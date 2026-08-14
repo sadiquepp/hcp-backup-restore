@@ -107,16 +107,19 @@ Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP operat
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 ```
+### Step 3 — Prepare ACM and Inventory
 
-
-
-### Step 3 — Provision Hosted Clusters
+- Configure CIM. `ACM -> Fleet Management -> Infrastructure -> Host Inventory -> Configure Host Inventory Settings -> Accept the defaults`
+- Create Infrastructure Environment. `ACM -> Fleet Management -> Host Inventory -> Create Infrastructure Environment -> Create Environment -> Fill up the form and create the environment.`
+- Download the Discovery ISO from Add Hosts
+- Discover the VMs as hosts in inventory. Either create from virt-manager specifiying the correct mcaddress or use the playbook to create the hosts.
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hosted_cluster.yaml --ask-vault-pass
 ansible-playbook -i inventory/hosts setup_hosted_cluster2.yaml --ask-vault-pass
 ```
-
+- Once discovered, approve the nodes.
+- Create a Hosted Cluster from the Web UI using the discovered nodes.
 
 
 ### Step 4 — Create S3 Bucket (one-time)
