@@ -1,0 +1,202 @@
+---
+# Tasks file for setup-hub-cluster2 (the replacement/DR hub cluster)
+- name: Check existence of CoreOS Image
+  stat: 
+    path: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2"
+  register: coreos_image_status
+
+
+- name: Get the CoreOS qemu image
+  get_url:
+    url: "https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/{{ ocp_major_version }}/{{ ocp_major_version }}.{{ocp_minor_version}}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
+    dest: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
+  when: coreos_image_status.stat.exists == false
+
+
+- name: Unzip CoreOS KVM Image
+  shell: |
+    gunzip {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2.gz
+  when: coreos_image_status.stat.exists == false
+
+# Check Existence of openshift-install    
+- name: Check existence of openshift-install
+  stat:
+    path: "/usr/bin/openshift-install"
+  register: openshift_installer_status
+
+- name: Get the Openshift Installer
+  get_url:
+    url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-install-linux.tar.gz"
+    dest: "{{ download_dir }}/openshift-install-linux.tar.gz"
+  when: openshift_installer_status.stat.exists == false
+
+- name: Extract openshift-install to /usr/bin
+  ansible.builtin.unarchive:
+    src: "{{ download_dir }}/openshift-install-linux.tar.gz"
+    dest: "/usr/bin"
+  when: openshift_installer_status.stat.exists == false
+
+# Check Existence of oc    
+- name: Check existence of oc cli 
+  stat: 
+    path: "/usr/bin/oc"
+  register: oc_status
+
+- name: Get the Openshift Client
+  get_url:
+    url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz"
+    dest: "{{ download_dir }}/openshift-client-linux.tar.gz"
+  when: oc_status.stat.exists == false
+
+- name: Unarchive OpenShift Client
+  unarchive:
+    src: "{{ download_dir }}/openshift-client-linux.tar.gz"
+    dest: "/usr/bin"
+    mode: 0755
+    remote_src: yes
+  when: oc_status.stat.exists == false
+
+- name: Create Directory for Hub Cluster VMs
+  file:
+    path: "{{ hub2_vm_folder }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Delete Install Directory if exists
+  file:
+    path: "{{ hub2_install_folder }}"
+    state: absent
+
+- name: Create Directory for Hub Cluster VMs
+  file:
+    path: "{{hub2_install_folder}}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Get SSH Key
+  shell: cat ~/.ssh/lab_rsa.pub
+  register: ssh_out
+
+- name: Setting booleans using complex argument style
+  ansible.builtin.set_fact:
+    ssh_key: "{{ ssh_out.stdout }}"
+
+# Copy Install-Config
+- name: Copying install-config.yaml to install dir
+  template:
+    src: install-config.yaml.j2
+    dest: "{{ hub2_install_folder }}/install-config.yaml"
+
+# Create Ignition-Files
+- name: Create Manifests
+  shell: |
+      openshift-install create manifests --dir={{ hub2_install_folder }}
+
+- name: Disable worker role on master nodes
+  lineinfile:
+    path: "{{ hub2_install_folder }}/manifests/cluster-scheduler-02-config.yml"
+    regexp: 'mastersSchedulable'
+    line: "  mastersSchedulable: false"
+
+# Create Ignition-Files
+- name: Create Ignition File
+  shell: |
+    openshift-install create ignition-configs --dir={{ hub2_install_folder }}
+
+- name: Set proper permission on Ignition File for qemu to access
+  file:
+    path: "{{ hub2_install_folder }}/{{ item }}"
+    mode: '0644'
+  with_items:
+    - bootstrap.ign
+    - master.ign
+    - worker.ign
+- name: Create Disk Image for Bootstrap
+  shell: |
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub2_vm_folder }}/hub2_bootstrap.qcow2 100G
+
+- name: Defining the OCP Bootstrap nodes
+  shell: |
+    virt-install --ram 16384 --vcpus 4 --osinfo rhel9.0  --disk path={{ hub2_vm_folder }}/hub2_bootstrap.qcow2,device=disk,bus=virtio,format=qcow2 --noautoconsole --vnc --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2_bootstrap}} --name hub2_bootstrap --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_install_folder }}/bootstrap.ign" --dry-run --print-xml > /tmp/hub2_bootstrap.xml
+    virsh define /tmp/hub2_bootstrap.xml && virsh start hub2_bootstrap
+
+- name: Lets wait for 300 seconds for the bootstrap to be UP and ACTIVEG. 
+  ansible.builtin.wait_for:
+    timeout: 300
+
+- name: Create Disk Image for Master Nodes
+  shell: |
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub2_vm_folder }}/hub2_master1.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub2_vm_folder }}/hub2_master2.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub2_vm_folder }}/hub2_master3.qcow2 100G
+
+- name: Defining the Master nodes
+  shell: |
+    virt-install --ram {{ master_memory }} --vcpus {{ master_cpu }} --osinfo rhel9.0  --disk path={{ hub2_vm_folder }}/hub2_master1.qcow2,device=disk,bus=virtio,format=qcow2 --noautoconsole --vnc --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2_master1}} --name hub2_master1 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_install_folder }}/master.ign" --dry-run --print-xml > /tmp/hub2_master1.xml
+    virt-install --ram {{ master_memory }} --vcpus {{ master_cpu }} --osinfo rhel9.0  --disk path={{ hub2_vm_folder }}/hub2_master2.qcow2,device=disk,bus=virtio,format=qcow2 --noautoconsole --vnc --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2_master2}} --name hub2_master2 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_install_folder }}/master.ign" --dry-run --print-xml > /tmp/hub2_master2.xml
+    virt-install --ram {{ master_memory }} --vcpus {{ master_cpu }} --osinfo rhel9.0  --disk path={{ hub2_vm_folder }}/hub2_master3.qcow2,device=disk,bus=virtio,format=qcow2 --noautoconsole --vnc --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2_master3}} --name hub2_master3 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_install_folder }}/master.ign" --dry-run --print-xml > /tmp/hub2_master3.xml
+    virsh define /tmp/hub2_master1.xml
+    virsh define /tmp/hub2_master2.xml
+    virsh define /tmp/hub2_master3.xml
+    virsh start hub2_master1 
+    virsh start hub2_master2 
+    virsh start hub2_master3
+
+- name: Lets wait for 300 seconds for the masters to be UP and RUNNING. 
+  ansible.builtin.wait_for:
+    timeout: 300
+
+- name: Create Disk Image for Worker Nodes
+  shell: |
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub2_vm_folder }}/hub2_worker1.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub2_vm_folder }}/hub2_worker2.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub2_vm_folder }}/hub2_worker3.qcow2 100G
+    qemu-img create -f qcow2 -o preallocation=metadata {{ hub2_vm_folder }}/storage_worker1.qcow2 500G
+    qemu-img create -f qcow2 -o preallocation=metadata {{ hub2_vm_folder }}/storage_worker2.qcow2 500G
+    qemu-img create -f qcow2 -o preallocation=metadata {{ hub2_vm_folder }}/storage_worker3.qcow2 500G
+
+- name: Defining the Worker nodes
+  shell: |
+    virt-install --ram {{ worker_memory }} --vcpus {{ worker_cpu }} --osinfo rhel9.0  --disk path={{ hub2_vm_folder }}/hub2_worker1.qcow2,device=disk,bus=virtio,format=qcow2 --disk path={{ hub2_vm_folder }}/storage_worker1.qcow2   --noautoconsole --vnc --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2_worker1}} --name hub2_worker1 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_install_folder }}/worker.ign" --dry-run --print-xml > /tmp/hub2_worker1.xml
+    virt-install --ram {{ worker_memory }} --vcpus {{ worker_cpu }} --osinfo rhel9.0  --disk path={{ hub2_vm_folder }}/hub2_worker2.qcow2,device=disk,bus=virtio,format=qcow2 --disk path={{ hub2_vm_folder }}/storage_worker2.qcow2   --noautoconsole --vnc --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2_worker2}} --name hub2_worker2 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_install_folder }}/worker.ign" --dry-run --print-xml > /tmp/hub2_worker2.xml
+    virt-install --ram {{ worker_memory }} --vcpus {{ worker_cpu }} --osinfo rhel9.0  --disk path={{ hub2_vm_folder }}/hub2_worker3.qcow2,device=disk,bus=virtio,format=qcow2 --disk path={{ hub2_vm_folder }}/storage_worker3.qcow2  --noautoconsole --vnc --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2_worker3}} --name hub2_worker3 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_install_folder }}/worker.ign" --dry-run --print-xml > /tmp/hub2_worker3.xml
+    virsh define /tmp/hub2_worker1.xml
+    virsh define /tmp/hub2_worker2.xml
+    virsh define /tmp/hub2_worker3.xml
+    virsh start hub2_worker1 
+    virsh start hub2_worker2 
+    virsh start hub2_worker3
+
+- name: Lets wait for 600 seconds for the workers to be UP and RUNNING. 
+  ansible.builtin.wait_for:
+    timeout: 600
+
+- name: Approve all pendign CSR for Worker nodes
+  shell: |
+    export KUBECONFIG={{ hub2_install_folder }}/auth/kubeconfig
+    sleep 180 
+    for i in `oc get csr| grep Pending | awk '{print $1}'`; do oc adm certificate approve $i; done  
+    sleep 180
+    for i in `oc get csr| grep Pending | awk '{print $1}'`; do oc adm certificate approve $i; done 
+
+- name: Waiting for cluster Bootstrap to finish
+  shell: |
+    openshift-install --dir={{ hub2_install_folder }}  wait-for bootstrap-complete --log-level=info
+
+- name: Deleting Bootstrap VM
+  community.libvirt.virt:
+    name: hub2_bootstrap
+    state: destroyed
+
+
+- name: Approve all pendign CSR for Worker nodes - If still PENDING
+  shell: |
+    export KUBECONFIG={{ hub2_install_folder }}/auth/kubeconfig
+    sleep 180 
+    for i in `oc get csr| grep Pending | awk '{print $1}'`; do oc adm certificate approve $i; done  
+    sleep 180
+    for i in `oc get csr| grep Pending | awk '{print $1}'`; do oc adm certificate approve $i; done 

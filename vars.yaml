@@ -21,6 +21,20 @@ ip_list:
   c2lb: 59
   c2vbmc: 71
 
+  # Hub2 - replacement management/hub cluster used for the OADP
+  # backup/restore-to-new-hub DR flow. Kept on its own IP block so it
+  # can be built (and its DNS resolved) while hub1 still exists.
+  # NOTE: last octet is used raw in the MAC scheme 52:54:00:e2:54:{{ value }},
+  # so it must stay a 1-2 digit hex-safe value (00-99) - do not use 100+.
+  hub2_bootstrap: 80
+  hub2_master1: 81
+  hub2_master2: 82
+  hub2_master3: 83
+  hub2_worker1: 84
+  hub2_worker2: 85
+  hub2_worker3: 86
+  hub2lb: 89
+
 helper_name: helper
 helper_disk: helper_disk.qcow2
 helper_memory: 8192 
@@ -64,6 +78,7 @@ dns_packages:
   - net-tools
 
 hub_domain: hub.mylab.com
+hub2_domain: hub2.mylab.com
 hosted_domain: hcp-cluster1.mylab.com
 hosted_domain2: hcp-cluster2.mylab.com
 
@@ -76,7 +91,13 @@ download_dir: /var/lib/libvirt/images/
 hub_vm_folder: /var/lib/libvirt/images/hub
 hub_install_folder: /var/lib/libvirt/images/hub_install
 hub_name: hub
+hub2_name: hub2
 base_domain: mylab.com
+
+## Variables required by Setup-Hub-Cluster2 Role (the replacement hub
+## built for DR/restore testing - new name, new VMs, same base domain)
+hub2_vm_folder: /var/lib/libvirt/images/hub2
+hub2_install_folder: /var/lib/libvirt/images/hub2_install
 
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4

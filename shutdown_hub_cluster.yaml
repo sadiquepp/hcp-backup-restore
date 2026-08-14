@@ -1,0 +1,67 @@
+## Shuts down the original (hub1) management cluster's VMs so a
+## replacement hub can be built and used for the OADP restore-to-new-hub
+## test. Unlike cleanup-hub.yaml, this does NOT undefine the domains or
+## delete disks - the VMs and their DNS/LB records are left in place so
+## the old hub can still be inspected, or powered back on, if needed.
+##
+## Usage:
+##   ansible-playbook shutdown_hub_cluster.yaml
+##   ansible-playbook shutdown_hub_cluster.yaml -e force_shutdown=true   # hard power-off instead of graceful
+
+- name: Shutdown Hub1 Management Cluster
+  hosts: localhost
+  become: true
+  vars:
+    force_shutdown: false
+    hub1_vms:
+      - hub_worker1
+      - hub_worker2
+      - hub_worker3
+      - hub_master1
+      - hub_master2
+      - hub_master3
+      - hub_bootstrap
+  tasks:
+  - name: Get current state of hub1 VMs
+    community.libvirt.virt:
+      command: status
+      name: "{{ item }}"
+    loop: "{{ hub1_vms }}"
+    register: hub1_vm_status
+    ignore_errors: true
+
+  - name: Gracefully shut down running hub1 VMs
+    shell: "virsh shutdown {{ item.item }}"
+    loop: "{{ hub1_vm_status.results }}"
+    when:
+      - not force_shutdown
+      - item.status is defined
+      - item.status == "running"
+
+  - name: Wait for graceful shutdown to complete (up to 3 minutes per node)
+    shell: "virsh domstate {{ item }}"
+    register: domstate
+    until: domstate.stdout is search('shut off')
+    retries: 18
+    delay: 10
+    loop: "{{ hub1_vms }}"
+    when: not force_shutdown
+
+  - name: Force power off any hub1 VMs still running
+    community.libvirt.virt:
+      name: "{{ item }}"
+      state: destroyed
+    loop: "{{ hub1_vms }}"
+    ignore_errors: true
+
+  - name: Confirm hub1 VMs are stopped
+    community.libvirt.virt:
+      command: status
+      name: "{{ item }}"
+    loop: "{{ hub1_vms }}"
+    register: final_status
+
+  - name: Report final state
+    debug:
+      msg: "{{ item.item }} -> {{ item.status | default('not defined') }}"
+    loop: "{{ final_status.results }}"

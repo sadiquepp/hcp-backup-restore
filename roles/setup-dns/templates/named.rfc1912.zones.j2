@@ -55,8 +55,18 @@ zone "122.168.192.in-addr.arpa" IN {
 	file "named-reverse.{{ hub_domain }}.db";
 	allow-update { none; };
 };
+zone "{{ hub2_domain }}" IN {
+	type master;
+	file "{{hub2_domain}}.db";
+	allow-update { none; };
+};
 zone "{{ hosted_domain }}" IN {
 	type master;
 	file "{{hosted_domain}}.db";
+	allow-update { none; };
+};
+zone "{{ hosted_domain2 }}" IN {
+	type master;
+	file "{{hosted_domain2}}.db";
 	allow-update { none; };
 };

@@ -1,0 +1,16 @@
+- name: Setting Up Hub2 Cluster (replacement management cluster)
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+  - ansible.builtin.import_role:
+      name: setup-hub-cluster2
+
+  - ansible.builtin.import_role:
+      name: setup-hub-acm
+    environment:
+      KUBECONFIG: "{{ hub2_install_folder }}/auth/kubeconfig"
+    tags:
+      - acm

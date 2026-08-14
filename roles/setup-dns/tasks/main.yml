@@ -58,6 +58,16 @@
   notify:
     -  Restart_Named
     
+- name: Deploy "{{ hub2_domain }}" - Forward zonefile
+  template:
+    src: hub2_domain.j2
+    dest: "/var/named/{{ hub2_domain }}.db"
+    owner: root
+    group: named
+    mode: u=rw,g=r,o=r
+  notify:
+    -  Restart_Named
+
 - name: Deploy "{{ hosted_domain }}" zonefile
   template:
     src: hosted_domain.j2

@@ -143,6 +143,59 @@ backend hub_apps_https_backend
     server master3 192.168.122.{{ip_list.worker3}}:443 check 
  
   
+#------------------- HUB2 API ---------------------------------------#
+frontend hub2_api
+    bind  192.168.122.{{ip_list.hub2lb}}:6443
+    use_backend hub2_api_backend
+    mode tcp
+
+backend hub2_api_backend
+    balance roundrobin
+    mode tcp
+    server bootstrap 192.168.122.{{ip_list.hub2_bootstrap}}:6443 check
+    server master1 192.168.122.{{ip_list.hub2_master1}}:6443 check
+    server master2 192.168.122.{{ip_list.hub2_master2}}:6443 check
+    server master3 192.168.122.{{ip_list.hub2_master3}}:6443 check
+##------------------- HUB2 API - INT  ---------------------------------------#
+frontend hub2_api_int
+    bind  192.168.122.{{ip_list.hub2lb}}:22623
+    use_backend hub2_api_int_backend
+    mode tcp
+
+backend hub2_api_int_backend
+    balance roundrobin
+    mode tcp
+    server bootstrap 192.168.122.{{ip_list.hub2_bootstrap}}:22623 check
+    server master1 192.168.122.{{ip_list.hub2_master1}}:22623 check
+    server master2 192.168.122.{{ip_list.hub2_master2}}:22623 check
+    server master3 192.168.122.{{ip_list.hub2_master3}}:22623 check
+
+#------------------- HUB2 APPS  ---------------------------------------#
+frontend hub2_apps
+    bind  192.168.122.{{ip_list.hub2lb}}:80
+    use_backend hub2_apps_backend
+    mode tcp
+
+backend hub2_apps_backend
+    balance roundrobin
+    mode tcp
+    server master1 192.168.122.{{ip_list.hub2_worker1}}:80 check
+    server master2 192.168.122.{{ip_list.hub2_worker2}}:80 check
+    server master3 192.168.122.{{ip_list.hub2_worker3}}:80 check
+
+#------------------- HUB2 APPS - HTTPS  -------------------------------#
+frontend hub2_apps_https
+    bind  192.168.122.{{ip_list.hub2lb}}:443
+    use_backend hub2_apps_https_backend
+    mode tcp
+
+backend hub2_apps_https_backend
+    balance roundrobin
+    mode tcp
+    server master1 192.168.122.{{ip_list.hub2_worker1}}:443 check
+    server master2 192.168.122.{{ip_list.hub2_worker2}}:443 check
+    server master3 192.168.122.{{ip_list.hub2_worker3}}:443 check
+
 #------------------- HCP-Cluster1 APPS -------------------------------------#
 frontend hcp_cluster1_apps
     bind  192.168.122.{{ip_list.c1lb}}:80
