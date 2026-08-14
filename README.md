@@ -4,7 +4,7 @@ End-to-end automation for backing up and restoring Hosted Control Plane (HCP) cl
 
 The lab runs on a single bare-metal RHEL 9 node using KVM/libvirt to simulate the management hub(s) and hosted clusters.
 
-![High-Level-Arch](images/hcp-on-bm.png)
+High-Level-Arch
 
 ## Architecture Overview
 
@@ -12,14 +12,14 @@ The lab runs on a single bare-metal RHEL 9 node using KVM/libvirt to simulate th
 ┌──────────────────────────────────────────────────────────────┐
 │  Bare Metal Host (RHEL 9 + KVM/libvirt)                      │
 │                                                              │
-│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐       │
-│  │  Helper VM  │   │   Hub1 VMs  │   │   Hub2 VMs  │       │
-│  │ (DNS + LB)  │   │ (OCP + ACM) │   │ (DR target) │       │
-│  └─────────────┘   └──────┬──────┘   └──────┬──────┘       │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐         │
+│  │  Helper VM  │   │   Hub1 VMs  │   │   Hub2 VMs  │         │
+│  │ (DNS + LB)  │   │ (OCP + ACM) │   │ (DR target) │         │
+│  └─────────────┘   └──────┬──────┘   └──────┬──────┘         │
 │                            │                  │              │
-│                    ┌───────┴───────┐  ┌──────┴───────┐      │
-│                    │ HCP Cluster 1 │  │ HCP Cluster 2│      │
-│                    └───────────────┘  └──────────────┘      │
+│                    ┌───────┴───────┐  ┌──────┴───────┐       │
+│                    │ HCP Cluster 1 │  │ HCP Cluster 2│       │
+│                    └───────────────┘  └──────────────┘       │
 └──────────────────────────────────────────────────────────────┘
                              │                  │
                              ▼                  ▼
@@ -52,17 +52,23 @@ If you have a different RHEL 9 version, update `rhel9_kvm_image` in `vars.yaml`.
 
 ## Configuration
 
+
+
 ### vars.yaml
 
 Review and adjust lab-specific values:
 
-| Variable | Purpose |
-|----------|---------|
-| `oadp_aws_region` | AWS region for the S3 backup bucket |
-| `oadp_bucket_name` | Globally unique S3 bucket name |
-| `oadp_backup_prefix` | Key prefix inside the bucket |
-| `oadp_backup_ttl` | Backup retention (e.g. `2h30m0s`) |
-| `target_hub` | Which hub the playbooks target (`hub` or `hub2`) |
+
+| Variable             | Purpose                                          |
+| -------------------- | ------------------------------------------------ |
+| `oadp_aws_region`    | AWS region for the S3 backup bucket              |
+| `oadp_bucket_name`   | Globally unique S3 bucket name                   |
+| `oadp_backup_prefix` | Key prefix inside the bucket                     |
+| `oadp_backup_ttl`    | Backup retention (e.g. `2h30m0s`)                |
+| `target_hub`         | Which hub the playbooks target (`hub` or `hub2`) |
+
+
+
 
 ### vault.yaml (encrypted)
 
@@ -78,7 +84,11 @@ oadp_aws_access_key_id: 'AKIA...'
 oadp_aws_secret_access_key: '...'
 ```
 
+
+
 ## End-to-End Workflow
+
+
 
 ### Step 1 — Setup Bare Metal Host
 
@@ -88,6 +98,8 @@ Creates and configures the `helper` VM that provides DNS and HAProxy for the lab
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
 ```
 
+
+
 ### Step 2 — Setup Hub Cluster (hub1)
 
 Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP operator.
@@ -96,12 +108,16 @@ Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP operat
 ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 ```
 
+
+
 ### Step 3 — Provision Hosted Clusters
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hosted_cluster.yaml --ask-vault-pass
 ansible-playbook -i inventory/hosts setup_hosted_cluster2.yaml --ask-vault-pass
 ```
+
+
 
 ### Step 4 — Create S3 Bucket (one-time)
 
@@ -129,6 +145,8 @@ Verify that the BackupStorageLocation reports `Available`:
 oc get backupstoragelocation -n openshift-adp
 ```
 
+
+
 ### Step 6 — Backup a Hosted Cluster
 
 ```bash
@@ -137,6 +155,7 @@ ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
 ```
 
 The playbook renders a Velero `Backup` manifest that captures:
+
 - The hosted cluster namespace (`hcp-cluster1`)
 - The HyperShift control-plane namespace (`hcp-cluster1-hcp-cluster1`)
 - The bare-metal infrastructure namespace (`bminfra`)
@@ -166,37 +185,46 @@ The restore playbook applies a Velero `Restore` manifest referencing the backup 
 
 ## Playbook Reference
 
-| Playbook | Description |
-|----------|-------------|
-| `setup_bm_host.yaml` | Prepare bare metal, create helper VM (DNS/LB) |
-| `setup_hub_cluster.yaml` | Deploy hub1 (OCP + day-2 operators) |
-| `setup_hub_cluster2.yaml` | Deploy hub2 (DR replacement hub) |
-| `setup_hosted_cluster.yaml` | Provision hosted cluster 1 |
-| `setup_hosted_cluster2.yaml` | Provision hosted cluster 2 |
-| `setup_oadp.yaml` | Wire OADP to S3 (credentials + DPA) |
-| `backup_hosted_cluster.yaml` | Backup a hosted cluster control plane |
-| `restore_hosted_cluster.yaml` | Restore a hosted cluster control plane |
-| `shutdown_hub_cluster.yaml` | Gracefully stop hub1 VMs (preserves disks) |
-| `cleanup-hub.yaml` | Destroy hub1 VMs and delete disks |
-| `cleanup.yaml` | Destroy all VMs (hub + helper) |
+
+| Playbook                      | Description                                   |
+| ----------------------------- | --------------------------------------------- |
+| `setup_bm_host.yaml`          | Prepare bare metal, create helper VM (DNS/LB) |
+| `setup_hub_cluster.yaml`      | Deploy hub1 (OCP + day-2 operators)           |
+| `setup_hub_cluster2.yaml`     | Deploy hub2 (DR replacement hub)              |
+| `setup_hosted_cluster.yaml`   | Provision hosted cluster 1                    |
+| `setup_hosted_cluster2.yaml`  | Provision hosted cluster 2                    |
+| `setup_oadp.yaml`             | Wire OADP to S3 (credentials + DPA)           |
+| `backup_hosted_cluster.yaml`  | Backup a hosted cluster control plane         |
+| `restore_hosted_cluster.yaml` | Restore a hosted cluster control plane        |
+| `shutdown_hub_cluster.yaml`   | Gracefully stop hub1 VMs (preserves disks)    |
+| `cleanup-hub.yaml`            | Destroy hub1 VMs and delete disks             |
+| `cleanup.yaml`                | Destroy all VMs (hub + helper)                |
+
+
+
 
 ## Key Roles
 
-| Role | Responsibility |
-|------|---------------|
-| `setup-hub-acm` | Installs ACM, LVM-Storage, MetalLB, and OADP operator subscriptions |
-| `setup-oadp` | Creates the cloud-credentials secret and DataProtectionApplication CR |
+
+| Role            | Responsibility                                                        |
+| --------------- | --------------------------------------------------------------------- |
+| `setup-hub-acm` | Installs ACM, LVM-Storage, MetalLB, and OADP operator subscriptions   |
+| `setup-oadp`    | Creates the cloud-credentials secret and DataProtectionApplication CR |
+
+
+
 
 ## OADP Details
 
 The OADP configuration uses:
+
 - **Velero plugins**: `openshift`, `aws`, `csi`, `hypershift`
 - **Uploader**: Kopia (node-agent based filesystem backup)
 - **Storage**: AWS S3 with a shared bucket/prefix across hubs
 
 Templates live in `oadp/templates/` (backup/restore manifests) and `roles/setup-oadp/templates/` (DPA and credentials).
 
-For the full IAM policy, smoke-test manifests, and per-hub setup details, see [`oadp/README.md`](oadp/README.md).
+For the full IAM policy, smoke-test manifests, and per-hub setup details, see `[oadp/README.md](oadp/README.md)`.
 
 ## Cleanup
 
@@ -211,3 +239,4 @@ Remove everything (all VMs including helper):
 ```bash
 ansible-playbook cleanup.yaml
 ```
+
