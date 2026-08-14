@@ -1,0 +1,64 @@
+---
+# Tasks file for setup-oadp
+#
+# The OADP operator itself is installed as part of hub bring-up by
+# roles/setup-hub-acm (alongside ACM/LVM-Storage/MetalLB), so it's
+# already present on both hub1 and hub2 by the time this role runs.
+#
+# This role only handles the parts that need AWS credentials/a bucket
+# to already exist, which isn't true the moment a hub is first created:
+# the cloud-credentials secret and the DataProtectionApplication CR.
+# Idempotent - safe to re-run against hub1 or hub2 with the same
+# S3 bucket/prefix so it can see the existing backups.
+
+- name: Wait for the OADP operator CRDs to be established
+  shell: |
+    oc wait --for=condition=Established crd/dataprotectionapplications.oadp.openshift.io --timeout=180s
+  register: crd_wait
+  retries: 3
+  delay: 20
+  until: crd_wait.rc == 0
+
+- name: Render AWS credentials file for Velero
+  template:
+    src: credentials-adp.j2
+    dest: "{{ role_path }}/templates/.rendered-credentials-adp"
+    mode: '0600'
+
+- name: Create/update the cloud-credentials secret (idempotent)
+  shell: |
+    oc create secret generic cloud-credentials -n openshift-adp \
+      --from-file cloud="{{ role_path }}/templates/.rendered-credentials-adp" \
+      --dry-run=client -o yaml | oc apply -f -
+
+- name: Render DataProtectionApplication
+  template:
+    src: dpa.yaml.j2
+    dest: "{{ role_path }}/templates/.rendered-dpa.yaml"
+
+- name: Apply DataProtectionApplication
+  shell: |
+    oc apply -f "{{ role_path }}/templates/.rendered-dpa.yaml"
+
+- name: Wait for the DPA to reconcile and the BackupStorageLocation to become Available
+  ansible.builtin.wait_for:
+    timeout: 120
+
+- name: Confirm BackupStorageLocation is Available
+  shell: |
+    oc get backupstoragelocation -n openshift-adp -o jsonpath='{.items[0].status.phase}'
+  register: bsl_phase
+  changed_when: false
+  failed_when: false
+
+- name: Report BackupStorageLocation status
+  debug:
+    msg: "BackupStorageLocation phase: {{ bsl_phase.stdout | default('unknown') }} (re-run this role if it is not 'Available')"
+
+- name: Clean up rendered scratch files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ role_path }}/templates/.rendered-credentials-adp"
+    - "{{ role_path }}/templates/.rendered-dpa.yaml"

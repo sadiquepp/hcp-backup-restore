@@ -1,0 +1,52 @@
+## Backs up a hosted cluster's control plane via OADP/Velero.
+## Run this against whichever hub currently owns the hosted cluster
+## (normally hub1, before the DR cutover).
+##
+## Usage:
+##   ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+##     -e hcp_cluster_name=hcp-cluster1
+##
+## hcp_cluster_name must match the HostedCluster name/namespace (e.g.
+## hcp-cluster1 or hcp-cluster2) - it is used to derive both the
+## hosting namespace ("{{ hcp_cluster_name }}") and the HyperShift
+## control-plane namespace ("{{ hcp_cluster_name }}-{{ hcp_cluster_name }}").
+
+- name: Backup Hosted Cluster Control Plane
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  vars:
+    hub_kubeconfig: >-
+      {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+  tasks:
+  - ansible.builtin.assert:
+      that:
+        - hcp_cluster_name is defined
+      fail_msg: "Pass -e hcp_cluster_name=<name> (e.g. hcp-cluster1)"
+
+  - name: Render Backup manifest
+    template:
+      src: oadp/templates/backup-hcp-cluster.yaml.j2
+      dest: "/tmp/{{ hcp_cluster_name }}-backup.yaml"
+
+  - name: Apply Backup
+    shell: "oc apply -f /tmp/{{ hcp_cluster_name }}-backup.yaml"
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  - name: Wait for Backup to complete (checked every 15s, up to 30 min)
+    shell: >
+      oc get backup "{{ hcp_cluster_name }}-backup" -n openshift-adp
+      -o jsonpath='{.status.phase}'
+    register: backup_phase
+    until: backup_phase.stdout in ['Completed', 'PartiallyFailed', 'Failed']
+    retries: 120
+    delay: 15
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  - name: Report Backup status
+    debug:
+      msg: "Backup {{ hcp_cluster_name }}-backup finished with phase: {{ backup_phase.stdout }}"

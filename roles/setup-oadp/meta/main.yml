@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Installs OADP operator, cloud-credentials secret and DataProtectionApplication
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

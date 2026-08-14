@@ -1,0 +1,48 @@
+## Restores a hosted cluster's control plane via OADP/Velero.
+## Run this against the target hub - normally hub2, after
+## setup_hub_cluster2.yaml and setup_oadp.yaml -e target_hub=hub2 have
+## already been run against the same S3 bucket/prefix the backup used.
+##
+## Usage:
+##   ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
+##     -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+
+- name: Restore Hosted Cluster Control Plane
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  vars:
+    hub_kubeconfig: >-
+      {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+  tasks:
+  - ansible.builtin.assert:
+      that:
+        - hcp_cluster_name is defined
+      fail_msg: "Pass -e hcp_cluster_name=<name> (e.g. hcp-cluster1)"
+
+  - name: Render Restore manifest
+    template:
+      src: oadp/templates/restore-hcp-cluster.yaml.j2
+      dest: "/tmp/{{ hcp_cluster_name }}-restore.yaml"
+
+  - name: Apply Restore
+    shell: "oc apply -f /tmp/{{ hcp_cluster_name }}-restore.yaml"
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  - name: Wait for Restore to complete (checked every 15s, up to 30 min)
+    shell: >
+      oc get restore "{{ hcp_cluster_name }}-restore" -n openshift-adp
+      -o jsonpath='{.status.phase}'
+    register: restore_phase
+    until: restore_phase.stdout in ['Completed', 'PartiallyFailed', 'Failed']
+    retries: 120
+    delay: 15
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  - name: Report Restore status
+    debug:
+      msg: "Restore {{ hcp_cluster_name }}-restore finished with phase: {{ restore_phase.stdout }}"

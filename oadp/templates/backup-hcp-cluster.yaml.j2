@@ -1,0 +1,46 @@
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: "{{ hcp_cluster_name }}-backup"
+  namespace: openshift-adp
+  labels:
+    velero.io/storage-location: "{{ oadp_storage_location }}"
+spec:
+  hooks: {}
+  includedNamespaces:
+    - "{{ hcp_cluster_name }}"
+    - "{{ hcp_cluster_name }}-{{ hcp_cluster_name }}"
+    - "{{ oadp_bminfra_namespace }}"
+  includedResources:
+    - sa
+    - role
+    - rolebinding
+    - pod
+    - pvc
+    - pv
+    - bmh
+    - configmap
+    - infraenv
+    - priorityclasses
+    - pdb
+    - agents
+    - hostedcluster
+    - nodepool
+    - secrets
+    - services
+    - deployments
+    - statefulsets
+    - hostedcontrolplane
+    - cluster
+    - agentcluster
+    - agentmachinetemplate
+    - agentmachine
+    - machinedeployment
+    - machineset
+    - machine
+    - route
+    - clusterdeployment
+  excludedResources: []
+  defaultVolumesToFsBackup: true
+  storageLocation: "{{ oadp_storage_location }}"
+  ttl: "{{ oadp_backup_ttl }}"

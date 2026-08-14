@@ -1,19 +1,31 @@
-1. Define Variables:
+# OADP: HCP control-plane backup/restore, including restore-to-new-hub
+
+This directory used to hold static, hub1-only manifests. It's now driven
+by `roles/setup-oadp/` plus three top-level playbooks, so the same flow
+works for any hosted cluster (`hcp-cluster1`, `hcp-cluster2`, ...) and for
+restoring onto a replacement hub (`hub2`) after a DR cutover
+(`shutdown_hub_cluster.yaml` / `setup_hub_cluster2.yaml`).
+
+The OADP operator itself is installed as part of hub bring-up, by
+`roles/setup-hub-acm` (right alongside ACM/LVM-Storage/MetalLB) - see
+`roles/setup-hub-acm/files/oadp/`. So it's already present on both hub1
+and hub2 by the time you get here; `roles/setup-oadp/` only wires up the
+cloud-credentials secret and the DataProtectionApplication, which need
+AWS credentials/a bucket that don't exist at first hub bring-up.
+
+`hello-openshift*.yaml` are left as-is - a small, self-contained
+smoke-test app + Backup/Restore pair to sanity-check OADP itself before
+you run it against a real hosted cluster.
+
+## One-time AWS setup (per bucket, not per hub)
 
 ```bash
-export BUCKET=adp-backup-bucket-xjt
+export BUCKET=adp-backup-bucket-xjt   # must be globally unique - pick your own
 export REGION=ap-southeast-1
-```
 
-1. Create the S3 bucket
+aws s3api create-bucket --bucket $BUCKET --region $REGION \
+  --create-bucket-configuration LocationConstraint=$REGION
 
-```bash
-aws s3api create-bucket --bucket $BUCKET --region $REGION --create-bucket-configuration LocationConstraint=$REGION
-```
-
-1. Crate IAM Policy for OADP
-
-```bash
 cat > adp-policy.json <<EOF
 {
     "Version": "2012-10-17",
@@ -39,9 +51,7 @@ cat > adp-policy.json <<EOF
                 "s3:AbortMultipartUpload",
                 "s3:ListMultipartUploadParts"
             ],
-            "Resource": [
-                "arn:aws:s3:::${BUCKET}/*"
-            ]
+            "Resource": ["arn:aws:s3:::${BUCKET}/*"]
         },
         {
             "Effect": "Allow",
@@ -50,59 +60,78 @@ cat > adp-policy.json <<EOF
                 "s3:GetBucketLocation",
                 "s3:ListBucketMultipartUploads"
             ],
-            "Resource": [
-                "arn:aws:s3:::${BUCKET}"
-            ]
+            "Resource": ["arn:aws:s3:::${BUCKET}"]
         }
     ]
 }
 EOF
-```
 
-1. Create the IAM user and policy
-
-```bash
 aws iam create-user --user-name adp-user
 aws iam put-user-policy --user-name adp-user --policy-name adp-policy --policy-document file://adp-policy.json
-```
-
-1. Create the IAM access key
-
-```bash
 aws iam create-access-key --user-name adp-user
 ```
 
-1. Create the credentials file. Then edit the file and replace the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY with the actual values from the previous step.
+Set `oadp_bucket_name` and `oadp_aws_region` in `vars.yaml` to match, and
+add the access key from the last command to `vault.yaml`:
 
 ```bash
-cat << EOF > ./credentials-adp
-[default]
-aws_access_key_id=
-aws_secret_access_key=
-EOF
+ansible-vault edit vault.yaml
+```
+```yaml
+oadp_aws_access_key_id: 'AKIA...'
+oadp_aws_secret_access_key: '...'
 ```
 
-1. Create the secret for cloud credentials
+This bucket and IAM user are reused by both hub1 and hub2 - you only do
+this section once per lab, not once per hub.
+
+## Per-hub: configure OADP (credentials + DPA)
+
+The operator is already there (installed during hub bring-up). This
+step just points it at your bucket:
 
 ```bash
-oc create secret generic cloud-credentials -n openshift-adp --from-file cloud=credentials-adp
+# hub1 (default)
+ansible-playbook setup_oadp.yaml --ask-vault-pass
+
+# hub2, after cutover
+ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
 ```
 
-1. Apply the OADP configuration
+Idempotent - re-running against the same hub just reconciles the
+secret/DPA. Both hubs point at the same bucket/prefix, so hub2's Velero
+can see backups hub1 created.
+
+## Backup a hosted cluster (run against the hub that currently owns it)
 
 ```bash
-oc apply -f oadp-adp.yaml
+ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+  -e hcp_cluster_name=hcp-cluster1
 ```
 
-1. Backup the HCP cluster
+`hcp_cluster_name` must match the HostedCluster's name/namespace - it's
+used to derive both the hosting namespace and the HyperShift
+control-plane namespace (`<name>-<name>`). Works unchanged for
+`hcp-cluster2` or any future hosted cluster.
+
+## Full hub1 -> hub2 DR cutover
 
 ```bash
-oc apply -f backup-hcp-cluster1.yaml
+ansible-playbook setup_oadp.yaml --ask-vault-pass                      # OADP on hub1
+ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+  -e hcp_cluster_name=hcp-cluster1                                     # backup on hub1
+
+ansible-playbook shutdown_hub_cluster.yaml                             # power off hub1
+ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass   # build hub2
+
+ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2   # OADP on hub2
+ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
+  -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2                  # restore on hub2
 ```
 
-1. Restore the HCP cluster
+## Manual / one-off apply
 
-```bash
-oc apply -f restore-hcp-cluster1.yaml
-```
-
+The rendered manifests are just Jinja2 templates under `oadp/templates/`
+and `roles/setup-oadp/templates/` - if you'd rather not go through the
+playbooks, render and `oc apply` them yourself with `ansible-playbook
+... --check --diff` or a throwaway `template` task.

@@ -24,6 +24,12 @@
     oc apply -f "{{ role_path }}/files/metal-lb/02-operatorGroup.yaml"
     oc apply -f "{{ role_path }}/files/metal-lb/03-subscription.yaml"
 
+- name: Deploy OADP Operator
+  shell: |
+    oc apply -f "{{ role_path }}/files/oadp/01-namespace.yaml"
+    oc apply -f "{{ role_path }}/files/oadp/02-operatorGroup.yaml"
+    oc apply -f "{{ role_path }}/files/oadp/03-subscription.yaml"
+
 - name: Lets wait for 300 seconds for Operators to be ACTIVE
   ansible.builtin.wait_for:
      timeout: 300

@@ -5,15 +5,15 @@ metadata:
   namespace: openshift-adp
 spec:
   backupLocations:
-    - name: default
+    - name: "{{ oadp_storage_location }}"
       velero:
         provider: aws
         default: true
         objectStorage:
-          bucket: adp-backup-bucket-xjt
-          prefix: hcp-backup
+          bucket: "{{ oadp_bucket_name }}"
+          prefix: "{{ oadp_backup_prefix }}"
         config:
-          region: ap-southeast-1
+          region: "{{ oadp_aws_region }}"
           profile: "default"
         credential:
           key: cloud
@@ -22,7 +22,7 @@ spec:
     - velero:
         provider: aws
         config:
-          region: ap-southeast-1
+          region: "{{ oadp_aws_region }}"
           profile: "default"
         credential:
           key: cloud

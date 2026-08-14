@@ -110,3 +110,21 @@ hosted_cluster_vm_folder: /var/lib/libvirt/images/hosted_cluster
 hosted_cluster2_cpu: 4
 hosted_cluster2_memory: 8192
 hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
+
+## Variables required by the OADP backup/restore flow
+## (roles/setup-oadp, oadp/templates/*, setup_oadp.yaml,
+##  backup_hosted_cluster.yaml, restore_hosted_cluster.yaml)
+##
+## AWS access key id/secret go in vault.yaml as
+## oadp_aws_access_key_id / oadp_aws_secret_access_key - never here.
+oadp_aws_region: ap-southeast-1
+oadp_bucket_name: adp-backup-bucket-xjt   # S3 bucket names are globally unique - change this before first use
+oadp_backup_prefix: hcp-backup
+oadp_backup_ttl: 2h30m0s
+oadp_bminfra_namespace: bminfra
+oadp_storage_location: default
+
+## Which hub's kubeconfig setup_oadp.yaml / backup_hosted_cluster.yaml /
+## restore_hosted_cluster.yaml target by default. Override per-run with
+## -e target_hub=hub2 once you've cut over (see oadp/README.md).
+target_hub: hub
