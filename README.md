@@ -59,7 +59,7 @@ Lets start with setting up the Bare Metal Host.
 
   
 ```
-[root@base hcp-on-bm]# ansible-playbook -i inventory/hosts setup_bm_host.yaml   --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_bm_host.yaml   --ask-vault-pass
 Vault password:
 ```
 The above playbook will create and configure a virtual machine named `helper` which will be hosting the DNS and HAProxy for the setup. 
@@ -71,7 +71,7 @@ Once we have that ready, let's start setting up the Hub Cluster.
 <img src="images/video-coming-soon.jpeg" alt="Setup-Hub-Cluster" width="600" height="400">  
 
 ```
-[root@base hcp-on-bm]# ansible-playbook -i inventory/hosts setup_hub_cluster.yaml   --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_hub_cluster.yaml   --ask-vault-pass
 Vault password:
 ```
 
@@ -80,7 +80,7 @@ Vault password:
 <img src="images/video-coming-soon.jpeg" alt="Setup-Hosted-Cluster" width="600" height="400">  
 
 ```
-[root@base hcp-on-bm]# ansible-playbook -i inventory/hosts setup_hosted_cluster.yaml   --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_hosted_cluster.yaml   --ask-vault-pass
 Vault password:
 ```
 
@@ -90,7 +90,7 @@ Vault password:
 <img src="images/video-coming-soon.jpeg" alt="Setup-Hosted-Cluster2" width="600" height="400">  
 
 ```
-[root@base hcp-on-bm]# ansible-playbook -i inventory/hosts setup_hosted_cluster2.yaml  --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_hosted_cluster2.yaml  --ask-vault-pass
 Vault password:
 ```
 
@@ -100,12 +100,12 @@ We got cleanup playbooks as well.
 To cleanup all the Hub Cluster VMs and Helper VMs use `cleanup.yaml`. 
 
 ```
-[root@base hcp-on-bm]# ansible-playbook cleanup.yaml
+ansible-playbook cleanup.yaml
 ```
 
 To cleanup only the Hub Cluster VMs use `cleanup-hub.yaml`. 
 ```
-[root@base hcp-on-bm]# ansible-playbook cleanup-hub.yaml
+ansible-playbook cleanup-hub.yaml
 ```
 
 
