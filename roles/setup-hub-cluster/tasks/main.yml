@@ -5,7 +5,6 @@
     path: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2"
   register: coreos_image_status
 
-
 - name: Get the CoreOS qemu image
   get_url:
     url: "https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/{{ ocp_major_version }}/{{ ocp_major_version }}.{{coreos_minor_version}}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
@@ -16,24 +15,6 @@
   shell: |
     gunzip {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz
   when: coreos_image_status.stat.exists == false
-
-# Check Existence of openshift-install    
-- name: Check existence of openshift-install
-  stat:
-    path: "/usr/bin/openshift-install"
-  register: openshift_installer_status
-
-- name: Get the Openshift Installer
-  get_url:
-    url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-install-linux.tar.gz"
-    dest: "{{ download_dir }}/openshift-install-linux.tar.gz"
-  when: openshift_installer_status.stat.exists == false
-
-- name: Extract openshift-install to /usr/bin
-  ansible.builtin.unarchive:
-    src: "{{ download_dir }}/openshift-install-linux.tar.gz"
-    dest: "/usr/bin"
-  when: openshift_installer_status.stat.exists == false
 
 # Check Existence of oc    
 - name: Check existence of oc cli 
@@ -76,6 +57,16 @@
     group: root
     mode: '0755'
 
+- name: Get the Openshift Installer
+  get_url:
+    url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-install-linux.tar.gz"
+    dest: "{{ hub_install_folder }}/openshift-install-linux.tar.gz"
+
+- name: Extract openshift-install to {{ hub_install_folder }}
+  ansible.builtin.unarchive:
+    src: "{{ hub_install_folder }}/openshift-install-linux.tar.gz"
+    dest: "{{ hub_install_folder }}"
+
 - name: Get SSH Key
   shell: cat ~/.ssh/lab_rsa.pub
   register: ssh_out
@@ -93,7 +84,7 @@
 # Create Ignition-Files
 - name: Create Manifests
   shell: |
-      openshift-install create manifests --dir={{ hub_install_folder }}
+      {{ hub_install_folder }}/openshift-install create manifests --dir={{ hub_install_folder }}
 
 - name: Disable worker role on master nodes
   lineinfile:
@@ -104,7 +95,7 @@
 # Create Ignition-Files
 - name: Create Ignition File
   shell: |
-    openshift-install create ignition-configs --dir={{ hub_install_folder }}
+    {{ hub_install_folder }}/openshift-install create ignition-configs --dir={{ hub_install_folder }}
 
 - name: Set proper permission on Ignition File for qemu to access
   file:
