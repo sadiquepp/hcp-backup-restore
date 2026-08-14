@@ -1,0 +1,27 @@
+# ── Restore ────────────────────────────────────────────────────────────────────
+# Restores the namespace from the backup above.
+# Apply this ONLY when you want to perform a restore — not at the same time
+# as the Backup CR above.
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: hello-openshift-restore
+  namespace: openshift-adp
+spec:
+  backupName: hello-openshift-backup  # must match the Backup CR name above
+
+  # Restore everything that was backed up
+  includedNamespaces:
+    - hello-openshift
+  includedResources:
+    - "*"
+
+  # Restore PVC data from the CSI snapshot
+  restorePVs: true
+
+  # If restoring into the same cluster where the namespace already exists,
+  # set this to true to overwrite existing resources
+  existingResourcePolicy: update      # options: none | update
+
+  # Preserve original node selector and storage class from backup
+  preserveNodePorts: true

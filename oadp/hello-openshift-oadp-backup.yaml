@@ -1,0 +1,37 @@
+# ── Backup ─────────────────────────────────────────────────────────────────────
+# Backs up everything in the hello-openshift namespace including the PVC
+# contents using CSI snapshots.
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: hello-openshift-backup
+  namespace: openshift-adp
+  labels:
+    velero.io/storage-location: hello-openshift-bsl
+spec:
+  # Scope
+  includedNamespaces:
+    - hello-openshift
+
+  # Include all resource types — PVC, PV, Deployment, Service, Route, etc.
+  includedResources:
+    - "*"
+
+  # Back up PVC data via CSI volume snapshot
+  snapshotVolumes: true
+  defaultVolumesToFsBackup: true     # set true to use Restic/Kopia file-level
+                                       # backup instead of CSI snapshot
+
+  storageLocation: hello-openshift-bsl
+  volumeSnapshotLocations:
+    - hello-openshift-vsl
+
+  # Retention
+  ttl: 720h                           # keep backup for 30 days
+
+  # Exclude OADP's own namespace from accidental inclusion
+  excludedNamespaces:
+    - openshift-adp
+
+  # Preserve node port assignments and cluster-scoped owner references
+  includeClusterResources: true
