@@ -8,14 +8,14 @@
 
 - name: Get the CoreOS qemu image
   get_url:
-    url: "https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/{{ ocp_major_version }}/{{ ocp_major_version }}.{{ocp_minor_version}}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
-    dest: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
+    url: "https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/{{ ocp_major_version }}/{{ ocp_major_version }}.{{coreos_minor_version}}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
+    dest: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
   when: coreos_image_status.stat.exists == false
 
 
 - name: Unzip CoreOS KVM Image
   shell: |
-    gunzip {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2.gz
+    gunzip {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz
   when: coreos_image_status.stat.exists == false
 
 # Check Existence of openshift-install    
@@ -130,9 +130,9 @@
 
 - name: Create Disk Image for Master Nodes
   shell: |
-    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_master1.qcow2 100G
-    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_master2.qcow2 100G
-    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_master3.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_master1.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_master2.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_master3.qcow2 100G
 
 - name: Defining the Master nodes
   shell: |
@@ -152,9 +152,9 @@
 
 - name: Create Disk Image for Worker Nodes
   shell: |
-    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_worker1.qcow2 100G
-    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_worker2.qcow2 100G
-    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{ocp_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_worker3.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_worker1.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_worker2.qcow2 100G
+    qemu-img create -f qcow2 -F qcow2 -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_worker3.qcow2 100G
     qemu-img create -f qcow2 -o preallocation=metadata {{ hub_vm_folder }}/storage_worker1.qcow2 500G
     qemu-img create -f qcow2 -o preallocation=metadata {{ hub_vm_folder }}/storage_worker2.qcow2 500G
     qemu-img create -f qcow2 -o preallocation=metadata {{ hub_vm_folder }}/storage_worker3.qcow2 500G

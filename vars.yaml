@@ -46,7 +46,7 @@ worker_cpu: 4
 
 ## Variables used by Setup BM Role 
 
-rhel9_kvm_image: "rhel-9.5-x86_64-kvm.qcow2"
+rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
 
 basic_packages: 
   - wget
@@ -85,8 +85,9 @@ hosted_domain2: hcp-cluster2.mylab.com
 
 
 ##  Variables required by Setup-Hub-Cluster Role 
-ocp_major_version: 4.16
-ocp_minor_version: 0 
+ocp_major_version: 4.21
+ocp_minor_version: 15 
+coreos_minor_version: 0
 download_dir: /var/lib/libvirt/images/
 hub_vm_folder: /var/lib/libvirt/images/hub
 hub_install_folder: /var/lib/libvirt/images/hub_install
