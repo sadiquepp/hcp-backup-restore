@@ -1,0 +1,34 @@
+---
+# Fetch InfraEnv.status.isoDownloadURL and cache the discovery ISO locally.
+# Requires KUBECONFIG in the task environment (set by the calling playbook).
+
+- name: Wait for InfraEnv discovery ISO URL
+  ansible.builtin.shell: >
+    oc get infraenv "{{ oadp_bminfra_namespace }}" -n "{{ oadp_bminfra_namespace }}"
+    -o jsonpath='{.status.isoDownloadURL}'
+  register: infraenv_iso_url
+  until: infraenv_iso_url.stdout | length > 0
+  retries: 60
+  delay: 15
+  changed_when: false
+
+- name: Ensure download directory exists
+  ansible.builtin.file:
+    path: "{{ download_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Download discovery ISO from InfraEnv
+  ansible.builtin.get_url:
+    url: "{{ infraenv_iso_url.stdout }}"
+    dest: "{{ download_dir }}{{ discovery_iso_filename }}"
+    validate_certs: false
+    mode: '0644'
+
+- name: Set discovery_image_url to local ISO path
+  ansible.builtin.set_fact:
+    discovery_image_url: "{{ download_dir }}{{ discovery_iso_filename }}"
+
+- name: Report discovery ISO path
+  ansible.builtin.debug:
+    msg: "Discovery ISO ready at {{ discovery_image_url }}"

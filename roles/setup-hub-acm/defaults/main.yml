@@ -2,10 +2,9 @@
 # defaults file for setup-hub-acm
 
 ## MetalLB IPAddressPool for the HCP APIServer/apps LoadBalancer VIPs.
-## Defaults match hub1's original static pool. hub2 must override these
-## with a disjoint range (see setup_hub_cluster2.yaml) - reusing the same
-## range on two hubs on the same L2 network means whichever hub's MetalLB
-## speaker comes up second will fight the first over the same IPs.
+## Per-hub ranges are defined in vars.yaml (hub_metallb_pool_* /
+## hub2_metallb_pool_*) and mapped in setup_hub_cluster*.yaml. Values below
+## are fallbacks only if the role is used without those mappings.
 metallb_pool_start: 60
 metallb_pool_end: 69
 

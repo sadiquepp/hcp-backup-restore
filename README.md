@@ -109,20 +109,31 @@ ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 ```
 ### Step 3 — Prepare ACM and Inventory
 
-- Configure CIM. Apply the AgentServiceConfig to the ACM cluster. Customize the OS images using `osImages` to the ones you want to use for the hosted clusters.
+- Configure CIM. Apply the AgentServiceConfig to the ACM cluster. Customize the OS images using `osImages` to the ones you want to use for the hosted clusters. Review the rendendered yaml file at `roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml` and apply it to the ACM cluster.
 
 ```bash
-oc apply -f roles/setup-hub-acm/files/acm/05-agent-service.yaml
+oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 ```
-- Create Infrastructure Environment. `ACM -> Fleet Management -> Host Inventory -> Create Infrastructure Environment -> Create Environment -> Fill up the form and create the environment.`
-- Download the Discovery ISO from Add Hosts
+
+- Create Infrastructure Environment. `ACM -> Fleet Management -> Host Inventory -> Create Infrastructure Environment -> Create Environment -> Fill up the form and create the environment.` Or review the rendered yaml file at `roles/setup-bminfra/templates/.rendered-03-infraenv.yaml` and apply it to the ACM cluster.
+
+```bash
+oc apply -f roles/setup-bminfra/templates/.rendered-01-namespace.yaml
+oc apply -f roles/setup-bminfra/templates/.rendered-02-pullsecret.yaml
+oc apply -f roles/setup-bminfra/templates/.rendered-03-infraenv.yaml
+oc apply -f roles/setup-bminfra/templates/.rendered-04-capi-role.yaml
+```
+
+- Download the Discovery ISO from Add Hosts.
+The ISO is automatically downloaded to the bare-metal host in the download dir specified in `vars.yaml` by role `setup-bminfra` after the agentserviceconfig is applied and infra environment is created.
+
 - Discover the VMs as hosts in inventory. Either create from virt-manager specifiying the correct mcaddress or use the playbook to create the hosts.
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hosted_cluster.yaml --ask-vault-pass
-ansible-playbook -i inventory/hosts setup_hosted_cluster2.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_hosted_cluster2.yaml --ask-vault-pass # Optional if need more than one hosted cluster.
 ```
-- Once discovered, approve the nodes.
+- Once discovered, approve the nodes from ACM/MCE Web UI.
 - Create a Hosted Cluster from the Web UI using the discovered nodes.
 
 

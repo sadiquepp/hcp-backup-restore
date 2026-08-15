@@ -1,6 +1,13 @@
-# List of IP Addresses to be used on the KVM Lab. 
-# We will be using 192.168.122.0/24 Network. Hence these  
-#   
+# Lab-wide Ansible variables. Loaded by most playbooks via vars_files.
+#
+# Secrets (pull_secret, activation_key, oadp_aws_*) belong in vault.yaml,
+# not here. Values below override role defaults when the same name is used.
+#
+# Optional role-default overrides are documented at the bottom of this file
+# as commented examples - uncomment and adjust as needed.
+
+# List of IP Addresses to be used on the KVM Lab.
+# We will be using 192.168.122.0/24 Network. Hence these
 ip_list:
   helper_server: 21 
   bootstrap: 30
@@ -100,6 +107,14 @@ base_domain: mylab.com
 hub2_vm_folder: /var/lib/libvirt/images/hub2
 hub2_install_folder: /var/lib/libvirt/images/hub2_install
 
+## MetalLB IPAddressPool ranges for HCP APIServer/apps VIPs (setup-hub-acm).
+## Mapped to metallb_pool_start/end in setup_hub_cluster*.yaml. Ranges must not
+## overlap while both hubs share the same L2 network (192.168.122.0/24).
+hub_metallb_pool_start: 60
+hub_metallb_pool_end: 69
+hub2_metallb_pool_start: 90
+hub2_metallb_pool_end: 99
+
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4
 hosted_cluster_memory: 8192
@@ -128,3 +143,31 @@ oadp_storage_location: default
 ## restore_hosted_cluster.yaml target by default. Override per-run with
 ## -e target_hub=hub2 once you've cut over (see oadp/README.md).
 target_hub: hub
+
+## ---------------------------------------------------------------------------
+## Role-default overrides (wired via vars_files in playbooks)
+##
+## These override roles/setup-hub-acm/defaults and roles/setup-bminfra/defaults.
+## Per-playbook role vars still win over vars.yaml when both set the same name.
+## ---------------------------------------------------------------------------
+
+## setup-hub-acm: AgentServiceConfig storage and RHCOS live-ISO catalogue.
+## Shared by hub1 and hub2. Keep openshiftVersion in sync with bminfra_ocp_version.
+agent_service_database_storage: 10Gi
+agent_service_filesystem_storage: 100Gi
+agent_service_image_storage: 50Gi
+agent_service_os_images:
+  - openshiftVersion: "4.21"
+    version: "4.21.0"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.21/4.21.0/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+  - openshiftVersion: "4.22"
+    version: "4.22.8"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+
+## setup-bminfra: bare-metal infra namespace and InfraEnv OCP version.
+## osImageVersion must match an entry in agent_service_os_images above.
+bminfra_location: singapore
+bminfra_ocp_version: '4.21'
+discovery_iso_filename: "bminfra-discovery-{{ bminfra_ocp_version }}.iso"

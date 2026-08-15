@@ -44,26 +44,11 @@
       (after roles/setup-hub-acm's AgentServiceConfig apply is re-enabled
       and confirmed working - InfraEnv depends on it).
 
-# Wait/report/cleanup are disabled along with the apply above, since
-# nothing was applied yet to wait on or clean up. Re-enable all three
-# alongside the apply task once you're done reviewing.
-# - name: Wait for the InfraEnv to generate its Discovery ISO
-#   shell: >
-#     oc get infraenv "{{ oadp_bminfra_namespace }}" -n "{{ oadp_bminfra_namespace }}"
-#     -o jsonpath='{.status.isoDownloadURL}'
-#   register: infraenv_iso
-#   until: infraenv_iso.stdout | length > 0
-#   retries: 30
-#   delay: 10
-#   failed_when: false
+- name: Download discovery ISO from InfraEnv
+  ansible.builtin.include_tasks: download-discovery-iso.yml
 
-# - name: Report InfraEnv status
-#   debug:
-#     msg: >-
-#       {{ (infraenv_iso.stdout | length > 0)
-#          | ternary('Discovery ISO ready: ' + infraenv_iso.stdout,
-#                    'ISO not ready yet - check `oc describe infraenv ' + oadp_bminfra_namespace + ' -n ' + oadp_bminfra_namespace + '`') }}
-
+# Cleanup is disabled while apply is disabled, since rendered files are
+# left in place for review. Re-enable alongside the apply task.
 # - name: Clean up rendered scratch files
 #   ansible.builtin.file:
 #     path: "{{ role_path }}/templates/{{ item }}"
