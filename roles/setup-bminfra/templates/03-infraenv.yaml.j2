@@ -1,0 +1,23 @@
+apiVersion: agent-install.openshift.io/v1beta1
+kind: InfraEnv
+metadata:
+  name: "{{ oadp_bminfra_namespace }}"
+  namespace: "{{ oadp_bminfra_namespace }}"
+  labels:
+    agentclusterinstalls.extensions.hive.openshift.io/location: "{{ bminfra_location }}"
+    networkType: dhcp
+spec:
+  agentLabels:
+    'agentclusterinstalls.extensions.hive.openshift.io/location': "{{ bminfra_location }}"
+  pullSecretRef:
+    name: pullsecret-{{ oadp_bminfra_namespace }}
+  sshAuthorizedKey: "{{ ssh_key }}"
+  nmStateConfigLabelSelector:
+      matchLabels:
+        infraenvs.agent-install.openshift.io: "{{ oadp_bminfra_namespace }}"
+  cpuArchitecture: x86_64
+  osImageVersion: "{{ bminfra_ocp_version }}"
+status:
+  agentLabelSelector:
+    matchLabels:
+      'agentclusterinstalls.extensions.hive.openshift.io/location': "{{ bminfra_location }}"

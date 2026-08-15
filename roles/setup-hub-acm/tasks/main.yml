@@ -38,16 +38,74 @@
   shell: |
     oc apply -f "{{ role_path }}/files/acm/04-multicluster-hub.yaml"
 
+- name: Wait for the Provisioning CRD to be established
+  shell: |
+    oc wait --for=condition=Established crd/provisionings.metal3.io --timeout=300s
+  register: provisioning_crd_wait
+  retries: 3
+  delay: 20
+  until: provisioning_crd_wait.rc == 0
+
+- name: Apply Provisioning configuration (required by metal3/baremetal-operator before AgentServiceConfig)
+  shell: |
+    oc apply -f "{{ role_path }}/files/acm/04b-provisioning.yaml"
+
+- name: Render AgentServiceConfig
+  template:
+    src: acm/05-agentserviceconfig.yaml.j2
+    dest: "{{ role_path }}/files/.rendered-05-agentserviceconfig.yaml"
+
+- name: Wait for the AgentServiceConfig CRD to be established
+  shell: |
+    oc wait --for=condition=Established crd/agentserviceconfigs.agent-install.openshift.io --timeout=300s
+  register: asc_crd_wait
+  retries: 3
+  delay: 20
+  until: asc_crd_wait.rc == 0
+
+# REVIEW-BEFORE-APPLY: rendered file is left in place at the path shown
+# below - inspect it, then re-enable this task (remove the comment
+# markers) once you've manually validated it.
+# - name: Apply AgentServiceConfig
+#   shell: |
+#     oc apply -f "{{ role_path }}/files/.rendered-05-agentserviceconfig.yaml"
+
+- name: AgentServiceConfig apply is disabled pending manual review
+  debug:
+    msg: >-
+      Apply is commented out - review
+      {{ role_path }}/files/.rendered-05-agentserviceconfig.yaml
+      then re-enable the 'Apply AgentServiceConfig' task in
+      roles/setup-hub-acm/tasks/main.yml.
+
+# Cleanup is also disabled while apply is disabled, so the rendered
+# file above survives for you to inspect. Re-enable this alongside the
+# apply task once you're done reviewing.
+# - name: Clean up rendered AgentServiceConfig scratch file
+#   ansible.builtin.file:
+#     path: "{{ role_path }}/files/.rendered-05-agentserviceconfig.yaml"
+#     state: absent
+
 
 - name: Setup LVMCluster Resource
   shell: |
     oc apply -f "{{ role_path }}/files/lvm-storage/04-lvm-cluster.yaml"
 
 
+- name: Render MetalLB IPAddressPool
+  template:
+    src: metal-lb/05-ip-pool.yaml.j2
+    dest: "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
+
 - name: Setup MetalLB Resource
   shell: |
     oc apply -f "{{ role_path }}/files/metal-lb/04-metalLB.yaml"
-    oc apply -f "{{ role_path }}/files/metal-lb/05-ip-pool.yaml"
+    oc apply -f "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
     oc apply -f "{{ role_path }}/files/metal-lb/06-L2Advertisement.yaml"
+
+- name: Clean up rendered scratch files
+  ansible.builtin.file:
+    path: "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
+    state: absent
 
 

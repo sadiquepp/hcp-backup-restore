@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Creates the namespace, pull-secret, InfraEnv and RBAC for agent-based bare-metal discovery
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

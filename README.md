@@ -109,7 +109,11 @@ ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 ```
 ### Step 3 — Prepare ACM and Inventory
 
-- Configure CIM. `ACM -> Fleet Management -> Infrastructure -> Host Inventory -> Configure Host Inventory Settings -> Accept the defaults`
+- Configure CIM. Apply the AgentServiceConfig to the ACM cluster. Customize the OS images using `osImages` to the ones you want to use for the hosted clusters.
+
+```bash
+oc apply -f roles/setup-hub-acm/files/acm/05-agent-service.yaml
+```
 - Create Infrastructure Environment. `ACM -> Fleet Management -> Host Inventory -> Create Infrastructure Environment -> Create Environment -> Fill up the form and create the environment.`
 - Download the Discovery ISO from Add Hosts
 - Discover the VMs as hosts in inventory. Either create from virt-manager specifiying the correct mcaddress or use the playbook to create the hosts.

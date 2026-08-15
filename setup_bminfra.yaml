@@ -1,0 +1,32 @@
+## Creates the shared bare-metal infra namespace, pull-secret, InfraEnv
+## and capi-provider RBAC that agent-based hosted-cluster nodes need to
+## discover and register. Idempotent - run against hub1 normally, or
+## against hub2 if you need to re-create the InfraEnv there.
+##
+## Usage:
+##   ansible-playbook setup_bminfra.yaml --ask-vault-pass                    # targets hub1 (default)
+##   ansible-playbook setup_bminfra.yaml --ask-vault-pass -e target_hub=hub2 # targets hub2
+
+- name: Setup bare-metal infra (namespace, pull-secret, InfraEnv, RBAC)
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  vars:
+    hub_kubeconfig: >-
+      {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+  tasks:
+  - name: Fail fast if pull_secret/ssh_key are missing from vault.yaml
+    ansible.builtin.assert:
+      that:
+        - pull_secret is defined
+        - ssh_key is defined
+      fail_msg: >-
+        pull_secret / ssh_key must be defined in vault.yaml - they're the
+        same ones used by setup_hub_cluster.yaml.
+
+  - ansible.builtin.import_role:
+      name: setup-bminfra
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"

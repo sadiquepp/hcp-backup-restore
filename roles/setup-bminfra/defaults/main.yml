@@ -1,0 +1,4 @@
+---
+# defaults file for setup-bminfra
+bminfra_location: singapore
+bminfra_ocp_version: '4.21'

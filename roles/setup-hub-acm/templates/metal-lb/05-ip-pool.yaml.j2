@@ -5,6 +5,6 @@ metadata:
   name: hcp-ip-pool
 spec:
   addresses:
-  - 192.168.122.60-192.168.122.69
+  - 192.168.122.{{ metallb_pool_start }}-192.168.122.{{ metallb_pool_end }}
   autoAssign: true
   avoidBuggyIPs: true

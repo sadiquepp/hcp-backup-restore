@@ -1,0 +1,75 @@
+---
+# Tasks file for setup-bminfra
+#
+# Creates the namespace, pull-secret, InfraEnv and capi-provider RBAC
+# needed before agent-based hosted-cluster nodes can discover/register.
+# Run against whichever hub currently owns the InfraEnv - normally hub1,
+# or hub2 post-cutover if you're re-creating it there.
+#
+# pull_secret and ssh_key are the same vars already used by
+# roles/setup-hub-cluster's install-config.yaml.j2 - stored once in
+# vault.yaml, reused here rather than duplicated.
+
+- name: Render bminfra manifests
+  template:
+    src: "{{ item }}"
+    dest: "{{ role_path }}/templates/.rendered-{{ item | basename | regex_replace('\\.j2$', '') }}"
+  loop:
+    - 01-namespace.yaml.j2
+    - 02-pullsecret.yaml.j2
+    - 03-infraenv.yaml.j2
+    - 04-capi-role.yaml.j2
+  loop_control:
+    label: "{{ item }}"
+
+# REVIEW-BEFORE-APPLY: the InfraEnv here can't do anything useful until
+# AgentServiceConfig is actually applied (see roles/setup-hub-acm), which
+# is also currently held in review mode. Rendered files are left in
+# place at the paths shown below - inspect them, then re-enable both
+# this task and roles/setup-hub-acm's AgentServiceConfig apply together
+# (order: AgentServiceConfig first, then this) once validated.
+# - name: Apply bminfra manifests
+#   shell: |
+#     oc apply -f "{{ role_path }}/templates/.rendered-01-namespace.yaml"
+#     oc apply -f "{{ role_path }}/templates/.rendered-02-pullsecret.yaml"
+#     oc apply -f "{{ role_path }}/templates/.rendered-03-infraenv.yaml"
+#     oc apply -f "{{ role_path }}/templates/.rendered-04-capi-role.yaml"
+
+- name: bminfra apply is disabled pending manual review
+  debug:
+    msg: >-
+      Apply is commented out - review the rendered files under
+      {{ role_path }}/templates/.rendered-*.yaml then re-enable the
+      'Apply bminfra manifests' task in roles/setup-bminfra/tasks/main.yml
+      (after roles/setup-hub-acm's AgentServiceConfig apply is re-enabled
+      and confirmed working - InfraEnv depends on it).
+
+# Wait/report/cleanup are disabled along with the apply above, since
+# nothing was applied yet to wait on or clean up. Re-enable all three
+# alongside the apply task once you're done reviewing.
+# - name: Wait for the InfraEnv to generate its Discovery ISO
+#   shell: >
+#     oc get infraenv "{{ oadp_bminfra_namespace }}" -n "{{ oadp_bminfra_namespace }}"
+#     -o jsonpath='{.status.isoDownloadURL}'
+#   register: infraenv_iso
+#   until: infraenv_iso.stdout | length > 0
+#   retries: 30
+#   delay: 10
+#   failed_when: false
+
+# - name: Report InfraEnv status
+#   debug:
+#     msg: >-
+#       {{ (infraenv_iso.stdout | length > 0)
+#          | ternary('Discovery ISO ready: ' + infraenv_iso.stdout,
+#                    'ISO not ready yet - check `oc describe infraenv ' + oadp_bminfra_namespace + ' -n ' + oadp_bminfra_namespace + '`') }}
+
+# - name: Clean up rendered scratch files
+#   ansible.builtin.file:
+#     path: "{{ role_path }}/templates/{{ item }}"
+#     state: absent
+#   loop:
+#     - .rendered-01-namespace.yaml
+#     - .rendered-02-pullsecret.yaml
+#     - .rendered-03-infraenv.yaml
+#     - .rendered-04-capi-role.yaml

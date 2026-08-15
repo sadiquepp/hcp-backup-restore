@@ -1,2 +1,32 @@
 ---
 # defaults file for setup-hub-acm
+
+## MetalLB IPAddressPool for the HCP APIServer/apps LoadBalancer VIPs.
+## Defaults match hub1's original static pool. hub2 must override these
+## with a disjoint range (see setup_hub_cluster2.yaml) - reusing the same
+## range on two hubs on the same L2 network means whichever hub's MetalLB
+## speaker comes up second will fight the first over the same IPs.
+metallb_pool_start: 60
+metallb_pool_end: 69
+
+## AgentServiceConfig storage sizes and available RHCOS live-ISO
+## versions. Both hub1 and hub2 normally want the same os image list
+## (they serve the same set of hosted-cluster OCP versions), so this
+## lives in role defaults rather than being duplicated per hub - override
+## in vars.yaml if you ever do want it to differ per hub. Keep entries
+## here in sync with bminfra_ocp_version (roles/setup-bminfra/defaults) -
+## an InfraEnv's osImageVersion must match one of these openshiftVersion
+## values or node discovery ISOs will fail to build.
+agent_service_database_storage: 10Gi
+agent_service_filesystem_storage: 100Gi
+agent_service_image_storage: 50Gi
+agent_service_os_images:
+  - openshiftVersion: "4.21"
+    version: "4.21.0"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.21/4.21.0/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+  - openshiftVersion: "4.22"
+    version: "4.22.8"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+

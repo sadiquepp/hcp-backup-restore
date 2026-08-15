@@ -1,0 +1,30 @@
+apiVersion: agent-install.openshift.io/v1beta1
+kind: AgentServiceConfig
+metadata:
+  name: agent
+spec:
+  databaseStorage:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "{{ agent_service_database_storage }}"
+  filesystemStorage:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "{{ agent_service_filesystem_storage }}"
+  imageStorage:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "{{ agent_service_image_storage }}"
+  osImages: # add/remove versions in agent_service_os_images (vars.yaml or role defaults) - not here
+{% for img in agent_service_os_images %}
+    - openshiftVersion: "{{ img.openshiftVersion }}"
+      version: "{{ img.version }}"
+      url: "{{ img.url }}"
+      cpuArchitecture: "{{ img.cpuArchitecture }}"
+{% endfor %}
