@@ -1,12 +1,49 @@
 ---
 # tasks file for setup-lb
-#- name: Setup Interface - Hub LB 
-#  shell: |
-#    nmcli con add type dummy ifname hub_lb ipv4.method manual ipv4.addresses 192.168.122.{{ ip_list.hub_lb }}/24 autoconnect yes && nmcli con up dummy-hub_lb
 
-# - name: Setup Interface - Hub LB 
-#  shell: |
-#    nmcli con add type dummy ifname hcp_cluster1_lb ipv4.method manual ipv4.addresses 192.168.122.{{ ip_list.hcp_cluster1_lb }}/24 autoconnect yes && nmcli con up dummy-hub_lb
+# The frontends in haproxy.cfg.j2 bind explicit VIPs (hublb/c1lb/c2lb/
+# hub2lb). These used to each get their own bridged virtio NIC (attached
+# via virsh attach-interface in roles/setup-bm-host) with a DHCP
+# reservation - but that put 5 NICs on the identical L2 subnet
+# (192.168.122.0/24 on virbr0), which is a routing/ARP anti-pattern:
+# `route -n` on helper showed a default route AND a duplicate connected
+# route for the same subnet on every interface, and Linux's weak-host
+# ARP behavior can answer for a VIP from the "wrong" interface's MAC,
+# causing intermittent, silent packet loss to that VIP - exactly the
+# random client-side dial timeouts this was causing.
+#
+# Fix: don't create extra NICs at all. Add each VIP as a secondary
+# IPv4 address on the existing primary interface (eth0) instead - no
+# new L2 presence, no ARP ambiguity, no duplicate routes.
+
+- name: Discover the active NetworkManager connection on the primary interface
+  shell: |
+    nmcli -t -f NAME,DEVICE connection show --active | awk -F: '$2=="eth0" {print $1; exit}'
+  register: primary_conn
+  changed_when: false
+
+- name: Fail if the primary interface's connection profile couldn't be found
+  ansible.builtin.assert:
+    that: primary_conn.stdout | length > 0
+    fail_msg: >-
+      Could not find an active NetworkManager connection bound to eth0.
+      Check the interface name on this VM with `ip -4 addr` and adjust
+      the awk filter above if it differs.
+
+- name: Add each VIP as a secondary address on the primary interface (idempotent)
+  shell: |
+    nmcli -g ipv4.addresses connection show "{{ primary_conn.stdout }}" | grep -qw "192.168.122.{{ item }}/24" || \
+    nmcli connection modify "{{ primary_conn.stdout }}" +ipv4.addresses "192.168.122.{{ item }}/24"
+  loop:
+    - "{{ ip_list.hublb }}"
+    - "{{ ip_list.c1lb }}"
+    - "{{ ip_list.c2lb }}"
+    - "{{ ip_list.hub2lb }}"
+  loop_control:
+    label: "192.168.122.{{ item }}/24"
+
+- name: Re-apply the primary connection to activate the new secondary addresses
+  shell: nmcli connection up "{{ primary_conn.stdout }}"
 
 - name: Install HAProxy
   dnf:
