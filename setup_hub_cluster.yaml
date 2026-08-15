@@ -29,6 +29,8 @@
 
   - ansible.builtin.import_role:
       name: setup-bminfra
+    vars:
+      hub_kubeconfig: "{{ hub_install_folder }}/auth/kubeconfig"
     environment:
       KUBECONFIG: "{{ hub_install_folder }}/auth/kubeconfig"
     tags:
