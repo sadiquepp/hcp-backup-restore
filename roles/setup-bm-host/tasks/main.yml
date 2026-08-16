@@ -86,7 +86,16 @@
 
 - name: Define the Helper VM 
   shell: |
-    virt-install --import --name "{{ helper_name }}" --memory "{{ helper_memory }}" --vcpus "{{ helper_vcpus }}"  --disk "/var/lib/libvirt/images/{{ helper_disk }}",format=qcow2,cache=none,bus=virtio  --os-variant=rhel9.4 --noautoconsole --network network:default,mac=52:54:00:e2:54:{{ip_list.helper_server}}
+    virt-install \
+    --import \
+    --name "{{ helper_name }}" \
+    --memory "{{ helper_memory }}" \
+    --vcpus "{{ helper_vcpus }}" \
+    --disk "/var/lib/libvirt/images/{{ helper_disk }}",format=qcow2,cache=none,bus=virtio \
+    --os-variant=rhel9.4 \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.helper_server}}
   when: vm_state.stdout == ''
   tags:
   - virt
