@@ -13,7 +13,8 @@ lab_network_netmask: "255.255.255.0"
 lab_network_reverse_zone: "122.168.192.in-addr.arpa"
 
 # List of IP Addresses to be used on the KVM Lab.
-# Last octets below are combined with lab_network_prefix (e.g. .21 -> 192.168.122.21).
+# Last octets below are combined with lab_network_prefix (e.g. .21 -> 192.168.122.21). Must be two digits (10-99) as last octet is used
+# to define mac addresses
 ip_list:
   helper_server: 21 
   bootstrap: 30
@@ -38,7 +39,7 @@ ip_list:
   # backup/restore-to-new-hub DR flow. Kept on its own IP block so it
   # can be built (and its DNS resolved) while hub1 still exists.
   # NOTE: last octet is used raw in the MAC scheme 52:54:00:e2:54:{{ value }},
-  # so it must stay a 1-2 digit hex-safe value (00-99) - do not use 100+.
+  # so it must stay a two digit hex-safe value (10-99) - do not use 100+.
   hub2_bootstrap: 80
   hub2_master1: 81
   hub2_master2: 82
@@ -53,9 +54,10 @@ helper_disk: helper_disk.qcow2
 helper_memory: 8192 
 helper_vcpus: 4
 master_memory: 16384
-master_cpu: 4
-worker_memory: 16384 
-worker_cpu: 4
+master_cpu: 8
+worker_memory: 32768 
+worker_cpu: 24
+hub_worker_replicas: 3
 
 ## Variables used by Setup BM Role 
 
@@ -123,13 +125,13 @@ hub2_metallb_pool_end: 99
 
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4
-hosted_cluster_memory: 8192
+hosted_cluster_memory: 8512
 hosted_cluster_vm_folder: /var/lib/libvirt/images/hosted_cluster
 
 
 ## Variables for Hosted Cluster1
 hosted_cluster2_cpu: 4
-hosted_cluster2_memory: 8192
+hosted_cluster2_memory: 8512
 hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
 
 ## Variables required by the OADP backup/restore flow
@@ -138,7 +140,7 @@ hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
 ##
 ## AWS access key id/secret go in vault.yaml as
 ## oadp_aws_access_key_id / oadp_aws_secret_access_key - never here.
-oadp_aws_region: ap-southeast-1
+oadp_aws_region: ap-south-1
 oadp_bucket_name: adp-backup-bucket-xjt   # S3 bucket names are globally unique - change this before first use
 oadp_backup_prefix: hcp-backup
 oadp_backup_ttl: 2h30m0s

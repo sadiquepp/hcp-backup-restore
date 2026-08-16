@@ -1,0 +1,23 @@
+---
+# Approve pending node CSRs and poll until expected_worker_replicas workers
+# report Ready. Retries every worker_ready_delay seconds (default 30s).
+
+- name: Approve pending CSRs until all worker nodes are Ready
+  ansible.builtin.shell: |
+    export KUBECONFIG={{ kubeconfig_path }}
+    for csr in $(oc get csr 2>/dev/null | awk '/Pending/{print $1}'); do
+      oc adm certificate approve "$csr" || true
+    done
+    ready=$(oc get nodes -l node-role.kubernetes.io/worker --no-headers 2>/dev/null \
+      | awk '$2=="Ready"{n++} END{print n+0}')
+    test "${ready:-0}" -ge {{ expected_worker_replicas }}
+  register: worker_ready_check
+  until: worker_ready_check.rc == 0
+  retries: "{{ worker_ready_retries | default(60) }}"
+  delay: "{{ worker_ready_delay | default(30) }}"
+  changed_when: false
+
+- name: Report worker node readiness
+  ansible.builtin.debug:
+    msg: >-
+      {{ worker_ready_check.stdout_lines | default(['All workers Ready']) | join(' ') }}

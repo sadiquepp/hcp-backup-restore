@@ -333,13 +333,11 @@
   ansible.builtin.wait_for:
     timeout: 600
 
-- name: Approve all pendign CSR for Worker nodes
-  shell: |
-    export KUBECONFIG={{ hub2_install_folder }}/auth/kubeconfig
-    sleep 180 
-    for i in `oc get csr| grep Pending | awk '{print $1}'`; do oc adm certificate approve $i; done  
-    sleep 180
-    for i in `oc get csr| grep Pending | awk '{print $1}'`; do oc adm certificate approve $i; done 
+- name: Approve CSRs until worker nodes are Ready
+  ansible.builtin.include_tasks: ../setup-hub-cluster/tasks/wait-for-workers-ready.yml
+  vars:
+    kubeconfig_path: "{{ hub2_install_folder }}/auth/kubeconfig"
+    expected_worker_replicas: "{{ hub_worker_replicas }}"
 
 - name: Waiting for cluster Bootstrap to finish
   shell: |
@@ -350,11 +348,8 @@
     name: hub2_bootstrap
     state: destroyed
 
-
-- name: Approve all pendign CSR for Worker nodes - If still PENDING
-  shell: |
-    export KUBECONFIG={{ hub2_install_folder }}/auth/kubeconfig
-    sleep 180 
-    for i in `oc get csr| grep Pending | awk '{print $1}'`; do oc adm certificate approve $i; done  
-    sleep 180
-    for i in `oc get csr| grep Pending | awk '{print $1}'`; do oc adm certificate approve $i; done 
+- name: Approve CSRs until worker nodes are Ready (post-bootstrap)
+  ansible.builtin.include_tasks: ../setup-hub-cluster/tasks/wait-for-workers-ready.yml
+  vars:
+    kubeconfig_path: "{{ hub2_install_folder }}/auth/kubeconfig"
+    expected_worker_replicas: "{{ hub_worker_replicas }}"

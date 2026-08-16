@@ -8,6 +8,11 @@
   - ansible.builtin.import_role:
       name: setup-hub-cluster2
 
+  - name: Wait for ClusterOperators to be healthy before day-2 install
+    ansible.builtin.include_tasks: roles/setup-hub-cluster/tasks/wait-for-cluster-operators.yml
+    vars:
+      kubeconfig_path: "{{ hub2_install_folder }}/auth/kubeconfig"
+
   - ansible.builtin.import_role:
       name: setup-hub-acm
     vars:
