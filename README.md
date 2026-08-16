@@ -142,10 +142,10 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
 
   - **Option2**: Invoke the setup-hosted-cluster-vm role which automatically downloads the discovery ISO and creates the hosts in inventory.
 
-```bash
-ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass
-ansible-playbook -i inventory/hosts setup_hosted_cluster2_vm.yaml --ask-vault-pass # Optional if need more than one hosted cluster.
-```
+  ```bash
+  ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass
+  ansible-playbook -i inventory/hosts setup_hosted_cluster2_vm.yaml --ask-vault-pass # Optional if need more than one hosted cluster.
+  ```
 - Once discovered, approve the nodes from ACM/MCE Web UI.
 
 - Create a Hosted Cluster from the Web UI using the discovered nodes.
