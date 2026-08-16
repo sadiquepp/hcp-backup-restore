@@ -1,0 +1,41 @@
+---
+# Tasks file for create-hosted-cluster
+#
+# Renders the HostedCluster/Secrets/NodePool/ManagedCluster/
+# KlusterletAddonConfig bundle for hcp_cluster_name. This is the most
+# consequential apply in the whole chain (it's what actually starts
+# node provisioning), so - matching how AgentServiceConfig and bminfra
+# are handled - apply starts out commented pending manual review.
+#
+# Depends on AgentServiceConfig and bminfra already being applied and
+# confirmed working (roles/setup-hub-acm, roles/setup-bminfra) - a
+# HostedCluster on Agent platform can't provision nodes without both.
+
+- name: Render hosted cluster bundle
+  template:
+    src: hosted-cluster.yaml.j2
+    dest: "{{ role_path }}/templates/.rendered-{{ hcp_cluster_name }}.yaml"
+
+# REVIEW-BEFORE-APPLY: rendered bundle is left in place at the path
+# shown below - inspect it, then re-enable this task once you've
+# manually validated it AND confirmed AgentServiceConfig/bminfra are
+# already applied and working.
+# - name: Apply hosted cluster bundle
+#   shell: |
+#     oc apply -f "{{ role_path }}/templates/.rendered-{{ hcp_cluster_name }}.yaml"
+
+- name: Hosted cluster apply is disabled pending manual review
+  debug:
+    msg: >-
+      Apply is commented out - review
+      {{ role_path }}/templates/.rendered-{{ hcp_cluster_name }}.yaml
+      then re-enable the 'Apply hosted cluster bundle' task in
+      roles/create-hosted-cluster/tasks/main.yml (only after
+      AgentServiceConfig and bminfra are confirmed working).
+
+# Cleanup is disabled along with apply above, so the rendered file
+# survives for review. Re-enable alongside the apply task.
+# - name: Clean up rendered scratch file
+#   ansible.builtin.file:
+#     path: "{{ role_path }}/templates/.rendered-{{ hcp_cluster_name }}.yaml"
+#     state: absent

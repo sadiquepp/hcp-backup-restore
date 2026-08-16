@@ -1,0 +1,41 @@
+## Renders (and, once you re-enable it, applies) the HostedCluster/
+## NodePool/ManagedCluster/KlusterletAddonConfig bundle for an
+## Agent-platform hosted cluster. Requires AgentServiceConfig and
+## bminfra already applied and working - a HostedCluster on Agent
+## platform can't provision nodes without both.
+##
+## Usage:
+##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
+##     -e hcp_cluster_name=hcp-cluster1
+##
+## For a second, concurrent hosted cluster on the same hub, override the
+## networking CIDRs to something disjoint from the first:
+##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
+##     -e hcp_cluster_name=hcp-cluster2 \
+##     -e hosted_cluster_cluster_cidr=10.136.0.0/14 \
+##     -e hosted_cluster_service_cidr=172.32.0.0/16
+
+- name: Create Hosted Cluster
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  vars:
+    hub_kubeconfig: >-
+      {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+  tasks:
+  - name: Fail fast if required inputs are missing
+    ansible.builtin.assert:
+      that:
+        - hcp_cluster_name is defined
+        - pull_secret is defined
+        - ssh_key is defined
+      fail_msg: >-
+        Pass -e hcp_cluster_name=<name> (e.g. hcp-cluster1), and make
+        sure pull_secret/ssh_key are defined in vault.yaml.
+
+  - ansible.builtin.import_role:
+      name: create-hosted-cluster
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"

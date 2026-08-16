@@ -1,0 +1,29 @@
+---
+# defaults file for create-hosted-cluster
+#
+# These are overridden by the matching vars in vars.yaml's
+# "create-hosted-cluster" section - edit values there, not here.
+# Kept here only as fallbacks if this role is ever used without vars.yaml.
+
+hosted_cluster_clusterset: default
+hosted_cluster_channel: fast-4.21
+# Keep in sync with roles/setup-hub-acm's agent_service_os_images list -
+# this must correspond to one of those openshiftVersion entries or the
+# release image and the available discovery ISOs will be mismatched.
+hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:05e69ed54453e3d306b136f52493073073b207f57d0562fe1c8a555bde61aa49"
+
+# clusterNetwork/serviceNetwork CIDRs. These default to hcp-cluster1's
+# values - if you're running a second hosted cluster (hcp-cluster2)
+# concurrently on the same hub, override both to a disjoint range, e.g.
+# -e hosted_cluster_cluster_cidr=10.136.0.0/14 -e hosted_cluster_service_cidr=172.32.0.0/16
+hosted_cluster_cluster_cidr: 10.132.0.0/14
+hosted_cluster_service_cidr: 172.31.0.0/16
+
+hosted_cluster_availability_policy: HighlyAvailable
+hosted_cluster_olm_catalog_placement: management
+hosted_cluster_nodepool_replicas: 2
+
+hosted_cluster_addon_application_manager: true
+hosted_cluster_addon_policy_controller: true
+hosted_cluster_addon_search_collector: true
+hosted_cluster_addon_cert_policy_controller: true

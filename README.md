@@ -115,27 +115,38 @@ ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 ```
 
-- Create Infrastructure Environment. `ACM -> Fleet Management -> Host Inventory -> Create Infrastructure Environment -> Create Environment -> Fill up the form and create the environment.` Or review the rendered yaml file at `roles/setup-bminfra/templates/.rendered-03-infraenv.yaml` and apply it to the ACM cluster.
+- Create Infrastructure Environment. 
+
+Option1: `ACM -> Fleet Management -> Host Inventory -> Create Infrastructure Environment -> Create Environment -> Fill up the form and create the environment.` 
+Option2: Invoke the setup-bminfra role and apply the rendered yaml files at `roles/setup-bminfra/templates/.rendered-01-namespace.yaml`, `roles/setup-bminfra/templates/.rendered-02-pullsecret.yaml`, `roles/setup-bminfra/templates/.rendered-03-infraenv.yaml`, `roles/setup-bminfra/templates/.rendered-04-capi-role.yaml` to the ACM cluster.
 
 ```bash
+ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass
 oc apply -f roles/setup-bminfra/templates/.rendered-01-namespace.yaml
 oc apply -f roles/setup-bminfra/templates/.rendered-02-pullsecret.yaml
 oc apply -f roles/setup-bminfra/templates/.rendered-03-infraenv.yaml
 oc apply -f roles/setup-bminfra/templates/.rendered-04-capi-role.yaml
 ```
 
-- Download the Discovery ISO from Add Hosts.
-The ISO is automatically downloaded to the bare-metal host in the download dir specified in `vars.yaml` by role `setup-bminfra` after the agentserviceconfig is applied and infra environment is created.
+- Download the Discovery ISO from Add Hosts. Only required if you are not using the playbook to automate the discovery process.
+Note: The ISO is automatically downloaded to the bare-metal host in the download dir specified in `vars.yaml`  when you automate the discovery process by running the playbook `setup_hosted_cluster-vm.yaml` or `setup_hosted_cluster2-vm.yaml` in the next step. If vms for hosted cluster is manually created, you can download the ISO from `Add Hosts` and place it in the download dir.
 
-- Discover the VMs as hosts in inventory. Either create from virt-manager specifiying the correct mcaddress or use the playbook to create the hosts.
+- Discover the VMs as hosts in inventory. 
+Option1: Manually create from virt-manager specifiying the correct mcaddress.
+Option2: Invoke the setup-hosted-cluster-vm role which automatically downloads the discovery ISO and creates the hosts in inventory.
 
 ```bash
-ansible-playbook -i inventory/hosts setup_hosted_cluster.yaml --ask-vault-pass
-ansible-playbook -i inventory/hosts setup_hosted_cluster2.yaml --ask-vault-pass # Optional if need more than one hosted cluster.
+ansible-playbook -i inventory/hosts setup_hosted_cluster-vm.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_hosted_cluster2-vm.yaml --ask-vault-pass # Optional if need more than one hosted cluster.
 ```
 - Once discovered, approve the nodes from ACM/MCE Web UI.
-- Create a Hosted Cluster from the Web UI using the discovered nodes.
 
+- Create a Hosted Cluster from the Web UI using the discovered nodes.
+Render the yaml files by invoking the create-hosted-cluster role at `roles/create-hosted-cluster/templates/.rendered-01-hosted-cluster.yaml` and apply it to the ACM cluster.
+```bash
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
+oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml # Replace hcp-cluster1 with the name of the hosted cluster.
+```
 
 ### Step 4 — Create S3 Bucket (one-time)
 

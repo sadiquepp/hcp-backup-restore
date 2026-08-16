@@ -1,0 +1,127 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: '{{ hcp_cluster_name }}'
+---
+apiVersion: hypershift.openshift.io/v1beta1
+kind: HostedCluster
+metadata:
+  name: '{{ hcp_cluster_name }}'
+  namespace: '{{ hcp_cluster_name }}'
+  labels:
+    "cluster.open-cluster-management.io/clusterset": '{{ hosted_cluster_clusterset }}'
+spec:
+  channel: "{{ hosted_cluster_channel }}"
+  release:
+    image: "{{ hosted_cluster_release_image }}"
+  pullSecret:
+    name: pullsecret-cluster-{{ hcp_cluster_name }}
+  sshKey:
+    name: sshkey-cluster-{{ hcp_cluster_name }}
+  networking:
+    clusterNetwork:
+      - cidr: "{{ hosted_cluster_cluster_cidr }}"
+    serviceNetwork:
+      - cidr: "{{ hosted_cluster_service_cidr }}"
+    networkType: OVNKubernetes
+  controllerAvailabilityPolicy: "{{ hosted_cluster_availability_policy }}"
+  infrastructureAvailabilityPolicy: "{{ hosted_cluster_availability_policy }}"
+  olmCatalogPlacement: "{{ hosted_cluster_olm_catalog_placement }}"
+  platform:
+    type: Agent
+    agent:
+      agentNamespace: '{{ oadp_bminfra_namespace }}'
+  infraID: '{{ hcp_cluster_name }}'
+  dns:
+    baseDomain: '{{ base_domain }}'
+  services:
+  - service: APIServer
+    servicePublishingStrategy:
+      type: LoadBalancer
+      loadBalancer:
+        hostname: api.{{ hcp_cluster_name }}.{{ base_domain }}
+  - service: OAuthServer
+    servicePublishingStrategy:
+      type: Route
+  - service: OIDC
+    servicePublishingStrategy:
+      type: Route
+  - service: Konnectivity
+    servicePublishingStrategy:
+      type: Route
+  - service: Ignition
+    servicePublishingStrategy:
+      type: Route
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pullsecret-cluster-{{ hcp_cluster_name }}
+  namespace: {{ hcp_cluster_name }}
+data:
+  '.dockerconfigjson': '{{ pull_secret | b64encode }}'
+type: kubernetes.io/dockerconfigjson
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sshkey-cluster-{{ hcp_cluster_name }}
+  namespace: '{{ hcp_cluster_name }}'
+stringData:
+  id_rsa.pub: {{ ssh_key }}
+---
+apiVersion: hypershift.openshift.io/v1beta1
+kind: NodePool
+metadata:
+  name: 'nodepool-{{ hcp_cluster_name }}-1'
+  namespace: '{{ hcp_cluster_name }}'
+spec:
+  clusterName: '{{ hcp_cluster_name }}'
+  replicas: {{ hosted_cluster_nodepool_replicas }}
+  management:
+    autoRepair: false
+    upgradeType: InPlace
+  platform:
+    type: Agent
+    agent:
+      agentLabelSelector:
+        matchLabels: {}
+  release:
+    image: "{{ hosted_cluster_release_image }}"
+---
+apiVersion: cluster.open-cluster-management.io/v1
+kind: ManagedCluster
+metadata:
+  annotations:
+    import.open-cluster-management.io/hosting-cluster-name: local-cluster
+    import.open-cluster-management.io/klusterlet-deploy-mode: Hosted
+    open-cluster-management/created-via: hypershift
+  labels:
+    cloud: BareMetal
+    vendor: OpenShift
+    name: '{{ hcp_cluster_name }}'
+    cluster.open-cluster-management.io/clusterset: '{{ hosted_cluster_clusterset }}'
+  name: '{{ hcp_cluster_name }}'
+spec:
+  hubAcceptsClient: true
+---
+apiVersion: agent.open-cluster-management.io/v1
+kind: KlusterletAddonConfig
+metadata:
+  name: '{{ hcp_cluster_name }}'
+  namespace: '{{ hcp_cluster_name }}'
+spec:
+  clusterName: '{{ hcp_cluster_name }}'
+  clusterNamespace: '{{ hcp_cluster_name }}'
+  clusterLabels:
+    cloud: BareMetal
+    vendor: OpenShift
+  applicationManager:
+    enabled: {{ hosted_cluster_addon_application_manager | lower }}
+  policyController:
+    enabled: {{ hosted_cluster_addon_policy_controller | lower }}
+  searchCollector:
+    enabled: {{ hosted_cluster_addon_search_collector | lower }}
+  certPolicyController:
+    enabled: {{ hosted_cluster_addon_cert_policy_controller | lower }}

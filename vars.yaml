@@ -171,3 +171,21 @@ agent_service_os_images:
 bminfra_location: singapore
 bminfra_ocp_version: '4.21'
 discovery_iso_filename: "bminfra-discovery-{{ bminfra_ocp_version }}.iso"
+
+## create-hosted-cluster: HostedCluster/NodePool/ManagedCluster bundle.
+## Defaults below match hcp-cluster1. For a second, concurrent hosted
+## cluster on the same hub, override hosted_cluster_cluster_cidr and
+## hosted_cluster_service_cidr to a disjoint range at minimum.
+## release image should correspond to an entry in agent_service_os_images.
+hosted_cluster_clusterset: default
+hosted_cluster_channel: fast-4.21
+hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:05e69ed54453e3d306b136f52493073073b207f57d0562fe1c8a555bde61aa49"
+hosted_cluster_cluster_cidr: 10.132.0.0/14
+hosted_cluster_service_cidr: 172.31.0.0/16
+hosted_cluster_availability_policy: HighlyAvailable
+hosted_cluster_olm_catalog_placement: management
+hosted_cluster_nodepool_replicas: 2
+hosted_cluster_addon_application_manager: true
+hosted_cluster_addon_policy_controller: true
+hosted_cluster_addon_search_collector: true
+hosted_cluster_addon_cert_policy_controller: true

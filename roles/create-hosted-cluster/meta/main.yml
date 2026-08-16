@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Renders and applies the HostedCluster/NodePool/ManagedCluster bundle for an Agent-platform hosted cluster
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

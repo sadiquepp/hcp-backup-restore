@@ -17,21 +17,3 @@
       KUBECONFIG: "{{ hub_install_folder }}/auth/kubeconfig"
     tags:
       - acm
-
-  - name: Fail fast if pull_secret/ssh_key are missing from vault.yaml
-    ansible.builtin.assert:
-      that:
-        - pull_secret is defined
-        - ssh_key is defined
-      fail_msg: >-
-        pull_secret / ssh_key must be defined in vault.yaml - they're the
-        same ones used by setup-hub-cluster's install-config.
-
-  - ansible.builtin.import_role:
-      name: setup-bminfra
-    vars:
-      hub_kubeconfig: "{{ hub_install_folder }}/auth/kubeconfig"
-    environment:
-      KUBECONFIG: "{{ hub_install_folder }}/auth/kubeconfig"
-    tags:
-      - bminfra
