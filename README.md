@@ -117,8 +117,8 @@ oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 
 - Create Infrastructure Environment. 
 
---*Option1: `ACM -> Fleet Management -> Host Inventory -> Create Infrastructure Environment -> Create Environment -> Fill up the form and create the environment.` 
---*Option2: Invoke the setup-bminfra role and apply the rendered yaml files at `roles/setup-bminfra/templates/.rendered-01-namespace.yaml`, `roles/setup-bminfra/templates/.rendered-02-pullsecret.yaml`, `roles/setup-bminfra/templates/.rendered-03-infraenv.yaml`, `roles/setup-bminfra/templates/.rendered-04-capi-role.yaml` to the ACM cluster.
+-- Option1: `ACM -> Fleet Management -> Host Inventory -> Create Infrastructure Environment -> Create Environment -> Fill up the form and create the environment.` 
+-- Option2: Invoke the setup-bminfra role and apply the rendered yaml files at `roles/setup-bminfra/templates/.rendered-01-namespace.yaml`, `roles/setup-bminfra/templates/.rendered-02-pullsecret.yaml`, `roles/setup-bminfra/templates/.rendered-03-infraenv.yaml`, `roles/setup-bminfra/templates/.rendered-04-capi-role.yaml` to the ACM cluster.
 
 ```bash
 ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass
