@@ -149,9 +149,13 @@ ansible-playbook -i inventory/hosts setup_hosted_cluster2_vm.yaml --ask-vault-pa
 - Once discovered, approve the nodes from ACM/MCE Web UI.
 
 - Create a Hosted Cluster from the Web UI using the discovered nodes.
-Render the yaml files by invoking the create-hosted-cluster role at `roles/create-hosted-cluster/templates/.rendered-01-hosted-cluster.yaml` and apply it to the ACM cluster.
+
+  - Render the yamlfiles by invoking the create-hosted-cluster role.
 ```bash
-ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1
+```
+  - Review and apply the rendered yaml files to the ACM cluster.
+```bash
 oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml # Replace hcp-cluster1 with the name of the hosted cluster.
 ```
 
