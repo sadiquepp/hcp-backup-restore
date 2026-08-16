@@ -151,13 +151,13 @@ ansible-playbook -i inventory/hosts setup_hosted_cluster2_vm.yaml --ask-vault-pa
 - Create a Hosted Cluster from the Web UI using the discovered nodes.
 
   - Render the yamlfiles by invoking the create-hosted-cluster role.
-```bash
-ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1
-```
+  ```bash
+  ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1
+  ```
   - Review and apply the rendered yaml files to the ACM cluster.
-```bash
-oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml # Replace hcp-cluster1 with the name of the hosted cluster.
-```
+  ```bash
+  oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml # Replace hcp-cluster1 with the name of the hosted cluster.
+  ```
 
 ### Step 4 — Create S3 Bucket (one-time)
 
