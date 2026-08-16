@@ -50,7 +50,7 @@ zone "{{ hub_domain }}" IN {
 	allow-update { none; };
 };
 
-zone "122.168.192.in-addr.arpa" IN {
+zone "{{ lab_network_reverse_zone }}" IN {
 	type master;
 	file "named-reverse.{{ hub_domain }}.db";
 	allow-update { none; };

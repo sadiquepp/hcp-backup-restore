@@ -5,6 +5,6 @@ metadata:
   name: hcp-ip-pool
 spec:
   addresses:
-  - 192.168.122.60-192.168.122.69
+  - 192.168.122.60-192.168.122.69   # static example; live pool is roles/setup-hub-acm/templates/metal-lb/05-ip-pool.yaml.j2
   autoAssign: true
   avoidBuggyIPs: true

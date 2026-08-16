@@ -105,12 +105,15 @@
     - bootstrap.ign
     - master.ign
     - worker.ign
+
 - name: Create Disk Image for Bootstrap
   shell: |
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_bootstrap.qcow2 100G
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_vm_folder }}/hub_bootstrap.qcow2 \
+    100G
 
 - name: Defining the OCP Bootstrap nodes
   shell: |
@@ -121,10 +124,16 @@
     --disk path={{ hub_vm_folder }}/hub_bootstrap.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
     --memballoon model=virtio,freePageReporting=on \
     --noautoconsole \
-    --vnc --network network:default,mac=52:54:00:e2:54:{{ip_list.bootstrap}} --name hub_bootstrap --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/bootstrap.ign" --dry-run --print-xml > /tmp/hub_bootstrap.xml
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.bootstrap}} \
+    --name hub_bootstrap \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/bootstrap.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub_bootstrap.xml
     
     virsh define /tmp/hub_bootstrap.xml 
-    
+    sleep 10
     virsh start hub_bootstrap
 
 - name: Lets wait for 300 seconds for the bootstrap to be UP and ACTIVEG. 
@@ -136,17 +145,23 @@
     qemu-img create \ 
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_master1.qcow2 100G
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_vm_folder }}/hub_master1.qcow2 \
+    100G
    
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_master2.qcow2 100G 
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_vm_folder }}/hub_master2.qcow2 \
+    100G 
     
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_master3.qcow2 100G
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_vm_folder }}/hub_master3.qcow2 \
+    100G
 
 - name: Defining the Master nodes
   shell: |
@@ -159,7 +174,11 @@
     --noautoconsole \
     --vnc \
     --network network:default,mac=52:54:00:e2:54:{{ip_list.master1}} \
-    --name hub_master1 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/master.ign" --dry-run --print-xml > /tmp/hub_master1.xml
+    --name hub_master1 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/master.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub_master1.xml
     
     virt-install \
     --ram {{ master_memory }} \
@@ -170,7 +189,11 @@
     --noautoconsole \
     --vnc \
     --network network:default,mac=52:54:00:e2:54:{{ip_list.master2}} \
-    --name hub_master2 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/master.ign" --dry-run --print-xml > /tmp/hub_master2.xml
+    --name hub_master2 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/master.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub_master2.xml
    
     virt-install \
     --ram {{ master_memory }} \
@@ -181,12 +204,16 @@
     --noautoconsole \
     --vnc \
     --network network:default,mac=52:54:00:e2:54:{{ip_list.master3}} \
-    --name hub_master3 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/master.ign" --dry-run --print-xml > /tmp/hub_master3.xml
+    --name hub_master3 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/master.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub_master3.xml
    
     virsh define /tmp/hub_master1.xml
     virsh define /tmp/hub_master2.xml
     virsh define /tmp/hub_master3.xml
-   
+    sleep 10
     virsh start hub_master1 
     virsh start hub_master2 
     virsh start hub_master3
@@ -200,32 +227,41 @@
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_worker1.qcow2 100G
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_vm_folder }}/hub_worker1.qcow2 \
+    100G
     
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_worker2.qcow2 100G
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_vm_folder }}/hub_worker2.qcow2 \
+    100G
     
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  {{ hub_vm_folder }}/hub_worker3.qcow2 100G
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_vm_folder }}/hub_worker3.qcow2 \
+    100G
     
     qemu-img create \
     -f qcow2 \
     -o preallocation=metadata \
-    {{ hub_vm_folder }}/storage_worker1.qcow2 500G
+    {{ hub_vm_folder }}/storage_worker1.qcow2 \
+    500G
    
     qemu-img create \
     -f qcow2 \
     -o preallocation=metadata \
-    {{ hub_vm_folder }}/storage_worker2.qcow2 500G
+    {{ hub_vm_folder }}/storage_worker2.qcow2 \
+    500G
     
     qemu-img create \
     -f qcow2 \
     -o preallocation=metadata \
-    {{ hub_vm_folder }}/storage_worker3.qcow2 500G
+    {{ hub_vm_folder }}/storage_worker3.qcow2 \
+    500G
 
 - name: Defining the Worker nodes
   shell: |
@@ -239,7 +275,11 @@
     --noautoconsole \
     --vnc \
     --network network:default,mac=52:54:00:e2:54:{{ip_list.worker1}} \
-    --name hub_worker1 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/worker.ign" --dry-run --print-xml > /tmp/hub_worker1.xml
+    --name hub_worker1 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/worker.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub_worker1.xml
     
     virt-install \
     --ram {{ worker_memory }} \
@@ -251,7 +291,11 @@
     --noautoconsole \
     --vnc \
     --network network:default,mac=52:54:00:e2:54:{{ip_list.worker2}} \
-    --name hub_worker2 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/worker.ign" --dry-run --print-xml > /tmp/hub_worker2.xml
+    --name hub_worker2 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/worker.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub_worker2.xml
     
     virt-install \
     --ram {{ worker_memory }} \
@@ -263,12 +307,16 @@
     --noautoconsole \
     --vnc \
     --network network:default,mac=52:54:00:e2:54:{{ip_list.worker3}} \
-    --name hub_worker3 --cpu host-passthrough --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/worker.ign" --dry-run --print-xml > /tmp/hub_worker3.xml
+    --name hub_worker3 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_install_folder }}/worker.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub_worker3.xml
     
     virsh define /tmp/hub_worker1.xml
     virsh define /tmp/hub_worker2.xml
     virsh define /tmp/hub_worker3.xml
-    
+    sleep 10
     virsh start hub_worker1 
     virsh start hub_worker2 
     virsh start hub_worker3

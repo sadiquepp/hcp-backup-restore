@@ -1,0 +1,16 @@
+# Rendered from vars.yaml (lab_network_prefix + ip_list) by setup_bm_host.yaml.
+[local]
+
+
+[helper]
+{{ lab_network_prefix }}.{{ ip_list.helper_server }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[hub_masters]
+master1.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.master1 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+master2.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.master2 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+master3.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.master3 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+
+[hub_workers]
+worker1.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.worker1 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+worker2.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.worker2 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+worker3.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.worker3 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core

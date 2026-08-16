@@ -9,19 +9,19 @@
   <bridge name='virbr0' stp='on' delay='0'/>
   <mac address='52:54:00:c7:82:0c'/>
   <dns>
-    <forwarder domain='{{ hub_domain }}' addr='192.168.122.{{ ip_list.helper_server}}'/>
-    <forwarder domain='{{ hosted_domain }}' addr='192.168.122.{{ ip_list.helper_server }}'/>
-    <forwarder domain='{{ hosted_domain2 }}' addr='192.168.122.{{ ip_list.helper_server }}'/>
-    <forwarder domain='{{ hub2_domain }}' addr='192.168.122.{{ ip_list.helper_server }}'/>
-    <forwarder domain='122.168.192.in-addr.arpa' addr='192.168.122.{{ ip_list.helper_server }}'/>
+    <forwarder domain='{{ hub_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server}}'/>
+    <forwarder domain='{{ hosted_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+    <forwarder domain='{{ hosted_domain2 }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+    <forwarder domain='{{ hub2_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+    <forwarder domain='{{ lab_network_reverse_zone }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
   </dns>
-  <ip address='192.168.122.1' netmask='255.255.255.0'>
+  <ip address='{{ lab_network_prefix }}.1' netmask='{{ lab_network_netmask }}'>
     <dhcp>
-     <range start="192.168.122.201" end="192.168.122.249"/>
+     <range start="{{ lab_network_prefix }}.201" end="{{ lab_network_prefix }}.249"/>
      {% for key,value in ip_list.items() %}
-     <host mac='52:54:00:e2:54:{{ value }}' name='{{ key }}.hub.mylab.com' ip='192.168.122.{{ value }}'/>
+     <host mac='52:54:00:e2:54:{{ value }}' name='{{ key }}.hub.mylab.com' ip='{{ lab_network_prefix }}.{{ value }}'/>
      {% endfor %}
-     <bootp file='pxelinux.0' server='192.168.122.{{ ip_list.helper_server }}'/>
+     <bootp file='pxelinux.0' server='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
    </dhcp>
   </ip>
 </network>

@@ -5,7 +5,7 @@
 # hub2lb). These used to each get their own bridged virtio NIC (attached
 # via virsh attach-interface in roles/setup-bm-host) with a DHCP
 # reservation - but that put 5 NICs on the identical L2 subnet
-# (192.168.122.0/24 on virbr0), which is a routing/ARP anti-pattern:
+# ({{ lab_network_prefix }}.0/24 on virbr0), which is a routing/ARP anti-pattern:
 # `route -n` on helper showed a default route AND a duplicate connected
 # route for the same subnet on every interface, and Linux's weak-host
 # ARP behavior can answer for a VIP from the "wrong" interface's MAC,
@@ -32,15 +32,15 @@
 
 - name: Add each VIP as a secondary address on the primary interface (idempotent)
   shell: |
-    nmcli -g ipv4.addresses connection show "{{ primary_conn.stdout }}" | grep -qw "192.168.122.{{ item }}/24" || \
-    nmcli connection modify "{{ primary_conn.stdout }}" +ipv4.addresses "192.168.122.{{ item }}/24"
+    nmcli -g ipv4.addresses connection show "{{ primary_conn.stdout }}" | grep -qw "{{ lab_network_prefix }}.{{ item }}/24" || \
+    nmcli connection modify "{{ primary_conn.stdout }}" +ipv4.addresses "{{ lab_network_prefix }}.{{ item }}/24"
   loop:
     - "{{ ip_list.hublb }}"
     - "{{ ip_list.c1lb }}"
     - "{{ ip_list.c2lb }}"
     - "{{ ip_list.hub2lb }}"
   loop_control:
-    label: "192.168.122.{{ item }}/24"
+    label: "{{ lab_network_prefix }}.{{ item }}/24"
 
 - name: Re-apply the primary connection to activate the new secondary addresses
   shell: nmcli connection up "{{ primary_conn.stdout }}"

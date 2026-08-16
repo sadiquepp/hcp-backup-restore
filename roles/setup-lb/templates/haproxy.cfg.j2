@@ -91,159 +91,159 @@ backend app
 
 #------------------- HUB API ---------------------------------------#
 frontend hub_api
-    bind  192.168.122.{{ip_list.hublb}}:6443
+    bind  {{ lab_network_prefix }}.{{ip_list.hublb}}:6443
     use_backend hub_api_backend
     mode tcp 
 
 backend hub_api_backend
     balance roundrobin
     mode tcp 
-    server bootstrap 192.168.122.{{ip_list.bootstrap}}:6443 check 
-    server master1 192.168.122.{{ip_list.master1}}:6443 check 
-    server master2 192.168.122.{{ip_list.master2}}:6443 check
-    server master3 192.168.122.{{ip_list.master3}}:6443 check
+    server bootstrap {{ lab_network_prefix }}.{{ip_list.bootstrap}}:6443 check 
+    server master1 {{ lab_network_prefix }}.{{ip_list.master1}}:6443 check 
+    server master2 {{ lab_network_prefix }}.{{ip_list.master2}}:6443 check
+    server master3 {{ lab_network_prefix }}.{{ip_list.master3}}:6443 check
 ##------------------- HUB API - INT  ---------------------------------------#
 frontend hub_api_int
-    bind  192.168.122.{{ip_list.hublb}}:22623
+    bind  {{ lab_network_prefix }}.{{ip_list.hublb}}:22623
     use_backend hub_api_int_backend
     mode tcp 
 
 backend hub_api_int_backend
     balance roundrobin
     mode tcp 
-    server bootstrap 192.168.122.{{ip_list.bootstrap}}:22623 check 
-    server master1 192.168.122.{{ip_list.master1}}:22623 check 
-    server master2 192.168.122.{{ip_list.master2}}:22623 check 
-    server master3 192.168.122.{{ip_list.master3}}:22623 check 
+    server bootstrap {{ lab_network_prefix }}.{{ip_list.bootstrap}}:22623 check 
+    server master1 {{ lab_network_prefix }}.{{ip_list.master1}}:22623 check 
+    server master2 {{ lab_network_prefix }}.{{ip_list.master2}}:22623 check 
+    server master3 {{ lab_network_prefix }}.{{ip_list.master3}}:22623 check 
    
 #------------------- HUB APPS  ---------------------------------------#
 frontend hub_apps
-    bind  192.168.122.{{ip_list.hublb}}:80
+    bind  {{ lab_network_prefix }}.{{ip_list.hublb}}:80
     use_backend hub_apps_backend
     mode tcp 
 
 backend hub_apps_backend
     balance roundrobin
     mode tcp 
-    server master1 192.168.122.{{ip_list.worker1}}:80 check 
-    server master2 192.168.122.{{ip_list.worker2}}:80 check
-    server master3 192.168.122.{{ip_list.worker3}}:80 check 
+    server master1 {{ lab_network_prefix }}.{{ip_list.worker1}}:80 check 
+    server master2 {{ lab_network_prefix }}.{{ip_list.worker2}}:80 check
+    server master3 {{ lab_network_prefix }}.{{ip_list.worker3}}:80 check 
 
 #------------------- HUB APPS - HTTPS  -------------------------------#
 frontend hub_apps_https
-    bind  192.168.122.{{ip_list.hublb}}:443
+    bind  {{ lab_network_prefix }}.{{ip_list.hublb}}:443
     use_backend hub_apps_https_backend
     mode tcp 
 
 backend hub_apps_https_backend
     balance roundrobin
     mode tcp 
-    server master1 192.168.122.{{ip_list.worker1}}:443 check 
-    server master2 192.168.122.{{ip_list.worker2}}:443 check 
-    server master3 192.168.122.{{ip_list.worker3}}:443 check 
+    server master1 {{ lab_network_prefix }}.{{ip_list.worker1}}:443 check 
+    server master2 {{ lab_network_prefix }}.{{ip_list.worker2}}:443 check 
+    server master3 {{ lab_network_prefix }}.{{ip_list.worker3}}:443 check 
  
   
 #------------------- HUB2 API ---------------------------------------#
 frontend hub2_api
-    bind  192.168.122.{{ip_list.hub2lb}}:6443
+    bind  {{ lab_network_prefix }}.{{ip_list.hub2lb}}:6443
     use_backend hub2_api_backend
     mode tcp
 
 backend hub2_api_backend
     balance roundrobin
     mode tcp
-    server bootstrap 192.168.122.{{ip_list.hub2_bootstrap}}:6443 check
-    server master1 192.168.122.{{ip_list.hub2_master1}}:6443 check
-    server master2 192.168.122.{{ip_list.hub2_master2}}:6443 check
-    server master3 192.168.122.{{ip_list.hub2_master3}}:6443 check
+    server bootstrap {{ lab_network_prefix }}.{{ip_list.hub2_bootstrap}}:6443 check
+    server master1 {{ lab_network_prefix }}.{{ip_list.hub2_master1}}:6443 check
+    server master2 {{ lab_network_prefix }}.{{ip_list.hub2_master2}}:6443 check
+    server master3 {{ lab_network_prefix }}.{{ip_list.hub2_master3}}:6443 check
 ##------------------- HUB2 API - INT  ---------------------------------------#
 frontend hub2_api_int
-    bind  192.168.122.{{ip_list.hub2lb}}:22623
+    bind  {{ lab_network_prefix }}.{{ip_list.hub2lb}}:22623
     use_backend hub2_api_int_backend
     mode tcp
 
 backend hub2_api_int_backend
     balance roundrobin
     mode tcp
-    server bootstrap 192.168.122.{{ip_list.hub2_bootstrap}}:22623 check
-    server master1 192.168.122.{{ip_list.hub2_master1}}:22623 check
-    server master2 192.168.122.{{ip_list.hub2_master2}}:22623 check
-    server master3 192.168.122.{{ip_list.hub2_master3}}:22623 check
+    server bootstrap {{ lab_network_prefix }}.{{ip_list.hub2_bootstrap}}:22623 check
+    server master1 {{ lab_network_prefix }}.{{ip_list.hub2_master1}}:22623 check
+    server master2 {{ lab_network_prefix }}.{{ip_list.hub2_master2}}:22623 check
+    server master3 {{ lab_network_prefix }}.{{ip_list.hub2_master3}}:22623 check
 
 #------------------- HUB2 APPS  ---------------------------------------#
 frontend hub2_apps
-    bind  192.168.122.{{ip_list.hub2lb}}:80
+    bind  {{ lab_network_prefix }}.{{ip_list.hub2lb}}:80
     use_backend hub2_apps_backend
     mode tcp
 
 backend hub2_apps_backend
     balance roundrobin
     mode tcp
-    server master1 192.168.122.{{ip_list.hub2_worker1}}:80 check
-    server master2 192.168.122.{{ip_list.hub2_worker2}}:80 check
-    server master3 192.168.122.{{ip_list.hub2_worker3}}:80 check
+    server master1 {{ lab_network_prefix }}.{{ip_list.hub2_worker1}}:80 check
+    server master2 {{ lab_network_prefix }}.{{ip_list.hub2_worker2}}:80 check
+    server master3 {{ lab_network_prefix }}.{{ip_list.hub2_worker3}}:80 check
 
 #------------------- HUB2 APPS - HTTPS  -------------------------------#
 frontend hub2_apps_https
-    bind  192.168.122.{{ip_list.hub2lb}}:443
+    bind  {{ lab_network_prefix }}.{{ip_list.hub2lb}}:443
     use_backend hub2_apps_https_backend
     mode tcp
 
 backend hub2_apps_https_backend
     balance roundrobin
     mode tcp
-    server master1 192.168.122.{{ip_list.hub2_worker1}}:443 check
-    server master2 192.168.122.{{ip_list.hub2_worker2}}:443 check
-    server master3 192.168.122.{{ip_list.hub2_worker3}}:443 check
+    server master1 {{ lab_network_prefix }}.{{ip_list.hub2_worker1}}:443 check
+    server master2 {{ lab_network_prefix }}.{{ip_list.hub2_worker2}}:443 check
+    server master3 {{ lab_network_prefix }}.{{ip_list.hub2_worker3}}:443 check
 
 #------------------- HCP-Cluster1 APPS -------------------------------------#
 frontend hcp_cluster1_apps
-    bind  192.168.122.{{ip_list.c1lb}}:80
+    bind  {{ lab_network_prefix }}.{{ip_list.c1lb}}:80
     use_backend hcp_cluster1_apps_backend
     mode tcp 
 
 backend hcp_cluster1_apps_backend
     mode tcp 
     balance roundrobin
-    server worker1 192.168.122.{{ip_list.c1worker1}}:80 check
-    server worker2 192.168.122.{{ip_list.c1worker2}}:80 check 
-    server worker3 192.168.122.{{ip_list.c1worker3}}:80 check 
+    server worker1 {{ lab_network_prefix }}.{{ip_list.c1worker1}}:80 check
+    server worker2 {{ lab_network_prefix }}.{{ip_list.c1worker2}}:80 check 
+    server worker3 {{ lab_network_prefix }}.{{ip_list.c1worker3}}:80 check 
 
 #------------------- HCP-Cluster1 APPS - HTTPS  ----------------------------#
 frontend hcp_cluster1_apps_https
-    bind  192.168.122.{{ip_list.c1lb}}:443
+    bind  {{ lab_network_prefix }}.{{ip_list.c1lb}}:443
     use_backend hcp_cluster1_apps_https_backend
     mode tcp 
 
 backend hcp_cluster1_apps_https_backend
     balance roundrobin
     mode tcp 
-    server worker1 192.168.122.{{ip_list.c1worker1}}:443 check
-    server worker2 192.168.122.{{ip_list.c1worker2}}:443 check 
-    server worker3 192.168.122.{{ip_list.c1worker3}}:443 check 
+    server worker1 {{ lab_network_prefix }}.{{ip_list.c1worker1}}:443 check
+    server worker2 {{ lab_network_prefix }}.{{ip_list.c1worker2}}:443 check 
+    server worker3 {{ lab_network_prefix }}.{{ip_list.c1worker3}}:443 check 
 #
 #------------------- HCP-Cluster2 APPS -------------------------------------#
 frontend hcp_cluster2_apps
-    bind  192.168.122.{{ip_list.c2lb}}:80
+    bind  {{ lab_network_prefix }}.{{ip_list.c2lb}}:80
     use_backend hcp_cluster2_apps_backend
     mode tcp 
 
 backend hcp_cluster2_apps_backend
     mode tcp 
     balance roundrobin
-    server worker1 192.168.122.{{ip_list.c2worker1}}:80 check
-    server worker2 192.168.122.{{ip_list.c2worker2}}:80 check 
-    server worker3 192.168.122.{{ip_list.c2worker3}}:80 check 
+    server worker1 {{ lab_network_prefix }}.{{ip_list.c2worker1}}:80 check
+    server worker2 {{ lab_network_prefix }}.{{ip_list.c2worker2}}:80 check 
+    server worker3 {{ lab_network_prefix }}.{{ip_list.c2worker3}}:80 check 
 
 #------------------- HCP-Cluster1 APPS - HTTPS  ----------------------------#
 frontend hcp_cluster2_apps_https
-    bind  192.168.122.{{ip_list.c2lb}}:443
+    bind  {{ lab_network_prefix }}.{{ip_list.c2lb}}:443
     use_backend hcp_cluster2_apps_https_backend
     mode tcp 
 
 backend hcp_cluster2_apps_https_backend
     balance roundrobin
     mode tcp 
-    server worker1 192.168.122.{{ip_list.c2worker1}}:443 check
-    server worker2 192.168.122.{{ip_list.c2worker2}}:443 check 
-    server worker3 192.168.122.{{ip_list.c2worker3}}:443 check 
+    server worker1 {{ lab_network_prefix }}.{{ip_list.c2worker1}}:443 check
+    server worker2 {{ lab_network_prefix }}.{{ip_list.c2worker2}}:443 check 
+    server worker3 {{ lab_network_prefix }}.{{ip_list.c2worker3}}:443 check 

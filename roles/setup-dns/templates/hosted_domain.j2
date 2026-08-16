@@ -6,10 +6,10 @@ $TTL 1D
 					1W	; expire
 					3H )	; minimum
 		NS	helper.{{ hub_domain }}.
-worker1		A	192.168.122.{{ ip_list.c1worker1 }}
-worker2		A	192.168.122.{{ ip_list.c1worker2 }}
-worker3		A	192.168.122.{{ ip_list.c1worker3 }}
-api		A	192.168.122.60
-api-int		A	192.168.122.60
-*.apps		A	192.168.122.{{ ip_list.c1lb }}
+worker1		A	{{ lab_network_prefix }}.{{ ip_list.c1worker1 }}
+worker2		A	{{ lab_network_prefix }}.{{ ip_list.c1worker2 }}
+worker3		A	{{ lab_network_prefix }}.{{ ip_list.c1worker3 }}
+api		A	{{ lab_network_prefix }}.60
+api-int		A	{{ lab_network_prefix }}.60
+*.apps		A	{{ lab_network_prefix }}.{{ ip_list.c1lb }}
 

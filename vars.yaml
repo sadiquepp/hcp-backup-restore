@@ -6,8 +6,14 @@
 # Optional role-default overrides are documented at the bottom of this file
 # as commented examples - uncomment and adjust as needed.
 
+# Lab L2 network (libvirt default / virbr0). ip_list values are last octets only.
+lab_network_prefix: "192.168.122"
+lab_network_netmask: "255.255.255.0"
+# Reverse zone for lab_network_prefix 192.168.122 — update if you change the prefix.
+lab_network_reverse_zone: "122.168.192.in-addr.arpa"
+
 # List of IP Addresses to be used on the KVM Lab.
-# We will be using 192.168.122.0/24 Network. Hence these
+# Last octets below are combined with lab_network_prefix (e.g. .21 -> 192.168.122.21).
 ip_list:
   helper_server: 21 
   bootstrap: 30
@@ -109,7 +115,7 @@ hub2_install_folder: /var/lib/libvirt/images/hub2_install
 
 ## MetalLB IPAddressPool ranges for HCP APIServer/apps VIPs (setup-hub-acm).
 ## Mapped to metallb_pool_start/end in setup_hub_cluster*.yaml. Ranges must not
-## overlap while both hubs share the same L2 network (192.168.122.0/24).
+## overlap while both hubs share the same L2 network ({{ lab_network_prefix }}.0/24).
 hub_metallb_pool_start: 60
 hub_metallb_pool_end: 69
 hub2_metallb_pool_start: 90
