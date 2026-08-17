@@ -110,12 +110,17 @@ oc apply -f oadp/hello-openshift-oadp.yaml
 ```
 
 Write some persistent data to the PVC.
+
 ```bash
-oc exec -it hello-openshift-oadp-pod -n hello-openshift-oadp -- sh -c "echo 'Hello, World!' > /var/data/hello.txt"
+# Use single quotes around sh -c so bash does not expand ! in "Hello, World!"
+POD=`oc get pod -n hello-openshift-oadp -o jsonpath='{.items[0].metadata.name}'`
+oc exec -it $POD -n hello-openshift-oadp -- sh -c 'echo "Hello, World!" > /var/data/hello.txt'
 ```
+
 Verify that the data is written to the PVC.
+
 ```bash
-oc exec -it hello-openshift-oadp-pod -n hello-openshift-oadp -- sh -c "cat /var/data/hello.txt"
+oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
 ```
 
 Backup the hello-openshift application with a PVC using OADP.
