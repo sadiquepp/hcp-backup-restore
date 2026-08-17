@@ -18,12 +18,6 @@
     gunzip {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz
   when: coreos_image_status.stat.exists == false
 
-# Check Existence of openshift-install    
-- name: Check existence of openshift-install
-  stat:
-    path: "/usr/bin/openshift-install"
-  register: openshift_installer_status
-
 # Check Existence of oc    
 - name: Check existence of oc cli 
   stat: 
@@ -341,7 +335,7 @@
 
 - name: Waiting for cluster Bootstrap to finish
   shell: |
-    openshift-install --dir={{ hub2_install_folder }}  wait-for bootstrap-complete --log-level=info
+    {{ hub2_install_folder }}/openshift-install --dir={{ hub2_install_folder }}  wait-for bootstrap-complete --log-level=info
 
 - name: Deleting Bootstrap VM
   community.libvirt.virt:

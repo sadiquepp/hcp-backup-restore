@@ -333,7 +333,7 @@
 
 - name: Waiting for cluster Bootstrap to finish
   shell: |
-    openshift-install --dir={{ hub_install_folder }}  wait-for bootstrap-complete --log-level=info
+    {{ hub_install_folder }}/openshift-install --dir={{ hub_install_folder }}  wait-for bootstrap-complete --log-level=info
 
 - name: Deleting Bootstrap VM
   community.libvirt.virt:
