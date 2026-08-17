@@ -20,8 +20,8 @@ you run it against a real hosted cluster.
 ## One-time AWS setup (per bucket, not per hub)
 
 ```bash
-export BUCKET=adp-backup-bucket-xjt   # must be globally unique - pick your own
-export REGION=ap-southeast-1
+export BUCKET=adp-backup-bucket-xjtvvs   # must be globally unique - pick your own
+export REGION=ap-south-1
 
 aws s3api create-bucket --bucket $BUCKET --region $REGION \
   --create-bucket-configuration LocationConstraint=$REGION

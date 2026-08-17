@@ -186,17 +186,9 @@ oc get route hello-openshift -n hello-openshift
 ```
 
 
-### Step 5 — Create S3 Bucket (one-time)
+### Step 5 — Pre-requisites for OADP
 
-```bash
-export BUCKET=adp-backup-bucket-xjtvvs   # pick a globally unique name
-export REGION=ap-south-1
-
-aws s3api create-bucket --bucket $BUCKET --region $REGION \
-  --create-bucket-configuration LocationConstraint=$REGION
-```
-
-Create an IAM user with the required permissions (see `oadp/README.md` for the full policy document) and add the access key to `vault.yaml`.
+Follow the instructions in `[oadp/README.md](oadp/README.md)` to create the S3 bucket, the access key to `vault.yaml` and set required variables in `vars.yaml`.
 
 ### Step 6 — Configure OADP on hub1
 
