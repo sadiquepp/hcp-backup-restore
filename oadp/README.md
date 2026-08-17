@@ -85,24 +85,20 @@ oadp_aws_secret_access_key: '...'
 This bucket and IAM user are reused by both hub1 and hub2 - you only do
 this section once per lab, not once per hub.
 
-## Per-hub: configure OADP (credentials + DPA)
-
+## Primary Hub: 
+### Configure OADP (credentials + DPA)
 The operator is already there (installed during hub bring-up). This
 step just points it at your bucket:
 
 ```bash
-# hub1 (default)
 ansible-playbook setup_oadp.yaml --ask-vault-pass
-
-# hub2, after cutover
-ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
 ```
 
 Idempotent - re-running against the same hub just reconciles the
 secret/DPA. Both hubs point at the same bucket/prefix, so hub2's Velero
 can see backups hub1 created.
 
-## Deploy a hello-openshift application with a PVC to Hub Cluster and backup it using OADP.
+### Deploy a hello-openshift application with a PVC to Hub Cluster and backup it using OADP.
 This will be helpful to verify that the backup and restore process is working before running it against a hosted cluster.
 
 ```bash
@@ -112,7 +108,6 @@ oc apply -f oadp/hello-openshift-oadp.yaml
 Write some persistent data to the PVC.
 
 ```bash
-# Use single quotes around sh -c so bash does not expand ! in "Hello, World!"
 POD=`oc get pod -n hello-openshift-oadp -o jsonpath='{.items[0].metadata.name}'`
 oc exec -it $POD -n hello-openshift-oadp -- sh -c 'echo "Hello, World!" > /var/data/hello.txt'
 ```
@@ -128,7 +123,7 @@ Backup the hello-openshift application with a PVC using OADP.
 oc apply -f oadp/hello-openshift-oadp-backup.yaml
 ```
 
-## Backup a hosted cluster (run against the hub that currently owns it)
+### Backup a hosted cluster using OADP.
 
 ```bash
 ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
@@ -140,24 +135,41 @@ used to derive both the hosting namespace and the HyperShift
 control-plane namespace (`<name>-<name>`). Works unchanged for
 `hcp-cluster2` or any future hosted cluster.
 
-## Full hub1 -> hub2 DR cutover
+### Shutdown Primary Hub
 
 ```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass                      # OADP on hub1
-ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
-  -e hcp_cluster_name=hcp-cluster1                                     # backup on hub1
+ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
+```
+## DR Hub:
+### Build Replacement Hub
+Once the primary hub is shutdown, you can build the DR hub.
+```bash
+ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
+```
+Note that AgentServiceConfigs are not restored by OADP. You need to apply the rendered manifests manually before proceeding to the next step. Watch the ansible debug output for the location of the rendered manifests to apply.
+```bash
+oc apply -f /home/images/hcp-backup-restore/roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
+```
+There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will do that automatically.
+### Configure OADP on DR Hub
 
-ansible-playbook shutdown_hub_cluster.yaml                             # power off hub1
-ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass   # build hub2
+```bash
+ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
+```
+### Restore hello-openshift application with a PVC to DR Hub. This validated restore is working before restoring the hosted cluster.
 
-ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2   # OADP on hub2
-ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
-  -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2                  # restore on hub2
+```bash
+oc apply -f oadp/hello-openshift-oadp-restore.yaml
+```
+Verify that the data persisted in the PVC is visible in the DR hub pod after restore.
+
+```bash
+POD=`oc get pod -n hello-openshift-oadp -o jsonpath='{.items[0].metadata.name}'`
+oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
 ```
 
-## Manual / one-off apply
+### Restore the hosted cluster to the DR Hub using OADP. This will restore the hosted cluster to the DR Hub using OADP.
 
-The rendered manifests are just Jinja2 templates under `oadp/templates/`
-and `roles/setup-oadp/templates/` - if you'd rather not go through the
-playbooks, render and `oc apply` them yourself with `ansible-playbook
-... --check --diff` or a throwaway `template` task.
+```bash
+ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+```
