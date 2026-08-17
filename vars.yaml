@@ -143,7 +143,7 @@ hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
 oadp_aws_region: ap-south-1
 oadp_bucket_name: adp-backup-bucket-xjt   # S3 bucket names are globally unique - change this before first use
 oadp_backup_prefix: hcp-backup
-oadp_backup_ttl: 2h30m0s
+oadp_backup_ttl: 999h0m0s
 oadp_bminfra_namespace: bminfra
 oadp_storage_location: default
 
