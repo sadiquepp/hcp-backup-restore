@@ -13,6 +13,16 @@
       rm -f /var/lib/libvirt/images/hub/storage_worker2.qcow2 
       rm -f /var/lib/libvirt/images/hub/storage_worker3.qcow2 
 
+  - name: Destroy Hub2 Workers
+    shell: |
+      virsh undefine hub2_worker1 && virsh undefine hub2_worker2 && virsh undefine hub2_worker3
+      virsh destroy hub2_worker1 && virsh destroy hub2_worker2 && virsh destroy hub2_worker3
+      rm -f /var/lib/libvirt/images/hub2/hub2_worker1.qcow2 
+      rm -f /var/lib/libvirt/images/hub2/hub2_worker2.qcow2 
+      rm -f /var/lib/libvirt/images/hub2/hub2_worker3.qcow2 
+      rm -f /var/lib/libvirt/images/hub2/storage_worker1.qcow2 
+      rm -f /var/lib/libvirt/images/hub2/storage_worker2.qcow2 
+
   - name: Destroy Hub Masters
     shell: |
       virsh undefine hub_master1 && virsh undefine hub_master2 && virsh undefine hub_master3
@@ -20,6 +30,14 @@
       rm -f /var/lib/libvirt/images/hub/hub_master1.qcow2 
       rm -f /var/lib/libvirt/images/hub/hub_master2.qcow2 
       rm -f /var/lib/libvirt/images/hub/hub_master3.qcow2 
+
+  - name: Destroy Hub2 Masters
+    shell: |
+      virsh undefine hub2_master1 && virsh undefine hub2_master2 && virsh undefine hub2_master3
+      virsh destroy hub2_master1 && virsh destroy hub2_master2 && virsh destroy hub2_master3
+      rm -f /var/lib/libvirt/images/hub2/hub2_master1.qcow2 
+      rm -f /var/lib/libvirt/images/hub2/hub2_master2.qcow2 
+      rm -f /var/lib/libvirt/images/hub2/hub2_master3.qcow2 
 
   - name: Destroy hosted cluster workers
     shell: |
@@ -33,6 +51,11 @@
     shell: |
       virsh undefine hub_bootstrap  && virsh destroy hub_bootstrap
       rm -f /var/lib/libvirt/images/hub/hub_bootstrap.qcow2 
+
+  - name: Destroy Hub2 Bootstrap
+    shell: |
+      virsh undefine hub2_bootstrap  && virsh destroy hub2_bootstrap
+      rm -f /var/lib/libvirt/images/hub2/hub2_bootstrap.qcow2 
 
   - name: Destroy Helper VM
     shell: |

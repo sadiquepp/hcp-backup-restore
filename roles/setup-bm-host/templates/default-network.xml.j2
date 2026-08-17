@@ -18,11 +18,28 @@
   <ip address='{{ lab_network_prefix }}.1' netmask='{{ lab_network_netmask }}'>
     <dhcp>
      <range start="{{ lab_network_prefix }}.201" end="{{ lab_network_prefix }}.249"/>
-     {% for key,value in ip_list.items() %}
-     <host mac='52:54:00:e2:54:{{ value }}' name='{{ key }}.hub.mylab.com' ip='{{ lab_network_prefix }}.{{ value }}'/>
+{# DHCP host FQDNs must match roles/setup-dns/templates/named-reverse.hub.j2 PTRs #}
+{% macro dhcp_fqdn(key) -%}
+{%- if key == 'helper_server' -%}
+helper.{{ hub_domain }}
+{%- elif key.startswith('hub2_') -%}
+{{ key | regex_replace('^hub2_', '') }}.{{ hub2_domain }}
+{%- elif key.startswith('c1worker') -%}
+{{ key }}.{{ hosted_domain }}
+{%- elif key.startswith('c2worker') -%}
+{{ key }}.{{ hosted_domain2 }}
+{%- elif key == 'hublb' -%}
+api.{{ hub_domain }}
+{%- elif key == 'hub2lb' -%}
+api.{{ hub2_domain }}
+{%- else -%}
+{{ key }}.{{ hub_domain }}
+{%- endif -%}
+{%- endmacro %}
+     {% for key, value in ip_list.items() %}
+     <host mac='52:54:00:e2:54:{{ value }}' name='{{ dhcp_fqdn(key) }}' ip='{{ lab_network_prefix }}.{{ value }}'/>
      {% endfor %}
      <bootp file='pxelinux.0' server='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
    </dhcp>
   </ip>
 </network>
-
