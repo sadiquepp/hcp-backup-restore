@@ -5,14 +5,14 @@
 apiVersion: velero.io/v1
 kind: Restore
 metadata:
-  name: hello-openshift-restore
+  name: hello-openshift-oadp-restore
   namespace: openshift-adp
 spec:
-  backupName: hello-openshift-backup  # must match the Backup CR name above
+  backupName: hello-openshift-oadp-backup  # must match the Backup CR name above
 
   # Restore everything that was backed up
   includedNamespaces:
-    - hello-openshift
+    - hello-openshift-oadp
   includedResources:
     - "*"
 
