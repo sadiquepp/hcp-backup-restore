@@ -4,14 +4,14 @@
 apiVersion: velero.io/v1
 kind: Backup
 metadata:
-  name: hello-openshift-backup
+  name: hello-openshift-oadp-backup
   namespace: openshift-adp
   labels:
-    velero.io/storage-location: hello-openshift-bsl
+    velero.io/storage-location: hello-openshift-oadp-bsl
 spec:
   # Scope
   includedNamespaces:
-    - hello-openshift
+    - hello-openshift-oadp
 
   # Include all resource types — PVC, PV, Deployment, Service, Route, etc.
   includedResources:
@@ -22,9 +22,9 @@ spec:
   defaultVolumesToFsBackup: true     # set true to use Restic/Kopia file-level
                                        # backup instead of CSI snapshot
 
-  storageLocation: hello-openshift-bsl
+  storageLocation: hello-openshift-oadp-bsl
   volumeSnapshotLocations:
-    - hello-openshift-vsl
+    - hello-openshift-oadp-vsl
 
   # Retention
   ttl: 720h                           # keep backup for 30 days
