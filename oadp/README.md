@@ -85,7 +85,7 @@ oadp_aws_secret_access_key: '...'
 This bucket and IAM user are reused by both hub1 and hub2 - you only do
 this section once per lab, not once per hub.
 
-## Primary Hub: 
+## Primary Hub
 ### Configure OADP (credentials + DPA)
 The operator is already there (installed during hub bring-up). This
 step just points it at your bucket:
@@ -140,8 +140,8 @@ control-plane namespace (`<name>-<name>`). Works unchanged for
 ```bash
 ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
 ```
-## DR Hub:
-### Build Replacement Hub
+## DR Hub
+### Build DR Hub
 Once the primary hub is shutdown, you can build the DR hub.
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
