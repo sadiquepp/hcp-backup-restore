@@ -5,27 +5,29 @@
     - vars.yaml
     - vault.yaml
   tasks:
-  - name: Render inventory/hosts from lab_network_prefix and ip_list
-    ansible.builtin.template:
-      src: "{{ playbook_dir }}/inventory/hosts.j2"
-      dest: "{{ playbook_dir }}/inventory/hosts"
-      mode: '0644'
+    - name: Render inventory/hosts from lab_network_prefix and ip_list
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/inventory/hosts.j2"
+        dest: "{{ playbook_dir }}/inventory/hosts"
+        mode: '0644'
 
-  - ansible.builtin.import_role:
-      name: setup-bm-host
-  - ansible.builtin.import_role:
-      name: setup-dns
-    tags:
-      - dns
-    delegate_to: {{ lab_network_prefix }}.{{ ip_list.helper_server }}
-  - ansible.builtin.import_role:
-      name: setup-lb
-    tags:
-      - lb
-    delegate_to: {{ lab_network_prefix }}.{{ ip_list.helper_server }}
-  - ansible.builtin.import_role:
-      name: setup-tftp
-    tags:
-      - tftp
-    delegate_to: {{ lab_network_prefix }}.{{ ip_list.helper_server }}
+    - ansible.builtin.import_role:
+        name: setup-bm-host
 
+    - ansible.builtin.import_role:
+        name: setup-dns
+      tags:
+        - dns
+      delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+
+    - ansible.builtin.import_role:
+        name: setup-lb
+      tags:
+        - lb
+      delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+
+    - ansible.builtin.import_role:
+        name: setup-tftp
+      tags:
+        - tftp
+      delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
