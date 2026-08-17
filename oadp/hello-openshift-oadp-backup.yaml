@@ -23,8 +23,8 @@ spec:
                                        # backup instead of CSI snapshot
 
   storageLocation: default
-  volumeSnapshotLocations:
-    - default
+#  volumeSnapshotLocations:
+#    - default
 
   # Retention
   ttl: 720h                           # keep backup for 30 days
