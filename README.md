@@ -186,11 +186,11 @@ oc get route hello-openshift -n hello-openshift
 ```
 
 
-### Step 4 — Create S3 Bucket (one-time)
+### Step 5 — Create S3 Bucket (one-time)
 
 ```bash
-export BUCKET=adp-backup-bucket-xjt   # pick a globally unique name
-export REGION=ap-southeast-1
+export BUCKET=adp-backup-bucket-xjtvvs   # pick a globally unique name
+export REGION=ap-south-1
 
 aws s3api create-bucket --bucket $BUCKET --region $REGION \
   --create-bucket-configuration LocationConstraint=$REGION
@@ -198,7 +198,7 @@ aws s3api create-bucket --bucket $BUCKET --region $REGION \
 
 Create an IAM user with the required permissions (see `oadp/README.md` for the full policy document) and add the access key to `vault.yaml`.
 
-### Step 5 — Configure OADP on hub1
+### Step 6 — Configure OADP on hub1
 
 Installs the cloud-credentials secret and DataProtectionApplication pointing at your S3 bucket. The OADP operator itself was already installed in Step 2.
 
@@ -214,7 +214,7 @@ oc get backupstoragelocation -n openshift-adp
 
 
 
-### Step 6 — Backup a Hosted Cluster
+### Step 7 — Backup a Hosted Cluster
 
 ```bash
 ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
@@ -229,7 +229,7 @@ The playbook renders a Velero `Backup` manifest that captures:
 
 It then waits (polling every 15 s, up to 30 min) until the backup reaches `Completed`.
 
-### Step 7 — DR Cutover: Restore to a New Hub
+### Step 8 — DR Cutover: Restore to a New Hub
 
 This sequence simulates a disaster-recovery scenario where hub1 is lost and the hosted cluster control plane is restored onto hub2.
 
