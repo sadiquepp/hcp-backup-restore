@@ -102,23 +102,13 @@ Idempotent - re-running against the same hub just reconciles the
 secret/DPA. Both hubs point at the same bucket/prefix, so hub2's Velero
 can see backups hub1 created.
 
-## Deploy a hello-openshift application with a PVC and backup it using OADP.
+## Deploy a hello-openshift application with a PVC to Hub Cluster and backup it using OADP.
 This will be helpful to verify that the backup and restore process is working before running it against a hosted cluster.
 
 ```bash
 oc apply -f oadp/hello-openshift-oadp.yaml
 ```
 
-Verify that the application is accessible. (replace `hcp-cluster1` with the name of the hosted cluster)
-Get the kubeconfig for the hosted cluster.
-```bash
-oc get secret hcp-cluster1-admin-kubeconfig -n hcp-cluster1 -o jsonpath='{.data.kubeconfig}' | base64 -d > kubeconfig-hcp-cluster1.yaml
-```
-
-```bash
-oc get route hello-openshift-oadp -n hello-openshift-oadp -kubconfig kubeconfig-hcp-cluster1.yaml
-curl $(oc get route hello-openshift-oadp -n hello-openshift-oadp -o jsonpath='{.spec.host}')
-```
 Write some persistent data to the PVC.
 ```bash
 oc exec -it hello-openshift-oadp-pod -n hello-openshift-oadp -- sh -c "echo 'Hello, World!' > /var/data/hello.txt"
