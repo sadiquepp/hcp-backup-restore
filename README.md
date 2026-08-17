@@ -188,7 +188,7 @@ oc get route hello-openshift -n hello-openshift
 
 ### Step 5 — Pre-requisites for OADP
 
-Follow the instructions in `[oadp/README.md](oadp/README.md)` to create the S3 bucket, the access key to `vault.yaml` and set required variables in `vars.yaml`.
+Follow the instructions in [oadp/README.md](oadp/README.md) to create the S3 bucket, the access key to `vault.yaml` and set required variables in `vars.yaml`.
 
 ### Step 6 — Configure OADP on hub1
 
