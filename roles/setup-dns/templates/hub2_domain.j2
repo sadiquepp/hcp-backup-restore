@@ -7,6 +7,7 @@ $TTL 1D
 					3H )	; minimum
 		NS	helper.{{ hub2_domain }}.
 helper		A	{{ lab_network_prefix }}.{{ ip_list.helper_server}}
+bootstrap	A	{{ lab_network_prefix }}.{{ ip_list.hub2_bootstrap }}
 master1		A	{{ lab_network_prefix }}.{{ ip_list.hub2_master1}}
 master2		A	{{ lab_network_prefix }}.{{ ip_list.hub2_master2}}
 master3		A	{{ lab_network_prefix }}.{{ ip_list.hub2_master3}}

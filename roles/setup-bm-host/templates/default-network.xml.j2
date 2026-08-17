@@ -22,6 +22,10 @@
 {% macro dhcp_fqdn(key) -%}
 {%- if key == 'helper_server' -%}
 helper.{{ hub_domain }}
+{%- elif key == 'bootstrap' -%}
+bootstrap.{{ hub_domain }}
+{%- elif key == 'hub2_bootstrap' -%}
+bootstrap.{{ hub2_domain }}
 {%- elif key.startswith('hub2_') -%}
 {{ key | regex_replace('^hub2_', '') }}.{{ hub2_domain }}
 {%- elif key.startswith('c1worker') -%}
