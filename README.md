@@ -133,9 +133,10 @@ oc apply -f roles/setup-bminfra/templates/.rendered-02-pullsecret.yaml
 oc apply -f roles/setup-bminfra/templates/.rendered-03-infraenv.yaml
 oc apply -f roles/setup-bminfra/templates/.rendered-04-capi-role.yaml
 ```
+- Discovery ISO will be automatically downlaoded by this role if yaml files are applied before the configured timeout is expired. If the timeout is expired, you can download the ISO from `Add Hosts` in the ACM Web UI or the playbook to create the hosted cluster vms will download the ISO as the first step.
 
-- Download the Discovery ISO from Add Hosts. Only required if you are not using the playbook to automate the discovery process.
-Note: The ISO is automatically downloaded to the bare-metal host in the download dir specified in `vars.yaml`  when you automate the discovery process by running the playbook `setup_hosted_cluster-vm.yaml` or `setup_hosted_cluster2-vm.yaml` in the next step. If vms for hosted cluster is manually created, you can download the ISO from `Add Hosts` and place it in the download dir.
+- Download the Discovery ISO from `Add Hosts` in the ACM Web UI if needed. Only required if you are not using the playbook to automate the discovery process.
+Note: The ISO is automatically downloaded to the bare-metal host in the download dir specified in `vars.yaml`  when you automate the discovery process by running the playbook `setup_hosted_cluster_vm.yaml` or `setup_hosted_cluster2_vm.yaml` in the next step. If vms for hosted cluster is manually created, you can download the ISO from `Add Hosts` and place it in the download dir.
 
 - Discover the VMs as hosts in inventory. 
   - **Option1**: Manually create from virt-manager specifiying the correct mcaddress.
@@ -158,6 +159,32 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
   ```bash
   oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml # Replace hcp-cluster1 with the name of the hosted cluster.
   ```
+- Note that the hosted cluster worker nodes will go to shutoff mode while joining the nodes to the NodePool. Make sure that the vms are started from virt-manager or via virsh to complete the NodePool join process.
+```bash
+virsh start c1_worker1
+virsh start c1_worker2
+```
+### Step 4 — Deploy a Sample hello-openshift application to the hosted cluster.
+
+We will evaluate that the application is accessible while hub cluster is down and during and after the restore process.
+
+Get the kubeconfig for the hosted cluster.
+```bash
+oc get secret hcp-cluster1-admin-kubeconfig -n hcp-cluster1 -o jsonpath='{.data.kubeconfig}' | base64 -d > kubeconfig-hcp-cluster1.yaml
+export KUBECONFIG=kubeconfig-hcp-cluster1.yaml
+```
+
+Apply the hello-openshift application.
+```bash
+oc apply -f hello-openshift.yaml
+```
+
+Verify that the application is accessible.
+
+```bash
+oc get route hello-openshift -n hello-openshift
+```
+
 
 ### Step 4 — Create S3 Bucket (one-time)
 
