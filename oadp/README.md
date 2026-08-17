@@ -106,7 +106,7 @@ can see backups hub1 created.
 This will be helpful to verify that the backup and restore process is working before running it against a hosted cluster.
 
 ```bash
-oc apply -f hello-openshift-oadp.yaml
+oc apply -f oadp/hello-openshift-oadp.yaml
 ```
 
 Verify that the application is accessible. (replace `hcp-cluster1` with the name of the hosted cluster)
