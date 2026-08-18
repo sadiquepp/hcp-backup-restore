@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Creates the mirror-registry VM for disconnected-install simulation
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

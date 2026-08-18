@@ -1,0 +1,48 @@
+## Creates the mirror-registry VM and installs the Quay mirror-registry
+## appliance + runs oc-mirror v2 against it, for simulating a
+## disconnected install. Structured the same way as setup_bm_host.yaml:
+## VM creation happens on the baremetal host (localhost), then the
+## actual in-guest setup is delegated into the new VM.
+##
+## This playbook is entirely new - nothing in the connected install flow
+## imports or calls it, so running the connected flow is completely
+## unaffected whether or not you ever run this.
+##
+## Requires disconnected_install: true (vars.yaml, default false) and
+## mirror_registry_password defined in vault.yaml.
+##
+## Usage:
+##   ansible-playbook setup_mirror_registry.yaml --ask-vault-pass
+
+- name: Setup Mirror Registry VM
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+  - name: Refuse to run unless disconnected_install is enabled
+    ansible.builtin.assert:
+      that:
+        - disconnected_install | bool
+      fail_msg: >-
+        Set disconnected_install: true in vars.yaml (or pass
+        -e disconnected_install=true) before running this playbook -
+        it's off by default so the connected flow is never affected.
+
+  - name: Fail fast if mirror_registry_password is missing from vault.yaml
+    ansible.builtin.assert:
+      that:
+        - mirror_registry_password is defined
+      fail_msg: "Add mirror_registry_password to vault.yaml (ansible-vault edit vault.yaml)."
+
+  - ansible.builtin.import_role:
+      name: setup-mirror-registry-vm
+    tags:
+      - mirror-vm
+
+  - ansible.builtin.import_role:
+      name: setup-mirror-registry
+    tags:
+      - mirror
+    delegate_to: "{{ lab_network_prefix }}.{{ ip_list.mirror_registry }}"

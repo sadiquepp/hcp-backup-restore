@@ -1,0 +1,145 @@
+---
+# Tasks file for setup-mirror-registry
+#
+# Runs delegated to the mirror-registry VM (see setup_mirror_registry.yaml).
+# Adapted from sadiquepp/openshift's AWS bastion disconnected-install
+# playbook, translated to this repo's baremetal/libvirt conventions and
+# reusing vars already established here (pull_secret from vault.yaml,
+# hub_domain-based hostname) instead of duplicating them.
+
+- name: Wait for SSH on the mirror-registry VM
+  ansible.builtin.wait_for_connection:
+    delay: 5
+    timeout: 300
+
+- name: Subscription
+  shell:
+    "subscription-manager register --org={{org_id }} --activationkey={{ activation_key}} --force" 
+  async: 2100
+  poll: 5 
+
+- name: Install required packages
+  dnf:
+    name:
+      - podman
+      - openssl
+      - tar
+    state: present
+  become: true
+
+- name: Create working directory
+  file:
+    path: /root/mirror
+    state: directory
+
+- name: Check if tool tarballs already exist
+  stat:
+    path: "/root/mirror/{{ item | basename }}"
+  loop:
+    - "https://mirror.openshift.com/pub/cgw/mirror-registry/latest/mirror-registry-amd64.tar.gz"
+    - "https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/{{ mirror_ocp_version }}/oc-mirror.rhel9.tar.gz"
+    - "https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/{{ mirror_ocp_version }}/openshift-client-linux-amd64-rhel9.tar.gz"
+  register: tarball_stats
+  loop_control:
+    label: "{{ item | basename }}"
+
+- name: Download mirror-registry/oc/oc-mirror tarballs
+  get_url:
+    url: "{{ item.item }}"
+    dest: "/root/mirror/{{ item.item | basename }}"
+  loop: "{{ tarball_stats.results }}"
+  loop_control:
+    label: "{{ item.item | basename }}"
+  when: not item.stat.exists
+
+- name: Unarchive tool tarballs
+  unarchive:
+    src: "/root/mirror/{{ item }}"
+    dest: /root/mirror/
+    remote_src: true
+  loop:
+    - mirror-registry-amd64.tar.gz
+    - oc-mirror.rhel9.tar.gz
+    - openshift-client-linux-amd64-rhel9.tar.gz
+
+- name: Copy CLI binaries to /usr/local/bin
+  copy:
+    src: "/root/mirror/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    remote_src: true
+    mode: '0755'
+  loop:
+    - oc
+    - oc-mirror
+    - mirror-registry
+  become: true
+
+- name: Create Quay storage directory
+  file:
+    path: "{{ mirror_registry_quay_root }}"
+    state: directory
+  become: true
+
+- name: Check if mirror registry is already running
+  shell: |
+    podman login -u init -p {{ mirror_registry_password }} {{ mirror_registry_domain }}:{{ mirror_registry_port }} 2>/dev/null
+  register: registry_check
+  ignore_errors: true
+  changed_when: false
+
+- name: Install Mirror Registry
+  shell: |
+    /usr/local/bin/mirror-registry install \
+      --quayHostname {{ mirror_registry_domain }}:{{ mirror_registry_port }} \
+      --quayRoot {{ mirror_registry_quay_root }} \
+      --quayStorage {{ mirror_registry_quay_root }} \
+      --initPassword {{ mirror_registry_password }}
+  become: true
+  when: registry_check.rc != 0
+
+- name: Copy Quay Root CA into system trust
+  copy:
+    src: "{{ mirror_registry_quay_root }}/quay-rootCA/rootCA.pem"
+    dest: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+    remote_src: true
+    mode: '0644'
+  become: true
+
+- name: Update CA trust bundle
+  shell: update-ca-trust extract
+  become: true
+
+- name: Copy base pull secret
+  copy:
+    dest: /root/mirror/pull-secret.txt
+    content: "{{ pull_secret }}"
+
+- name: Log in to the mirror registry (merges its credentials into the pull secret)
+  shell: |
+    podman login --authfile /root/mirror/pull-secret.txt \
+      -u init -p {{ mirror_registry_password }} \
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }}
+
+- name: Render ImageSetConfiguration
+  template:
+    src: imageset-config.yaml.j2
+    dest: /root/mirror/imageset-config.yaml
+  when: registry_check.rc != 0
+
+- name: Create oc-mirror workspace directory
+  file:
+    path: /root/mirror/oc-mirror-output
+    state: directory
+  when: registry_check.rc != 0
+
+- name: Mirror images to the local registry (oc-mirror v2)
+  shell: |
+    cd /root/mirror
+    oc-mirror -c imageset-config.yaml --workspace file://oc-mirror-output/ \
+      docker://{{ mirror_registry_domain }}:{{ mirror_registry_port }} --v2
+  when: registry_check.rc != 0
+  register: oc_mirror_result
+
+- name: Report mirror result
+  debug:
+    msg: "oc-mirror finished - check /root/mirror/oc-mirror-output on {{ mirror_registry_domain }} for logs/manifests"

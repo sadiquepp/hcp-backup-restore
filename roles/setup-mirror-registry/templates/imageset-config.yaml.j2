@@ -1,0 +1,26 @@
+# oc-mirror v2 ImageSetConfiguration. Schema has shifted across oc-mirror
+# releases - validate this against `oc-mirror version` / the docs for
+# {{ mirror_ocp_version }} before relying on it, particularly the
+# operators.catalog format and any new required fields.
+#
+# mirror_catalog_operator_packages (vars.yaml) currently covers what
+# roles/setup-hub-acm installs (ACM, LVM Storage, MetalLB, OADP). If you
+# add operators there, add the matching package name here too, or the
+# CatalogSource will resolve but the subscription will fail to find the
+# package once actually disconnected.
+apiVersion: mirror.openshift.io/v2alpha1
+kind: ImageSetConfiguration
+mirror:
+  platform:
+    channels:
+      - name: "{{ mirror_ocp_channel }}"
+        minVersion: "{{ mirror_ocp_version }}"
+        maxVersion: "{{ mirror_ocp_version }}"
+  operators:
+    - catalog: "{{ mirror_catalog_index }}"
+      packages:
+{% for pkg in mirror_catalog_operator_packages %}
+        - name: {{ pkg }}
+{% endfor %}
+  additionalImages:
+    - name: registry.redhat.io/openshift4/ose-tools-rhel9:latest

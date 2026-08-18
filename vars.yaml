@@ -49,6 +49,11 @@ ip_list:
   hub2_worker3: 86
   hub2lb: 89
 
+  # Mirror registry - shared connected infrastructure for disconnected-install
+  # simulation (see setup_mirror_registry.yaml). Stays reachable/connected
+  # even when master/worker IPs are cut off from the real internet.
+  mirror_registry: 22
+
 helper_name: helper
 helper_disk: helper_disk.qcow2
 helper_memory: 8192 
@@ -200,3 +205,36 @@ hosted_cluster_addon_application_manager: true
 hosted_cluster_addon_policy_controller: true
 hosted_cluster_addon_search_collector: true
 hosted_cluster_addon_cert_policy_controller: true
+
+## setup-mirror-registry-vm / setup-mirror-registry: the standalone VM
+## used to simulate a disconnected install (see setup_mirror_registry.yaml).
+## disconnected_install gates whether any of this is used at all - default
+## false so connected installs are completely unaffected.
+disconnected_install: false
+mirror_registry_name: mirror-registry
+mirror_registry_disk: mirror_registry_disk.qcow2
+mirror_registry_disk_size: 500G
+## Partition inside rhel9_kvm_image to expand into all the new space -
+## verify against your actual base image with:
+##   virt-filesystems --long --parts --blkdevs -h -a <image>
+## if you ever change rhel9_kvm_image, since this is image-specific.
+mirror_registry_resize_partition: /dev/sda3
+mirror_registry_memory: 16384
+mirror_registry_vcpus: 8
+mirror_registry_domain: "registry.{{ hub_domain }}"
+mirror_registry_port: 8443
+## mirror_registry_password goes in vault.yaml, not here.
+mirror_registry_quay_root: /var/lib/quay-storage
+
+## OCP release/operators to mirror. Extend catalog_operator_packages with
+## any additional operators your disconnected install needs beyond what
+## setup-hub-acm already installs (ACM, LVM Storage, MetalLB, OADP).
+mirror_ocp_channel: fast-4.21
+mirror_ocp_version: "4.21.0"
+mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v4.21"
+mirror_catalog_operator_packages:
+  - advanced-cluster-management
+  - multicluster-engine
+  - lvms-operator
+  - metallb-operator
+  - redhat-oadp-operator
