@@ -179,6 +179,9 @@ agent_service_os_images:
 bminfra_location: singapore
 bminfra_ocp_version: '4.21'
 discovery_iso_filename: "bminfra-discovery-{{ bminfra_ocp_version }}.iso"
+discovery_boot_kernel_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-vmlinuz"
+discovery_boot_initrd_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-initrd.img"
+discovery_boot_rootfs_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-rootfs.img"
 
 ## create-hosted-cluster: HostedCluster/NodePool/ManagedCluster bundle.
 ## Defaults below match hcp-cluster1. For a second, concurrent hosted

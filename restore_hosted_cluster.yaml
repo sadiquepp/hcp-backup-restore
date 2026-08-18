@@ -34,7 +34,7 @@
 
   - name: Wait for Restore to complete (checked every 15s, up to 30 min)
     shell: >
-      oc get restore "{{ hcp_cluster_name }}-restore" -n openshift-adp
+      oc get restore.velero.io "{{ hcp_cluster_name }}-restore" -n openshift-adp
       -o jsonpath='{.status.phase}'
     register: restore_phase
     until: restore_phase.stdout in ['Completed', 'PartiallyFailed', 'Failed']

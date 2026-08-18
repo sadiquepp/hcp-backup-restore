@@ -13,7 +13,7 @@
     test "${ready:-0}" -ge {{ expected_worker_replicas }}
   register: worker_ready_check
   until: worker_ready_check.rc == 0
-  retries: "{{ worker_ready_retries | default(60) }}"
+  retries: "{{ worker_ready_retries | default(120) }}"
   delay: "{{ worker_ready_delay | default(30) }}"
   changed_when: false
 

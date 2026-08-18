@@ -122,7 +122,10 @@ Backup the hello-openshift application with a PVC using OADP.
 ```bash
 oc apply -f oadp/hello-openshift-oadp-backup.yaml
 ```
-
+- Check the backup status periodically until it shows as completed.
+```bash
+oc get Backup -n hello-openshift-oadp-backup -o yaml
+```
 ### Backup a hosted cluster using OADP.
 
 ```bash
@@ -134,6 +137,22 @@ ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
 used to derive both the hosting namespace and the HyperShift
 control-plane namespace (`<name>-<name>`). Works unchanged for
 `hcp-cluster2` or any future hosted cluster.
+
+- Get the status of the backup and wait till it finishes before proceeding to the next step.
+```bash
+oc get Backup -n openshift-adp hcp-cluster1-backup -o yaml
+```
+It should show the backup as completed. Example output: `phase: Completed`. `itemsBackedUp:` should be equal to `totalItems`.
+```yaml
+status:
+  expiration: "2026-09-28T04:52:01Z"
+  formatVersion: 1.1.0
+  phase: Completed
+  progress:
+    itemsBackedUp: 363
+    totalItems: 363
+  startTimestamp: "2026-08-17T13:52:01Z"
+  version: 1
 
 ### Shutdown Primary Hub
 
@@ -156,7 +175,8 @@ There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will
 ```bash
 ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
 ```
-### Restore hello-openshift application with a PVC to DR Hub. This validated restore is working before restoring the hosted cluster.
+### Restore hello-openshift application with a PVC to DR Hub.
+This will validate that the restore is working before restoring the hosted cluster.
 
 ```bash
 oc apply -f oadp/hello-openshift-oadp-restore.yaml

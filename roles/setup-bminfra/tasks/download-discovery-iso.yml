@@ -1,5 +1,7 @@
 ---
-# Fetch InfraEnv.status.isoDownloadURL and cache the discovery ISO locally.
+# Fetch InfraEnv.status.isoDownloadURL and bootArtifacts (kernel/initrd/rootfs).
+# Cache the discovery ISO on the bare-metal host; copy PXE artifacts to helper
+# paths used by roles/setup-tftp/templates/default.j2.
 # Requires KUBECONFIG in the task environment (set by the calling playbook).
 
 - name: Wait for InfraEnv discovery ISO URL
@@ -11,6 +13,26 @@
   retries: 60
   delay: 15
   changed_when: false
+
+- name: Wait for InfraEnv PXE boot artifact URLs
+  ansible.builtin.shell: >
+    oc get infraenv "{{ oadp_bminfra_namespace }}" -n "{{ oadp_bminfra_namespace }}"
+    -o jsonpath='{.status.bootArtifacts.kernel}{"\n"}{.status.bootArtifacts.initrd}{"\n"}{.status.bootArtifacts.rootfs}'
+  register: infraenv_boot_artifacts
+  until: >
+    (infraenv_boot_artifacts.stdout_lines | length) >= 3
+    and (infraenv_boot_artifacts.stdout_lines[0] | default('') | length) > 0
+    and (infraenv_boot_artifacts.stdout_lines[1] | default('') | length) > 0
+    and (infraenv_boot_artifacts.stdout_lines[2] | default('') | length) > 0
+  retries: 60
+  delay: 15
+  changed_when: false
+
+- name: Set InfraEnv boot artifact URLs
+  ansible.builtin.set_fact:
+    infraenv_boot_kernel_url: "{{ infraenv_boot_artifacts.stdout_lines[0] }}"
+    infraenv_boot_initrd_url: "{{ infraenv_boot_artifacts.stdout_lines[1] }}"
+    infraenv_boot_rootfs_url: "{{ infraenv_boot_artifacts.stdout_lines[2] }}"
 
 - name: Ensure download directory exists
   ansible.builtin.file:
@@ -25,10 +47,58 @@
     validate_certs: false
     mode: '0644'
 
+- name: Download InfraEnv PXE boot artifacts
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ download_dir }}{{ item.filename }}"
+    validate_certs: false
+    mode: '0644'
+  loop:
+    - url: "{{ infraenv_boot_kernel_url }}"
+      filename: "{{ discovery_boot_kernel_filename }}"
+    - url: "{{ infraenv_boot_initrd_url }}"
+      filename: "{{ discovery_boot_initrd_filename }}"
+    - url: "{{ infraenv_boot_rootfs_url }}"
+      filename: "{{ discovery_boot_rootfs_filename }}"
+  loop_control:
+    label: "{{ item.filename }}"
+
 - name: Set discovery_image_url to local ISO path
   ansible.builtin.set_fact:
     discovery_image_url: "{{ download_dir }}{{ discovery_iso_filename }}"
 
-- name: Report discovery ISO path
+- name: Ensure PXE directories exist on helper
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /var/lib/tftpboot/images
+    - /var/www/html/bootp
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+  become: true
+
+- name: Copy PXE boot artifacts to helper
+  ansible.builtin.copy:
+    src: "{{ download_dir }}{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: '0644'
+  loop:
+    - src: "{{ discovery_boot_kernel_filename }}"
+      dest: /var/lib/tftpboot/images/vmlinuz
+    - src: "{{ discovery_boot_initrd_filename }}"
+      dest: /var/lib/tftpboot/images/initrd.img
+    - src: "{{ discovery_boot_rootfs_filename }}"
+      dest: /var/www/html/bootp/rootfs.img
+  loop_control:
+    label: "{{ item.dest }}"
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+  become: true
+
+- name: Report discovery image and PXE boot artifact paths
   ansible.builtin.debug:
-    msg: "Discovery ISO ready at {{ discovery_image_url }}"
+    msg:
+      - "Discovery ISO ready at {{ discovery_image_url }}"
+      - "PXE kernel on helper: /var/lib/tftpboot/images/vmlinuz"
+      - "PXE initrd on helper: /var/lib/tftpboot/images/initrd.img"
+      - "PXE rootfs on helper: /var/www/html/bootp/rootfs.img"

@@ -31,8 +31,9 @@ High-Level-Arch
 **Hub1** is the primary management cluster running ACM, OADP, LVM-Storage, and MetalLB. **Hub2** is a replacement hub used as the restore target during a DR cutover. Both hubs share the same S3 bucket so backups created by hub1 are visible to hub2's Velero instance.
 
 ## Prerequisites
+### Setup Bare Metal Host
 
-Start with a freshly installed RHEL 9.5+ bare-metal host with valid subscriptions.
+- Start with a freshly installed RHEL 9.5+ bare-metal host with valid subscriptions.
 
 ```bash
 subscription-manager register
@@ -41,36 +42,95 @@ ansible-galaxy collection install community.libvirt
 ansible-galaxy collection install community.crypto
 ```
 
-Download `rhel-9.8-x86_64-kvm.qcow2` (or latest RHEL 9 KVM image) from [access.redhat.com/downloads](https://access.redhat.com/downloads) and place it in the role files directory:
+- Download `rhel-9.8-x86_64-kvm.qcow2` (or latest RHEL 9 KVM image) from [access.redhat.com/downloads](https://access.redhat.com/downloads) and place it in the role files directory:
 
 ```bash
 git clone https://github.com/sadiquepp/hcp-backup-restore.git
 cp rhel-9.8-x86_64-kvm.qcow2 hcp-backup-restore/roles/setup-bm-host/files/
 ```
 
-If you have a different RHEL 9 version, update `rhel9_kvm_image` in `vars.yaml`.
+If using a different RHEL 9 KVM image, update `rhel9_kvm_image` in `vars.yaml`.
 
-## Configuration
+- Set up OADP s3 Bucket. An example with AWS is shown here. Refer the respective documentation for other cloud providers.
 
+### Configure OADP Pre-requisites
+- Configure variables in the terminal.
 
+```bash
+export BUCKET=adp-backup-bucket-xjtvvs   # must be globally unique - pick your own
+export REGION=ap-south-1
+```
+- Create the S3 bucket.
+```bash
+aws s3api create-bucket --bucket $BUCKET --region $REGION \
+  --create-bucket-configuration LocationConstraint=$REGION
+```
+- Create the IAM policy.
+```bash
+cat > adp-policy.json <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeVolumes",
+                "ec2:DescribeSnapshots",
+                "ec2:CreateTags",
+                "ec2:CreateVolume",
+                "ec2:CreateSnapshot",
+                "ec2:DeleteSnapshot"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:DeleteObject",
+                "s3:PutObject",
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"
+            ],
+            "Resource": ["arn:aws:s3:::${BUCKET}/*"]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation",
+                "s3:ListBucketMultipartUploads"
+            ],
+            "Resource": ["arn:aws:s3:::${BUCKET}"]
+        }
+    ]
+}
+EOF
+```
+
+- Create the IAM user and retrieve the access key.
+```bash 
+aws iam create-user --user-name adp-user
+aws iam put-user-policy --user-name adp-user --policy-name adp-policy --policy-document file://adp-policy.json
+aws iam create-access-key --user-name adp-user
+```
+
+Set `oadp_bucket_name` and `oadp_aws_region` in `vars.yaml` to match, and
+add the access key from the last command to `vault.yaml` as below.
 
 ### vars.yaml
 
 Review and adjust lab-specific values:
 
-
-| Variable             | Purpose                                          |
-| -------------------- | ------------------------------------------------ |
-| `oadp_aws_region`    | AWS region for the S3 backup bucket              |
-| `oadp_bucket_name`   | Globally unique S3 bucket name                   |
-| `oadp_backup_prefix` | Key prefix inside the bucket                     |
-| `oadp_backup_ttl`    | Backup retention (e.g. `2h30m0s`)                |
-| `target_hub`         | Which hub the playbooks target (`hub` or `hub2`) |
-
-
-
+- Review the variables in `vars.yaml` and adjust them to your needs. Each section has a description of the variables and their purpose.
 
 ### vault.yaml (encrypted)
+- Configure the vault.yaml file. All the values are mandatory
+ - Get org_id from [console.redhat.com](https://console.redhat.com)
+ - Get activation_key from [console.redhat.com](https://console.redhat.com/insights/connector/activation-keys)
+ - Get pull_secret from [console.redhat.com](hhttps://console.redhat.com/openshift/install/pull-secret)
+ - Use your own ssh public key for ssh_key.
+ - Get oadp_aws_access_key_id and oadp_aws_secret_access_key from the previous steps
 
 ```bash
 ansible-vault create vault.yaml
@@ -85,13 +145,10 @@ oadp_aws_access_key_id: 'AKIA...'
 oadp_aws_secret_access_key: '...'
 ```
 
-
-
 ## End-to-End Workflow
 
 
-
-### Step 1 — Setup Bare Metal Host
+### Setup Bare Metal Host
 
 Creates and configures the `helper` VM that provides DNS and HAProxy for the lab.
 
@@ -101,16 +158,17 @@ ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
 
 
 
-### Step 2 — Setup Hub Cluster (hub1)
+### Setup Hub Cluster (hub1)
 
 Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP operator.
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 ```
-### Step 3 — Prepare ACM and Inventory
+### Prepare ACM and Inventory
 
 - Configure CIM. Apply the AgentServiceConfig to the ACM cluster. Customize the OS images using `osImages` to the ones you want to use for the hosted clusters. Review the rendendered yaml file at `roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml` and apply it to the ACM cluster.
+- Make sure that ACM and `MultClusterHub` is fully operational before proceeding to apply the `AgentServiceConfig` in the next step.
 
 ```bash
 oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
@@ -145,7 +203,6 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
 
   ```bash
   ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass
-  ansible-playbook -i inventory/hosts setup_hosted_cluster2_vm.yaml --ask-vault-pass # Optional if need more than one hosted cluster.
   ```
 - Once discovered, approve the nodes from ACM/MCE Web UI.
 
@@ -164,7 +221,7 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
 virsh start c1_worker1
 virsh start c1_worker2
 ```
-### Step 4 — Deploy a Sample hello-openshift application to the hosted cluster.
+### Deploy a Sample hello-openshift application to the hosted cluster.
 
 We will evaluate that the application is accessible while hub cluster is down and during and after the restore process.
 
@@ -186,61 +243,118 @@ oc get route hello-openshift -n hello-openshift
 ```
 
 
-### Step 5 — Pre-requisites for OADP
+# Backup and Restore
 
-Follow the instructions in [oadp/README.md](oadp/README.md) to create the S3 bucket, the access key to `vault.yaml` and set required variables in `vars.yaml`.
-
-### Step 6 — Configure OADP on hub1
-
-Installs the cloud-credentials secret and DataProtectionApplication pointing at your S3 bucket. The OADP operator itself was already installed in Step 2.
+## Primary Hub
+### Configure OADP (credentials + DPA)
+The operator is already there (installed during hub bring-up). This
+step just points it at your bucket:
 
 ```bash
 ansible-playbook setup_oadp.yaml --ask-vault-pass
 ```
 
-Verify that the BackupStorageLocation reports `Available`:
+Idempotent - re-running against the same hub just reconciles the
+secret/DPA. Both hubs point at the same bucket/prefix, so hub2's Velero
+can see backups hub1 created.
+
+### Deploy a hello-openshift application to Hub. 
+Deply a hello-openshift application with a PVC to Hub Cluster and backup it using OADP. This will be helpful to verify that the backup and restore process of a sample application is working before running it against a hosted cluster.
 
 ```bash
-oc get backupstoragelocation -n openshift-adp
+oc apply -f oadp/hello-openshift-oadp.yaml
 ```
 
+Write some persistent data to the PVC.
 
+```bash
+POD=`oc get pod -n hello-openshift-oadp -o jsonpath='{.items[0].metadata.name}'`
+oc exec -it $POD -n hello-openshift-oadp -- sh -c 'echo "Hello, World!" > /var/data/hello.txt'
+```
 
-### Step 7 — Backup a Hosted Cluster
+Verify that the data is written to the PVC.
+
+```bash
+oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
+```
+
+Backup the hello-openshift application with a PVC using OADP.
+```bash
+oc apply -f oadp/hello-openshift-oadp-backup.yaml
+```
+- Check the backup status periodically until it shows as completed.
+```bash
+oc get Backup -n hello-openshift-oadp-backup -o yaml
+```
+### Backup a hosted cluster using OADP.
 
 ```bash
 ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1
 ```
 
-The playbook renders a Velero `Backup` manifest that captures:
+`hcp_cluster_name` must match the HostedCluster's name/namespace - it's
+used to derive both the hosting namespace and the HyperShift
+control-plane namespace (`<name>-<name>`). Works unchanged for
+`hcp-cluster2` or any future hosted cluster.
 
-- The hosted cluster namespace (`hcp-cluster1`)
-- The HyperShift control-plane namespace (`hcp-cluster1-hcp-cluster1`)
-- The bare-metal infrastructure namespace (`bminfra`)
+- Get the status of the backup and wait till it finishes before proceeding to the next step.
+```bash
+oc get Backup -n openshift-adp hcp-cluster1-backup -o yaml
+```
+It should show the backup as completed. Example output: `phase: Completed`. `itemsBackedUp:` should be equal to `totalItems`.
+```yaml
+status:
+  expiration: "2026-09-28T04:52:01Z"
+  formatVersion: 1.1.0
+  phase: Completed
+  progress:
+    itemsBackedUp: 363
+    totalItems: 363
+  startTimestamp: "2026-08-17T13:52:01Z"
+  version: 1
 
-It then waits (polling every 15 s, up to 30 min) until the backup reaches `Completed`.
-
-### Step 8 — DR Cutover: Restore to a New Hub
-
-This sequence simulates a disaster-recovery scenario where hub1 is lost and the hosted cluster control plane is restored onto hub2.
+### Shutdown Primary Hub
 
 ```bash
-# 7a. Shut down hub1 (graceful; VMs/disks preserved for inspection)
-ansible-playbook shutdown_hub_cluster.yaml
-
-# 7b. Build the replacement hub
+ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
+```
+## DR Hub
+### Build DR Hub
+Once the primary hub is shutdown, you can build the DR hub.
+```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
+```
+Note that AgentServiceConfigs are not restored by OADP. You need to apply the rendered manifests manually before proceeding to the next step. Watch the ansible debug output for the location of the rendered manifests to apply.
+```bash
+oc apply -f /home/images/hcp-backup-restore/roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
+```
+There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will do that automatically.
+### Configure OADP on DR Hub
 
-# 7c. Configure OADP on hub2 (same bucket, sees hub1's backups)
+```bash
 ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
+```
+### Restore hello-openshift application with a PVC to DR Hub.
+This will validate that the restore is working before restoring the hosted cluster.
 
-# 7d. Restore the hosted cluster onto hub2
-ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
-  -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+```bash
+oc apply -f oadp/hello-openshift-oadp-restore.yaml
+```
+Verify that the data persisted in the PVC is visible in the DR hub pod after restore.
+
+```bash
+POD=`oc get pod -n hello-openshift-oadp -o jsonpath='{.items[0].metadata.name}'`
+oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
 ```
 
-The restore playbook applies a Velero `Restore` manifest referencing the backup name, re-creates the PVs, and uses `existingResourcePolicy: update` so pre-existing resources are patched rather than skipped.
+### Restore the hosted cluster to the DR Hub using OADP. This will restore the hosted cluster to the DR Hub using OADP.
+
+```bash
+ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+```
+
+
 
 ## Playbook Reference
 
