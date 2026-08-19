@@ -229,7 +229,7 @@ mirror_registry_disk_size: 500G
 ## verify against your actual base image with:
 ##   virt-filesystems --long --parts --blkdevs -h -a <image>
 ## if you ever change rhel9_kvm_image, since this is image-specific.
-mirror_registry_resize_partition: /dev/sda3
+mirror_registry_resize_partition: /dev/sda4
 mirror_registry_memory: 16384
 mirror_registry_vcpus: 8
 mirror_registry_domain: "registry.{{ hub_domain }}"
