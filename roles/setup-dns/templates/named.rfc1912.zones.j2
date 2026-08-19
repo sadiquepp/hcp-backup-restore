@@ -70,3 +70,8 @@ zone "{{ hosted_domain2 }}" IN {
 	file "{{hosted_domain2}}.db";
 	allow-update { none; };
 };
+zone "{{ hosted_domain3 }}" IN {
+	type master;
+	file "{{hosted_domain3}}.db";
+	allow-update { none; };
+};
