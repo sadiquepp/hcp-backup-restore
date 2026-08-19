@@ -129,7 +129,7 @@
 - name: Mirror images to the local registry (oc-mirror v2)
   shell: |
     cd /root/mirror
-    oc-mirror -c imageset-config.yaml --workspace file://oc-mirror-output/ \
+    oc mirror -c imageset-config.yaml --workspace file://oc-mirror-output/ \
       docker://{{ mirror_registry_domain }}:{{ mirror_registry_port }} --v2
   when: registry_check.rc != 0
   register: oc_mirror_result
