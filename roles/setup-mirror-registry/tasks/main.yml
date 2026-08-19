@@ -56,10 +56,10 @@
     - oc-mirror.rhel9.tar.gz
     - openshift-client-linux-amd64-rhel9.tar.gz
 
-- name: Copy CLI binaries to /usr/local/bin
+- name: Copy CLI binaries to /usr/bin
   copy:
     src: "/root/mirror/{{ item }}"
-    dest: "/usr/local/bin/{{ item }}"
+    dest: "/usr/bin/{{ item }}"
     remote_src: true
     mode: '0755'
   loop:
