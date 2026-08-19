@@ -83,7 +83,7 @@
 
 - name: Install Mirror Registry
   shell: |
-    /usr/local/bin/mirror-registry install \
+    /root/mirror/mirror-registry install \
       --quayHostname {{ mirror_registry_domain }}:{{ mirror_registry_port }} \
       --quayRoot {{ mirror_registry_quay_root }} \
       --quayStorage {{ mirror_registry_quay_root }} \

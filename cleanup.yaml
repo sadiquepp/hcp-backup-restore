@@ -67,6 +67,11 @@
       virsh undefine mirror-registry && virsh destroy mirror-registry
       rm -f /var/lib/libvirt/images/mirror_registry_disk.qcow2 
 
+  - name: Destroy Minio VM
+    shell: |
+      virsh undefine minio && virsh destroy minio
+      rm -f /var/lib/libvirt/images/minio_disk.qcow2 
+
   - name: Cleanup SSH Know Hostss
     shell: |
       rm -f /root/.ssh/known_hosts
