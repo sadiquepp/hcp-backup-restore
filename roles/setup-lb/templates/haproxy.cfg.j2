@@ -272,4 +272,5 @@ backend hcp_cluster3_apps_https_backend
     mode tcp
     server worker1 {{ lab_network_prefix }}.{{ip_list.c3worker1}}:443 check
     server worker2 {{ lab_network_prefix }}.{{ip_list.c3worker2}}:443 check
-    server worker3 {{ lab_network_prefix }}.{{ip_list.c3worker3}}:443 check 
+    server worker3 {{ lab_network_prefix }}.{{ip_list.c3worker3}}:443 check
+

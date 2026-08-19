@@ -62,6 +62,7 @@
     owner: root
     group: root
     mode: u=rw,g=rw,o=r
+    validate: haproxy -c -f %s
   notify:
     - Restart_HAProxy
 

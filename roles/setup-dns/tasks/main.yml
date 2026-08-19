@@ -92,7 +92,7 @@
   notify:
     -  Restart_Named
 
-- name: Start NAmed Service
+- name: Start Named Service
   service:
     name: named
     state: started 
