@@ -114,6 +114,13 @@
       -u init -p {{ mirror_registry_password }} \
       {{ mirror_registry_domain }}:{{ mirror_registry_port }}
 
+- name: Create .docker directory
+  file:
+    path: ~/.docker
+    state: directory
+    mode: '0700'
+  become: true
+
 - name: Copy pull secret to ~/.docker/config.json
   copy:
     src: /root/mirror/pull-secret.txt
