@@ -118,7 +118,7 @@
   copy:
     src: /root/mirror/pull-secret.txt
     dest: ~/.docker/config.json
-  remote_src: true
+    remote_src: true
   become: true
 
 - name: Render ImageSetConfiguration
