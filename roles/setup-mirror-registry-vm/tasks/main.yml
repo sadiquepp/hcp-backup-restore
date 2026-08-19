@@ -32,7 +32,7 @@
 
 - name: Show base image partition layout
   ansible.builtin.debug:
-  msg: "{{ base_image_filesystems.stdout_lines }}"
+    msg: "{{ base_image_filesystems.stdout_lines }}"
   when: not mirror_registry_disk_status.stat.exists
   tags:
     - virt
