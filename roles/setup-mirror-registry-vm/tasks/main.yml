@@ -72,5 +72,5 @@
 
 - name: Wait for the mirror-registry VM to boot
   shell: |
-    sleep 30s
+    sleep 120s
   when: mirror_registry_vm_state.stdout == ''
