@@ -224,6 +224,7 @@ hosted_cluster_addon_cert_policy_controller: true
 disconnected_install: false
 mirror_registry_name: mirror-registry
 mirror_registry_disk: mirror_registry_disk.qcow2
+mirror_registry_extra_disk: mirror_registry_extra_disk.qcow2
 mirror_registry_disk_size: 500G
 ## Partition inside rhel9_kvm_image to expand into all the new space -
 ## verify against your actual base image with:
