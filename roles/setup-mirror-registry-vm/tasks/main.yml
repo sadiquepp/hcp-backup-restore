@@ -24,7 +24,7 @@
     # Prepare the Helper Image 
 - name: Create Mirror-registry VM Disk
   ansible.builtin.copy:
-    src: "{{ role_path }}/files/{{ rhel9_kvm_image }}"
+    src: "roles/setup-bm-host/files/{{ rhel9_kvm_image }}"
     dest: "/var/lib/libvirt/images/{{ mirror_registry_disk }}"
   when: mirror_registry_disk_status.stat.exists == false
   tags:
