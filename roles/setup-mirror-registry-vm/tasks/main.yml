@@ -16,45 +16,36 @@
 
 - name: Create mirror-registry VM Disk (500G, sparse, no preallocation)
   ansible.builtin.command:
-    cmd: "qemu-img create -f qcow2 /var/lib/libvirt/images/{{ mirror_registry_extra_disk }} {{ mirror_registry_disk_size }}"
+    cmd: "qemu-img create -f qcow2 /var/lib/libvirt/images/{{ mirror_registry_disk }} {{ mirror_registry_disk_size }}"
   when: not mirror_registry_disk_status.stat.exists
   tags:
     - virt
 
-    # Prepare the Helper Image 
-- name: Create Mirror-registry VM Disk
-  ansible.builtin.copy:
-    src: "roles/setup-bm-host/files/{{ rhel9_kvm_image }}"
-    dest: "/var/lib/libvirt/images/{{ mirror_registry_disk }}"
-  when: mirror_registry_disk_status.stat.exists == false
+- name: Report actual partition layout of the base image (verify mirror_registry_resize_partition matches)
+  ansible.builtin.command:
+   cmd: "virt-filesystems --long --parts --blkdevs -h -a roles/setup-bm-host/files/{{ rhel9_kvm_image }}"
+  register: base_image_filesystems
+  changed_when: false
+  when: not mirror_registry_disk_status.stat.exists
   tags:
-  - virt
+    - virt
 
-#- name: Report actual partition layout of the base image (verify mirror_registry_resize_partition matches)
-#  ansible.builtin.command:
-#   cmd: "virt-filesystems --long --parts --blkdevs -h -a roles/setup-bm-host/files/{{ rhel9_kvm_image }}"
-#  register: base_image_filesystems
-#  changed_when: false
-#  when: not mirror_registry_disk_status.stat.exists
-#  tags:
-#    - virt
+- name: Show base image partition layout
+  ansible.builtin.debug:
+  msg: "{{ base_image_filesystems.stdout_lines }}"
+  when: not mirror_registry_disk_status.stat.exists
+  tags:
+    - virt
 
-#- name: Show base image partition layout
-#  ansible.builtin.debug:
-#  msg: "{{ base_image_filesystems.stdout_lines }}"
-#  when: not mirror_registry_disk_status.stat.exists
-#  tags:
-#    - virt
-
-#- name: Expand base RHEL9 image into the new 500G disk (virt-resize)
-#  ansible.builtin.command:
-#    cmd: >
-#      virt-resize --expand {{ mirror_registry_resize_partition }}
-#      roles/setup-bm-host/files/{{ rhel9_kvm_image }}
-#      /var/lib/libvirt/images/{{ mirror_registry_disk }}
-#  when: not mirror_registry_disk_status.stat.exists
-#  tags:
-#    - virt
+- name: Expand base RHEL9 image into the new 500G disk (virt-resize)
+  ansible.builtin.command:
+    cmd: >
+      virt-resize --expand {{ mirror_registry_resize_partition }}
+      roles/setup-bm-host/files/{{ rhel9_kvm_image }}
+      /var/lib/libvirt/images/{{ mirror_registry_disk }}
+  when: not mirror_registry_disk_status.stat.exists
+  tags:
+    - virt
 
 - name: Check if mirror-registry VM is running using virsh
   shell: "virsh dominfo {{ mirror_registry_name }} 2>/dev/null | grep 'State' | awk '{print $2}'"
@@ -71,7 +62,6 @@
     --memory "{{ mirror_registry_memory }}" \
     --vcpus "{{ mirror_registry_vcpus }}" \
     --disk "/var/lib/libvirt/images/{{ mirror_registry_disk }}",format=qcow2,cache=none,bus=virtio \
-    --disk "/var/lib/libvirt/images/{{ mirror_registry_extra_disk }}",format=qcow2,cache=none,bus=virtio \
     --os-variant=rhel9.5 \
     --memballoon model=virtio,freePageReporting=on \
     --noautoconsole \
