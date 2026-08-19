@@ -55,6 +55,11 @@ ip_list:
   # even when master/worker IPs are cut off from the real internet.
   mirror_registry: 22
 
+  # MinIO - local S3-compatible target for OADP backups during
+  # disconnected-install simulation (see setup_minio.yaml). Same
+  # connected-infrastructure treatment as mirror_registry.
+  minio: 23
+
 helper_name: helper
 helper_disk: helper_disk.qcow2
 helper_memory: 8192 
@@ -240,3 +245,24 @@ mirror_catalog_operator_packages:
   - metallb-operator
   - redhat-oadp-operator
   - cincinnati-operator
+
+## setup-minio-vm / setup-minio: local S3-compatible OADP backup target
+## for disconnected-install simulation (see setup_minio.yaml). Also
+## gated behind disconnected_install (shared with mirror-registry above).
+## minio_root_user / minio_root_password go in vault.yaml, not here.
+minio_name: minio
+minio_disk: minio_disk.qcow2
+minio_disk_size: 100G
+## Partition inside rhel9_kvm_image to expand into all the new space -
+## same base image/assumption as mirror_registry_resize_partition.
+minio_resize_partition: /dev/sda3
+minio_memory: 4096
+minio_vcpus: 4
+minio_domain: "minio.{{ hub_domain }}"
+minio_api_port: 9000
+minio_console_port: 9001
+minio_data_dir: /data/minio
+## Bucket OADP will target when running against MinIO instead of real
+## AWS S3 - kept distinct from oadp_bucket_name so switching between
+## connected/disconnected DPA config is an explicit, visible choice.
+minio_bucket_name: adp-backup-disconnected

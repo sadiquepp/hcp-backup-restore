@@ -1,0 +1,18 @@
+[Unit]
+Description=MinIO
+Documentation=https://min.io/docs/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=minio-user
+Group=minio-user
+EnvironmentFile=-/etc/default/minio
+ExecStart=/usr/local/bin/minio server {{ minio_data_dir }} --address :{{ minio_api_port }} --console-address :{{ minio_console_port }}
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

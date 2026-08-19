@@ -1,0 +1,103 @@
+---
+# Tasks file for setup-minio
+#
+# Runs delegated to the minio VM (see setup_minio.yaml). Installs the
+# MinIO server + mc client, runs it as a systemd service, and creates
+# the bucket OADP will use as its backup target when disconnected.
+#
+# minio_root_user / minio_root_password come from vault.yaml.
+
+- name: Wait for SSH on the minio VM
+  ansible.builtin.wait_for_connection:
+    delay: 5
+    timeout: 300
+
+- name: Create minio-user
+  ansible.builtin.user:
+    name: minio-user
+    system: true
+    shell: /sbin/nologin
+    create_home: false
+  become: true
+
+- name: Create MinIO data directory
+  ansible.builtin.file:
+    path: "{{ minio_data_dir }}"
+    state: directory
+    owner: minio-user
+    group: minio-user
+    mode: '0750'
+  become: true
+
+- name: Check if MinIO binaries already installed
+  stat:
+    path: /usr/local/bin/minio
+  register: minio_binary_status
+
+- name: Download MinIO server binary
+  get_url:
+    url: https://dl.min.io/server/minio/release/linux-amd64/minio
+    dest: /usr/local/bin/minio
+    mode: '0755'
+  become: true
+  when: not minio_binary_status.stat.exists
+
+- name: Download MinIO client (mc) binary
+  get_url:
+    url: https://dl.min.io/client/mc/release/linux-amd64/mc
+    dest: /usr/local/bin/mc
+    mode: '0755'
+  become: true
+  when: not minio_binary_status.stat.exists
+
+- name: Render MinIO environment file (root credentials)
+  template:
+    src: minio-env.j2
+    dest: /etc/default/minio
+    owner: root
+    group: minio-user
+    mode: '0640'
+  become: true
+
+- name: Render MinIO systemd unit
+  template:
+    src: minio.service.j2
+    dest: /etc/systemd/system/minio.service
+    mode: '0644'
+  become: true
+  register: minio_unit
+
+- name: Reload systemd, enable and start MinIO
+  systemd:
+    name: minio
+    daemon_reload: "{{ minio_unit.changed }}"
+    enabled: true
+    state: "{{ 'restarted' if minio_unit.changed else 'started' }}"
+  become: true
+
+- name: Wait for the MinIO API to respond
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ minio_api_port }}/minio/health/live"
+    status_code: 200
+  register: minio_health
+  until: minio_health.status == 200
+  retries: 20
+  delay: 5
+
+- name: Set the local mc alias for this MinIO instance
+  shell: >
+    /usr/local/bin/mc alias set local
+    http://127.0.0.1:{{ minio_api_port }}
+    {{ minio_root_user }} {{ minio_root_password }}
+
+- name: Create the OADP backup bucket if it doesn't already exist
+  shell: >
+    /usr/local/bin/mc ls local/{{ minio_bucket_name }} ||
+    /usr/local/bin/mc mb local/{{ minio_bucket_name }}
+
+- name: Report MinIO endpoint
+  debug:
+    msg: >-
+      MinIO ready at http://{{ minio_domain }}:{{ minio_api_port }}
+      (console: http://{{ minio_domain }}:{{ minio_console_port }}),
+      bucket '{{ minio_bucket_name }}' created.

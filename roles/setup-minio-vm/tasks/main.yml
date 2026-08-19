@@ -1,0 +1,59 @@
+---
+# Tasks file for setup-minio-vm
+#
+# Creates the minio VM on the baremetal host (localhost). Same pattern
+# as setup-mirror-registry-vm: reuses the already-customized RHEL9 base
+# image, offline virt-resize into a sparse disk (no pre-allocation).
+# Runs only when disconnected_install is true.
+
+- name: Check the minio Disk Existence
+  stat:
+    path: "/var/lib/libvirt/images/{{ minio_disk }}"
+  register: minio_disk_status
+  tags:
+    - virt
+
+- name: Create minio VM Disk ({{ minio_disk_size }}, sparse, no preallocation)
+  ansible.builtin.command:
+    cmd: "qemu-img create -f qcow2 /var/lib/libvirt/images/{{ minio_disk }} {{ minio_disk_size }}"
+  when: not minio_disk_status.stat.exists
+  tags:
+    - virt
+
+- name: Expand base RHEL9 image into the new minio disk (virt-resize)
+  ansible.builtin.command:
+    cmd: >
+      virt-resize --expand {{ minio_resize_partition }}
+      roles/setup-bm-host/files/{{ rhel9_kvm_image }}
+      /var/lib/libvirt/images/{{ minio_disk }}
+  when: not minio_disk_status.stat.exists
+  tags:
+    - virt
+
+- name: Check if minio VM is running using virsh
+  shell: "virsh dominfo {{ minio_name }} 2>/dev/null | grep 'State' | awk '{print $2}'"
+  register: minio_vm_state
+  changed_when: false
+  tags:
+    - virt
+
+- name: Define the minio VM
+  shell: |
+    virt-install \
+    --import \
+    --name "{{ minio_name }}" \
+    --memory "{{ minio_memory }}" \
+    --vcpus "{{ minio_vcpus }}" \
+    --disk "/var/lib/libvirt/images/{{ minio_disk }}",format=qcow2,cache=none,bus=virtio \
+    --os-variant=rhel9.5 \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --network network:default,mac=52:54:00:e2:54:{{ ip_list.minio }}
+  when: minio_vm_state.stdout == ''
+  tags:
+    - virt
+
+- name: Wait for the minio VM to boot
+  shell: |
+    sleep 30s
+  when: minio_vm_state.stdout == ''

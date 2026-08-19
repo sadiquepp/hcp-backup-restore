@@ -1,0 +1,65 @@
+## Creates the minio VM and installs/configures MinIO as the local
+## S3-compatible OADP backup target for disconnected-install simulation.
+## Structured the same way as setup_mirror_registry.yaml: VM creation
+## happens on the baremetal host (localhost), then the actual in-guest
+## setup is delegated into the new VM.
+##
+## This playbook is entirely new - nothing in the connected install flow
+## imports or calls it, so running the connected flow is completely
+## unaffected whether or not you ever run this.
+##
+## Requires disconnected_install: true (vars.yaml, default false),
+## minio_root_user / minio_root_password defined in vault.yaml, and
+## org_id / activation_key defined in vault.yaml (see roles/setup-rhsm).
+##
+## Usage:
+##   ansible-playbook setup_minio.yaml --ask-vault-pass
+
+- name: Setup MinIO VM
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+  - name: Refuse to run unless disconnected_install is enabled
+    ansible.builtin.assert:
+      that:
+        - disconnected_install | bool
+      fail_msg: >-
+        Set disconnected_install: true in vars.yaml (or pass
+        -e disconnected_install=true) before running this playbook -
+        it's off by default so the connected flow is never affected.
+
+  - name: Fail fast if minio_root_user/minio_root_password are missing from vault.yaml
+    ansible.builtin.assert:
+      that:
+        - minio_root_user is defined
+        - minio_root_password is defined
+      fail_msg: "Add minio_root_user / minio_root_password to vault.yaml (ansible-vault edit vault.yaml)."
+
+  - name: Fail fast if org_id/activation_key are missing from vault.yaml
+    ansible.builtin.assert:
+      that:
+        - org_id is defined
+        - activation_key is defined
+      fail_msg: >-
+        Add org_id / activation_key to vault.yaml (ansible-vault edit
+        vault.yaml) - needed to register minio with subscription-manager.
+
+  - ansible.builtin.import_role:
+      name: setup-minio-vm
+    tags:
+      - minio-vm
+
+  - ansible.builtin.import_role:
+      name: setup-rhsm
+    tags:
+      - rhsm
+    delegate_to: "{{ lab_network_prefix }}.{{ ip_list.minio }}"
+
+  - ansible.builtin.import_role:
+      name: setup-minio
+    tags:
+      - minio
+    delegate_to: "{{ lab_network_prefix }}.{{ ip_list.minio }}"
