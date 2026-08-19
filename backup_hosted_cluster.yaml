@@ -43,7 +43,7 @@
     register: backup_phase
     until: backup_phase.stdout in ['Completed', 'PartiallyFailed', 'Failed']
     retries: 120
-    delay: 15
+    delay: 30
     environment:
       KUBECONFIG: "{{ hub_kubeconfig }}"
 

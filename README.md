@@ -284,7 +284,7 @@ oc apply -f oadp/hello-openshift-oadp-backup.yaml
 ```
 - Check the backup status periodically until it shows as completed.
 ```bash
-oc get Backup -n hello-openshift-oadp-backup -o yaml
+oc get Backup -n openshift-adp hello-openshift-oadp-backup -o yaml
 ```
 ### Backup a hosted cluster using OADP.
 
@@ -313,7 +313,7 @@ status:
     totalItems: 363
   startTimestamp: "2026-08-17T13:52:01Z"
   version: 1
-
+```
 ### Shutdown Primary Hub
 
 ```bash
@@ -348,12 +348,16 @@ POD=`oc get pod -n hello-openshift-oadp -o jsonpath='{.items[0].metadata.name}'`
 oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
 ```
 
-### Restore the hosted cluster to the DR Hub using OADP. This will restore the hosted cluster to the DR Hub using OADP.
+### Restore the hosted cluster to the DR Hub using OADP. 
+This will restore the hosted cluster to the DR Hub using OADP.
 
 ```bash
 ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
 ```
-
+Check the status of the restore.
+```bash
+oc get restore.velero.io -n openshift-adp hcp-cluster1-restore -o yaml
+```
 
 
 ## Playbook Reference

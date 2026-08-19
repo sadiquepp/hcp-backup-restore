@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Registers a RHEL9 guest with Red Hat Subscription Manager
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

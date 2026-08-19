@@ -1,0 +1,24 @@
+---
+# Tasks file for setup-rhsm
+#
+# Registers a freshly-created RHEL9 guest with Red Hat Subscription
+# Manager, so dnf can install packages. Delegate this to whichever VM
+# needs it, before any dnf/package task runs against that VM. Shared
+# by helper (setup_bm_host.yaml) and mirror-registry
+# (setup_mirror_registry.yaml) rather than duplicated in each.
+#
+# org_id / activation_key live in vault.yaml, not vars.yaml.
+
+- name: Check current subscription status
+  shell: subscription-manager status
+  register: rhsm_status
+  changed_when: false
+  failed_when: false
+
+- name: Register with Red Hat Subscription Manager
+  shell: >
+    subscription-manager register --org={{ org_id }}
+    --activationkey={{ activation_key }} --force
+  async: 2100
+  poll: 5
+  when: "'Overall Status: Current' not in rhsm_status.stdout"

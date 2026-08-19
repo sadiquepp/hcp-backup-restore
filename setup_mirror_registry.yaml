@@ -36,10 +36,25 @@
         - mirror_registry_password is defined
       fail_msg: "Add mirror_registry_password to vault.yaml (ansible-vault edit vault.yaml)."
 
+  - name: Fail fast if org_id/activation_key are missing from vault.yaml
+    ansible.builtin.assert:
+      that:
+        - org_id is defined
+        - activation_key is defined
+      fail_msg: >-
+        Add org_id / activation_key to vault.yaml (ansible-vault edit
+        vault.yaml) - needed to register mirror-registry with subscription-manager.
+
   - ansible.builtin.import_role:
       name: setup-mirror-registry-vm
     tags:
       - mirror-vm
+
+  - ansible.builtin.import_role:
+      name: setup-rhsm
+    tags:
+      - rhsm
+    delegate_to: "{{ lab_network_prefix }}.{{ ip_list.mirror_registry }}"
 
   - ansible.builtin.import_role:
       name: setup-mirror-registry

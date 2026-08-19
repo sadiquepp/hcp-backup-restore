@@ -1,7 +1,8 @@
 # Lab-wide Ansible variables. Loaded by most playbooks via vars_files.
 #
-# Secrets (pull_secret, activation_key, oadp_aws_*) belong in vault.yaml,
-# not here. Values below override role defaults when the same name is used.
+# Secrets (pull_secret, activation_key, org_id, oadp_aws_*) belong in
+# vault.yaml, not here. Values below override role defaults when the
+# same name is used.
 #
 # Optional role-default overrides are documented at the bottom of this file
 # as commented examples - uncomment and adjust as needed.
@@ -107,7 +108,7 @@ hosted_domain2: hcp-cluster2.mylab.com
 ##  Variables required by Setup-Hub-Cluster Role 
 ocp_major_version: 4.21
 ocp_minor_version: 15 
-coreos_minor_version: 0
+coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
 download_dir: /var/lib/libvirt/images/
 hub_vm_folder: /var/lib/libvirt/images/hub
 hub_install_folder: /var/lib/libvirt/images/hub_install
@@ -224,17 +225,18 @@ mirror_registry_vcpus: 8
 mirror_registry_domain: "registry.{{ hub_domain }}"
 mirror_registry_port: 8443
 ## mirror_registry_password goes in vault.yaml, not here.
-mirror_registry_quay_root: /var/lib/quay-storage
+mirror_registry_quay_root: /registry
 
 ## OCP release/operators to mirror. Extend catalog_operator_packages with
 ## any additional operators your disconnected install needs beyond what
 ## setup-hub-acm already installs (ACM, LVM Storage, MetalLB, OADP).
-mirror_ocp_channel: fast-4.21
-mirror_ocp_version: "4.21.0"
-mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v4.21"
+mirror_ocp_channel: stable-{{ ocp_major_version }}
+mirror_ocp_version: "{{ ocp_major_version }}.{{ ocp_minor_version }}"
+mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v{{ ocp_major_version }}"
 mirror_catalog_operator_packages:
   - advanced-cluster-management
   - multicluster-engine
   - lvms-operator
   - metallb-operator
   - redhat-oadp-operator
+  - cincinnati-operator

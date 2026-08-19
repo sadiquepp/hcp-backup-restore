@@ -7,12 +7,6 @@
   register: result
   until: result.rc == 0
 
-- name: Subscription
-  shell:
-    "subscription-manager register --org={{org_id }} --activationkey={{ activation_key}} --force" 
-  async: 2100
-  poll: 5 
-
 - name: Install DNS Packages
   dnf:
     name: "{{ dns_packages }}"

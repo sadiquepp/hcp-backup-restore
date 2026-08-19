@@ -7,7 +7,7 @@ $TTL 1D
 					3H )	; minimum
 		NS	helper.{{ hub_domain }}.
 helper		A	{{ lab_network_prefix }}.{{ ip_list.helper_server}}
-mirror		A	{{ lab_network_prefix }}.{{ ip_list.mirror_registry}}
+registry		A	{{ lab_network_prefix }}.{{ ip_list.mirror_registry}}
 bootstrap	A	{{ lab_network_prefix }}.{{ ip_list.bootstrap }}
 master1		A	{{ lab_network_prefix }}.{{ ip_list.master1}}
 master2		A	{{ lab_network_prefix }}.{{ ip_list.master2}}

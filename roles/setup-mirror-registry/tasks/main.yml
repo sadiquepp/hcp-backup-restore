@@ -11,13 +11,7 @@
   ansible.builtin.wait_for_connection:
     delay: 5
     timeout: 300
-
-- name: Subscription
-  shell:
-    "subscription-manager register --org={{org_id }} --activationkey={{ activation_key}} --force" 
-  async: 2100
-  poll: 5 
-
+    
 - name: Install required packages
   dnf:
     name:
