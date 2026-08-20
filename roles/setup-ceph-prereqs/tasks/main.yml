@@ -1,0 +1,78 @@
+---
+# Tasks file for setup-ceph-prereqs
+#
+# Runs delegated to a single Ceph node (see setup_ceph.yaml), after
+# setup-rhsm has already registered it with subscription-manager
+# using org_id/activation_key from vault.yaml. There is no Satellite
+# anywhere in this flow - repos come straight from the CDN entitled
+# by that registration.
+#
+# RHEL9 doesn't support the cephadm-ansible preflight playbook, so
+# this does by hand what that playbook would do for us on RHEL8:
+# enable the RHCS9 tools repo and install cephadm + dependencies.
+# Runs on all four nodes (storage nodes and the admin node alike) -
+# cephadm/ceph-common/podman are needed on every node cephadm will
+# ever touch, admin node included.
+#
+# Also installs pull_secret (vault.yaml - the same one
+# setup-hub-cluster/setup-mirror-registry already use) as this host's
+# podman authfile. pull_secret already carries a valid
+# registry.redhat.io credential (see roles/setup-mirror-registry's
+# use of it as an authfile) - cephadm just shells out to `podman
+# pull`, so no separate --registry-username/--registry-password is
+# needed on the bootstrap command in setup-ceph-cluster. Every node
+# that will run a Ceph container daemon needs this locally: cephadm
+# pulls the image on each target host over SSH, it doesn't push/copy
+# images out from ceph1.
+
+- name: Wait for SSH on the Ceph node
+  ansible.builtin.wait_for_connection:
+    delay: 5
+    timeout: 300
+
+- name: Enable RHEL9 BaseOS/AppStream and the RHCS9 Tools repo
+  ansible.builtin.command:
+    cmd: >
+      subscription-manager repos
+      --enable=rhel-9-for-x86_64-baseos-rpms
+      --enable=rhel-9-for-x86_64-appstream-rpms
+      --enable={{ rhceph_tools_repo }}
+  become: true
+  register: ceph_repo_enable
+  changed_when: "'Repository' in ceph_repo_enable.stdout"
+
+- name: Install cephadm and cluster dependencies
+  ansible.builtin.yum:
+    name:
+      - cephadm
+      - ceph-common
+      - podman
+      - lvm2
+      - chrony
+    state: present
+  become: true
+
+- name: Make sure chronyd is enabled and running (Ceph is picky about clock skew)
+  ansible.builtin.systemd:
+    name: chronyd
+    enabled: true
+    state: started
+  become: true
+
+- name: Ensure ~/.docker exists (root's default podman authfile location)
+  ansible.builtin.file:
+    path: /root/.docker
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  become: true
+
+- name: Install pull_secret as this host's container registry auth
+  ansible.builtin.copy:
+    dest: /root/.docker/config.json
+    content: "{{ pull_secret }}"
+    owner: root
+    group: root
+    mode: '0600'
+  become: true

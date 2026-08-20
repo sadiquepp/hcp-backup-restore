@@ -1,0 +1,130 @@
+---
+# Tasks file for setup-ceph-vm
+#
+# Creates the Ceph 9 VMs on the baremetal host (localhost): three
+# all-in-one storage nodes (mon+mgr+osd on each, see setup-ceph-cluster)
+# plus one admin node that only ever holds the admin keyring/ceph.conf
+# (_admin label, no daemons).
+#
+# Storage nodes get an OS disk using the same offline
+# virt-resize-from-base-image pattern as setup-minio-vm /
+# setup-mirror-registry-vm, plus ceph_osd_disks_per_node freshly
+# created, unformatted raw disks for cephadm to consume as OSDs. The
+# admin node only gets an OS disk.
+#
+# This playbook is entirely new - nothing in the connected install
+# flow imports or calls it, so running the connected flow is
+# completely unaffected whether or not you ever run this.
+
+- name: Check the OS disk existence for each Ceph node
+  stat:
+    path: "/var/lib/libvirt/images/{{ item }}_disk.qcow2"
+  loop: "{{ ceph_storage_node_names + [ceph_admin_node_name] }}"
+  register: ceph_os_disk_status
+  tags:
+    - virt
+
+- name: Create OS disk for each Ceph node ({{ ceph_os_disk_size }}, sparse, no preallocation)
+  ansible.builtin.command:
+    cmd: "qemu-img create -f qcow2 /var/lib/libvirt/images/{{ item.item }}_disk.qcow2 {{ ceph_os_disk_size }}"
+  loop: "{{ ceph_os_disk_status.results }}"
+  when: not item.stat.exists
+  tags:
+    - virt
+
+- name: Report actual partition layout of the base image (verify ceph_os_resize_partition matches)
+  ansible.builtin.command:
+    cmd: "virt-filesystems --long --parts --blkdevs -h -a roles/setup-bm-host/files/{{ rhel9_kvm_image }}"
+  register: ceph_base_image_filesystems
+  changed_when: false
+  when: ceph_os_disk_status.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+  tags:
+    - virt
+
+- name: Show base image partition layout
+  ansible.builtin.debug:
+    msg: "{{ ceph_base_image_filesystems.stdout_lines }}"
+  when: ceph_base_image_filesystems is not skipped
+  tags:
+    - virt
+
+- name: Expand base RHEL9 image into each Ceph node's OS disk (virt-resize)
+  ansible.builtin.command:
+    cmd: >
+      virt-resize --expand {{ ceph_os_resize_partition }}
+      roles/setup-bm-host/files/{{ rhel9_kvm_image }}
+      /var/lib/libvirt/images/{{ item.item }}_disk.qcow2
+  loop: "{{ ceph_os_disk_status.results }}"
+  when: not item.stat.exists
+  tags:
+    - virt
+
+- name: Check OSD disk existence for each storage node
+  stat:
+    path: "/var/lib/libvirt/images/{{ item.0 }}_osd{{ item.1 }}.qcow2"
+  register: ceph_osd_disk_status
+  with_nested:
+    - "{{ ceph_storage_node_names }}"
+    - "{{ range(1, ceph_osd_disks_per_node + 1) | list }}"
+  tags:
+    - virt
+
+- name: Create raw OSD disks ({{ ceph_osd_disk_size }} each, unformatted - cephadm consumes these directly)
+  ansible.builtin.command:
+    cmd: "qemu-img create -f qcow2 /var/lib/libvirt/images/{{ item.item.0 }}_osd{{ item.item.1 }}.qcow2 {{ ceph_osd_disk_size }}"
+  loop: "{{ ceph_osd_disk_status.results }}"
+  when: not item.stat.exists
+  tags:
+    - virt
+
+- name: Check if each Ceph VM is running using virsh
+  shell: "virsh dominfo {{ item }} 2>/dev/null | grep 'State' | awk '{print $2}'"
+  loop: "{{ ceph_storage_node_names + [ceph_admin_node_name] }}"
+  register: ceph_vm_state
+  changed_when: false
+  tags:
+    - virt
+
+- name: Define each storage node VM (OS disk + {{ ceph_osd_disks_per_node }} raw OSD disks)
+  shell: |
+    virt-install \
+    --import \
+    --name "{{ item.item }}" \
+    --memory "{{ ceph_storage_memory }}" \
+    --vcpus "{{ ceph_storage_vcpus }}" \
+    --disk "/var/lib/libvirt/images/{{ item.item }}_disk.qcow2",format=qcow2,cache=none,bus=virtio \
+    {% for n in range(1, ceph_osd_disks_per_node + 1) %}
+    --disk "/var/lib/libvirt/images/{{ item.item }}_osd{{ n }}.qcow2",format=qcow2,cache=none,bus=virtio \
+    {% endfor %}
+    --os-variant=rhel9.5 \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --network network:default,mac=52:54:00:e2:54:{{ ip_list[item.item] }}
+  loop: "{{ ceph_vm_state.results }}"
+  when: item.item in ceph_storage_node_names and item.stdout == ''
+  tags:
+    - virt
+
+- name: Define the admin node VM (OS disk only)
+  shell: |
+    virt-install \
+    --import \
+    --name "{{ item.item }}" \
+    --memory "{{ ceph_admin_memory }}" \
+    --vcpus "{{ ceph_admin_vcpus }}" \
+    --disk "/var/lib/libvirt/images/{{ item.item }}_disk.qcow2",format=qcow2,cache=none,bus=virtio \
+    --os-variant=rhel9.5 \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --network network:default,mac=52:54:00:e2:54:{{ ip_list[item.item] }}
+  loop: "{{ ceph_vm_state.results }}"
+  when: item.item == ceph_admin_node_name and item.stdout == ''
+  tags:
+    - virt
+
+- name: Wait for the Ceph VMs to boot
+  shell: |
+    sleep 30s
+  when: ceph_vm_state.results | selectattr('stdout', 'equalto', '') | list | length > 0
+  tags:
+    - virt

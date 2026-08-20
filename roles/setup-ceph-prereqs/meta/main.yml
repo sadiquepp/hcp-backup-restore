@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Enables RHCS9 repos (direct subscription-manager, no Satellite) and installs cephadm
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

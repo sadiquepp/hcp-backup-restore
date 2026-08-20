@@ -57,12 +57,18 @@ ip_list:
   # Mirror registry - shared connected infrastructure for disconnected-install
   # simulation (see setup_mirror_registry.yaml). Stays reachable/connected
   # even when master/worker IPs are cut off from the real internet.
-  mirror_registry: 22
+  registry: 22
 
   # MinIO - local S3-compatible target for OADP backups during
   # disconnected-install simulation (see setup_minio.yaml). Same
   # connected-infrastructure treatment as mirror_registry.
   minio: 23
+
+  # Ceph - 3-node all-in-one + 1-node admin Ceph 9 cluster (see setup_ceph.yaml).
+  ceph1: 24
+  ceph2: 25
+  ceph3: 26
+  cephadmin: 27
 
 helper_name: helper
 helper_disk: helper_disk.qcow2
@@ -222,9 +228,9 @@ hosted_cluster_addon_cert_policy_controller: true
 ## disconnected_install gates whether any of this is used at all - default
 ## false so connected installs are completely unaffected.
 disconnected_install: false
-mirror_registry_name: mirror-registry
-mirror_registry_disk: mirror_registry_disk.qcow2
-mirror_registry_extra_disk: mirror_registry_extra_disk.qcow2
+mirror_registry_name: registry
+mirror_registry_disk: registry_disk.qcow2
+mirror_registry_extra_disk: registry_extra_disk.qcow2
 mirror_registry_disk_size: 500G
 ## Partition inside rhel9_kvm_image to expand into all the new space -
 ## verify against your actual base image with:
@@ -276,3 +282,71 @@ minio_data_dir: /data/minio
 ## AWS S3 - kept distinct from oadp_bucket_name so switching between
 ## connected/disconnected DPA config is an explicit, visible choice.
 minio_bucket_name: adp-backup-disconnected
+
+# -----------------------------------------------------------------------
+# ADD to vars.yaml:
+#
+# 1) Four new entries in the existing `ip_list:` map (pick any free
+#    two-digit last-octets - these four are free as of this repo's
+#    current vars.yaml: 21,22,23 are used by helper/mirror_registry/
+#    minio, 60-69 and 90-99 are reserved for the hub1/hub2 MetalLB
+#    pools, everything else in 24-27 is open):
+# -----------------------------------------------------------------------
+#   ceph1: 24
+#   ceph2: 25
+#   ceph3: 26
+#   cephadmin: 27
+#
+# (add these four lines inside the existing `ip_list:` block, they do
+# not need their own top-level key)
+
+# -----------------------------------------------------------------------
+# 2) New standalone section - append anywhere after the ip_list block,
+#    same style as the "setup-minio-vm / setup-minio" section already
+#    at the bottom of vars.yaml:
+# -----------------------------------------------------------------------
+
+## setup-ceph-vm / setup-ceph-prereqs / setup-ceph-cluster: a 3-node
+## all-in-one (mon+mgr+osd) + 1-node admin Ceph 9 cluster (see
+## setup_ceph.yaml). Entirely independent of the HCP/hub flow.
+ceph_storage_node_names:
+  - ceph1
+  - ceph2
+  - ceph3
+ceph_admin_node_name: cephadmin
+
+## setup-ceph-vm: OS disk (per node) + raw OSD disks (per storage node).
+ceph_os_disk_size: 60G
+## Partition inside rhel9_kvm_image to expand into the new OS disk -
+## same base image/assumption as mirror_registry_resize_partition -
+## verify with `virt-filesystems --long --parts --blkdevs -h -a <image>`
+## if you ever change rhel9_kvm_image.
+ceph_os_resize_partition: /dev/sda4
+ceph_osd_disks_per_node: 3
+ceph_osd_disk_size: 50G
+ceph_storage_memory: 8192
+ceph_storage_vcpus: 4
+ceph_admin_memory: 4096
+ceph_admin_vcpus: 2
+
+## setup-ceph-prereqs: direct subscription-manager registration (no
+## Satellite) - org_id/activation_key come from vault.yaml, shared
+## with the rest of the lab (see roles/setup-rhsm). This is just the
+## repo name for the RHCS9 content itself.
+rhceph_tools_repo: rhceph-9-tools-for-rhel-9-x86_64-rpms
+
+## setup-ceph-cluster: cephadm pulls the container image straight
+## from registry.redhat.io. Authentication is just pull_secret
+## (vault.yaml, already required repo-wide) installed as each node's
+## podman authfile by setup-ceph-prereqs - no separate registry
+## credentials needed, since pull_secret already carries a valid
+## registry.redhat.io auth entry (same as roles/setup-mirror-registry
+## already relies on). If you don't have RHCS entitlements, point
+## this at the upstream community image on quay.io instead (public -
+## pull_secret doesn't need a quay.io/ceph entry for this to work):
+##   ceph_container_registry: quay.io
+##   ceph_container_image: quay.io/ceph/ceph:v19
+ceph_container_registry: registry.redhat.io
+ceph_container_image: "{{ ceph_container_registry }}/rhceph/rhceph-9-rhel9:latest"
+ceph_dashboard_user: admin
+## ceph_dashboard_password goes in vault.yaml, not here.

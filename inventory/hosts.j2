@@ -20,3 +20,11 @@ master3.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.maste
 worker1.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.worker1 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
 worker2.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.worker2 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
 worker3.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.worker3 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+
+[ceph]
+{{ lab_network_prefix }}.{{ ip_list.ceph1 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+{{ lab_network_prefix }}.{{ ip_list.ceph2 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+{{ lab_network_prefix }}.{{ ip_list.ceph3 }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[ceph_admin]
+{{ lab_network_prefix }}.{{ ip_list.cephadmin }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'

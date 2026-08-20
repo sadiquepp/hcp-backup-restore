@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Creates the 3 all-in-one storage node VMs + 1 admin node VM for a Ceph 9 cluster
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

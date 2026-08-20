@@ -1,0 +1,164 @@
+---
+# Tasks file for setup-ceph-cluster
+#
+# Delegated to ceph1 (see setup_ceph.yaml) - ceph1 is the node
+# cephadm bootstrap runs from, and ends up hosting the first mon/mgr.
+# This role:
+#   1. Bootstraps the cluster on ceph1, pulling the RHCS9 image
+#      straight from registry.redhat.io (or quay.io - see
+#      ceph_container_registry/ceph_container_image in vars.yaml).
+#      No Satellite/local mirror involved, and no separate registry
+#      credentials either - setup-ceph-prereqs already installed
+#      pull_secret as this host's podman authfile, so the plain
+#      `podman pull` cephadm does under the hood just works.
+#   2. Trusts the cluster's own SSH key on ceph2, ceph3 and the admin
+#      node (done from the controller via lineinfile rather than
+#      `ssh-copy-id` from inside ceph1, since ceph1 has no route back
+#      to the other guests' credentials - only the baremetal
+#      controller does).
+#   3. Adds ceph2/ceph3 as further mon+mgr+osd ("all-in-one") hosts,
+#      and labels ceph1 the same way.
+#   4. Adds the admin node as an _admin-only host - it gets
+#      /etc/ceph/ceph.conf + the admin keyring so you can run
+#      `ceph`/`cephadm shell` from there, but never runs any daemons.
+#   5. Places mon/mgr by label and deploys OSDs on every raw disk
+#      setup-ceph-vm attached to the three storage nodes.
+#
+# Steps 2-5 only run on a fresh bootstrap (gated on
+# ceph_bootstrap_status below) - this is a one-shot cluster-creation
+# role, not a full day-2 reconciler. Re-running setup_ceph.yaml
+# against an existing cluster just re-checks/re-installs prereqs and
+# leaves the cluster itself alone.
+
+- name: Wait for SSH on ceph1
+  ansible.builtin.wait_for_connection:
+    delay: 5
+    timeout: 300
+
+- name: Check if the cluster is already bootstrapped
+  ansible.builtin.stat:
+    path: /etc/ceph/ceph.conf
+  register: ceph_bootstrap_status
+
+- name: Bootstrap the Ceph 9 cluster on ceph1
+  ansible.builtin.command:
+    cmd: >
+      cephadm bootstrap
+      --mon-ip {{ lab_network_prefix }}.{{ ip_list.ceph1 }}
+      --image {{ ceph_container_image }}
+      --initial-dashboard-user {{ ceph_dashboard_user }}
+      --initial-dashboard-password {{ ceph_dashboard_password }}
+      --allow-fqdn-hostname
+  become: true
+  when: not ceph_bootstrap_status.stat.exists
+  register: ceph_bootstrap_result
+
+- name: Show the bootstrap output (dashboard URL/admin password on first run)
+  ansible.builtin.debug:
+    msg: "{{ ceph_bootstrap_result.stdout_lines }}"
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Read the cluster's public SSH key (cephadm generated it during bootstrap)
+  ansible.builtin.slurp:
+    src: /etc/ceph/ceph.pub
+  register: ceph_pub_key_raw
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Set a fact with the decoded cluster SSH public key
+  ansible.builtin.set_fact:
+    ceph_cluster_pubkey: "{{ ceph_pub_key_raw.content | b64decode }}"
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Ensure /root/.ssh exists on ceph2, ceph3 and the admin node
+  ansible.builtin.file:
+    path: /root/.ssh
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - "{{ lab_network_prefix }}.{{ ip_list.ceph2 }}"
+    - "{{ lab_network_prefix }}.{{ ip_list.ceph3 }}"
+    - "{{ lab_network_prefix }}.{{ ip_list.cephadmin }}"
+  delegate_to: "{{ item }}"
+  become: true
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Trust the cluster's SSH key on ceph2, ceph3 and the admin node
+  ansible.builtin.lineinfile:
+    path: /root/.ssh/authorized_keys
+    line: "{{ ceph_cluster_pubkey }}"
+    create: true
+    owner: root
+    group: root
+    mode: '0600'
+  loop:
+    - "{{ lab_network_prefix }}.{{ ip_list.ceph2 }}"
+    - "{{ lab_network_prefix }}.{{ ip_list.ceph3 }}"
+    - "{{ lab_network_prefix }}.{{ ip_list.cephadmin }}"
+  delegate_to: "{{ item }}"
+  become: true
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Label ceph1 as mon, mgr and osd (bootstrap only gave it _admin)
+  ansible.builtin.command:
+    cmd: "cephadm shell -- ceph orch host label add ceph1 {{ item }}"
+  become: true
+  loop:
+    - mon
+    - mgr
+    - osd
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Add ceph2 and ceph3 as mon+mgr+osd hosts
+  ansible.builtin.command:
+    cmd: "cephadm shell -- ceph orch host add {{ item }} {{ lab_network_prefix }}.{{ ip_list[item] }} --labels mon,mgr,osd"
+  become: true
+  loop:
+    - ceph2
+    - ceph3
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Add the admin node as an _admin-only host (config/keyring, no daemons)
+  ansible.builtin.command:
+    cmd: >
+      cephadm shell -- ceph orch host add {{ ceph_admin_node_name }}
+      {{ lab_network_prefix }}.{{ ip_list.cephadmin }} --labels _admin
+  become: true
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Place mon daemons on the three storage nodes
+  ansible.builtin.command:
+    cmd: 'cephadm shell -- ceph orch apply mon --placement="label:mon"'
+  become: true
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Place mgr daemons on the three storage nodes
+  ansible.builtin.command:
+    cmd: 'cephadm shell -- ceph orch apply mgr --placement="label:mgr"'
+  become: true
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Deploy OSDs on every raw disk cephadm finds on the storage nodes
+  ansible.builtin.command:
+    cmd: 'cephadm shell -- ceph orch apply osd --all-available-devices'
+  become: true
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Wait for the cluster to settle before checking status
+  ansible.builtin.pause:
+    seconds: 30
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Get cluster status
+  ansible.builtin.command:
+    cmd: cephadm shell -- ceph -s
+  become: true
+  register: ceph_status
+  changed_when: false
+  when: not ceph_bootstrap_status.stat.exists
+
+- name: Show cluster status
+  ansible.builtin.debug:
+    msg: "{{ ceph_status.stdout_lines }}"
+  when: not ceph_bootstrap_status.stat.exists

@@ -8,7 +8,7 @@ $TTL    600
 
 @ 					IN NS 	helper.{{ hub_domain }}.
 {{ ip_list.helper_server }}   		IN PTR 		helper.{{ hub_domain }}.
-{{ ip_list.mirror_registry }}   		IN PTR 		mirror.{{ hub_domain }}.
+{{ ip_list.mirror_registry }}   		IN PTR 		registry.{{ hub_domain }}.
 {{ ip_list.minio }}   		IN PTR 		minio.{{ hub_domain }}.
 {{ ip_list.bootstrap }} 		IN PTR 		bootstrap.{{ hub_domain }}.
 {{ ip_list.master1 }} 		IN PTR 		master1.{{ hub_domain }}.
@@ -33,3 +33,7 @@ $TTL    600
 {{ ip_list.c3worker1 }} 		IN PTR 		c3worker1.{{ hosted_domain3 }}.
 {{ ip_list.c3worker2 }} 		IN PTR 		c3worker2.{{ hosted_domain3 }}.
 {{ ip_list.c3worker3 }} 		IN PTR 		c3worker3.{{ hosted_domain3 }}.
+{{ ip_list.ceph1 }} 		IN PTR 		ceph1.{{ hub_domain }}.
+{{ ip_list.ceph2 }} 		IN PTR 		ceph2.{{ hub_domain }}.
+{{ ip_list.ceph3 }} 		IN PTR 		ceph3.{{ hub_domain }}.
+{{ ip_list.cephadmin }} 		IN PTR 		cephadmin.{{ hub_domain }}.

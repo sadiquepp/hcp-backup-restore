@@ -1,0 +1,87 @@
+## Creates a 3-node all-in-one + 1-node admin Ceph 9 cluster,
+## independent of the HCP/hub flow (nothing else imports or calls
+## this - running it is entirely optional and doesn't affect the
+## rest of the lab). Storage nodes (ceph1-3) each run a mon+mgr+osd
+## ("all-in-one"); the admin node holds only the admin
+## keyring/ceph.conf (_admin label) and is used to run
+## `ceph`/`cephadm shell` commands without touching a storage node.
+##
+## No Satellite anywhere in this flow: nodes register directly with
+## subscription-manager (setup-rhsm, org_id/activation_key from
+## vault.yaml - same as every other VM in this lab), and cephadm
+## pulls the RHCS9 container image straight from registry.redhat.io,
+## authenticated using pull_secret (vault.yaml - the same pull secret
+## setup-hub-cluster/setup-mirror-registry already use, installed as
+## each node's podman authfile by setup-ceph-prereqs). No separate
+## registry credentials needed. Set
+## ceph_container_registry/ceph_container_image in vars.yaml if you'd
+## rather point this at quay.io instead (see the comments there).
+##
+## Requires org_id/activation_key and pull_secret (vault.yaml, shared
+## with the rest of the lab) plus ceph_dashboard_password (vault.yaml,
+## new - the initial Ceph dashboard admin password).
+##
+## Usage:
+##   ansible-playbook setup_ceph.yaml --ask-vault-pass
+
+- name: Setup Ceph 9 cluster
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+  - name: Fail fast if org_id/activation_key are missing from vault.yaml
+    ansible.builtin.assert:
+      that:
+        - org_id is defined
+        - activation_key is defined
+      fail_msg: >-
+        Add org_id / activation_key to vault.yaml (ansible-vault edit
+        vault.yaml) - needed to register the Ceph nodes with
+        subscription-manager.
+
+  - name: Fail fast if ceph_dashboard_password is missing from vault.yaml
+    ansible.builtin.assert:
+      that:
+        - ceph_dashboard_password is defined
+      fail_msg: >-
+        Add ceph_dashboard_password to vault.yaml (ansible-vault edit
+        vault.yaml) - the initial password for the Ceph dashboard
+        admin user (ceph_dashboard_user in vars.yaml).
+
+  - ansible.builtin.import_role:
+      name: setup-ceph-vm
+    tags:
+      - ceph-vm
+
+  # include_role (not import_role) deliberately here: it's the only
+  # one of the two that supports `loop`, and looping is what lets us
+  # run {setup-rhsm, setup-ceph-prereqs} against all four nodes
+  # without repeating eight near-identical import_role blocks (the
+  # pattern setup_minio.yaml/setup_mirror_registry.yaml use for a
+  # single node each).
+  - name: Register and prep each Ceph node (setup-rhsm, then setup-ceph-prereqs)
+    ansible.builtin.include_role:
+      name: "{{ item.role }}"
+    loop:
+      - { role: setup-rhsm,         host: ceph1 }
+      - { role: setup-ceph-prereqs, host: ceph1 }
+      - { role: setup-rhsm,         host: ceph2 }
+      - { role: setup-ceph-prereqs, host: ceph2 }
+      - { role: setup-rhsm,         host: ceph3 }
+      - { role: setup-ceph-prereqs, host: ceph3 }
+      - { role: setup-rhsm,         host: cephadmin }
+      - { role: setup-ceph-prereqs, host: cephadmin }
+    loop_control:
+      label: "{{ item.role }} -> {{ item.host }}"
+    delegate_to: "{{ lab_network_prefix }}.{{ ip_list[item.host] }}"
+    tags:
+      - rhsm
+      - ceph-prereqs
+
+  - ansible.builtin.import_role:
+      name: setup-ceph-cluster
+    tags:
+      - ceph-cluster
+    delegate_to: "{{ lab_network_prefix }}.{{ ip_list.ceph1 }}"
