@@ -8,7 +8,7 @@ $TTL    600
 
 @ 					IN NS 	helper.{{ hub_domain }}.
 {{ ip_list.helper_server }}   		IN PTR 		helper.{{ hub_domain }}.
-{{ ip_list.mirror_registry }}   		IN PTR 		registry.{{ hub_domain }}.
+{{ ip_list.registry }}   		IN PTR 		registry.{{ hub_domain }}.
 {{ ip_list.minio }}   		IN PTR 		minio.{{ hub_domain }}.
 {{ ip_list.bootstrap }} 		IN PTR 		bootstrap.{{ hub_domain }}.
 {{ ip_list.master1 }} 		IN PTR 		master1.{{ hub_domain }}.

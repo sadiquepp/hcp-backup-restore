@@ -19,7 +19,7 @@
     src: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
     dest: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
     flat: true
-  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.mirror_registry }}"
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
 
 - name: Update baremetal's CA trust bundle
   ansible.builtin.command:

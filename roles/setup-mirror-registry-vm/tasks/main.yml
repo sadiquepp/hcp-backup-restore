@@ -65,7 +65,7 @@
     --os-variant=rhel9.5 \
     --memballoon model=virtio,freePageReporting=on \
     --noautoconsole \
-    --network network:default,mac=52:54:00:e2:54:{{ ip_list.mirror_registry }}
+    --network network:default,mac=52:54:00:e2:54:{{ ip_list.registry }}
   when: mirror_registry_vm_state.stdout == ''
   tags:
     - virt
