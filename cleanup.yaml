@@ -64,8 +64,8 @@
 
   - name: Destroy Mirror Registry VM
     shell: |
-      virsh undefine mirror-registry && virsh destroy mirror-registry
-      rm -f /var/lib/libvirt/images/mirror_registry_disk.qcow2 
+      virsh undefine registry && virsh destroy registry
+      rm -f /var/lib/libvirt/images/registry_disk.qcow2 
 
   - name: Destroy Minio VM
     shell: |

@@ -54,13 +54,13 @@
       name: setup-rhsm
     tags:
       - rhsm
-    delegate_to: "{{ lab_network_prefix }}.{{ ip_list.mirror_registry }}"
+    delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
 
   - ansible.builtin.import_role:
       name: setup-mirror-registry
     tags:
       - mirror
-    delegate_to: "{{ lab_network_prefix }}.{{ ip_list.mirror_registry }}"
+    delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
 
   - ansible.builtin.import_role:
       name: setup-mirror-registry-trust
