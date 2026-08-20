@@ -25,10 +25,10 @@
   ansible.builtin.command:
     cmd: update-ca-trust extract
 
-- name: Remove any stale mirror-registry authfile (clean slate)
-  ansible.builtin.file:
-    path: "{{ mirror_registry_authfile }}"
-    state: absent
+#- name: Remove any stale mirror-registry authfile (clean slate)
+#  ansible.builtin.file:
+#    path: "{{ mirror_registry_authfile }}"
+#    state: absent
 
 #- name: Log baremetal in to the mirror registry (dedicated authfile)
 #  ansible.builtin.command:
