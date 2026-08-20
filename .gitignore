@@ -1,2 +1,4 @@
 *.qcow2
 vault.yaml
+.DS_Store
+roles/.DS_Store
