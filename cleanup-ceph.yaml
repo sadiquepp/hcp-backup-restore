@@ -1,0 +1,28 @@
+- name: Cleanup
+  hosts: localhost
+  become: true
+  tasks:
+  - name: Destroy Ceph Nodes
+    shell: |
+      virsh undefine ceph1 && virsh undefine ceph2 && virsh undefine ceph3 && virsh undefine cephadmin
+      virsh destroy ceph1 && virsh destroy ceph2 && virsh destroy ceph3 && virsh destroy cephadmin
+      rm -f /var/lib/libvirt/images/ceph1_disk.qcow2 
+      rm -f /var/lib/libvirt/images/ceph2_disk.qcow2 
+      rm -f /var/lib/libvirt/images/ceph3_disk.qcow2 
+      rm -f /var/lib/libvirt/images/cephadmin_disk.qcow2 
+
+  - name: Destroy Ceph OSD Disks
+    shell: |
+      rm -f /var/lib/libvirt/images/ceph1_osd1.qcow2 
+      rm -f /var/lib/libvirt/images/ceph1_osd2.qcow2 
+      rm -f /var/lib/libvirt/images/ceph1_osd3.qcow2 
+      rm -f /var/lib/libvirt/images/ceph2_osd1.qcow2 
+      rm -f /var/lib/libvirt/images/ceph2_osd2.qcow2 
+      rm -f /var/lib/libvirt/images/ceph2_osd3.qcow2 
+      rm -f /var/lib/libvirt/images/ceph3_osd1.qcow2 
+      rm -f /var/lib/libvirt/images/ceph3_osd2.qcow2 
+      rm -f /var/lib/libvirt/images/ceph3_osd3.qcow2 
+
+  - name: Cleanup SSH Know Hostss
+    shell: |
+      rm -f /root/.ssh/known_hosts
