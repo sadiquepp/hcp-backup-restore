@@ -25,18 +25,6 @@
   ansible.builtin.command:
     cmd: update-ca-trust extract
 
-#- name: Remove any stale mirror-registry authfile (clean slate)
-#  ansible.builtin.file:
-#    path: "{{ mirror_registry_authfile }}"
-#    state: absent
-
-#- name: Log baremetal in to the mirror registry (dedicated authfile)
-#  ansible.builtin.command:
-#    cmd: >
-#      podman login --authfile {{ mirror_registry_authfile }}
-#      -u init -p {{ mirror_registry_password }}
-#      {{ mirror_registry_domain }}:{{ mirror_registry_port }}
-
 - name: Login to the mirror registry and generate password
   shell: |
     podman login --authfile {{ mirror_registry_authfile }} \
