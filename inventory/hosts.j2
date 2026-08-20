@@ -6,7 +6,7 @@
 {{ lab_network_prefix }}.{{ ip_list.helper_server }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 
 [mirror_registry]
-{{ lab_network_prefix }}.{{ ip_list.mirror_registry }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+{{ lab_network_prefix }}.{{ ip_list.registry }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 
 [minio]
 {{ lab_network_prefix }}.{{ ip_list.minio }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
