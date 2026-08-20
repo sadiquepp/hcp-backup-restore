@@ -323,7 +323,7 @@ ceph_os_disk_size: 60G
 ## if you ever change rhel9_kvm_image.
 ceph_os_resize_partition: /dev/sda4
 ceph_osd_disks_per_node: 3
-ceph_osd_disk_size: 50G
+ceph_osd_disk_size: 100G
 ceph_storage_memory: 8192
 ceph_storage_vcpus: 4
 ceph_admin_memory: 4096

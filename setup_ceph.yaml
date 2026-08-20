@@ -22,9 +22,9 @@
 ## new - the initial Ceph dashboard admin password).
 ##
 ## Usage:
-##   ansible-playbook setup_ceph.yaml --ask-vault-pass
+##   ansible-playbook -i inventory/hosts setup_ceph.yaml --ask-vault-pass
 
-- name: Setup Ceph 9 cluster
+- name: Create Ceph VMs
   hosts: localhost
   become: true
   vars_files:
@@ -55,32 +55,33 @@
     tags:
       - ceph-vm
 
-  # include_role (not import_role) deliberately here: it's the only
-  # one of the two that supports `loop`, and looping is what lets us
-  # run {setup-rhsm, setup-ceph-prereqs} against all four nodes
-  # without repeating eight near-identical import_role blocks (the
-  # pattern setup_minio.yaml/setup_mirror_registry.yaml use for a
-  # single node each).
-  - name: Register and prep each Ceph node (setup-rhsm, then setup-ceph-prereqs)
-    ansible.builtin.include_role:
-      name: "{{ item.role }}"
-      apply:
-        delegate_to: "{{ lab_network_prefix }}.{{ ip_list[item.host] }}"
-    loop:
-      - { role: setup-rhsm,         host: ceph1 }
-      - { role: setup-ceph-prereqs, host: ceph1 }
-      - { role: setup-rhsm,         host: ceph2 }
-      - { role: setup-ceph-prereqs, host: ceph2 }
-      - { role: setup-rhsm,         host: ceph3 }
-      - { role: setup-ceph-prereqs, host: ceph3 }
-      - { role: setup-rhsm,         host: cephadmin }
-      - { role: setup-ceph-prereqs, host: cephadmin }
-    loop_control:
-      label: "{{ item.role }} -> {{ item.host }}"
+# Target inventory groups (ceph + ceph_admin) so Ansible runs each
+# host in parallel (default forks). Per node, setup-rhsm still runs
+# before setup-ceph-prereqs; across nodes those steps overlap.
+- name: Register and prep Ceph nodes
+  hosts: ceph:ceph_admin
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+  - ansible.builtin.import_role:
+      name: setup-rhsm
     tags:
       - rhsm
+
+  - ansible.builtin.import_role:
+      name: setup-ceph-prereqs
+    tags:
       - ceph-prereqs
 
+- name: Bootstrap Ceph cluster
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
   - ansible.builtin.import_role:
       name: setup-ceph-cluster
     tags:
