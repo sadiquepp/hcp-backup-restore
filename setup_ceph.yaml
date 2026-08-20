@@ -64,6 +64,8 @@
   - name: Register and prep each Ceph node (setup-rhsm, then setup-ceph-prereqs)
     ansible.builtin.include_role:
       name: "{{ item.role }}"
+      apply:
+        delegate_to: "{{ lab_network_prefix }}.{{ ip_list[item.host] }}"
     loop:
       - { role: setup-rhsm,         host: ceph1 }
       - { role: setup-ceph-prereqs, host: ceph1 }
@@ -75,7 +77,6 @@
       - { role: setup-ceph-prereqs, host: cephadmin }
     loop_control:
       label: "{{ item.role }} -> {{ item.host }}"
-    delegate_to: "{{ lab_network_prefix }}.{{ ip_list[item.host] }}"
     tags:
       - rhsm
       - ceph-prereqs
