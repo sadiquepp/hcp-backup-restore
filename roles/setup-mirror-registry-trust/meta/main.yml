@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Fetches the mirror registry's self-signed CA to baremetal, trusts it, and logs baremetal's podman in via a dedicated authfile
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

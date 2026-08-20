@@ -236,6 +236,10 @@ mirror_registry_vcpus: 8
 mirror_registry_domain: "registry.{{ hub_domain }}"
 mirror_registry_port: 8443
 ## mirror_registry_password goes in vault.yaml, not here.
+## Dedicated authfile for baremetal's own podman login to the mirror
+## registry (see roles/setup-mirror-registry-trust) - kept separate from
+## ~/.docker/config.json so this never touches your other registry creds.
+mirror_registry_authfile: /root/.docker/config.json
 mirror_registry_quay_root: /registry
 
 ## OCP release/operators to mirror. Extend catalog_operator_packages with

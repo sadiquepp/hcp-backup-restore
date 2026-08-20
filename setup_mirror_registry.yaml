@@ -61,3 +61,8 @@
     tags:
       - mirror
     delegate_to: "{{ lab_network_prefix }}.{{ ip_list.mirror_registry }}"
+
+  - ansible.builtin.import_role:
+      name: setup-mirror-registry-trust
+    tags:
+      - mirror-trust

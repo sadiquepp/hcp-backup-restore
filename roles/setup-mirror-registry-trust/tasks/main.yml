@@ -1,0 +1,45 @@
+---
+# Tasks file for setup-mirror-registry-trust
+#
+# Runs on the baremetal host (localhost) - fetches the mirror registry's
+# self-signed CA back from the VM, trusts it locally, and logs
+# baremetal's own podman in via a dedicated authfile. Never touches
+# ~/.docker/config.json, so this can't disturb any other registry
+# credentials already configured there (registry.redhat.io, quay.io,
+# etc). Must run after roles/setup-mirror-registry, since that's what
+# generates the CA on the VM in the first place.
+
+- name: Ensure podman is installed on baremetal
+  dnf:
+    name: podman
+    state: present
+
+- name: Fetch the Quay root CA from the mirror-registry VM
+  ansible.builtin.fetch:
+    src: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+    dest: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+    flat: true
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.mirror_registry }}"
+
+- name: Update baremetal's CA trust bundle
+  ansible.builtin.command:
+    cmd: update-ca-trust extract
+
+- name: Remove any stale mirror-registry authfile (clean slate)
+  ansible.builtin.file:
+    path: "{{ mirror_registry_authfile }}"
+    state: absent
+
+- name: Log baremetal in to the mirror registry (dedicated authfile)
+  ansible.builtin.command:
+    cmd: >
+      podman login --authfile {{ mirror_registry_authfile }}
+      -u init -p {{ mirror_registry_password }}
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }}
+
+- name: Report the authfile location for other tooling (oc-mirror, skopeo, etc.)
+  debug:
+    msg: >-
+      Baremetal is logged in to {{ mirror_registry_domain }}:{{ mirror_registry_port }} -
+      use --authfile {{ mirror_registry_authfile }} with podman/skopeo/oc-mirror
+      commands run from here.
