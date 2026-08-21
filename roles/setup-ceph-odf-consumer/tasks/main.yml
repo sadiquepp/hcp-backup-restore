@@ -55,7 +55,8 @@
 
 - name: Create/update the rook-ceph-external-cluster-details secret (idempotent)
   shell: |
-    oc create secret generic rook-ceph-external-cluster-details \
+    oc create secret generic oc get storagecluster ocs-external-storagecluster -n openshift-storage \
+  -o jsonpath='{.status.conditions[?(@.type=="ExternalClusterConnected")].status}{"\n"}' \
       --from-file=external_cluster_details="{{ ceph_odf_export_dir }}/external-cluster-details.json" \
       -n openshift-storage \
       --dry-run=client -o yaml | oc apply -f -
