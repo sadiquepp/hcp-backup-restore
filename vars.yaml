@@ -369,3 +369,4 @@ ceph_odf_exporter_script_url: https://raw.githubusercontent.com/rook/rook/releas
 ## Where the exported JSON (contains cluster credentials!) lands
 ## locally - see .gitignore, never commit this.
 ceph_odf_export_dir: "{{ playbook_dir }}/ceph-odf"
+use_lvm_storage: false

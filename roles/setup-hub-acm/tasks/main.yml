@@ -11,11 +11,12 @@
     oc apply -f "{{ role_path }}/files/acm/03-subscription.yaml"
 
 
-#- name: Deploy LVM Storage Operator
-#  shell: |
-#    oc apply -f "{{ role_path }}/files/lvm-storage/01-namespace.yaml"
-#    oc apply -f "{{ role_path }}/files/lvm-storage/02-operatorGroup.yaml"
-#    oc apply -f "{{ role_path }}/files/lvm-storage/03-subscription.yaml"
+- name: Deploy LVM Storage Operator
+  shell: |
+    oc apply -f "{{ role_path }}/files/lvm-storage/01-namespace.yaml"
+    oc apply -f "{{ role_path }}/files/lvm-storage/02-operatorGroup.yaml"
+    oc apply -f "{{ role_path }}/files/lvm-storage/03-subscription.yaml"
+  when: use_lvm_storage == true
 
 
 - name: Deploy MetalLB Operator  
@@ -50,10 +51,10 @@
   shell: |
     oc apply -f "{{ role_path }}/files/acm/04b-provisioning.yaml"
 
-#- name: Setup LVMCluster Resource
-#  shell: |
-#    oc apply -f "{{ role_path }}/files/lvm-storage/04-lvm-cluster.yaml"
-
+- name: Setup LVMCluster Resource
+  shell: |
+    oc apply -f "{{ role_path }}/files/lvm-storage/04-lvm-cluster.yaml"
+  when: use_lvm_storage == true
 
 - name: Render MetalLB IPAddressPool
   template:
