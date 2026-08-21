@@ -34,15 +34,20 @@
 
 - name: Create the OperatorGroup
   shell: |
-    oc apply -f "{{ role_path }}/files/02-operatorGroup.yaml"
+    oc create -f "{{ role_path }}/files/02-operatorGroup.yaml"
+
+- name: Render the ODF operator Subscription
+  ansible.builtin.template:
+    src: 03-subscription.yaml.j2
+    dest: "{{ role_path }}/templates/.rendered-subscription.yaml"
 
 - name: Subscribe to the ODF operator
   shell: |
-    oc apply -f "{{ role_path }}/files/03-subscription.yaml"
+    oc apply -f "{{ role_path }}/templates/.rendered-subscription.yaml"
 
 - name: Wait for the StorageCluster CRD to be established
   shell: |
-    oc wait --for=condition=Established crd/storageclusters.ocs.openshift.io --timeout=300s
+    oc wait --for=condition=Established crd/storageclients.ocs.openshift.io --timeout=300s
   register: crd_wait
   retries: 5
   delay: 30

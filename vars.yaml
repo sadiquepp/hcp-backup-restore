@@ -354,7 +354,8 @@ ceph_dashboard_user: admin
 ## setup-ceph-odf-export / setup-ceph-odf-consumer: exports this Ceph
 ## cluster's RBD pool (+ optional CephFS) and scoped CSI credentials
 ## for OpenShift Data Foundation (ODF) "external mode" to consume as
-## PVs (see setup_ceph_odf.yaml).
+## PVs (see setup_ceph_odf.yaml). ODF operator channel is
+## stable-{{ ocp_major_version }} (same ocp_major_version as the hub).
 ceph_odf_rbd_pool: ocs-storagecluster-cephblockpool
 ceph_odf_rbd_pool_pg_num: 32
 ceph_odf_enable_cephfs: true
