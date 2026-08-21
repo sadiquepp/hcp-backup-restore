@@ -43,9 +43,8 @@
 - name: Bootstrap the Ceph 9 cluster on ceph1
   ansible.builtin.command:
     cmd: >
-      cephadm bootstrap
+      cephadm --image {{ ceph_container_image }} bootstrap
       --mon-ip {{ lab_network_prefix }}.{{ ip_list.ceph1 }}
-      --image {{ ceph_container_image }}
       --initial-dashboard-user {{ ceph_dashboard_user }}
       --initial-dashboard-password {{ ceph_dashboard_password }}
       --allow-fqdn-hostname
