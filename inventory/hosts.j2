@@ -28,3 +28,7 @@ worker3.hub.mylab.com ansible_ssh_host={{ lab_network_prefix }}.{{ ip_list.worke
 
 [ceph_admin]
 {{ lab_network_prefix }}.{{ ip_list.cephadmin }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[ceph_nodes:children]
+ceph
+ceph_admin

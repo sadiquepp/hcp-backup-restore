@@ -55,11 +55,13 @@
     tags:
       - ceph-vm
 
-# Target inventory groups (ceph + ceph_admin) so Ansible runs each
-# host in parallel (default forks). Per node, setup-rhsm still runs
-# before setup-ceph-prereqs; across nodes those steps overlap.
+# gather_facts must stay off: VMs were just created in the previous play
+# and are not SSH-ready yet. setup-rhsm's wait_for_connection is the
+# first contact attempt (same as when this used localhost + delegate_to,
+# where facts were only gathered on localhost).
 - name: Register and prep Ceph nodes
-  hosts: ceph:ceph_admin
+  hosts: ceph_nodes
+  gather_facts: false
   become: true
   vars_files:
     - vars.yaml
