@@ -34,7 +34,7 @@
 
 - name: Create the OperatorGroup
   shell: |
-    oc create -f "{{ role_path }}/files/02-operatorGroup.yaml"
+    oc apply -f "{{ role_path }}/files/02-operatorGroup.yaml"
 
 - name: Render the ODF operator Subscription
   ansible.builtin.template:
