@@ -324,10 +324,10 @@ ceph_os_disk_size: 60G
 ceph_os_resize_partition: /dev/sda4
 ceph_osd_disks_per_node: 3
 ceph_osd_disk_size: 100G
-ceph_storage_memory: 8192
-ceph_storage_vcpus: 4
-ceph_admin_memory: 4096
-ceph_admin_vcpus: 2
+ceph_storage_memory: 24576
+ceph_storage_vcpus: 16
+ceph_admin_memory: 8192
+ceph_admin_vcpus: 4
 
 ## setup-ceph-prereqs: direct subscription-manager registration (no
 ## Satellite) - org_id/activation_key come from vault.yaml, shared
@@ -350,3 +350,22 @@ ceph_container_registry: registry.redhat.io
 ceph_container_image: "{{ ceph_container_registry }}/rhceph/rhceph-9-rhel9:latest"
 ceph_dashboard_user: admin
 ## ceph_dashboard_password goes in vault.yaml, not here.
+
+## setup-ceph-odf-export / setup-ceph-odf-consumer: exports this Ceph
+## cluster's RBD pool (+ optional CephFS) and scoped CSI credentials
+## for OpenShift Data Foundation (ODF) "external mode" to consume as
+## PVs (see setup_ceph_odf.yaml).
+ceph_odf_rbd_pool: ocs-storagecluster-cephblockpool
+ceph_odf_rbd_pool_pg_num: 32
+ceph_odf_enable_cephfs: true
+ceph_odf_cephfs_name: ocs-storagecluster-cephfilesystem
+ceph_odf_storagecluster_name: ocs-external-storagecluster
+## Pinned Rook release for create-external-cluster-resources.py (same
+## script ODF's UI hands you as ceph-external-cluster-details-exporter.py -
+## same project, different filename). Bump this if you're on a
+## different ODF version - check docs.redhat.com for your ODF
+## release's matching rook branch.
+ceph_odf_exporter_script_url: https://raw.githubusercontent.com/rook/rook/release-1.16/deploy/examples/create-external-cluster-resources.py
+## Where the exported JSON (contains cluster credentials!) lands
+## locally - see .gitignore, never commit this.
+ceph_odf_export_dir: "{{ playbook_dir }}/ceph-odf"

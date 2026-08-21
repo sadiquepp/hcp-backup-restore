@@ -1,0 +1,15 @@
+apiVersion: ocs.openshift.io/v1
+kind: StorageCluster
+metadata:
+  name: {{ ceph_odf_storagecluster_name }}
+  namespace: openshift-storage
+spec:
+  externalStorage:
+    enable: true
+  managedResources:
+    cephBlockPools:
+      reconcileStrategy: ignore
+    cephFilesystems:
+      reconcileStrategy: ignore
+    cephObjectStores:
+      reconcileStrategy: ignore

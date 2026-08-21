@@ -2,3 +2,4 @@
 vault.yaml
 .DS_Store
 roles/.DS_Store
+ceph-odf/

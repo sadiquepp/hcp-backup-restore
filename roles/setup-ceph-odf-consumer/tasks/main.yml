@@ -1,0 +1,86 @@
+---
+# Tasks file for setup-ceph-odf-consumer
+#
+# Runs against whatever cluster KUBECONFIG points at when this role
+# is imported (see setup_ceph_odf.yaml - ceph_odf_target_kubeconfig).
+# Same idempotent oc-apply style as roles/setup-oadp.
+#
+# 1. Installs the ODF operator (namespace + OperatorGroup +
+#    Subscription - same shape as roles/setup-hub-acm's other
+#    operators).
+# 2. Creates rook-ceph-external-cluster-details from the JSON
+#    setup-ceph-odf-export produced.
+# 3. Creates the external StorageCluster CR, which tells ocs-operator
+#    to wire ceph-csi up to that cluster instead of deploying its own
+#    Ceph. StorageClasses (ocs-external-storagecluster-ceph-rbd, and
+#    -cephfs if enabled) appear once it reconciles.
+
+- name: Fail fast if the exported JSON hasn't been fetched yet
+  ansible.builtin.stat:
+    path: "{{ ceph_odf_export_dir }}/external-cluster-details.json"
+  register: ceph_odf_export_file
+
+- name: Fail with a clear message if it's missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ ceph_odf_export_dir }}/external-cluster-details.json not
+      found - run setup_ceph_odf.yaml's first play
+      (setup-ceph-odf-export) before this one.
+  when: not ceph_odf_export_file.stat.exists
+
+- name: Create the openshift-storage namespace
+  shell: |
+    oc apply -f "{{ role_path }}/files/01-namespace.yaml"
+
+- name: Create the OperatorGroup
+  shell: |
+    oc apply -f "{{ role_path }}/files/02-operatorGroup.yaml"
+
+- name: Subscribe to the ODF operator
+  shell: |
+    oc apply -f "{{ role_path }}/files/03-subscription.yaml"
+
+- name: Wait for the StorageCluster CRD to be established
+  shell: |
+    oc wait --for=condition=Established crd/storageclusters.ocs.openshift.io --timeout=300s
+  register: crd_wait
+  retries: 5
+  delay: 30
+  until: crd_wait.rc == 0
+
+- name: Create/update the rook-ceph-external-cluster-details secret (idempotent)
+  shell: |
+    oc create secret generic rook-ceph-external-cluster-details \
+      --from-file=external_cluster_details="{{ ceph_odf_export_dir }}/external-cluster-details.json" \
+      -n openshift-storage \
+      --dry-run=client -o yaml | oc apply -f -
+
+- name: Render the external StorageCluster CR
+  template:
+    src: 04-storagecluster.yaml.j2
+    dest: "{{ role_path }}/templates/.rendered-storagecluster.yaml"
+
+- name: Apply the external StorageCluster
+  shell: |
+    oc apply -f "{{ role_path }}/templates/.rendered-storagecluster.yaml"
+
+#- name: Clean up the rendered scratch file
+#  ansible.builtin.file:
+#    path: "{{ role_path }}/templates/.rendered-storagecluster.yaml"
+#    state: absent
+
+- name: Wait for the external StorageCluster to reconcile
+  ansible.builtin.pause:
+    seconds: 60
+
+- name: Check for the resulting StorageClasses
+  shell: |
+    oc get storageclass -o name | grep {{ ceph_odf_storagecluster_name }} || true
+  register: ceph_odf_storageclasses
+  changed_when: false
+
+- name: Report StorageClasses
+  ansible.builtin.debug:
+    msg: >-
+      {{ ceph_odf_storageclasses.stdout_lines
+         | default(['none yet - check `oc get storagecluster -n openshift-storage` for status']) }}

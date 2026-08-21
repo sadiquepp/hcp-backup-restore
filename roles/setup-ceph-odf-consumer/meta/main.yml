@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Installs ODF and creates the external StorageCluster pointing at the Ceph 9 cluster
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

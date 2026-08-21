@@ -1,0 +1,99 @@
+---
+# Tasks file for setup-ceph-odf-export
+#
+# Delegated to cephadmin (see setup_ceph_odf.yaml) - the one node in
+# this cluster that already has the admin keyring/ceph.conf (_admin
+# label from setup-ceph-cluster) and ceph-common installed
+# (setup-ceph-prereqs), so plain `ceph`/`rbd` CLI commands just work
+# here directly, no `cephadm shell` container needed.
+#
+# 1. Creates the RBD pool (and, optionally, a CephFS filesystem) ODF
+#    will provision PVs out of. These are genuine prerequisites - the
+#    exporter script below does NOT create pools/filesystems for you,
+#    it only creates CSI users/keys scoped to ones that already exist.
+# 2. Downloads Red Hat/Rook's external-cluster exporter script (the
+#    same script ODF's UI hands you as
+#    ceph-external-cluster-details-exporter.py - same project, just a
+#    different filename) and runs it, producing a JSON blob with the
+#    fsid, mon endpoints, and scoped CSI credentials ODF needs.
+# 3. Fetches that JSON back to the controller (ceph_odf_export_dir) -
+#    setup-ceph-odf-consumer picks it up from there in the next play.
+#    NOT committed to git (see .gitignore) - it's cluster credentials.
+
+- name: Wait for SSH on cephadmin
+  ansible.builtin.wait_for_connection:
+    delay: 5
+    timeout: 300
+
+- name: Check existing RBD pools
+  ansible.builtin.command:
+    cmd: ceph osd pool ls
+  register: ceph_pool_list
+  changed_when: false
+
+- name: Create the RBD pool for ODF
+  ansible.builtin.command:
+    cmd: "ceph osd pool create {{ ceph_odf_rbd_pool }} {{ ceph_odf_rbd_pool_pg_num }}"
+  when: ceph_odf_rbd_pool not in ceph_pool_list.stdout_lines
+
+- name: Initialize the RBD pool
+  ansible.builtin.command:
+    cmd: "rbd pool init {{ ceph_odf_rbd_pool }}"
+  when: ceph_odf_rbd_pool not in ceph_pool_list.stdout_lines
+
+- name: Check existing CephFS filesystems
+  ansible.builtin.command:
+    cmd: ceph fs ls
+  register: ceph_fs_list
+  changed_when: false
+  when: ceph_odf_enable_cephfs
+
+- name: Create the CephFS filesystem for ODF
+  ansible.builtin.command:
+    cmd: "ceph fs volume create {{ ceph_odf_cephfs_name }}"
+  when:
+    - ceph_odf_enable_cephfs
+    - ceph_odf_cephfs_name not in ceph_fs_list.stdout
+
+- name: Place an MDS daemon for the new filesystem (on the all-in-one storage nodes)
+  ansible.builtin.command:
+    cmd: 'ceph orch apply mds {{ ceph_odf_cephfs_name }} --placement="label:mon"'
+  when:
+    - ceph_odf_enable_cephfs
+    - ceph_odf_cephfs_name not in ceph_fs_list.stdout
+
+- name: Download the Rook/ODF external-cluster exporter script
+  ansible.builtin.get_url:
+    url: "{{ ceph_odf_exporter_script_url }}"
+    dest: /root/ceph-external-cluster-details-exporter.py
+    mode: '0755'
+
+- name: Run the exporter script (creates scoped CSI users, gathers connection details)
+  ansible.builtin.command:
+    cmd: >
+      python3 /root/ceph-external-cluster-details-exporter.py
+      --rbd-data-pool-name {{ ceph_odf_rbd_pool }}
+      {{ ('--cephfs-filesystem-name ' + ceph_odf_cephfs_name) if ceph_odf_enable_cephfs else '' }}
+      --format json
+  register: ceph_odf_export_result
+  changed_when: true
+
+- name: Write the exported JSON to disk on cephadmin
+  ansible.builtin.copy:
+    dest: /root/external-cluster-details.json
+    content: "{{ ceph_odf_export_result.stdout }}"
+    mode: '0600'
+
+- name: Fetch the exported JSON back to the controller
+  ansible.builtin.fetch:
+    src: /root/external-cluster-details.json
+    dest: "{{ ceph_odf_export_dir }}/external-cluster-details.json"
+    flat: true
+
+- name: Show where the exported JSON landed
+  ansible.builtin.debug:
+    msg: >-
+      Wrote {{ ceph_odf_export_dir }}/external-cluster-details.json -
+      contains cluster credentials, do not commit it (see
+      .gitignore). Run setup_ceph_odf.yaml's second play
+      (setup-ceph-odf-consumer) next to apply it to your OCP cluster.
