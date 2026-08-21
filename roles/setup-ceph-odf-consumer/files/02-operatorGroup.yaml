@@ -2,7 +2,7 @@ apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
   namespace: openshift-storage
-  generateName: openshift-storage-
+  name: openshift-storage-odf
 spec:
   upgradeStrategy: Default
   targetNamespaces:
