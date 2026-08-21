@@ -47,7 +47,7 @@
 
 - name: Wait for the StorageCluster CRD to be established
   shell: |
-    oc wait --for=condition=Established crd/storageclients.ocs.openshift.io --timeout=300s
+    oc wait --for=condition=Established crd/storageclusters.ocs.openshift.io --timeout=300s
   register: crd_wait
   retries: 5
   delay: 30
