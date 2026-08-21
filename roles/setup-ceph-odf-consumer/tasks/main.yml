@@ -49,7 +49,7 @@
   shell: |
     oc wait --for=condition=Established crd/storageclusters.ocs.openshift.io --timeout=300s
   register: crd_wait
-  retries: 5
+  retries: 60
   delay: 30
   until: crd_wait.rc == 0
 
