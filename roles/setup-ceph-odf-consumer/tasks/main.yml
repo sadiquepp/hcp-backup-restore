@@ -53,6 +53,20 @@
   delay: 30
   until: crd_wait.rc == 0
 
+- name: Enable the odf-console plugin on the OpenShift Console
+  shell: |
+    set -e
+    plugins=$(oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}')
+    case "$plugins" in
+      *odf-console*) echo "already enabled" ;;
+      ''|null) oc patch console.operator.openshift.io cluster --type merge \
+                 -p '{"spec":{"plugins":["odf-console"]}}' ;;
+      *) oc patch console.operator.openshift.io cluster --type json \
+           -p '[{"op":"add","path":"/spec/plugins/-","value":"odf-console"}]' ;;
+    esac
+  register: odf_console_plugin
+  changed_when: "'already enabled' not in odf_console_plugin.stdout"
+
 - name: Create/update the rook-ceph-external-cluster-details secret (idempotent)
   shell: |
     oc create secret generic {{ ceph_odf_storagecluster_name }} \
