@@ -7,9 +7,14 @@ spec:
   externalStorage:
     enable: true
   managedResources:
+    # Do NOT set reconcileStrategy: ignore here. In external mode the
+    # operator isn't managing the Ceph pools themselves - it's
+    # managing the StorageClasses that point at them. "ignore"
+    # suppresses that StorageClass creation, so no default SC ever
+    # appears. defaultStorageClass: true is what marks the RBD
+    # StorageClass as the cluster default - this matches what the ODF
+    # UI generates.
     cephBlockPools:
-      reconcileStrategy: ignore
-    cephFilesystems:
-      reconcileStrategy: ignore
-    cephObjectStores:
-      reconcileStrategy: ignore
+      defaultStorageClass: {{ ceph_odf_rbd_default_sc | ternary('true', 'false') }}
+    cephFilesystems: {}
+    cephObjectStores: {}

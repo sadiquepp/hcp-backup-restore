@@ -361,6 +361,11 @@ ceph_odf_rbd_pool_pg_num: 32
 ceph_odf_enable_cephfs: true
 ceph_odf_cephfs_name: ocs-storagecluster-cephfilesystem
 ceph_odf_storagecluster_name: ocs-external-storagecluster
+## Whether the external RBD StorageClass is marked the cluster
+## default (managedResources.cephBlockPools.defaultStorageClass). The
+## ODF UI sets this true; set false if another StorageClass should
+## stay default (e.g. if this coexists with LVM Storage).
+ceph_odf_rbd_default_sc: true
 ## The exporter script is NOT pulled from a fixed GitHub branch -
 ## it's extracted from the installed ODF operator's CSV so it always
 ## matches the operator version (an older upstream script emits CSI
