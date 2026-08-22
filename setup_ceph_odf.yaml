@@ -3,8 +3,20 @@
 ## ODF and wires up the external StorageCluster on the target OCP
 ## cluster.
 ##
-## IMPORTANT - read before running: by default the second play here
-## targets the same hub cluster every other *.yaml in this repo does
+## Runs in three ordered plays, because ODF must be installed before
+## we can export (the exporter script has to match the installed
+## operator version - an older upstream script emits CSI credentials
+## under key names a newer operator won't read, which silently leaves
+## the StorageCluster stuck "Progressing"):
+##   1. consumer stage 'install' - install ODF, extract the
+##      version-matched exporter script from the operator CSV
+##   2. export - create the pool/CephFS on the Ceph cluster and run
+##      that script (on cephadmin) to produce the connection JSON
+##   3. consumer stage 'create' - create the external-cluster secret
+##      and StorageCluster CR from that JSON
+##
+## IMPORTANT - read before running: by default the consumer plays
+## target the same hub cluster every other *.yaml in this repo does
 ## (hub_kubeconfig, same target_hub switch as setup_oadp.yaml). But
 ## the hub already runs the LVM Storage operator in the
 ## openshift-storage namespace (roles/setup-hub-acm, part of hub
@@ -14,14 +26,29 @@
 ##   - remove LVM Storage from the hub first, or
 ##   - point this at a different cluster's kubeconfig instead:
 ##       -e ceph_odf_target_kubeconfig=/path/to/some/other/kubeconfig
-##     (e.g. a hosted cluster's, once you've extracted one - this repo
-##     doesn't do that extraction for you, hcp CLI or `oc get secret
-##     <name>-admin-kubeconfig` on the hub gets you one)
 ##
 ## Usage:
 ##   ansible-playbook setup_ceph_odf.yaml --ask-vault-pass
 ##   ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
 ##   ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e ceph_odf_target_kubeconfig=/path/to/kubeconfig
+
+- name: Install ODF and extract the version-matched exporter script
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  vars:
+    ceph_odf_target_kubeconfig: >-
+      {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+    ceph_odf_consumer_stage: install
+  tasks:
+  - ansible.builtin.import_role:
+      name: setup-ceph-odf-consumer
+    environment:
+      KUBECONFIG: "{{ ceph_odf_target_kubeconfig }}"
+    tags:
+      - ceph-odf-install
 
 - name: Export Ceph pool/CephFS + CSI credentials for ODF
   hosts: localhost
@@ -36,7 +63,7 @@
       - ceph-odf-export
     delegate_to: "{{ lab_network_prefix }}.{{ ip_list.cephadmin }}"
 
-- name: Install ODF and create the external StorageCluster
+- name: Create the external StorageCluster
   hosts: localhost
   become: true
   vars_files:
@@ -45,10 +72,11 @@
   vars:
     ceph_odf_target_kubeconfig: >-
       {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+    ceph_odf_consumer_stage: create
   tasks:
   - ansible.builtin.import_role:
       name: setup-ceph-odf-consumer
     environment:
       KUBECONFIG: "{{ ceph_odf_target_kubeconfig }}"
     tags:
-      - ceph-odf-consumer
+      - ceph-odf-create

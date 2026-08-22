@@ -1,0 +1,121 @@
+---
+# setup-ceph-odf-consumer : install-operator.yml
+#
+# The FIRST of the two consumer stages (see setup_ceph_odf.yaml).
+# Runs with KUBECONFIG pointed at the target OCP cluster. Installs
+# the ODF operator, then extracts the version-matched exporter script
+# from the operator's CSV so the export play (on cephadmin) runs the
+# script that actually matches this operator - see the note in
+# setup-ceph-odf-export about the adminID/userID drift.
+
+- name: Create the openshift-storage namespace
+  shell: |
+    oc apply -f "{{ role_path }}/files/01-namespace.yaml"
+
+- name: Create the OperatorGroup
+  shell: |
+    oc apply -f "{{ role_path }}/files/02-operatorGroup.yaml"
+
+- name: Render the ODF operator Subscription
+  ansible.builtin.template:
+    src: 03-subscription.yaml.j2
+    dest: "{{ role_path }}/templates/.rendered-subscription.yaml"
+
+- name: Subscribe to the ODF operator
+  shell: |
+    oc apply -f "{{ role_path }}/templates/.rendered-subscription.yaml"
+
+- name: Wait for the StorageCluster CRD to be established
+  shell: |
+    oc wait --for=condition=Established crd/storageclusters.ocs.openshift.io --timeout=300s
+  register: crd_wait
+  retries: 60
+  delay: 30
+  until: crd_wait.rc == 0
+
+- name: Enable the odf-console plugin on the OpenShift Console
+  shell: |
+    set -e
+    plugins=$(oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}')
+    case "$plugins" in
+      *odf-console*) echo "already enabled" ;;
+      ''|null) oc patch console.operator.openshift.io cluster --type merge \
+                 -p '{"spec":{"plugins":["odf-console"]}}' ;;
+      *) oc patch console.operator.openshift.io cluster --type json \
+           -p '[{"op":"add","path":"/spec/plugins/-","value":"odf-console"}]' ;;
+    esac
+  register: odf_console_plugin
+  changed_when: "'already enabled' not in odf_console_plugin.stdout"
+
+# The exporter script ships inside the installed ODF operator so it
+# always matches the operator version. WHERE it ships moved in 4.19:
+#   - ODF >= 4.19: ConfigMap rook-ceph-external-cluster-script-config,
+#     key .data.script (base64). The CSV annotation is GONE here.
+#   - ODF <= 4.18: CSV annotation
+#     external.features.ocs.openshift.io/export-script (base64).
+# Try the 4.19+ ConfigMap first, fall back to the CSV annotation, so
+# this role works across versions. (An older upstream GitHub script
+# is NOT interchangeable - it emits CephFS CSI secrets as
+# adminID/adminKey, which a 4.19+ operator won't read, leaving the
+# StorageCluster stuck "Progressing".)
+- name: Ensure the local ceph-odf dir exists for the extracted script/JSON
+  ansible.builtin.file:
+    path: "{{ ceph_odf_export_dir }}"
+    state: directory
+    mode: '0700'
+
+- name: Wait for the 4.19+ exporter-script ConfigMap (created by the operator)
+  shell: |
+    oc get cm rook-ceph-external-cluster-script-config -n openshift-storage -o name 2>/dev/null
+  register: ceph_odf_script_cm_present
+  failed_when: false
+  changed_when: false
+  retries: 30
+  delay: 20
+  until: ceph_odf_script_cm_present.rc == 0 or ceph_odf_script_cm_present.stdout != ""
+
+- name: Extract the exporter script from the 4.19+ ConfigMap
+  shell: |
+    oc get cm rook-ceph-external-cluster-script-config -n openshift-storage \
+      -o jsonpath='{.data.script}' | base64 --decode > "{{ ceph_odf_exporter_local_path }}"
+  when: ceph_odf_script_cm_present.stdout != ""
+  changed_when: true
+
+- name: Check whether the ConfigMap extraction produced a script
+  ansible.builtin.stat:
+    path: "{{ ceph_odf_exporter_local_path }}"
+  register: ceph_odf_script_after_cm
+
+- name: Fall back to the <=4.18 CSV annotation if the ConfigMap wasn't present
+  when: not ceph_odf_script_after_cm.stat.exists or ceph_odf_script_after_cm.stat.size == 0
+  block:
+    - name: Find the ocs-operator CSV name
+      shell: |
+        oc get csv -n openshift-storage -o name | grep ocs-operator | head -n1 | cut -d/ -f2
+      register: ocs_csv_name
+      retries: 30
+      delay: 20
+      until: ocs_csv_name.stdout != ""
+      changed_when: false
+
+    - name: Extract the exporter script from the CSV annotation
+      shell: |
+        oc get csv "{{ ocs_csv_name.stdout }}" -n openshift-storage \
+          -o jsonpath='{.metadata.annotations.external\.features\.ocs\.openshift\.io/export-script}' \
+          | base64 --decode > "{{ ceph_odf_exporter_local_path }}"
+      changed_when: true
+
+- name: Sanity-check the extracted script is non-empty
+  ansible.builtin.stat:
+    path: "{{ ceph_odf_exporter_local_path }}"
+  register: ceph_odf_exporter_stat
+
+- name: Fail if the exporter script didn't extract from either source
+  ansible.builtin.fail:
+    msg: >-
+      Could not extract the exporter script. On ODF >= 4.19 it comes
+      from ConfigMap rook-ceph-external-cluster-script-config
+      (.data.script); on <= 4.18 from the ocs-operator CSV annotation
+      external.features.ocs.openshift.io/export-script. Neither was
+      found in the openshift-storage namespace.
+  when: not ceph_odf_exporter_stat.stat.exists or ceph_odf_exporter_stat.stat.size == 0

@@ -361,12 +361,14 @@ ceph_odf_rbd_pool_pg_num: 32
 ceph_odf_enable_cephfs: true
 ceph_odf_cephfs_name: ocs-storagecluster-cephfilesystem
 ceph_odf_storagecluster_name: ocs-external-storagecluster
-## Pinned Rook release for create-external-cluster-resources.py (same
-## script ODF's UI hands you as ceph-external-cluster-details-exporter.py -
-## same project, different filename). Bump this if you're on a
-## different ODF version - check docs.redhat.com for your ODF
-## release's matching rook branch.
-ceph_odf_exporter_script_url: https://raw.githubusercontent.com/rook/rook/release-1.16/deploy/examples/create-external-cluster-resources.py
+## The exporter script is NOT pulled from a fixed GitHub branch -
+## it's extracted from the installed ODF operator's CSV so it always
+## matches the operator version (an older upstream script emits CSI
+## secrets as adminID/adminKey, but ODF 4.21 reads userID/userKey,
+## which silently breaks the connection). This is where the first
+## play drops the extracted copy on the controller; the export play
+## copies it to cephadmin from here.
+ceph_odf_exporter_local_path: "{{ playbook_dir }}/ceph-odf/ceph-external-cluster-details-exporter.py"
 ## Where the exported JSON (contains cluster credentials!) lands
 ## locally - see .gitignore, never commit this.
 ceph_odf_export_dir: "{{ playbook_dir }}/ceph-odf"

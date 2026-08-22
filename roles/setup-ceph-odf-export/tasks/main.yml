@@ -11,11 +11,12 @@
 #    will provision PVs out of. These are genuine prerequisites - the
 #    exporter script below does NOT create pools/filesystems for you,
 #    it only creates CSI users/keys scoped to ones that already exist.
-# 2. Downloads Red Hat/Rook's external-cluster exporter script (the
-#    same script ODF's UI hands you as
-#    ceph-external-cluster-details-exporter.py - same project, just a
-#    different filename) and runs it, producing a JSON blob with the
-#    fsid, mon endpoints, and scoped CSI credentials ODF needs.
+# 2. Runs the version-matched exporter script (extracted from the
+#    installed ODF operator's CSV by the first play, then copied here)
+#    to produce a JSON blob with the fsid, mon endpoints, and scoped
+#    CSI credentials ODF needs. Version-matched matters: an older
+#    upstream script emits credentials under key names a newer
+#    operator won't read - see the longer note at the run task.
 # 3. Fetches that JSON back to the controller (ceph_odf_export_dir) -
 #    setup-ceph-odf-consumer picks it up from there in the next play.
 #    NOT committed to git (see .gitignore) - it's cluster credentials.
@@ -62,9 +63,24 @@
     - ceph_odf_enable_cephfs
     - ceph_odf_cephfs_name not in ceph_fs_list.stdout
 
-- name: Download the Rook/ODF external-cluster exporter script
-  ansible.builtin.get_url:
-    url: "{{ ceph_odf_exporter_script_url }}"
+# The exporter script MUST be the one the installed ODF operator
+# ships, NOT a fixed GitHub branch. They drift: an older upstream
+# script (e.g. rook release-1.16) emits the CephFS CSI secrets as
+# adminID/adminKey, but ODF 4.21's operator reads userID/userKey - a
+# wrong-key-name mismatch that leaves the operator with no usable CSI
+# credential, so it falls back to DNS SRV mon discovery and the
+# external StorageCluster sticks in "Progressing" with
+# "unable to get monitor info from DNS SRV / RADOS object not found".
+# The version-matched script also enables v2-port-enable itself, so
+# the mon endpoints come out :3300 natively (no regex fix-up needed).
+#
+# setup_ceph_odf.yaml's first play extracts that script straight from
+# the operator's CSV annotation and drops it at
+# ceph_odf_exporter_local_path on the controller. Here we just push
+# that copy to cephadmin and run it.
+- name: Copy the version-matched exporter script from the controller to cephadmin
+  ansible.builtin.copy:
+    src: "{{ ceph_odf_exporter_local_path }}"
     dest: /root/ceph-external-cluster-details-exporter.py
     mode: '0755'
 
@@ -74,31 +90,15 @@
       python3 /root/ceph-external-cluster-details-exporter.py
       --rbd-data-pool-name {{ ceph_odf_rbd_pool }}
       {{ ('--cephfs-filesystem-name ' + ceph_odf_cephfs_name) if ceph_odf_enable_cephfs else '' }}
+      --v2-port-enable
       --format json
   register: ceph_odf_export_result
   changed_when: true
 
-# The exporter seeds the rook-ceph-mon-endpoints ConfigMap entry with
-# the mon's v1/6789 port (e.g. "ceph1=192.168.122.24:6789"), even
-# though the mon offers v2/3300 too. Modern ODF's ceph-csi wants a
-# msgr2 endpoint, so the v1 seed leaves the external StorageCluster
-# stuck in "Progressing" (rook-ceph-mon-endpoints keeps the stale
-# :6789). The --v2-port-enable flag does NOT fix this field. Rewrite
-# it here with a pattern tight enough to hit only a mon endpoint
-# ("=<ip>:6789" inside the seed string) - it deliberately won't
-# touch a bare :6789 anywhere else (fsid, other fields), and unlike a
-# combine/reject rebuild it preserves the list order the exporter
-# emitted.
-- name: Force the mon-endpoints seed to the msgr2 (v2/3300) port
-  ansible.builtin.set_fact:
-    ceph_odf_export_json: >-
-      {{ ceph_odf_export_result.stdout
-         | regex_replace('(=\d+\.\d+\.\d+\.\d+):6789(")', '\g<1>:3300\g<2>') }}
-
-- name: Write the (port-corrected) exported JSON to disk on cephadmin
+- name: Write the exported JSON to disk on cephadmin
   ansible.builtin.copy:
     dest: /root/external-cluster-details.json
-    content: "{{ ceph_odf_export_json }}"
+    content: "{{ ceph_odf_export_result.stdout }}"
     mode: '0600'
 
 - name: Fetch the exported JSON back to the controller
