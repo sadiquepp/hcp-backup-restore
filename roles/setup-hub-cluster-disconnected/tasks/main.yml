@@ -38,6 +38,108 @@
 # Note the "Delete Install Directory if exists" task below only ever removes
 # hub_disconnected_install_folder, so re-running this never disturbs hub1/hub2.
 
+# ---------------------------------------------------------------------------
+# Cut this cluster's nodes off from the real internet BEFORE anything boots.
+#
+# libvirt keeps the MASQUERADE rules for its networks in the nat table's
+# LIBVIRT_PRT chain (POSTROUTING jumps to it). Anything a node sends off the lab
+# subnet is source-NATed there and reaches the real internet - so a
+# "disconnected" install could still fall back to quay.io / registry.redhat.io
+# and succeed for the wrong reason, which defeats the point of this role.
+#
+# Both matches below are shaped like libvirt's own rules ("from this node, NOT
+# to the lab subnet"), so everything on {{ lab_network_prefix }}.0/24 stays
+# fully reachable: the mirror registry (ip_list.registry), MinIO, the helper's
+# DNS/DHCP/TFTP, the load balancer, and the nodes talking to each other. Only
+# egress past the lab is cut. Traffic to the other libvirt networks on this
+# hypervisor (172.16.x.0/24) is cut too - those are hosted-cluster networks,
+# not part of this cluster's disconnected environment.
+#
+# It takes two rules because the nat table cannot filter:
+#
+#   1. RETURN at the top of LIBVIRT_PRT - the requested nat-table rule. It
+#      short-circuits the chain before libvirt's MASQUERADE rules, so the node's
+#      packets are never NATed. DROP and REJECT are both impossible here:
+#      iptables-nft inhibits DROP in the nat table ("The nat table is not
+#      intended for filtering") and REJECT is not supported in the postrouting
+#      hook at all (RULE_INSERT failed (Invalid argument)). Verified against
+#      iptables v1.8.10 (nf_tables) on the hypervisor.
+#   2. REJECT at the top of LIBVIRT_FWO - the filter table's forward chain for
+#      traffic *out of* a libvirt network, where rejecting is legal. Without it
+#      the un-NATed packets from (1) would still leave the box with a private
+#      source address and just black-hole upstream; with it the node gets an
+#      immediate ICMP error and fails fast instead of waiting out a timeout.
+#
+# Both live in the running ruleset only. libvirt rebuilds LIBVIRT_PRT and
+# LIBVIRT_FWO whenever libvirtd restarts or a network is stopped/started, which
+# wipes them - re-run this role, or just `--tags disconnected-nat`, if that
+# happens.
+- name: Read the libvirt chains this role has to insert into
+  ansible.builtin.command: "iptables -t {{ item.table }} -n -L {{ item.chain }}"
+  loop:
+    - { table: nat, chain: LIBVIRT_PRT }
+    - { table: filter, chain: LIBVIRT_FWO }
+  register: libvirt_chains
+  changed_when: false
+  failed_when: false
+  when: hub_disconnected_block_node_nat | bool
+  tags: [disconnected-nat]
+
+- name: Fail if libvirt has not created those chains yet
+  ansible.builtin.assert:
+    that:
+      - libvirt_chains.results | map(attribute='rc') | max == 0
+    fail_msg: >-
+      LIBVIRT_PRT (nat) and/or LIBVIRT_FWO (filter) are missing - libvirtd has
+      not set its networks up on this hypervisor yet. Start libvirtd and
+      `virsh net-start default`, then re-run.
+  when: hub_disconnected_block_node_nat | bool
+  tags: [disconnected-nat]
+
+- name: Deny NAT for the disconnected cluster's bootstrap/master/worker IPs
+  ansible.builtin.iptables:
+    table: nat
+    chain: LIBVIRT_PRT
+    action: insert
+    rule_num: '1'
+    source: "{{ lab_network_prefix }}.{{ ip_list[item] }}/32"
+    destination: "!{{ lab_network_prefix }}.0/24"
+    jump: RETURN
+    comment: "hubd disconnected: no NAT for {{ item }}"
+    state: present
+  loop: "{{ hub_disconnected_node_ip_keys }}"
+  when: hub_disconnected_block_node_nat | bool
+  tags: [disconnected-nat]
+
+- name: Reject forwarded traffic from those IPs so nothing leaks out un-NATed
+  ansible.builtin.iptables:
+    table: filter
+    chain: LIBVIRT_FWO
+    action: insert
+    rule_num: '1'
+    source: "{{ lab_network_prefix }}.{{ ip_list[item] }}/32"
+    destination: "!{{ lab_network_prefix }}.0/24"
+    jump: REJECT
+    reject_with: icmp-admin-prohibited
+    comment: "hubd disconnected: no egress for {{ item }}"
+    state: present
+  loop: "{{ hub_disconnected_node_ip_keys }}"
+  when: hub_disconnected_block_node_nat | bool
+  tags: [disconnected-nat]
+
+- name: Read the nat table back so the blocked node IPs show up in the log
+  ansible.builtin.command: iptables -t nat -n -L --line-numbers
+  register: nat_table_after_block
+  changed_when: false
+  when: hub_disconnected_block_node_nat | bool
+  tags: [disconnected-nat]
+
+- name: Show the nat table
+  ansible.builtin.debug:
+    var: nat_table_after_block.stdout_lines
+  when: hub_disconnected_block_node_nat | bool
+  tags: [disconnected-nat]
+
 - name: Check existence of CoreOS Image
   stat:
     path: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2"
