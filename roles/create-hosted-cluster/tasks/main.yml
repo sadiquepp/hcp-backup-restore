@@ -2,40 +2,103 @@
 # Tasks file for create-hosted-cluster
 #
 # Renders the HostedCluster/Secrets/NodePool/ManagedCluster/
-# KlusterletAddonConfig bundle for hcp_cluster_name. This is the most
-# consequential apply in the whole chain (it's what actually starts
-# node provisioning), so - matching how AgentServiceConfig and bminfra
-# are handled - apply starts out commented pending manual review.
+# KlusterletAddonConfig bundle once per entry in hosted_clusters (see
+# vars.yaml). One generic template drives all of them - to add another
+# hosted cluster, add a name to that list, not a new template.
+#
+# Each entry is either a bare name:
+#   hosted_clusters:
+#     - hcp-cluster1
+# or a dict whose extra keys override the hosted_cluster_* defaults for
+# that cluster only:
+#   hosted_clusters:
+#     - hcp-cluster1
+#     - name: hcp-cluster2
+#       nodepool_replicas: 3
+#
+# Passing -e hcp_cluster_name=<name> still works: it renders just that
+# one cluster (using its hosted_clusters entry if it has one).
+#
+# This is the most consequential apply in the whole chain (it's what
+# actually starts node provisioning), so - matching how AgentServiceConfig
+# and bminfra are handled - apply starts out commented pending manual
+# review.
 #
 # Depends on AgentServiceConfig and bminfra already being applied and
 # confirmed working (roles/setup-hub-acm, roles/setup-bminfra) - a
 # HostedCluster on Agent platform can't provision nodes without both.
 
-- name: Render hosted cluster bundle
-  template:
-    src: hosted-cluster.yaml.j2
-    dest: "{{ role_path }}/templates/.rendered-{{ hcp_cluster_name }}.yaml"
+- name: Normalise hosted_clusters into a list of dicts
+  ansible.builtin.set_fact:
+    hosted_cluster_specs: >-
+      {{ hosted_cluster_specs | default([])
+         + [ (item is mapping) | ternary(item, {'name': item}) ] }}
+  loop: "{{ hosted_clusters | default([]) }}"
+  loop_control:
+    label: "{{ (item is mapping) | ternary(item.name | default('<unnamed>'), item) }}"
 
-# REVIEW-BEFORE-APPLY: rendered bundle is left in place at the path
-# shown below - inspect it, then re-enable this task once you've
-# manually validated it AND confirmed AgentServiceConfig/bminfra are
+# -e hcp_cluster_name=<name> narrows the run to a single cluster. If that
+# name is in hosted_clusters its per-cluster overrides are kept; if it
+# isn't, it's rendered from the hosted_cluster_* defaults alone (which is
+# how this role behaved before hosted_clusters existed).
+- name: Restrict to hcp_cluster_name when one was passed on the command line
+  ansible.builtin.set_fact:
+    hosted_cluster_specs: >-
+      {{ (hosted_cluster_specs | default([])
+          | selectattr('name', 'eq', hcp_cluster_name) | list)
+         or [{'name': hcp_cluster_name}] }}
+  when: hcp_cluster_name is defined
+
+- name: Fail fast if there is nothing to render
+  ansible.builtin.assert:
+    that:
+      - hosted_cluster_specs | default([]) | length > 0
+      - hosted_cluster_specs | rejectattr('name', 'defined') | list | length == 0
+    fail_msg: >-
+      No hosted clusters to render. Define hosted_clusters in vars.yaml
+      (a list of names, or of dicts each with a 'name' key), or pass
+      -e hcp_cluster_name=<name>.
+
+- name: Render hosted cluster bundles
+  ansible.builtin.template:
+    src: hosted-cluster.yaml.j2
+    dest: "{{ role_path }}/templates/.rendered-{{ hcp.name }}.yaml"
+  loop: "{{ hosted_cluster_specs }}"
+  loop_control:
+    label: "{{ hcp.name }}"
+  vars:
+    hcp: "{{ item }}"
+
+# REVIEW-BEFORE-APPLY: rendered bundles are left in place at the paths
+# shown below - inspect them, then re-enable this task once you've
+# manually validated them AND confirmed AgentServiceConfig/bminfra are
 # already applied and working.
-# - name: Apply hosted cluster bundle
-#   shell: |
-#     oc apply -f "{{ role_path }}/templates/.rendered-{{ hcp_cluster_name }}.yaml"
+# - name: Apply hosted cluster bundles
+#   ansible.builtin.shell: |
+#     oc apply -f "{{ role_path }}/templates/.rendered-{{ item.name }}.yaml"
+#   loop: "{{ hosted_cluster_specs }}"
+#   loop_control:
+#     label: "{{ item.name }}"
 
 - name: Hosted cluster apply is disabled pending manual review
-  debug:
+  ansible.builtin.debug:
     msg: >-
       Apply is commented out - review
-      {{ role_path }}/templates/.rendered-{{ hcp_cluster_name }}.yaml
-      then re-enable the 'Apply hosted cluster bundle' task in
+      {{ hosted_cluster_specs
+         | map(attribute='name')
+         | map('regex_replace', '^', role_path ~ '/templates/.rendered-')
+         | map('regex_replace', '$', '.yaml')
+         | join(', ') }}
+      then re-enable the 'Apply hosted cluster bundles' task in
       roles/create-hosted-cluster/tasks/main.yml (only after
       AgentServiceConfig and bminfra are confirmed working).
 
-# Cleanup is disabled along with apply above, so the rendered file
-# survives for review. Re-enable alongside the apply task.
-# - name: Clean up rendered scratch file
+# Cleanup is disabled along with apply above, so the rendered files
+# survive for review. Re-enable alongside the apply task.
+# - name: Clean up rendered scratch files
 #   ansible.builtin.file:
-#     path: "{{ role_path }}/templates/.rendered-{{ hcp_cluster_name }}.yaml"
+#     path: "{{ role_path }}/templates/.rendered-{{ item.name }}.yaml"
 #     state: absent
+#   loop: "{{ hosted_cluster_specs }}"
+#   loop_control:
+#     label: "{{ item.name }}"

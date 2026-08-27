@@ -60,6 +60,11 @@ zone "{{ hub2_domain }}" IN {
 	file "{{hub2_domain}}.db";
 	allow-update { none; };
 };
+zone "{{ hub_disconnected_domain }}" IN {
+	type master;
+	file "{{hub_disconnected_domain}}.db";
+	allow-update { none; };
+};
 zone "{{ hosted_domain }}" IN {
 	type master;
 	file "{{hosted_domain}}.db";

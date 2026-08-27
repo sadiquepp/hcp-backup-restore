@@ -40,6 +40,7 @@
     - "{{ ip_list.c2lb }}"
     - "{{ ip_list.c3lb }}"
     - "{{ ip_list.hub2lb }}"
+    - "{{ ip_list.hubdlb }}"
   loop_control:
     label: "{{ lab_network_prefix }}.{{ item }}/24"
 

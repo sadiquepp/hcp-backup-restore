@@ -1,0 +1,57 @@
+# Default deny all ingress in the namespace, then allow exactly three flows.
+# Egress is left unrestricted — the app makes no outbound calls beyond the
+# cluster, and locking egress down would also block DNS unless explicitly
+# re-allowed, which is a common way to break a namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# 1. Router -> storefront. The namespace label below is how OpenShift labels
+#    its ingress namespace; on a non-OpenShift cluster this selector will match
+#    nothing and the Route/Ingress traffic will be dropped.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-router-to-storefront
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: storefront
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/ingress: ""
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# 2 & 3. storefront -> catalog and storefront -> orders. Nothing else in the
+# namespace can reach the backends, and they cannot reach each other.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-storefront-to-backends
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [catalog, orders]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: storefront
+      ports:
+        - protocol: TCP
+          port: 8080

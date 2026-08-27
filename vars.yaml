@@ -54,6 +54,22 @@ ip_list:
   hub2_worker3: 86
   hub2lb: 89
 
+  # Hub-disconnected - a third, fully independent hub cluster installed
+  # entirely from the local mirror registry (see
+  # setup_hub_cluster_disconnected.yaml). Deliberately given its own IP
+  # block, its own subdomain (hub_disconnected_domain) and its own
+  # install/VM directories so it can be built and run *alongside* hub1
+  # and hub2 rather than replacing either.
+  # NOTE: same MAC scheme constraint as above - two digit values (10-99).
+  hubd_bootstrap: 72
+  hubd_master1: 73
+  hubd_master2: 74
+  hubd_master3: 75
+  hubd_worker1: 76
+  hubd_worker2: 77
+  hubd_worker3: 78
+  hubdlb: 79
+
   # Mirror registry - shared connected infrastructure for disconnected-install
   # simulation (see setup_mirror_registry.yaml). Stays reachable/connected
   # even when master/worker IPs are cut off from the real internet.
@@ -115,6 +131,11 @@ dns_packages:
 
 hub_domain: hub.mylab.com
 hub2_domain: hub2.mylab.com
+## Subdomain for the disconnected hub. Must stay in sync with
+## hub_disconnected_name below (OpenShift derives the cluster's DNS from
+## <metadata.name>.<baseDomain>), and needs a matching zone in
+## roles/setup-dns + a forwarder in roles/setup-bm-host's libvirt network.
+hub_disconnected_domain: hubd.mylab.com
 hosted_domain: hcp-cluster1.mylab.com
 hosted_domain2: hcp-cluster2.mylab.com
 hosted_domain3: hcp-cluster3.mylab.com
@@ -137,13 +158,28 @@ base_domain: mylab.com
 hub2_vm_folder: /var/lib/libvirt/images/hub2
 hub2_install_folder: /var/lib/libvirt/images/hub2_install
 
+## Variables required by Setup-Hub-Cluster-Disconnected Role - the hub
+## installed purely from the local mirror registry. Separate name, VM
+## folder and install folder from hub1/hub2 so all three can co-exist:
+## nothing here is shared, and hub_disconnected_name doubles as the
+## leading label of hub_disconnected_domain above.
+hub_disconnected_name: hubd
+hub_disconnected_vm_folder: /var/lib/libvirt/images/hubd
+hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
+
 ## MetalLB IPAddressPool ranges for HCP APIServer/apps VIPs (setup-hub-acm).
 ## Mapped to metallb_pool_start/end in setup_hub_cluster*.yaml. Ranges must not
-## overlap while both hubs share the same L2 network ({{ lab_network_prefix }}.0/24).
+## overlap while all three hubs share the same L2 network ({{ lab_network_prefix }}.0/24).
 hub_metallb_pool_start: 60
-hub_metallb_pool_end: 69
+hub_metallb_pool_end: 63
 hub2_metallb_pool_start: 90
-hub2_metallb_pool_end: 99
+hub2_metallb_pool_end: 93
+## Disconnected hub's pool, carved out of the same 60-69 span as hub1's
+## (hub1 60-63, hubd 64-67). Like the other two it must stay clear of every
+## ip_list octet and of the .201-.249 libvirt DHCP range, since MetalLB L2
+## mode ARPs for these addresses itself and nothing else may own them.
+hub_disconnected_metallb_pool_start: 64
+hub_disconnected_metallb_pool_end: 67
 
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4
@@ -206,10 +242,26 @@ discovery_boot_initrd_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-ini
 discovery_boot_rootfs_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-rootfs.img"
 
 ## create-hosted-cluster: HostedCluster/NodePool/ManagedCluster bundle.
-## Defaults below match hcp-cluster1. For a second, concurrent hosted
-## cluster on the same hub, override hosted_cluster_cluster_cidr and
-## hosted_cluster_service_cidr to a disjoint range at minimum.
-## release image should correspond to an entry in agent_service_os_images.
+## One entry per hosted cluster, all rendered from the same generic
+## template - add a cluster here, not a new template. An entry is either a
+## bare name, or a dict with 'name' plus any hosted_cluster_* key (minus
+## the prefix) to override the defaults below for that cluster only.
+## Concurrent clusters on the same hub can share cluster_cidr and
+## service_cidr - each hosted cluster is its own OVN-Kubernetes cluster and
+## those CIDRs never leave its data plane (the control plane on the hub
+## reaches it over the Konnectivity tunnel). Override them per-cluster only
+## if you have a reason to, e.g. direct pod-to-pod connectivity between two
+## hosted clusters (Submariner without globalnet).
+hosted_clusters:
+  - hcp-cluster1
+  # - hcp-cluster2
+  # - name: hcp-cluster3
+  #   cluster_cidr: 10.136.0.0/14
+  #   service_cidr: 172.32.0.0/16
+
+## Defaults for every entry above that doesn't override them; they match
+## hcp-cluster1. release image should correspond to an entry in
+## agent_service_os_images.
 hosted_cluster_clusterset: default
 hosted_cluster_channel: fast-4.21
 hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:05e69ed54453e3d306b136f52493073073b207f57d0562fe1c8a555bde61aa49"
@@ -254,6 +306,13 @@ mirror_registry_quay_root: /registry
 mirror_ocp_channel: stable-{{ ocp_major_version }}
 mirror_ocp_version: "{{ ocp_major_version }}.{{ ocp_minor_version }}"
 mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v{{ ocp_major_version }}"
+## Repository oc-mirror v2 publishes the release payload under, inside the
+## mirror registry. roles/setup-hub-cluster-disconnected extracts
+## openshift-install from "<registry>:<port>/<this>:<mirror_ocp_version>-x86_64",
+## and it's the same repo the generated ImageDigestMirrorSet maps
+## quay.io/openshift-release-dev/ocp-release onto - if you change oc-mirror's
+## destination layout, change this to match or the extract will 404.
+mirror_release_repository: openshift/release-images
 mirror_catalog_operator_packages:
   - advanced-cluster-management
   - multicluster-engine

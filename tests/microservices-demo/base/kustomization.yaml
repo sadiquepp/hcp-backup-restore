@@ -1,0 +1,45 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Reusable base. Deliberately NOT deployable on its own:
+#   - no namespace (overlays set it, so the same base can land in many)
+#   - no image tag (pinned in overlays/default, override per project)
+#
+# To consume this from another repo, reference it remotely:
+#   resources:
+#     - github.com/<org>/<repo>//tests/microservices-demo/base?ref=main
+
+resources:
+  - catalog.yaml
+  - orders.yaml
+  - storefront.yaml
+
+# includeSelectors: false is important. Kustomize's older `commonLabels` also
+# writes into spec.selector, which is immutable on a Deployment — changing
+# part-of later would then require deleting every workload. These labels are
+# metadata only.
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: microservices-demo
+      app.kubernetes.io/managed-by: kustomize
+
+# Service code is kept as real .py files rather than inline YAML blobs: they
+# stay lintable and directly runnable. The generated ConfigMaps get a content
+# hash suffix, so editing a .py rolls the Deployment automatically instead of
+# silently leaving old pods running.
+configMapGenerator:
+  - name: catalog-code
+    files:
+      - server.py=src/catalog.py
+  - name: orders-code
+    files:
+      - server.py=src/orders.py
+  - name: storefront-code
+    files:
+      - server.py=src/storefront.py
+  - name: storefront-config
+    literals:
+      - CATALOG_URL=http://catalog:8080
+      - ORDERS_URL=http://orders:8080
+      - UPSTREAM_TIMEOUT=5

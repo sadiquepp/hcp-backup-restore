@@ -1,0 +1,470 @@
+---
+# Tasks file for setup-hub-cluster-disconnected
+#
+# Same KVM/libvirt UPI install as roles/setup-hub-cluster (RHCOS qcow2 +
+# openshift-install create ignition-configs + virt-install bootstrap/
+# master/worker), but the resulting cluster is wired up to pull every
+# release and operator image exclusively from the local mirror registry
+# (see roles/setup-mirror-registry) instead of quay.io/registry.redhat.io.
+#
+# This host (the KVM hypervisor) keeps its normal internet access - only
+# the *cluster's* image pulls are redirected, same as agent_service_os_images
+# in vars.yaml still points at mirror.openshift.com even when
+# disconnected_install: true. So the RHCOS qcow2 and the oc CLI are still
+# staged from mirror.openshift.com exactly as roles/setup-hub-cluster does
+# (and oc has to come first - it's what performs the extract below).
+#
+# What differs from the connected role:
+#   - openshift-install is extracted from the release image *in the mirror
+#     registry*, so the pullspec it bakes into ignition points at the mirror
+#   - install-config.yaml carries the mirror CA + a mirror-only pull secret
+#   - extra manifests are injected before ignition-configs are generated:
+#     ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource from oc-mirror,
+#     plus one disabling the default OperatorHub sources
+#
+# Requires roles/setup-mirror-registry-trust to have already run, so the
+# mirror registry's CA is trusted locally and its credentials are in
+# mirror_registry_authfile (see setup_mirror_registry.yaml).
+#
+# CO-EXISTENCE: this hub is fully independent of hub1 (roles/setup-hub-cluster)
+# and hub2 (roles/setup-hub-cluster2) - all three can be up at once. Nothing
+# is shared except the host-level artifacts that are genuinely version-identical
+# (the RHCOS qcow2 in download_dir and /usr/bin/oc). Everything else is
+# namespaced to this cluster:
+#   - hub_disconnected_install_folder / hub_disconnected_vm_folder
+#   - hubd_* keys in ip_list (and therefore distinct MACs + DHCP reservations)
+#   - hubd_* libvirt domain names, disk images and /tmp/*.xml definitions
+#   - hub_disconnected_name -> its own subdomain, hub_disconnected_domain
+# Note the "Delete Install Directory if exists" task below only ever removes
+# hub_disconnected_install_folder, so re-running this never disturbs hub1/hub2.
+
+- name: Check existence of CoreOS Image
+  stat:
+    path: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2"
+  register: coreos_image_status
+
+- name: Get the CoreOS qemu image
+  get_url:
+    url: "https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/{{ ocp_major_version }}/{{ ocp_major_version }}.{{coreos_minor_version}}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
+    dest: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
+  when: coreos_image_status.stat.exists == false
+
+- name: Unzip CoreOS KVM Image
+  shell: |
+    gunzip {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz
+  when: coreos_image_status.stat.exists == false
+
+# Check Existence of oc
+- name: Check existence of oc cli
+  stat:
+    path: "/usr/bin/oc"
+  register: oc_status
+
+# Pinned to mirror_ocp_version rather than "latest" (which is what
+# roles/setup-hub-cluster uses). Here oc is load-bearing: it's what runs the
+# `oc adm release extract` below against a {{ mirror_ocp_version }} payload, and
+# a wildly skewed client can fail to read that release image. Only fetched when
+# /usr/bin/oc is absent, so this never replaces an oc another role installed.
+- name: Get the Openshift Client
+  get_url:
+    url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ mirror_ocp_version }}/openshift-client-linux.tar.gz"
+    dest: "{{ download_dir }}/openshift-client-linux.tar.gz"
+  when: oc_status.stat.exists == false
+
+- name: Unarchive OpenShift Client
+  unarchive:
+    src: "{{ download_dir }}/openshift-client-linux.tar.gz"
+    dest: "/usr/bin"
+    mode: 0755
+    remote_src: yes
+  when: oc_status.stat.exists == false
+
+- name: Create Directory for Hub Cluster VMs
+  file:
+    path: "{{ hub_disconnected_vm_folder }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Delete Install Directory if exists
+  file:
+    path: "{{ hub_disconnected_install_folder }}"
+    state: absent
+
+- name: Create Directory for Hub Cluster VMs
+  file:
+    path: "{{hub_disconnected_install_folder}}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+# openshift-install is pulled out of the mirror registry's own release payload
+# rather than downloaded from mirror.openshift.com. This matters beyond just
+# avoiding an internet fetch: the binary that `oc adm release extract` hands
+# back has the release image it was extracted from baked in as its default
+# pullspec, so every ignition config it renders points at
+# {{ mirror_registry_domain }} instead of quay.io - which is what actually makes
+# the installed cluster disconnected. Mirrors the "Extract Openshift Install
+# Binary from mirror registry" step in
+# openshift/cloud/self-managed/disconnected (roles/openshift_installer_prep).
+#
+# `oc adm release extract` writes into the current working directory, hence the
+# chdir. It needs the mirror registry's CA in the system trust store and a pull
+# secret holding that registry's credentials - roles/setup-mirror-registry-trust
+# sets up both, and setup_hub_cluster_disconnected.yaml asserts the CA is there
+# before this role runs.
+- name: Extract openshift-install from the release image in the mirror registry
+  ansible.builtin.shell: |
+    oc adm release extract -a {{ mirror_registry_authfile }} \
+      --command=openshift-install \
+      "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}:{{ mirror_ocp_version }}-x86_64"
+  args:
+    chdir: "{{ hub_disconnected_install_folder }}"
+
+- name: Ensure the extracted openshift-install is executable
+  ansible.builtin.file:
+    path: "{{ hub_disconnected_install_folder }}/openshift-install"
+    mode: '0755'
+
+- name: Get SSH Key
+  shell: cat ~/.ssh/lab_rsa.pub
+  register: ssh_out
+
+- name: Setting booleans using complex argument style
+  ansible.builtin.set_fact:
+    ssh_key: "{{ ssh_out.stdout }}"
+
+- name: Read the mirror registry CA certificate (trusted locally by setup-mirror-registry-trust)
+  ansible.builtin.slurp:
+    src: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+  register: mirror_registry_ca_cert_b64
+
+- name: Store the mirror registry CA cert as a fact
+  ansible.builtin.set_fact:
+    mirror_registry_ca_cert: "{{ mirror_registry_ca_cert_b64.content | b64decode }}"
+
+- name: Read the mirror registry pull secret (generated by setup-mirror-registry-trust)
+  ansible.builtin.slurp:
+    src: "{{ mirror_registry_authfile }}"
+  register: mirror_registry_pull_secret_b64
+  become: true
+
+- name: Store the mirror registry pull secret as a fact
+  ansible.builtin.set_fact:
+    disconnected_pull_secret: "{{ mirror_registry_pull_secret_b64.content | b64decode }}"
+
+# Copy Install-Config
+- name: Copying install-config.yaml to install dir
+  template:
+    src: install-config.yaml.j2
+    dest: "{{ hub_disconnected_install_folder }}/install-config.yaml"
+
+# Create Ignition-Files
+- name: Create Manifests
+  shell: |
+      {{ hub_disconnected_install_folder }}/openshift-install create manifests --dir={{ hub_disconnected_install_folder }}
+
+- name: Disable worker role on master nodes
+  lineinfile:
+    path: "{{ hub_disconnected_install_folder }}/manifests/cluster-scheduler-02-config.yml"
+    regexp: 'mastersSchedulable'
+    line: "  mastersSchedulable: false"
+
+- name: Locate the oc-mirror cluster-resources directory on the mirror-registry VM
+  ansible.builtin.shell: |
+    set -o pipefail
+    find /root/mirror/oc-mirror-output -type d -name cluster-resources | head -n1
+  args:
+    executable: /bin/bash
+  register: cluster_resources_dir
+  changed_when: false
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+- name: Fail if oc-mirror has not produced any cluster-resources manifests yet
+  ansible.builtin.assert:
+    that:
+      - cluster_resources_dir.stdout | trim | length > 0
+    fail_msg: >-
+      No cluster-resources directory found under /root/mirror/oc-mirror-output on
+      the mirror-registry VM - run setup_mirror_registry.yaml first.
+
+- name: Archive the oc-mirror cluster-resources manifests (ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource)
+  ansible.builtin.shell: |
+    tar czf /root/mirror/hubd-cluster-resources.tar.gz -C "{{ cluster_resources_dir.stdout | trim | dirname }}" cluster-resources
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+- name: Fetch the cluster-resources archive to the hypervisor
+  ansible.builtin.fetch:
+    src: /root/mirror/hubd-cluster-resources.tar.gz
+    dest: /tmp/hubd-cluster-resources.tar.gz
+    flat: true
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+- name: Extract the mirror registry's ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource manifests into the install manifests directory
+  ansible.builtin.unarchive:
+    src: /tmp/hubd-cluster-resources.tar.gz
+    dest: "{{ hub_disconnected_install_folder }}/manifests"
+    extra_opts:
+      - "--strip-components=1"
+
+- name: Copy the OperatorHub default-catalog-sources suppression manifest
+  ansible.builtin.copy:
+    src: operatorhub-disable-default-sources.yaml
+    dest: "{{ hub_disconnected_install_folder }}/manifests/operatorhub-disable-default-sources.yaml"
+    mode: '0644'
+
+# Create Ignition-Files
+- name: Create Ignition File
+  shell: |
+    {{ hub_disconnected_install_folder }}/openshift-install create ignition-configs --dir={{ hub_disconnected_install_folder }}
+
+- name: Set proper permission on Ignition File for qemu to access
+  file:
+    path: "{{ hub_disconnected_install_folder }}/{{ item }}"
+    mode: '0644'
+  with_items:
+    - bootstrap.ign
+    - master.ign
+    - worker.ign
+
+- name: Create Disk Image for Bootstrap
+  shell: |
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_disconnected_vm_folder }}/hubd_bootstrap.qcow2 \
+    100G
+
+- name: Defining the OCP Bootstrap nodes
+  shell: |
+    virt-install \
+    --ram 16384 \
+    --vcpus 4 \
+    --osinfo rhel9.0  \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_bootstrap.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hubd_bootstrap}} \
+    --name hubd_bootstrap \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_disconnected_install_folder }}/bootstrap.ign" \
+    --dry-run \
+    --print-xml > /tmp/hubd_bootstrap.xml
+
+    virsh define /tmp/hubd_bootstrap.xml
+    sleep 10
+    virsh start hubd_bootstrap
+
+- name: Lets wait for 300 seconds for the bootstrap to be UP and ACTIVEG.
+  ansible.builtin.wait_for:
+    timeout: 300
+
+- name: Create Disk Image for Master Nodes
+  shell: |
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_disconnected_vm_folder }}/hubd_master1.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_disconnected_vm_folder }}/hubd_master2.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_disconnected_vm_folder }}/hubd_master3.qcow2 \
+    100G
+
+- name: Defining the Master nodes
+  shell: |
+    virt-install \
+    --ram {{ master_memory }} \
+    --vcpus {{ master_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_master1.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hubd_master1}} \
+    --name hubd_master1 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_disconnected_install_folder }}/master.ign" \
+    --dry-run \
+    --print-xml > /tmp/hubd_master1.xml
+
+    virt-install \
+    --ram {{ master_memory }} \
+    --vcpus {{ master_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_master2.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hubd_master2}} \
+    --name hubd_master2 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_disconnected_install_folder }}/master.ign" \
+    --dry-run \
+    --print-xml > /tmp/hubd_master2.xml
+
+    virt-install \
+    --ram {{ master_memory }} \
+    --vcpus {{ master_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_master3.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hubd_master3}} \
+    --name hubd_master3 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_disconnected_install_folder }}/master.ign" \
+    --dry-run \
+    --print-xml > /tmp/hubd_master3.xml
+
+    virsh define /tmp/hubd_master1.xml
+    virsh define /tmp/hubd_master2.xml
+    virsh define /tmp/hubd_master3.xml
+    sleep 10
+    virsh start hubd_master1
+    virsh start hubd_master2
+    virsh start hubd_master3
+
+- name: Lets wait for 300 seconds for the masters to be UP and RUNNING.
+  ansible.builtin.wait_for:
+    timeout: 300
+
+- name: Create Disk Image for Worker Nodes
+  shell: |
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_disconnected_vm_folder }}/hubd_worker1.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_disconnected_vm_folder }}/hubd_worker2.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub_disconnected_vm_folder }}/hubd_worker3.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -o preallocation=metadata \
+    {{ hub_disconnected_vm_folder }}/hubd_storage_worker1.qcow2 \
+    500G
+
+    qemu-img create \
+    -f qcow2 \
+    -o preallocation=metadata \
+    {{ hub_disconnected_vm_folder }}/hubd_storage_worker2.qcow2 \
+    500G
+
+    qemu-img create \
+    -f qcow2 \
+    -o preallocation=metadata \
+    {{ hub_disconnected_vm_folder }}/hubd_storage_worker3.qcow2 \
+    500G
+
+- name: Defining the Worker nodes
+  shell: |
+    virt-install \
+    --ram {{ worker_memory }} \
+    --vcpus {{ worker_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_worker1.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_storage_worker1.qcow2,device=disk,bus=virtio,format=qcow2,cache=none  \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hubd_worker1}} \
+    --name hubd_worker1 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_disconnected_install_folder }}/worker.ign" \
+    --dry-run \
+    --print-xml > /tmp/hubd_worker1.xml
+
+    virt-install \
+    --ram {{ worker_memory }} \
+    --vcpus {{ worker_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_worker2.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_storage_worker2.qcow2,device=disk,bus=virtio,format=qcow2,cache=none  \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hubd_worker2}} \
+    --name hubd_worker2 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_disconnected_install_folder }}/worker.ign" \
+    --dry-run \
+    --print-xml > /tmp/hubd_worker2.xml
+
+    virt-install \
+    --ram {{ worker_memory }} \
+    --vcpus {{ worker_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_worker3.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --disk path={{ hub_disconnected_vm_folder }}/hubd_storage_worker3.qcow2,device=disk,bus=virtio,format=qcow2,cache=none  \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hubd_worker3}} \
+    --name hubd_worker3 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub_disconnected_install_folder }}/worker.ign" \
+    --dry-run \
+    --print-xml > /tmp/hubd_worker3.xml
+
+    virsh define /tmp/hubd_worker1.xml
+    virsh define /tmp/hubd_worker2.xml
+    virsh define /tmp/hubd_worker3.xml
+    sleep 10
+    virsh start hubd_worker1
+    virsh start hubd_worker2
+    virsh start hubd_worker3
+
+- name: Lets wait for 600 seconds for the workers to be UP and RUNNING.
+  ansible.builtin.wait_for:
+    timeout: 600
+
+- name: Approve CSRs until worker nodes are Ready
+  ansible.builtin.include_tasks: wait-for-workers-ready.yml
+  vars:
+    kubeconfig_path: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
+    expected_worker_replicas: "{{ hub_worker_replicas }}"
+
+- name: Waiting for cluster Bootstrap to finish
+  shell: |
+    {{ hub_disconnected_install_folder }}/openshift-install --dir={{ hub_disconnected_install_folder }}  wait-for bootstrap-complete --log-level=info
+
+- name: Deleting Bootstrap VM
+  community.libvirt.virt:
+    name: hubd_bootstrap
+    state: destroyed
+
+- name: Approve CSRs until worker nodes are Ready (post-bootstrap)
+  ansible.builtin.include_tasks: wait-for-workers-ready.yml
+  vars:
+    kubeconfig_path: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
+    expected_worker_replicas: "{{ hub_worker_replicas }}"

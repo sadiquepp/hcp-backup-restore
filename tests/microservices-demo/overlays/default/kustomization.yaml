@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The normal deploy: own namespace, PVC-backed, pinned image.
+# Copy this directory as the starting point for a new project.
+
+namespace: microservices-demo
+
+resources:
+  - ../../base
+  - namespace.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/instance: microservices-demo
+
+# Pinned rather than :latest so a redeploy months from now is the same bits.
+# The image is multi-arch (amd64/arm64/ppc64le), so this works on x86 clusters,
+# ARM clusters and CRC on Apple silicon alike.
+# Repoint at a mirror for a disconnected cluster, e.g.
+#   newName: registry.example.com:8443/sclorg/python-312-c9s
+images:
+  - name: quay.io/sclorg/python-312-c9s
+    newTag: "20260820"

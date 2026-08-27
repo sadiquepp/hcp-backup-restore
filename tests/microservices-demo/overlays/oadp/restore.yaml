@@ -1,0 +1,26 @@
+# ── Restore ────────────────────────────────────────────────────────────────────
+# Apply ONLY when restoring — never at the same time as the Backup CR.
+#
+# For a genuine test, delete the namespace first and wait for it to go:
+#   oc delete ns microservices-demo
+# Restoring over a live namespace with existingResourcePolicy: update leaves the
+# current PVC contents untouched, so the test "passes" without ever proving the
+# data came back.
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: microservices-demo-restore
+  namespace: openshift-adp
+spec:
+  backupName: microservices-demo-backup
+
+  includedNamespaces:
+    - microservices-demo
+  includedResources:
+    - "*"
+
+  restorePVs: true
+
+  existingResourcePolicy: update
+
+  preserveNodePorts: true

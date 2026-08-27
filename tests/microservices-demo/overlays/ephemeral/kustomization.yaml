@@ -1,0 +1,75 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# No PersistentVolumeClaims — data lives in emptyDir and dies with the pod.
+#
+# Use this when the target cluster has no default StorageClass, or when the app
+# is only there as a traffic/routing/mesh fixture and its state is irrelevant.
+# Do NOT use it to test anything that must preserve state; there is nothing to
+# preserve.
+
+namespace: microservices-demo-ephemeral
+
+resources:
+  - ../../base
+  - namespace.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/instance: microservices-demo-ephemeral
+
+images:
+  - name: quay.io/sclorg/python-312-c9s
+    newTag: "20260820"
+
+patches:
+  # Drop both PVCs.
+  - target:
+      kind: PersistentVolumeClaim
+      name: catalog-data
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: catalog-data
+  - target:
+      kind: PersistentVolumeClaim
+      name: orders-data
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: orders-data
+
+  # Repoint the `data` volume at emptyDir.
+  #
+  # This is a JSON 6902 patch, not a strategic merge, and that is deliberate. A
+  # strategic merge (even with $retainKeys) leaves BOTH persistentVolumeClaim
+  # and emptyDir set on the same volume — kustomize builds it happily and the
+  # API server then rejects it. JSON 6902 `remove` errors at build time if the
+  # path is not there, so if base/ ever reorders its volumes this fails loudly
+  # instead of shipping something invalid.
+  #
+  # Index 1 == the `data` volume (`code` is 0) in base/catalog.yaml and
+  # base/orders.yaml.
+  - target:
+      kind: Deployment
+      name: catalog
+    patch: |
+      - op: remove
+        path: /spec/template/spec/volumes/1/persistentVolumeClaim
+      - op: add
+        path: /spec/template/spec/volumes/1/emptyDir
+        value: {}
+  - target:
+      kind: Deployment
+      name: orders
+    patch: |
+      - op: remove
+        path: /spec/template/spec/volumes/1/persistentVolumeClaim
+      - op: add
+        path: /spec/template/spec/volumes/1/emptyDir
+        value: {}

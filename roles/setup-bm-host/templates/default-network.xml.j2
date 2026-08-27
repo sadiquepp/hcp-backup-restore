@@ -12,7 +12,9 @@
     <forwarder domain='{{ hub_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server}}'/>
     <forwarder domain='{{ hosted_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
     <forwarder domain='{{ hosted_domain2 }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+    <forwarder domain='{{ hosted_domain3 }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
     <forwarder domain='{{ hub2_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+    <forwarder domain='{{ hub_disconnected_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
     <forwarder domain='{{ lab_network_reverse_zone }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
   </dns>
   <ip address='{{ lab_network_prefix }}.1' netmask='{{ lab_network_netmask }}'>
@@ -28,14 +30,22 @@ bootstrap.{{ hub_domain }}
 bootstrap.{{ hub2_domain }}
 {%- elif key.startswith('hub2_') -%}
 {{ key | regex_replace('^hub2_', '') }}.{{ hub2_domain }}
+{%- elif key == 'hubd_bootstrap' -%}
+bootstrap.{{ hub_disconnected_domain }}
+{%- elif key.startswith('hubd_') -%}
+{{ key | regex_replace('^hubd_', '') }}.{{ hub_disconnected_domain }}
 {%- elif key.startswith('c1worker') -%}
 {{ key }}.{{ hosted_domain }}
 {%- elif key.startswith('c2worker') -%}
 {{ key }}.{{ hosted_domain2 }}
+{%- elif key.startswith('c3worker') -%}
+{{ key }}.{{ hosted_domain3 }}
 {%- elif key == 'hublb' -%}
 api.{{ hub_domain }}
 {%- elif key == 'hub2lb' -%}
 api.{{ hub2_domain }}
+{%- elif key == 'hubdlb' -%}
+api.{{ hub_disconnected_domain }}
 {%- else -%}
 {{ key }}.{{ hub_domain }}
 {%- endif -%}

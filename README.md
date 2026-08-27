@@ -208,13 +208,21 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
 
 - Create a Hosted Cluster from the Web UI using the discovered nodes.
 
-  - Render the yamlfiles by invoking the create-hosted-cluster role.
-  ```bash
-  ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1
+  - List the hosted clusters you want in `hosted_clusters` in `vars.yaml`, then render them all by invoking the create-hosted-cluster role. One generic template covers every cluster; an entry is a bare name, or a dict with `name` plus any per-cluster override. Concurrent hosted clusters on the same hub can share `cluster_cidr`/`service_cidr` - each is its own OVN-Kubernetes cluster and those CIDRs never leave its data plane.
+  ```yaml
+  hosted_clusters:
+    - hcp-cluster1
+    - hcp-cluster2
+    - name: hcp-cluster3
+      nodepool_replicas: 3
   ```
-  - Review and apply the rendered yaml files to the ACM cluster.
   ```bash
-  oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml # Replace hcp-cluster1 with the name of the hosted cluster.
+  ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
+  ```
+  - Add `-e hcp_cluster_name=hcp-cluster2` to render just one of them.
+  - Review and apply the rendered yaml files (one `.rendered-<cluster>.yaml` per entry) to the ACM cluster.
+  ```bash
+  oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml
   ```
 - Note that the hosted cluster worker nodes will go to shutoff mode while joining the nodes to the NodePool. Make sure that the vms are started from virt-manager or via virsh to complete the NodePool join process.
 ```bash

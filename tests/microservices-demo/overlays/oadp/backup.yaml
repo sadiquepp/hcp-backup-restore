@@ -1,0 +1,37 @@
+# ── Backup ─────────────────────────────────────────────────────────────────────
+# Same shape as oadp/hello-openshift-oadp-backup.yaml, but covering a
+# multi-service namespace with two PVCs instead of a single container.
+#
+# Apply AFTER seeding orders — the point is to capture a known record count and
+# assert on it after the restore.
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: microservices-demo-backup
+  namespace: openshift-adp
+  labels:
+    velero.io/storage-location: default
+spec:
+  includedNamespaces:
+    - microservices-demo
+
+  includedResources:
+    - "*"
+
+  # File-level (Kopia) rather than CSI snapshots: matches the existing
+  # hello-openshift example and stays portable across this lab's storage
+  # backends (ODF external RBD, LVM Storage) without needing a
+  # VolumeSnapshotClass wired up for each.
+  # Flip to snapshotVolumes: true + defaultVolumesToFsBackup: false to exercise
+  # the CSI snapshot path instead.
+  snapshotVolumes: false
+  defaultVolumesToFsBackup: true
+
+  storageLocation: default
+
+  ttl: 720h
+
+  excludedNamespaces:
+    - openshift-adp
+
+  includeClusterResources: true

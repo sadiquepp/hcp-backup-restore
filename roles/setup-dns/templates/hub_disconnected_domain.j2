@@ -1,0 +1,19 @@
+$TTL 1D
+@	IN SOA	helper.{{ hub_disconnected_domain }}. root.{{hub_disconnected_domain }}. (
+					0	; serial
+					1D	; refresh
+					1H	; retry
+					1W	; expire
+					3H )	; minimum
+		NS	helper.{{ hub_disconnected_domain }}.
+helper		A	{{ lab_network_prefix }}.{{ ip_list.helper_server}}
+bootstrap	A	{{ lab_network_prefix }}.{{ ip_list.hubd_bootstrap }}
+master1		A	{{ lab_network_prefix }}.{{ ip_list.hubd_master1}}
+master2		A	{{ lab_network_prefix }}.{{ ip_list.hubd_master2}}
+master3		A	{{ lab_network_prefix }}.{{ ip_list.hubd_master3}}
+worker1		A	{{ lab_network_prefix }}.{{ ip_list.hubd_worker1}}
+worker2		A	{{ lab_network_prefix }}.{{ ip_list.hubd_worker2}}
+worker3		A	{{ lab_network_prefix }}.{{ ip_list.hubd_worker3}}
+api		A	{{ lab_network_prefix }}.{{ ip_list.hubdlb}}
+api-int		A	{{ lab_network_prefix }}.{{ ip_list.hubdlb}}
+*.apps		A	{{ lab_network_prefix }}.{{ ip_list.hubdlb}}

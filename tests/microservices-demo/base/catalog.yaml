@@ -1,0 +1,108 @@
+# catalog — stateful, seeds itself on first start.
+#
+# No `namespace:` on any resource in base/ — the overlay sets it. That is what
+# lets the same base be deployed into several namespaces of one cluster.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: catalog-data
+  labels:
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/component: backend
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName deliberately omitted: binds to the cluster default.
+  # Set it in an overlay to pin a specific backend. If the target cluster has
+  # no default StorageClass, use overlays/ephemeral instead.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  labels:
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog
+  strategy:
+    # RWO volume: a rolling update would deadlock waiting for the outgoing pod
+    # to release it.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: catalog
+        app.kubernetes.io/component: backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: catalog
+          image: quay.io/sclorg/python-312-c9s
+          command: ["python3", "-u", "/opt/app/server.py"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DATA_DIR
+              value: /data
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: code
+              mountPath: /opt/app
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: code
+          configMap:
+            name: catalog-code
+        - name: data
+          persistentVolumeClaim:
+            claimName: catalog-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog
+  labels:
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/component: backend
+spec:
+  selector:
+    app.kubernetes.io/name: catalog
+  ports:
+    - port: 8080
+      targetPort: http
+      name: http
