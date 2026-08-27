@@ -156,15 +156,28 @@ Creates and configures the `helper` VM that provides DNS and HAProxy for the lab
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
 ```
 
+### Setup Mirror Registry (If using a disconnected deployment)
+If you are using a disconnected deployment, you need to setup a mirror registry to pull the images from the internet.
+```bash
+ansible-playbook -i inventory/hosts setup_mirror_registry.yaml --ask-vault-pass -e disconnected_install=true
+```
 
-
-### Setup Hub Cluster (hub1)
+### Setup Hub Cluster (hub1 - Connected Deployment)
 
 Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP operator.
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 ```
+
+### Setup Hub Cluster (hub1 - Disconnected Deployment)
+
+Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP operator in a disconnected deployment.
+
+```bash
+ansible-playbook -i inventory/hosts setup_hub_cluster_disconnected.yaml --ask-vault-pass -e disconnected_install=true
+```
+
 ### Prepare ACM and Inventory
 
 - Configure CIM. Apply the AgentServiceConfig to the ACM cluster. Customize the OS images using `osImages` to the ones you want to use for the hosted clusters. Review the rendendered yaml file at `roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml` and apply it to the ACM cluster.
