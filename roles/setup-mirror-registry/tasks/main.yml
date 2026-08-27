@@ -140,13 +140,51 @@
     state: directory
   when: registry_check.rc != 0
 
+# oc-mirror pulls thousands of images and regularly trips over a
+# transient failure (a single package/blob that fails to pull, a registry
+# 5xx, a timeout). That is NOT a reason to tear down the VM and start
+# over: everything up to this point is already done, and oc-mirror v2
+# keeps its cache/workspace under /root/mirror/oc-mirror-output, so a
+# re-run only fetches what is still missing. The rescue below prints the
+# exact command to re-run by hand.
 - name: Mirror images to the local registry (oc-mirror v2)
-  shell: |
-    cd /root/mirror
-    oc mirror -c imageset-config.yaml --workspace file://oc-mirror-output/ \
-      docker://{{ mirror_registry_domain }}:{{ mirror_registry_port }} --v2
   when: registry_check.rc != 0
-  register: oc_mirror_result
+  block:
+    - name: Run oc-mirror
+      shell: |
+        cd /root/mirror
+        oc mirror -c imageset-config.yaml --workspace file://oc-mirror-output/ \
+          docker://{{ mirror_registry_domain }}:{{ mirror_registry_port }} --v2
+      register: oc_mirror_result
+
+  rescue:
+    - name: How to re-run oc-mirror manually (no redeploy needed)
+      debug:
+        msg:
+          - "oc-mirror FAILED - this is often transient (one package/blob failed to pull)."
+          - "Do NOT redeploy the mirror-registry VM: the registry, tools, pull secret and"
+          - "ImageSetConfiguration are all in place already, and oc-mirror v2 resumes from its"
+          - "workspace, so a re-run only pulls what is still missing."
+          - ""
+          - "Re-run it by hand on the mirror-registry VM:"
+          - ""
+          - "  ssh root@{{ lab_network_prefix }}.{{ ip_list.registry }}"
+          - "  cd /root/mirror"
+          - "  oc mirror -c imageset-config.yaml --workspace file://oc-mirror-output/ docker://{{ mirror_registry_domain }}:{{ mirror_registry_port }} --v2"
+          - ""
+          - "Repeat that command until it completes - each attempt picks up where the last left off."
+          - "Logs: /root/mirror/oc-mirror-output/working-dir/logs/ (and /root/mirror/.oc-mirror.log)."
+          - ""
+          - "Note: re-running 'ansible-playbook setup_mirror_registry.yaml --ask-vault-pass --tags mirror'"
+          - "will SKIP this task now that the registry answers 'podman login', which is why the manual"
+          - "command above is the way to finish the mirror. Once it succeeds, carry on with the rest of"
+          - "the disconnected flow (setup_mirror_registry.yaml --tags mirror-trust, then the hub install)."
+
+    - name: Fail after printing the manual re-run instructions
+      ansible.builtin.fail:
+        msg: >-
+          oc-mirror failed on {{ mirror_registry_domain }} - see the message above for
+          the exact command to re-run it manually on the VM (no redeploy required).
 
 - name: Report mirror result
   debug:
