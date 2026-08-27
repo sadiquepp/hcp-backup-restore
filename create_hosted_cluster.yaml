@@ -4,16 +4,22 @@
 ## bminfra already applied and working - a HostedCluster on Agent
 ## platform can't provision nodes without both.
 ##
-## Usage:
-##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
-##     -e hcp_cluster_name=hcp-cluster1
+## Renders one bundle per entry in vars.yaml's hosted_clusters list:
+##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass
 ##
-## For a second, concurrent hosted cluster on the same hub, override the
-## networking CIDRs to something disjoint from the first:
+## A second, concurrent hosted cluster on the same hub is just another
+## entry in that list - it can reuse the same networking CIDRs, since those
+## are internal to each hosted cluster's own data plane. Add per-cluster
+## keys only to override a hosted_cluster_* default:
+##   hosted_clusters:
+##     - hcp-cluster1
+##     - hcp-cluster2
+##     - name: hcp-cluster3
+##       nodepool_replicas: 3
+##
+## To render just one of them:
 ##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
-##     -e hcp_cluster_name=hcp-cluster2 \
-##     -e hosted_cluster_cluster_cidr=10.136.0.0/14 \
-##     -e hosted_cluster_service_cidr=172.32.0.0/16
+##     -e hcp_cluster_name=hcp-cluster2
 
 - name: Create Hosted Cluster
   hosts: localhost
@@ -28,12 +34,13 @@
   - name: Fail fast if required inputs are missing
     ansible.builtin.assert:
       that:
-        - hcp_cluster_name is defined
+        - (hosted_clusters | default([]) | length > 0) or hcp_cluster_name is defined
         - pull_secret is defined
         - ssh_key is defined
       fail_msg: >-
-        Pass -e hcp_cluster_name=<name> (e.g. hcp-cluster1), and make
-        sure pull_secret/ssh_key are defined in vault.yaml.
+        Define hosted_clusters in vars.yaml (or pass -e hcp_cluster_name=<name>
+        to render a single cluster), and make sure pull_secret/ssh_key are
+        defined in vault.yaml.
 
   - ansible.builtin.import_role:
       name: create-hosted-cluster

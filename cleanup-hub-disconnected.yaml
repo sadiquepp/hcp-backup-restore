@@ -1,0 +1,42 @@
+## Tears down ONLY the disconnected hub's VMs and disks (see
+## setup_hub_cluster_disconnected.yaml). hub1 and hub2 are untouched -
+## every domain name and path below is namespaced to hubd.
+##
+## Modelled on cleanup-hub.yaml / cleanup-hub2.yaml.
+##
+## Usage:
+##   ansible-playbook cleanup-hub-disconnected.yaml
+
+- name: Cleanup
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+  tasks:
+  - name: Destroy Hub Workers
+    shell: |
+      virsh undefine hubd_worker1 && virsh undefine hubd_worker2 && virsh undefine hubd_worker3
+      virsh destroy hubd_worker1 && virsh destroy hubd_worker2 && virsh destroy hubd_worker3
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_worker1.qcow2
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_worker2.qcow2
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_worker3.qcow2
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_storage_worker1.qcow2
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_storage_worker2.qcow2
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_storage_worker3.qcow2
+
+  - name: Destroy Hub Masters
+    shell: |
+      virsh undefine hubd_master1 && virsh undefine hubd_master2 && virsh undefine hubd_master3
+      virsh destroy hubd_master1 && virsh destroy hubd_master2 && virsh destroy hubd_master3
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_master1.qcow2
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_master2.qcow2
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_master3.qcow2
+
+  - name: Destroy Hub Bootstrap
+    shell: |
+      virsh undefine hubd_bootstrap  && virsh destroy hubd_bootstrap
+      rm -f {{ hub_disconnected_vm_folder }}/hubd_bootstrap.qcow2
+
+  - name: Cleanup SSH Know Hostss
+    shell: |
+      rm -f /root/.ssh/known_hosts

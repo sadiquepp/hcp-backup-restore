@@ -1,0 +1,18 @@
+---
+# Poll until every ClusterOperator is Available=True, Progressing=False,
+# and Degraded=False (equivalent to a clean oc get co).
+
+- name: Wait for all ClusterOperators to be healthy
+  ansible.builtin.shell: |
+    export KUBECONFIG={{ kubeconfig_path }}
+    oc get co -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Available")].status}{"\t"}{.status.conditions[?(@.type=="Progressing")].status}{"\t"}{.status.conditions[?(@.type=="Degraded")].status}{"\n"}{end}' \
+      | awk -F'\t' '$2 != "True" || $3 != "False" || $4 != "False" { print; bad = 1 } END { exit bad + 0 }'
+  register: cluster_operators_check
+  until: cluster_operators_check.rc == 0
+  retries: "{{ cluster_operator_retries | default(120) }}"
+  delay: "{{ cluster_operator_delay | default(30) }}"
+  changed_when: false
+
+- name: Report ClusterOperator status
+  ansible.builtin.debug:
+    msg: "All ClusterOperators are Available (not Progressing or Degraded)"

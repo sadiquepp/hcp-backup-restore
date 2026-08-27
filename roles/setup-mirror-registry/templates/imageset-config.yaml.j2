@@ -24,3 +24,7 @@ mirror:
 {% endfor %}
   additionalImages:
     - name: registry.redhat.io/openshift4/ose-tools-rhel9:latest
+    # Test workload in tests/microservices-demo - all three of its services run
+    # from this one image, with their code supplied via ConfigMaps, so this
+    # single entry is all a disconnected hub needs to run the app.
+    - name: quay.io/sclorg/python-312-c9s:latest

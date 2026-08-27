@@ -1,0 +1,70 @@
+## Installs the hub cluster the same way setup_hub_cluster.yaml does (KVM/
+## libvirt UPI: bootstrap/master/worker VMs booted from RHCOS + ignition),
+## except the cluster is configured to pull every release/operator image
+## solely from the local mirror registry (see setup_mirror_registry.yaml)
+## instead of quay.io/registry.redhat.io.
+##
+## This hub CO-EXISTS with hub1 (setup_hub_cluster.yaml) and hub2
+## (setup_hub_cluster2.yaml) - it has its own IP block (ip_list.hubd_*), its
+## own subdomain (hub_disconnected_domain), its own MetalLB pool
+## (hub_disconnected_metallb_pool_*) and its own VM/install directories, so
+## all three can be running at the same time. Adding the hubd_* entries to
+## ip_list is what gives it DHCP reservations and DNS records, so re-run
+## setup_bm_host.yaml (at minimum its dns/lb tags) after pulling these vars
+## in, otherwise api/api-int/*.apps for this cluster won't resolve.
+##
+## Scope is deliberately just the cluster install - it does not chain into
+## setup-hub-acm. Run that separately afterwards, same as the connected flow,
+## once you've decided how ACM/MCE will resolve operator catalogs disconnected:
+##
+##   - ansible.builtin.import_role:
+##       name: setup-hub-acm
+##     vars:
+##       metallb_pool_start: "{{ hub_disconnected_metallb_pool_start }}"
+##       metallb_pool_end: "{{ hub_disconnected_metallb_pool_end }}"
+##     environment:
+##       KUBECONFIG: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
+##
+## Requires disconnected_install: true (vars.yaml, default false) and the
+## mirror registry already stood up via setup_mirror_registry.yaml (mirror
+## registry CA trusted + credentials available locally, oc-mirror output
+## present on the mirror-registry VM).
+##
+## Usage:
+##   ansible-playbook setup_hub_cluster_disconnected.yaml --ask-vault-pass
+
+- name: Setting Up Hub Cluster (disconnected)
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+  - name: Refuse to run unless disconnected_install is enabled
+    ansible.builtin.assert:
+      that:
+        - disconnected_install | bool
+      fail_msg: >-
+        Set disconnected_install: true in vars.yaml (or pass
+        -e disconnected_install=true) before running this playbook.
+
+  - name: Fail fast if the mirror registry CA has not been trusted locally yet
+    ansible.builtin.stat:
+      path: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+    register: mirror_ca_status
+
+  - ansible.builtin.assert:
+      that:
+        - mirror_ca_status.stat.exists
+      fail_msg: >-
+        Mirror registry CA not found locally - run setup_mirror_registry.yaml
+        first (it stands up the mirror registry and runs
+        setup-mirror-registry-trust to trust its CA here).
+
+  - ansible.builtin.import_role:
+      name: setup-hub-cluster-disconnected
+
+  - name: Wait for ClusterOperators to be healthy before day-2 install
+    ansible.builtin.include_tasks: roles/setup-hub-cluster-disconnected/tasks/wait-for-cluster-operators.yml
+    vars:
+      kubeconfig_path: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"

@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Installs the KVM/libvirt hub cluster (UPI, platform none) wired up to pull exclusively from the local mirror registry, for disconnected-install simulation
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

@@ -5,6 +5,11 @@
 # "create-hosted-cluster" section - edit values there, not here.
 # Kept here only as fallbacks if this role is ever used without vars.yaml.
 
+# One entry per hosted cluster - see vars.yaml, which is where this is
+# meant to be set. Empty here so the role fails loudly rather than
+# rendering something unexpected if vars.yaml isn't loaded.
+hosted_clusters: []
+
 hosted_cluster_clusterset: default
 hosted_cluster_channel: fast-4.21
 # Keep in sync with roles/setup-hub-acm's agent_service_os_images list -
@@ -12,10 +17,14 @@ hosted_cluster_channel: fast-4.21
 # release image and the available discovery ISOs will be mismatched.
 hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:05e69ed54453e3d306b136f52493073073b207f57d0562fe1c8a555bde61aa49"
 
-# clusterNetwork/serviceNetwork CIDRs. These default to hcp-cluster1's
-# values - if you're running a second hosted cluster (hcp-cluster2)
-# concurrently on the same hub, override both to a disjoint range, e.g.
-# -e hosted_cluster_cluster_cidr=10.136.0.0/14 -e hosted_cluster_service_cidr=172.32.0.0/16
+# clusterNetwork/serviceNetwork CIDRs. Internal to each hosted cluster's
+# own OVN-Kubernetes data plane, so concurrent hosted clusters on the same
+# hub can all use these same values. Keep them clear of the lab/machine
+# network the worker VMs sit on. Override per-cluster in a hosted_clusters
+# entry when a cluster genuinely needs its own range:
+#   - name: hcp-cluster3
+#     cluster_cidr: 10.136.0.0/14
+#     service_cidr: 172.32.0.0/16
 hosted_cluster_cluster_cidr: 10.132.0.0/14
 hosted_cluster_service_cidr: 172.31.0.0/16
 

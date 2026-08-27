@@ -1,0 +1,7 @@
+# Split out from base so the app can also be deployed into a namespace that
+# already exists — drop this from `resources:` and the deploy needs no
+# cluster-scoped permission at all.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: microservices-demo

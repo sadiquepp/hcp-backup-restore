@@ -9,7 +9,7 @@ $TTL 1D
 worker1		A	{{ lab_network_prefix }}.{{ ip_list.c1worker1 }}
 worker2		A	{{ lab_network_prefix }}.{{ ip_list.c1worker2 }}
 worker3		A	{{ lab_network_prefix }}.{{ ip_list.c1worker3 }}
-api		A	{{ lab_network_prefix }}.60
-api-int		A	{{ lab_network_prefix }}.60
+api		A	{{ lab_network_prefix }}.{{ hub_metallb_pool_start }}
+api-int		A	{{ lab_network_prefix }}.{{ hub_metallb_pool_start }}
 *.apps		A	{{ lab_network_prefix }}.{{ ip_list.c1lb }}
 

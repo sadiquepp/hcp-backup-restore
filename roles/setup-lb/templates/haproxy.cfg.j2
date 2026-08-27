@@ -98,10 +98,24 @@ frontend hub_api
 backend hub_api_backend
     balance roundrobin
     mode tcp 
-    server bootstrap {{ lab_network_prefix }}.{{ip_list.bootstrap}}:6443 check 
-    server master1 {{ lab_network_prefix }}.{{ip_list.master1}}:6443 check 
-    server master2 {{ lab_network_prefix }}.{{ip_list.master2}}:6443 check
-    server master3 {{ lab_network_prefix }}.{{ip_list.master3}}:6443 check
+    # kube-apiserver health check. A bare TCP connect only proves something
+    # is listening on 6443 - it goes UP the moment the socket binds, well
+    # before the API can actually serve. /readyz is the apiserver's own
+    # readiness gate, so a master only takes traffic once it is genuinely
+    # ready. check-ssl is mandatory here, not cosmetic: 6443 is TLS, and an
+    # httpchk without it sends a plaintext GET to a TLS socket and every
+    # backend goes DOWN. verify none because these are the cluster's own
+    # self-signed serving certs.
+    # NB: expect *status 200*, not `expect string ok` - a failing /readyz
+    # returns 500 with a per-check body whose lines read "[+]ping ok",
+    # so a substring match on "ok" scores a failed apiserver as healthy.
+    option httpchk GET /readyz HTTP/1.0
+    http-check expect status 200
+    option log-health-checks
+    server bootstrap {{ lab_network_prefix }}.{{ip_list.bootstrap}}:6443 check check-ssl verify none
+    server master1 {{ lab_network_prefix }}.{{ip_list.master1}}:6443 check check-ssl verify none
+    server master2 {{ lab_network_prefix }}.{{ip_list.master2}}:6443 check check-ssl verify none
+    server master3 {{ lab_network_prefix }}.{{ip_list.master3}}:6443 check check-ssl verify none
 ##------------------- HUB API - INT  ---------------------------------------#
 frontend hub_api_int
     bind  {{ lab_network_prefix }}.{{ip_list.hublb}}:22623
@@ -152,10 +166,24 @@ frontend hub2_api
 backend hub2_api_backend
     balance roundrobin
     mode tcp
-    server bootstrap {{ lab_network_prefix }}.{{ip_list.hub2_bootstrap}}:6443 check
-    server master1 {{ lab_network_prefix }}.{{ip_list.hub2_master1}}:6443 check
-    server master2 {{ lab_network_prefix }}.{{ip_list.hub2_master2}}:6443 check
-    server master3 {{ lab_network_prefix }}.{{ip_list.hub2_master3}}:6443 check
+    # kube-apiserver health check. A bare TCP connect only proves something
+    # is listening on 6443 - it goes UP the moment the socket binds, well
+    # before the API can actually serve. /readyz is the apiserver's own
+    # readiness gate, so a master only takes traffic once it is genuinely
+    # ready. check-ssl is mandatory here, not cosmetic: 6443 is TLS, and an
+    # httpchk without it sends a plaintext GET to a TLS socket and every
+    # backend goes DOWN. verify none because these are the cluster's own
+    # self-signed serving certs.
+    # NB: expect *status 200*, not `expect string ok` - a failing /readyz
+    # returns 500 with a per-check body whose lines read "[+]ping ok",
+    # so a substring match on "ok" scores a failed apiserver as healthy.
+    option httpchk GET /readyz HTTP/1.0
+    http-check expect status 200
+    option log-health-checks
+    server bootstrap {{ lab_network_prefix }}.{{ip_list.hub2_bootstrap}}:6443 check check-ssl verify none
+    server master1 {{ lab_network_prefix }}.{{ip_list.hub2_master1}}:6443 check check-ssl verify none
+    server master2 {{ lab_network_prefix }}.{{ip_list.hub2_master2}}:6443 check check-ssl verify none
+    server master3 {{ lab_network_prefix }}.{{ip_list.hub2_master3}}:6443 check check-ssl verify none
 ##------------------- HUB2 API - INT  ---------------------------------------#
 frontend hub2_api_int
     bind  {{ lab_network_prefix }}.{{ip_list.hub2lb}}:22623
@@ -195,6 +223,74 @@ backend hub2_apps_https_backend
     server master1 {{ lab_network_prefix }}.{{ip_list.hub2_worker1}}:443 check
     server master2 {{ lab_network_prefix }}.{{ip_list.hub2_worker2}}:443 check
     server master3 {{ lab_network_prefix }}.{{ip_list.hub2_worker3}}:443 check
+
+#------------------- HUB-DISCONNECTED API ----------------------------#
+frontend hubd_api
+    bind  {{ lab_network_prefix }}.{{ip_list.hubdlb}}:6443
+    use_backend hubd_api_backend
+    mode tcp
+
+backend hubd_api_backend
+    balance roundrobin
+    mode tcp
+    # kube-apiserver health check. A bare TCP connect only proves something
+    # is listening on 6443 - it goes UP the moment the socket binds, well
+    # before the API can actually serve. /readyz is the apiserver's own
+    # readiness gate, so a master only takes traffic once it is genuinely
+    # ready. check-ssl is mandatory here, not cosmetic: 6443 is TLS, and an
+    # httpchk without it sends a plaintext GET to a TLS socket and every
+    # backend goes DOWN. verify none because these are the cluster's own
+    # self-signed serving certs.
+    # NB: expect *status 200*, not `expect string ok` - a failing /readyz
+    # returns 500 with a per-check body whose lines read "[+]ping ok",
+    # so a substring match on "ok" scores a failed apiserver as healthy.
+    option httpchk GET /readyz HTTP/1.0
+    http-check expect status 200
+    option log-health-checks
+    server bootstrap {{ lab_network_prefix }}.{{ip_list.hubd_bootstrap}}:6443 check check-ssl verify none
+    server master1 {{ lab_network_prefix }}.{{ip_list.hubd_master1}}:6443 check check-ssl verify none
+    server master2 {{ lab_network_prefix }}.{{ip_list.hubd_master2}}:6443 check check-ssl verify none
+    server master3 {{ lab_network_prefix }}.{{ip_list.hubd_master3}}:6443 check check-ssl verify none
+
+##------------------- HUB-DISCONNECTED API - INT  --------------------#
+frontend hubd_api_int
+    bind  {{ lab_network_prefix }}.{{ip_list.hubdlb}}:22623
+    use_backend hubd_api_int_backend
+    mode tcp
+
+backend hubd_api_int_backend
+    balance roundrobin
+    mode tcp
+    server bootstrap {{ lab_network_prefix }}.{{ip_list.hubd_bootstrap}}:22623 check
+    server master1 {{ lab_network_prefix }}.{{ip_list.hubd_master1}}:22623 check
+    server master2 {{ lab_network_prefix }}.{{ip_list.hubd_master2}}:22623 check
+    server master3 {{ lab_network_prefix }}.{{ip_list.hubd_master3}}:22623 check
+
+#------------------- HUB-DISCONNECTED APPS  --------------------------#
+frontend hubd_apps
+    bind  {{ lab_network_prefix }}.{{ip_list.hubdlb}}:80
+    use_backend hubd_apps_backend
+    mode tcp
+
+backend hubd_apps_backend
+    balance roundrobin
+    mode tcp
+    server worker1 {{ lab_network_prefix }}.{{ip_list.hubd_worker1}}:80 check
+    server worker2 {{ lab_network_prefix }}.{{ip_list.hubd_worker2}}:80 check
+    server worker3 {{ lab_network_prefix }}.{{ip_list.hubd_worker3}}:80 check
+
+#------------------- HUB-DISCONNECTED APPS - HTTPS  ------------------#
+frontend hubd_apps_https
+    bind  {{ lab_network_prefix }}.{{ip_list.hubdlb}}:443
+    use_backend hubd_apps_https_backend
+    mode tcp
+
+backend hubd_apps_https_backend
+    balance roundrobin
+    mode tcp
+    server worker1 {{ lab_network_prefix }}.{{ip_list.hubd_worker1}}:443 check
+    server worker2 {{ lab_network_prefix }}.{{ip_list.hubd_worker2}}:443 check
+    server worker3 {{ lab_network_prefix }}.{{ip_list.hubd_worker3}}:443 check
 
 #------------------- HCP-Cluster1 APPS -------------------------------------#
 frontend hcp_cluster1_apps
