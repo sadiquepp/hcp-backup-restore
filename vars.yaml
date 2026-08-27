@@ -436,4 +436,4 @@ ceph_odf_exporter_local_path: "{{ playbook_dir }}/ceph-odf/ceph-external-cluster
 ## Where the exported JSON (contains cluster credentials!) lands
 ## locally - see .gitignore, never commit this.
 ceph_odf_export_dir: "{{ playbook_dir }}/ceph-odf"
-use_lvm_storage: false
+use_lvm_storage: true
