@@ -27,4 +27,29 @@ mirror:
     # Test workload in tests/microservices-demo - all three of its services run
     # from this one image, with their code supplied via ConfigMaps, so this
     # single entry is all a disconnected hub needs to run the app.
-    - name: quay.io/sclorg/python-312-c9s:latest
+    #
+    # Pinned to the linux/amd64 CHILD manifest digest rather than to a tag, and
+    # that is load-bearing - do NOT "tidy" it back into a tag. The tags of this
+    # repository point at an OCI image index
+    # (application/vnd.oci.image.index.v1+json), and oc-mirror v2 copies with
+    # digests preserved, so it cannot re-serialise that index as a Docker v2
+    # manifest list and fails the whole run:
+    #
+    #   error mirroring image quay.io/sclorg/python-312-c9s:latest
+    #   Manifest list must be converted to type
+    #   "application/vnd.docker.distribution.manifest.list.v2+json" to be
+    #   written to destination, but we cannot modify it:
+    #   "Instructed to preserve digests"
+    #
+    # A single-arch child manifest needs no conversion, so it mirrors cleanly -
+    # at the cost of being amd64 only, which is what this lab runs.
+    #
+    # This digest is the amd64 member of tag 20260820 and must stay in step with
+    # the `digest:` in tests/microservices-demo/overlays/*/kustomization.yaml.
+    # To move to a newer build:
+    #
+    #   skopeo inspect --raw docker://quay.io/sclorg/python-312-c9s:<tag> \
+    #     | jq -r '.manifests[]
+    #              | select(.platform.os=="linux" and .platform.architecture=="amd64")
+    #              | .digest'
+    - name: quay.io/sclorg/python-312-c9s@sha256:526d1584d52d0a400868c7616ca29b47e91ac73bcd28dd7d5d46cec538e1e230

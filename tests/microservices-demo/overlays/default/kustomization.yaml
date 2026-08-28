@@ -15,11 +15,17 @@ labels:
     pairs:
       app.kubernetes.io/instance: microservices-demo
 
-# Pinned rather than :latest so a redeploy months from now is the same bits.
-# The image is multi-arch (amd64/arm64/ppc64le), so this works on x86 clusters,
-# ARM clusters and CRC on Apple silicon alike.
-# Repoint at a mirror for a disconnected cluster, e.g.
-#   newName: registry.example.com:8443/sclorg/python-312-c9s
+# Pinned by digest rather than :latest so a redeploy months from now is the same
+# bits. This is the linux/amd64 member of tag 20260820 - a child manifest, not
+# the multi-arch index, because oc-mirror v2 cannot mirror that index at all
+# (see roles/setup-mirror-registry/templates/imageset-config.yaml.j2 for why).
+#
+# So: amd64 only. On an ARM cluster or CRC on Apple silicon, override with
+# `newTag: "20260820"` in your own overlay to get the multi-arch index back.
+#
+# Nothing to repoint for a disconnected cluster: oc-mirror mirrors this exact
+# digest, so the ImageDigestMirrorSet it generates redirects the pull to the
+# mirror registry on its own - no `newName:` needed.
 images:
   - name: quay.io/sclorg/python-312-c9s
-    newTag: "20260820"
+    digest: sha256:526d1584d52d0a400868c7616ca29b47e91ac73bcd28dd7d5d46cec538e1e230
