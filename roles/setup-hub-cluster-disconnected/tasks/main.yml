@@ -400,9 +400,49 @@
   register: mirror_registry_pull_secret_b64
   become: true
 
-- name: Store the mirror registry pull secret as a fact
+# mirror_registry_authfile is /root/.docker/config.json - the host's shared
+# podman/docker config, not a file private to this lab. setup-mirror-registry-trust
+# runs `podman login --authfile` against it, so it holds the mirror registry's
+# entry *merged into* whatever the host already had for quay.io,
+# registry.redhat.io, cloud.openshift.com and friends. Two reasons not to hand
+# the whole thing to the cluster:
+#
+#   1. Those credentials would give every node a working route back to the real
+#      registries. The install could then satisfy a pull that the mirror is
+#      missing and succeed for the wrong reason - the same "disconnected only by
+#      accident" failure the LIBVIRT_PRT rules at the top of this file exist to
+#      prevent.
+#   2. Red Hat pull secrets carry "email" fields, and an apostrophe in one is
+#      enough to break the generated install-config.yaml. It used to be
+#      interpolated into a single-quoted YAML scalar, where the apostrophe closes
+#      the scalar early and the remaining JSON gets parsed as YAML structure:
+#      "failed to unmarshal install-config.yaml: error converting YAML to JSON:
+#      yaml: line 25: did not find expected key". The template now serialises
+#      this with to_json rather than pasting raw file text, so that class of
+#      breakage is gone either way, but there is still no reason to ship
+#      credentials the cluster must not use.
+- name: Work out which authfile entry belongs to the mirror registry
   ansible.builtin.set_fact:
-    disconnected_pull_secret: "{{ mirror_registry_pull_secret_b64.content | b64decode }}"
+    hubd_mirror_registry_host: "{{ mirror_registry_domain }}:{{ mirror_registry_port }}"
+    hubd_authfile_auths: "{{ (mirror_registry_pull_secret_b64.content | b64decode | from_json).auths | default({}, true) }}"
+  no_log: true
+
+- name: Fail if the host is not logged in to the mirror registry
+  ansible.builtin.assert:
+    that:
+      - hubd_mirror_registry_host in hubd_authfile_auths
+    fail_msg: >-
+      {{ mirror_registry_authfile }} has no credentials for
+      {{ hubd_mirror_registry_host }} - it holds entries for
+      [{{ hubd_authfile_auths.keys() | list | join(', ') }}].
+      roles/setup-mirror-registry-trust is what logs podman in there, so run
+      setup_mirror_registry.yaml first.
+
+- name: Reduce the pull secret to the mirror registry's own credentials
+  ansible.builtin.set_fact:
+    disconnected_pull_secret:
+      auths: "{{ {hubd_mirror_registry_host: hubd_authfile_auths[hubd_mirror_registry_host]} }}"
+  no_log: true
 
 # Copy Install-Config
 - name: Copying install-config.yaml to install dir
