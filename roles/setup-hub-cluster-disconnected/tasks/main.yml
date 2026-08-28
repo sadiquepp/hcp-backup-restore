@@ -16,7 +16,10 @@
 #
 # What differs from the connected role:
 #   - openshift-install is extracted from the release image *in the mirror
-#     registry*, so the pullspec it bakes into ignition points at the mirror
+#     registry*, so the pullspec it bakes into ignition points at the mirror.
+#     That extract is handed oc-mirror's ImageDigestMirrorSet via --idms-file,
+#     which is what lets oc resolve the installer *component* image inside the
+#     mirror instead of falling back to its original quay.io pullspec
 #   - install-config.yaml carries the mirror CA + a mirror-only pull secret
 #   - extra manifests are injected before ignition-configs are generated:
 #     ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource from oc-mirror,
@@ -202,6 +205,149 @@
     group: root
     mode: '0755'
 
+# ---------------------------------------------------------------------------
+# Stage oc-mirror's cluster-resources manifests on the hypervisor *before* the
+# install starts, because the `oc adm release extract` below needs the
+# ImageDigestMirrorSet that is among them.
+#
+# oc-mirror v2 does not put the release payload's component images in the same
+# repository as the release image. The release image lands in
+# {{ mirror_release_repository }}, while every component it references -
+# including the installer image that --command=openshift-install actually reads
+# the binary out of - lands in <registry>/openshift/release. `oc adm release
+# extract` knows nothing about that split: its only built-in fallback is "look
+# in the same repository as the release image I was handed", which is the layout
+# `oc adm release mirror` produces, not oc-mirror v2's. So it falls back to the
+# installer's original pullspec and goes to the internet for it:
+#
+#   error: unable to read image quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:...
+#   Get "https://quay.io/v2/...": unauthorized: ...
+#
+# That fails outright on a host with no internet, and on a host with internet it
+# succeeds for the wrong reason - producing an openshift-install whose component
+# references point at quay.io, which is exactly the leak the rest of this role
+# exists to prevent.
+#
+# oc-mirror already wrote the source-to-mirror map we need, so fetch it and pass
+# it with --idms-file. The same manifests are copied into the install
+# manifests/ directory further down; this block only moves the fetch early
+# enough for oc to use it as well.
+- name: Locate the oc-mirror cluster-resources directory on the mirror-registry VM
+  ansible.builtin.shell: |
+    set -o pipefail
+    find /root/mirror/oc-mirror-output -type d -name cluster-resources | head -n1
+  args:
+    executable: /bin/bash
+  register: cluster_resources_dir
+  changed_when: false
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+- name: Fail if oc-mirror has not produced any cluster-resources manifests yet
+  ansible.builtin.assert:
+    that:
+      - cluster_resources_dir.stdout | trim | length > 0
+    fail_msg: >-
+      No cluster-resources directory found under /root/mirror/oc-mirror-output on
+      the mirror-registry VM - run setup_mirror_registry.yaml first.
+
+- name: Archive the oc-mirror cluster-resources manifests (ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource)
+  ansible.builtin.shell: |
+    tar czf /root/mirror/hubd-cluster-resources.tar.gz -C "{{ cluster_resources_dir.stdout | trim | dirname }}" cluster-resources
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+- name: Fetch the cluster-resources archive to the hypervisor
+  ansible.builtin.fetch:
+    src: /root/mirror/hubd-cluster-resources.tar.gz
+    dest: "{{ hub_disconnected_cluster_resources_archive }}"
+    flat: true
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+# Rebuilt from empty rather than unpacked over, so a manifest oc-mirror no
+# longer emits cannot survive from an earlier run and get copied into the
+# install manifests directory later.
+- name: Clear the cluster-resources staging directory on the hypervisor
+  ansible.builtin.file:
+    path: "{{ hub_disconnected_cluster_resources_dir }}"
+    state: absent
+
+- name: Create the cluster-resources staging directory on the hypervisor
+  ansible.builtin.file:
+    path: "{{ hub_disconnected_cluster_resources_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Unpack the cluster-resources manifests into the staging directory
+  ansible.builtin.unarchive:
+    src: "{{ hub_disconnected_cluster_resources_archive }}"
+    dest: "{{ hub_disconnected_cluster_resources_dir }}"
+    remote_src: true
+    extra_opts:
+      - "--strip-components=1"
+
+# oc-mirror's filename for this manifest has moved around across releases
+# (idms-oc-mirror.yaml, imageDigestMirrorSet.yaml, release-idms-oc-mirror.yaml),
+# so select it by content instead. Only the release mappings matter to the
+# extract - the operator and additional-image mappings in the same output are
+# irrelevant to the installer image, and the cluster picks them up from the
+# manifests directory anyway - so prefer a manifest that actually maps
+# openshift-release-dev, falling back to any ImageDigestMirrorSet for the case
+# where oc-mirror wrote one combined file under a name that does not mention it.
+# One file, not a concatenation: `oc adm release extract` takes a single
+# --idms-file path and does not parse a multi-document stream.
+- name: Find the ImageDigestMirrorSet that maps the release payload
+  ansible.builtin.shell: |
+    set -o pipefail
+    all=$(grep -rlE '^[[:space:]]*kind:[[:space:]]*ImageDigestMirrorSet' \
+            "{{ hub_disconnected_cluster_resources_dir }}" | sort)
+    [ -n "$all" ] || exit 0
+    release=$(printf '%s\n' "$all" | xargs -r grep -l 'openshift-release-dev')
+    printf '%s\n' "${release:-$all}" | head -n1
+  args:
+    executable: /bin/bash
+  register: hubd_idms_file
+  changed_when: false
+
+- name: Fail if oc-mirror produced no ImageDigestMirrorSet
+  ansible.builtin.assert:
+    that:
+      - hubd_idms_file.stdout | trim | length > 0
+    fail_msg: >-
+      No ImageDigestMirrorSet found in the oc-mirror output staged at
+      {{ hub_disconnected_cluster_resources_dir }}. Without one, `oc adm release
+      extract` cannot map quay.io/openshift-release-dev/ocp-v4.0-art-dev to
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }} and will try to
+      pull the installer image from quay.io. Check that the ImageSetConfiguration
+      actually mirrored a platform release, then re-run
+      setup_mirror_registry.yaml.
+
+- name: Show which ImageDigestMirrorSet the extract will use
+  ansible.builtin.debug:
+    msg: "oc adm release extract --idms-file={{ hubd_idms_file.stdout | trim }}"
+
+# The oc download above is skipped when /usr/bin/oc already exists, so the
+# client running the extract is not guaranteed to be the mirror_ocp_version one.
+# --idms-file arrived in oc 4.13 (superseding the older --icsp-file); fail with
+# something more useful than "unknown flag" if this one predates it.
+- name: Check that oc supports --idms-file
+  ansible.builtin.shell: |
+    set -o pipefail
+    oc adm release extract --help | grep -q -- --idms-file
+  args:
+    executable: /bin/bash
+  register: oc_idms_support
+  changed_when: false
+  failed_when: false
+
+- name: Fail if oc is too old to accept an ImageDigestMirrorSet
+  ansible.builtin.assert:
+    that:
+      - oc_idms_support.rc == 0
+    fail_msg: >-
+      /usr/bin/oc does not support `oc adm release extract --idms-file`, which
+      this role needs in order to resolve the installer image inside the mirror
+      registry (the flag arrived in oc 4.13). Delete /usr/bin/oc and re-run so
+      the {{ mirror_ocp_version }} client is downloaded, or upgrade it by hand.
+
 # openshift-install is pulled out of the mirror registry's own release payload
 # rather than downloaded from mirror.openshift.com. This matters beyond just
 # avoiding an internet fetch: the binary that `oc adm release extract` hands
@@ -220,6 +366,7 @@
 - name: Extract openshift-install from the release image in the mirror registry
   ansible.builtin.shell: |
     oc adm release extract -a {{ mirror_registry_authfile }} \
+      --idms-file="{{ hubd_idms_file.stdout | trim }}" \
       --command=openshift-install \
       "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}:{{ mirror_ocp_version }}-x86_64"
   args:
@@ -274,42 +421,16 @@
     regexp: 'mastersSchedulable'
     line: "  mastersSchedulable: false"
 
-- name: Locate the oc-mirror cluster-resources directory on the mirror-registry VM
-  ansible.builtin.shell: |
-    set -o pipefail
-    find /root/mirror/oc-mirror-output -type d -name cluster-resources | head -n1
-  args:
-    executable: /bin/bash
-  register: cluster_resources_dir
-  changed_when: false
-  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
-
-- name: Fail if oc-mirror has not produced any cluster-resources manifests yet
-  ansible.builtin.assert:
-    that:
-      - cluster_resources_dir.stdout | trim | length > 0
-    fail_msg: >-
-      No cluster-resources directory found under /root/mirror/oc-mirror-output on
-      the mirror-registry VM - run setup_mirror_registry.yaml first.
-
-- name: Archive the oc-mirror cluster-resources manifests (ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource)
-  ansible.builtin.shell: |
-    tar czf /root/mirror/hubd-cluster-resources.tar.gz -C "{{ cluster_resources_dir.stdout | trim | dirname }}" cluster-resources
-  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
-
-- name: Fetch the cluster-resources archive to the hypervisor
-  ansible.builtin.fetch:
-    src: /root/mirror/hubd-cluster-resources.tar.gz
-    dest: /tmp/hubd-cluster-resources.tar.gz
-    flat: true
-  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
-
-- name: Extract the mirror registry's ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource manifests into the install manifests directory
-  ansible.builtin.unarchive:
-    src: /tmp/hubd-cluster-resources.tar.gz
-    dest: "{{ hub_disconnected_install_folder }}/manifests"
-    extra_opts:
-      - "--strip-components=1"
+# These manifests were already pulled off the mirror-registry VM and staged
+# before the openshift-install extract above, which needs the
+# ImageDigestMirrorSet among them. Copying them in here is the second half of
+# that: --idms-file redirected the *extract*, and these manifests redirect the
+# *installed cluster*, so neither reaches for quay.io.
+- name: Copy the mirror registry's ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource manifests into the install manifests directory
+  ansible.builtin.copy:
+    src: "{{ hub_disconnected_cluster_resources_dir }}/"
+    dest: "{{ hub_disconnected_install_folder }}/manifests/"
+    remote_src: true
 
 - name: Copy the OperatorHub default-catalog-sources suppression manifest
   ansible.builtin.copy:
