@@ -22,3 +22,17 @@ hub_disconnected_node_ip_keys:
   - hubd_worker1
   - hubd_worker2
   - hubd_worker3
+
+# Where oc-mirror's cluster-resources manifests (ImageDigestMirrorSet /
+# ImageTagMirrorSet / CatalogSource) are staged on the hypervisor after being
+# pulled off the mirror-registry VM. They are needed at two different points in
+# this role, which is why they get staged outside the install directory rather
+# than fetched straight into it:
+#   1. before the install starts at all, so `oc adm release extract` can be
+#      handed the release mirror map via --idms-file
+#   2. as manifests copied into the install directory, so the cluster itself
+#      keeps the same redirection at runtime
+# The staging directory is rebuilt from the archive on every run, so stale
+# manifests from a previous oc-mirror run are never reused.
+hub_disconnected_cluster_resources_archive: /tmp/hubd-cluster-resources.tar.gz
+hub_disconnected_cluster_resources_dir: /tmp/hubd-cluster-resources

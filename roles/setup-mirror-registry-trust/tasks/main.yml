@@ -2,12 +2,21 @@
 # Tasks file for setup-mirror-registry-trust
 #
 # Runs on the baremetal host (localhost) - fetches the mirror registry's
-# self-signed CA back from the VM, trusts it locally, and logs
-# baremetal's own podman in via a dedicated authfile. Never touches
-# ~/.docker/config.json, so this can't disturb any other registry
-# credentials already configured there (registry.redhat.io, quay.io,
-# etc). Must run after roles/setup-mirror-registry, since that's what
-# generates the CA on the VM in the first place.
+# self-signed CA back from the VM, trusts it locally, and logs baremetal's own
+# podman in to the registry.
+#
+# mirror_registry_authfile defaults to /root/.docker/config.json, which is the
+# host's shared podman/docker config rather than a file private to this lab, so
+# the login below MERGES the mirror registry's entry into whatever credentials
+# are already there (registry.redhat.io, quay.io, cloud.openshift.com...).
+# Anything pointed at that authfile therefore sees all of them - which is fine
+# for oc-mirror, but not for the cluster, so roles/setup-hub-cluster-disconnected
+# reduces it back down to the mirror registry's single entry before putting it
+# in install-config.yaml. Point mirror_registry_authfile elsewhere if you would
+# rather keep this lab's credentials separate.
+#
+# Must run after roles/setup-mirror-registry, since that's what generates the CA
+# on the VM in the first place.
 
 - name: Ensure podman is installed on baremetal
   dnf:
