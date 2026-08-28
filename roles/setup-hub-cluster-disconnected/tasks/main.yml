@@ -290,10 +290,10 @@
 # (idms-oc-mirror.yaml, imageDigestMirrorSet.yaml, release-idms-oc-mirror.yaml)
 # and it may write one combined file or split them per image type, so find them
 # by content rather than by name. Release-payload mappings are listed first
-# because `oc adm release extract` takes a single --idms-file path and does not
-# parse a multi-document stream, so only the first can be handed to it - and the
-# installer image it has to resolve is a release-payload image. Every file found
-# still feeds imageDigestSources below.
+# because `oc adm release extract` takes a single --idms-file path, so only the
+# first of them can be handed to it - and the image it has to resolve, the
+# installer, is a release-payload image. Every file found still feeds
+# imageDigestSources below.
 # Partitioned with an explicit loop rather than `grep -v` against the release
 # list, because grep exits 1 when it selects nothing - which is the ordinary case
 # of oc-mirror writing a single combined idms-oc-mirror.yaml that IS the release
@@ -353,11 +353,41 @@
 # The template reads only .source and .mirrors from each entry, which drops
 # IDMS-only fields such as mirrorSourcePolicy that the installer's
 # ImageDigestSource type does not accept.
+#
+# from_yaml_all, not from_yaml: oc-mirror writes idms-oc-mirror.yaml as a
+# multi-document stream, one ImageDigestMirrorSet per '---' (release, operators,
+# additional images). from_yaml is a plain safe_load and rejects that outright -
+# "expected a single document in the stream ... but found another document" -
+# pointing at the line of the second '---'. Every document is collected and then
+# narrowed back to ImageDigestMirrorSets, so an ImageTagMirrorSet sharing the
+# file, or the empty document a trailing '---' produces, is skipped rather than
+# blowing up the expression.
 - name: Collect oc-mirror's source-to-mirror mappings for install-config.yaml
   ansible.builtin.set_fact:
     disconnected_image_digest_mirrors: "{{ hubd_idms_raw.results
-      | map(attribute='content') | map('b64decode') | map('from_yaml')
+      | map(attribute='content') | map('b64decode')
+      | map('from_yaml_all') | map('list') | flatten
+      | select('mapping')
+      | selectattr('kind', 'defined')
+      | selectattr('kind', 'equalto', 'ImageDigestMirrorSet')
+      | selectattr('spec', 'defined')
       | map(attribute='spec.imageDigestMirrors') | flatten }}"
+
+# Guards against rendering a bare "imageDigestSources:" with nothing under it,
+# which YAML reads as null and which would leave the bootstrap node with no
+# mirror configuration at all - the failure this key exists to prevent, but
+# silent.
+- name: Fail if no source-to-mirror mappings could be read
+  ansible.builtin.assert:
+    that:
+      - disconnected_image_digest_mirrors | length > 0
+    fail_msg: >-
+      Found ImageDigestMirrorSet files
+      ({{ hubd_idms_files.stdout_lines | join(', ') }}) but no
+      spec.imageDigestMirrors entries in any of them, so install-config.yaml
+      would carry an empty imageDigestSources and the bootstrap node would
+      resolve payload images to quay.io. Check the oc-mirror output on the
+      mirror-registry VM.
 
 - name: Show what the extract and install-config.yaml will use
   ansible.builtin.debug:
