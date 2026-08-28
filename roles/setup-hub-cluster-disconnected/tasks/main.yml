@@ -284,33 +284,36 @@
     extra_opts:
       - "--strip-components=1"
 
-# oc-mirror's filename for this manifest has moved around across releases
-# (idms-oc-mirror.yaml, imageDigestMirrorSet.yaml, release-idms-oc-mirror.yaml),
-# so select it by content instead. Only the release mappings matter to the
-# extract - the operator and additional-image mappings in the same output are
-# irrelevant to the installer image, and the cluster picks them up from the
-# manifests directory anyway - so prefer a manifest that actually maps
-# openshift-release-dev, falling back to any ImageDigestMirrorSet for the case
-# where oc-mirror wrote one combined file under a name that does not mention it.
-# One file, not a concatenation: `oc adm release extract` takes a single
-# --idms-file path and does not parse a multi-document stream.
-- name: Find the ImageDigestMirrorSet that maps the release payload
+# oc-mirror's filename for these has moved around across releases
+# (idms-oc-mirror.yaml, imageDigestMirrorSet.yaml, release-idms-oc-mirror.yaml)
+# and it may write one combined file or split them per image type, so find them
+# by content rather than by name. Release-payload mappings are listed first
+# because `oc adm release extract` takes a single --idms-file path and does not
+# parse a multi-document stream, so only the first can be handed to it - and the
+# installer image it has to resolve is a release-payload image. Every file found
+# still feeds imageDigestSources below.
+- name: List the ImageDigestMirrorSets oc-mirror produced, release payload first
   ansible.builtin.shell: |
     set -o pipefail
     all=$(grep -rlE '^[[:space:]]*kind:[[:space:]]*ImageDigestMirrorSet' \
             "{{ hub_disconnected_cluster_resources_dir }}" | sort)
     [ -n "$all" ] || exit 0
     release=$(printf '%s\n' "$all" | xargs -r grep -l 'openshift-release-dev')
-    printf '%s\n' "${release:-$all}" | head -n1
+    if [ -n "$release" ]; then
+      printf '%s\n' "$release"
+      printf '%s\n' "$all" | grep -vxF -f <(printf '%s\n' "$release")
+    else
+      printf '%s\n' "$all"
+    fi
   args:
     executable: /bin/bash
-  register: hubd_idms_file
+  register: hubd_idms_files
   changed_when: false
 
 - name: Fail if oc-mirror produced no ImageDigestMirrorSet
   ansible.builtin.assert:
     that:
-      - hubd_idms_file.stdout | trim | length > 0
+      - hubd_idms_files.stdout_lines | length > 0
     fail_msg: >-
       No ImageDigestMirrorSet found in the oc-mirror output staged at
       {{ hub_disconnected_cluster_resources_dir }}. Without one, `oc adm release
@@ -320,9 +323,36 @@
       actually mirrored a platform release, then re-run
       setup_mirror_registry.yaml.
 
-- name: Show which ImageDigestMirrorSet the extract will use
+- name: Read every ImageDigestMirrorSet oc-mirror produced
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ hubd_idms_files.stdout_lines }}"
+  register: hubd_idms_raw
+
+# Flattened into the source/mirrors pairs that install-config.yaml's
+# imageDigestSources takes. Manifests in manifests/ only reach the *cluster* -
+# the CVO applies them, and the MCO turns the ImageDigestMirrorSet into
+# /etc/containers/registries.conf on masters and workers. The bootstrap node has
+# neither: its registries.conf comes from the bootstrap ignition, which the
+# installer builds from imageDigestSources in install-config.yaml. Without this,
+# bootkube resolves the payload's component images (etcd, kube-apiserver,
+# cluster-bootstrap...) to their original quay.io pullspecs and bootstrap fails
+# on a host that cannot reach quay.io.
+#
+# The template reads only .source and .mirrors from each entry, which drops
+# IDMS-only fields such as mirrorSourcePolicy that the installer's
+# ImageDigestSource type does not accept.
+- name: Collect oc-mirror's source-to-mirror mappings for install-config.yaml
+  ansible.builtin.set_fact:
+    disconnected_image_digest_mirrors: "{{ hubd_idms_raw.results
+      | map(attribute='content') | map('b64decode') | map('from_yaml')
+      | map(attribute='spec.imageDigestMirrors') | flatten }}"
+
+- name: Show what the extract and install-config.yaml will use
   ansible.builtin.debug:
-    msg: "oc adm release extract --idms-file={{ hubd_idms_file.stdout | trim }}"
+    msg:
+      - "oc adm release extract --idms-file={{ hubd_idms_files.stdout_lines[0] }}"
+      - "imageDigestSources: {{ disconnected_image_digest_mirrors | map(attribute='source') | join(', ') }}"
 
 # The oc download above is skipped when /usr/bin/oc already exists, so the
 # client running the extract is not guaranteed to be the mirror_ocp_version one.
@@ -366,11 +396,43 @@
 - name: Extract openshift-install from the release image in the mirror registry
   ansible.builtin.shell: |
     oc adm release extract -a {{ mirror_registry_authfile }} \
-      --idms-file="{{ hubd_idms_file.stdout | trim }}" \
+      --idms-file="{{ hubd_idms_files.stdout_lines[0] }}" \
       --command=openshift-install \
       "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}:{{ mirror_ocp_version }}-x86_64"
   args:
     chdir: "{{ hub_disconnected_install_folder }}"
+
+# oc-mirror writes some of its cluster resources twice, once as .json and once
+# as .yaml. The release signature ConfigMap is the one that bites: both files
+# describe the same object, and `openshift-install create ignition-configs`
+# refuses a manifests directory that defines an object twice -
+#
+#   failed to generate asset "CVO Ignore": multiple manifests for group  kind
+#   ConfigMap namespace openshift-config-managed name mirrored-release-signatures:
+#   manifests/signature-configmap.json, manifests/signature-configmap.yaml
+#
+# - so drop the .json wherever a .yaml/.yml of the same name sits beside it.
+# A .json with no YAML counterpart is left alone; removing it would silently drop
+# a resource the cluster is meant to get. Done here rather than at unpack time
+# because the --idms-file lookup above runs against the untouched output.
+- name: Drop oc-mirror's duplicate .json manifests where a .yaml exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd "{{ hub_disconnected_cluster_resources_dir }}" || exit 1
+    for j in *.json; do
+      [ -e "$j" ] || continue
+      for y in "${j%.json}.yaml" "${j%.json}.yml"; do
+        if [ -e "$y" ]; then
+          rm -f -- "$j"
+          echo "dropped $j (same object as $y)"
+          break
+        fi
+      done
+    done
+  args:
+    executable: /bin/bash
+  register: hubd_dropped_json
+  changed_when: hubd_dropped_json.stdout | trim | length > 0
 
 - name: Ensure the extracted openshift-install is executable
   ansible.builtin.file:

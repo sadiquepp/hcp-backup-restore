@@ -20,6 +20,38 @@ networking:
 platform:
   none: {}
 fips: false
+# Derived from the ImageDigestMirrorSet oc-mirror generated, so this and the
+# manifests copied into manifests/ can never drift apart. Same shape a connected-
+# infrastructure disconnected install writes by hand:
+#
+#   imageDigestSources:
+#   - mirrors:
+#     - <registry>/openshift/release-images
+#     source: quay.io/openshift-release-dev/ocp-release
+#   - mirrors:
+#     - <registry>/openshift/release
+#     source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+#
+# This is not a duplicate of the ImageDigestMirrorSet in manifests/ - the two
+# configure different hosts. manifests/ is applied by the CVO once the cluster
+# exists, and the MCO renders it into /etc/containers/registries.conf on masters
+# and workers. The bootstrap node is not a cluster member and never sees it: its
+# registries.conf comes from the bootstrap ignition, which the installer builds
+# from this key. Without it bootkube resolves the payload's component images to
+# quay.io and bootstrap fails.
+#
+# Every mapping oc-mirror emitted is listed, not just the release ones, so the
+# bootstrap node resolves operator images through the mirror too. Only .source
+# and .mirrors are read; IDMS-only fields like mirrorSourcePolicy are not part of
+# the installer's ImageDigestSource type.
+imageDigestSources:
+{% for m in disconnected_image_digest_mirrors %}
+- mirrors:
+{% for mirror in m.mirrors %}
+  - {{ mirror }}
+{% endfor %}
+  source: {{ m.source }}
+{% endfor %}
 # Only the mirror registry's own credentials, not the whole host authfile:
 # tasks/main.yml reduces mirror_registry_authfile down to that single auths
 # entry. The ImageDigestMirrorSet oc-mirror generated (copied into manifests/ in
