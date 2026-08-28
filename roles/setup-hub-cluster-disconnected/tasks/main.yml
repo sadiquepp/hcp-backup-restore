@@ -235,7 +235,9 @@
 - name: Locate the oc-mirror cluster-resources directory on the mirror-registry VM
   ansible.builtin.shell: |
     set -o pipefail
-    find /root/mirror/oc-mirror-output -type d -name cluster-resources | head -n1
+    # `|| true` so a missing directory surfaces through the assert below with an
+    # explanation, rather than as a bare non-zero rc from find.
+    find /root/mirror/oc-mirror-output -type d -name cluster-resources | head -n1 || true
   args:
     executable: /bin/bash
   register: cluster_resources_dir
@@ -292,19 +294,28 @@
 # parse a multi-document stream, so only the first can be handed to it - and the
 # installer image it has to resolve is a release-payload image. Every file found
 # still feeds imageDigestSources below.
+# Partitioned with an explicit loop rather than `grep -v` against the release
+# list, because grep exits 1 when it selects nothing - which is the ordinary case
+# of oc-mirror writing a single combined idms-oc-mirror.yaml that IS the release
+# one. Under `set -o pipefail` that non-zero status fails the task even though
+# the file list it printed was correct. Every path out of here is exit 0; an
+# empty result is the assert below's business, not a task failure.
 - name: List the ImageDigestMirrorSets oc-mirror produced, release payload first
   ansible.builtin.shell: |
     set -o pipefail
     all=$(grep -rlE '^[[:space:]]*kind:[[:space:]]*ImageDigestMirrorSet' \
-            "{{ hub_disconnected_cluster_resources_dir }}" | sort)
+            "{{ hub_disconnected_cluster_resources_dir }}" | sort) || true
     [ -n "$all" ] || exit 0
-    release=$(printf '%s\n' "$all" | xargs -r grep -l 'openshift-release-dev')
-    if [ -n "$release" ]; then
-      printf '%s\n' "$release"
-      printf '%s\n' "$all" | grep -vxF -f <(printf '%s\n' "$release")
-    else
-      printf '%s\n' "$all"
-    fi
+    rest=
+    while IFS= read -r f; do
+      if grep -q 'openshift-release-dev' "$f"; then
+        printf '%s\n' "$f"
+      else
+        rest="${rest}${f}"$'\n'
+      fi
+    done <<< "$all"
+    printf '%s' "$rest"
+    exit 0
   args:
     executable: /bin/bash
   register: hubd_idms_files
