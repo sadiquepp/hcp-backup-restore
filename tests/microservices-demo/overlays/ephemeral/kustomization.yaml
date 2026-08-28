@@ -19,9 +19,10 @@ labels:
     pairs:
       app.kubernetes.io/instance: microservices-demo-ephemeral
 
+# Same amd64 child-manifest digest as overlays/default - see the comment there.
 images:
   - name: quay.io/sclorg/python-312-c9s
-    newTag: "20260820"
+    digest: sha256:526d1584d52d0a400868c7616ca29b47e91ac73bcd28dd7d5d46cec538e1e230
 
 patches:
   # Drop both PVCs.

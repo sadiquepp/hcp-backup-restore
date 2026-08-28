@@ -36,8 +36,11 @@ no Dockerfile, no registry to push to, and exactly one image to mirror.
 **Standard library only.** No `pip install` at runtime, so it behaves identically
 on an air-gapped cluster as on a connected one.
 
-**Multi-arch.** The base image publishes amd64, arm64 and ppc64le, so the same
-manifests work on x86 clusters, ARM clusters, and CRC on Apple silicon.
+**Multi-arch upstream, amd64 as shipped.** The base image publishes amd64, arm64
+and ppc64le. The overlays here pin the **amd64 child manifest by digest**, because
+the multi-arch index is an OCI image index and oc-mirror v2 cannot mirror it (see
+[Disconnected clusters](#disconnected-clusters)). On an ARM cluster or CRC on
+Apple silicon, override with `newTag: "20260820"` to get the index back.
 
 **Restricted SCC clean.** `runAsNonRoot`, all capabilities dropped,
 `seccompProfile: RuntimeDefault`, no fixed UID — runs under the default
@@ -87,9 +90,10 @@ resources:
 
 images:
   - name: quay.io/sclorg/python-312-c9s
-    newName: registry.internal:8443/sclorg/python-312-c9s   # your mirror
-    newTag: "20260820"
+    digest: sha256:526d1584d52d0a400868c7616ca29b47e91ac73bcd28dd7d5d46cec538e1e230   # amd64 member of tag 20260820
 ```
+
+On a connected ARM cluster, swap that `digest:` for `newTag: "20260820"`.
 
 Common overrides:
 
@@ -202,6 +206,33 @@ cluster needs OADP installed there too.
 
 ## Disconnected clusters
 
-One image to mirror. It is already listed under `additionalImages` in
-`roles/setup-mirror-registry/templates/imageset-config.yaml.j2`; point the
-overlay's `images:` entry at your mirror.
+One image to mirror, already listed under `additionalImages` in
+`roles/setup-mirror-registry/templates/imageset-config.yaml.j2`. Nothing to
+repoint: oc-mirror mirrors the exact digest the overlays ask for, so the
+`ImageDigestMirrorSet` it generates redirects the pull to the mirror registry
+by itself — no `newName:` needed.
+
+### Why it is pinned by digest and not by tag
+
+The tags of `quay.io/sclorg/python-312-c9s` point at an **OCI image index**
+(`application/vnd.oci.image.index.v1+json`). oc-mirror v2 copies with digests
+preserved, so it cannot re-serialise that index into the Docker v2 manifest list
+the destination wants, and the whole mirror run dies with:
+
+```
+error mirroring image quay.io/sclorg/python-312-c9s:latest
+Manifest list must be converted to type
+"application/vnd.docker.distribution.manifest.list.v2+json" to be written to
+destination, but we cannot modify it: "Instructed to preserve digests"
+```
+
+A single-arch **child** manifest is a plain image manifest, needs no conversion,
+and mirrors cleanly — hence the digest. Keep the digest in the ImageSetConfiguration
+and the one in the overlays in step. To move to a newer build:
+
+```bash
+skopeo inspect --raw docker://quay.io/sclorg/python-312-c9s:<tag> \
+  | jq -r '.manifests[]
+           | select(.platform.os=="linux" and .platform.architecture=="amd64")
+           | .digest'
+```
