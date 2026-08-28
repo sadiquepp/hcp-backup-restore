@@ -162,6 +162,29 @@ If you are using a disconnected deployment, you need to setup a mirror registry 
 ansible-playbook -i inventory/hosts setup_mirror_registry.yaml --ask-vault-pass -e disconnected_install=true
 ```
 
+### Setup MinIO (If using a disconnected deployment)
+
+A disconnected lab has no route to AWS S3, so OADP needs a local S3-compatible
+backup target. This creates a VM, registers it, installs the MinIO server and
+the `mc` client as a systemd service, and creates the bucket OADP backs up to.
+Like the mirror registry it is gated behind `disconnected_install`, and needs
+`minio_root_user` / `minio_root_password` in `vault.yaml`.
+
+```bash
+ansible-playbook -i inventory/hosts setup_minio.yaml --ask-vault-pass -e disconnected_install=true
+```
+
+MinIO ends up on `http://minio.<hub_domain>:9000` (console on `:9001`), with the
+bucket from `minio_bucket_name` in `vars.yaml`.
+
+> The same server can back more than OADP. The OpenShift observability stack —
+> Loki for logs and network flows, Tempo for traces — is also plain S3, and the
+> [`minio_backends`](https://github.com/sadiquepp/openshift/tree/main/observability/ansible/roles/minio_backends)
+> role in `sadiquepp/openshift` provisions its buckets and least-privilege users
+> on an existing MinIO exactly like this one, as a drop-in replacement for its
+> AWS phase. See
+> [observability/ansible/README.md](https://github.com/sadiquepp/openshift/blob/main/observability/ansible/README.md#disconnected-minio-instead-of-aws-s3).
+
 ### Setup Hub Cluster (hub1 - Connected Deployment)
 
 Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP operator.
@@ -387,6 +410,8 @@ oc get restore.velero.io -n openshift-adp hcp-cluster1-restore -o yaml
 | Playbook                      | Description                                   |
 | ----------------------------- | --------------------------------------------- |
 | `setup_bm_host.yaml`          | Prepare bare metal, create helper VM (DNS/LB) |
+| `setup_mirror_registry.yaml`  | Create the mirror registry VM (disconnected)  |
+| `setup_minio.yaml`            | Create the MinIO VM - local S3 for OADP (disconnected) |
 | `setup_hub_cluster.yaml`      | Deploy hub1 (OCP + day-2 operators)           |
 | `setup_hub_cluster2.yaml`     | Deploy hub2 (DR replacement hub)              |
 | `setup_hosted_cluster.yaml`   | Provision hosted cluster 1                    |
@@ -408,6 +433,8 @@ oc get restore.velero.io -n openshift-adp hcp-cluster1-restore -o yaml
 | --------------- | --------------------------------------------------------------------- |
 | `setup-hub-acm` | Installs ACM, LVM-Storage, MetalLB, and OADP operator subscriptions   |
 | `setup-oadp`    | Creates the cloud-credentials secret and DataProtectionApplication CR |
+| `setup-minio-vm` | Creates the MinIO VM on the bare metal host                          |
+| `setup-minio`   | Installs the MinIO server + `mc`, runs it under systemd, makes the bucket |
 
 
 
