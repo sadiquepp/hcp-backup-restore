@@ -68,3 +68,17 @@
     ansible.builtin.include_tasks: roles/setup-hub-cluster-disconnected/tasks/wait-for-cluster-operators.yml
     vars:
       kubeconfig_path: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
+
+  # The ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource oc-mirror generated
+  # are applied here rather than dropped into the install manifests directory.
+  # In manifests/ they are rendered into a MachineConfig by the in-cluster MCO,
+  # which then has to match what the bootstrap MCO rendered from
+  # install-config.yaml's imageDigestSources - and an ImageTagMirrorSet has no
+  # imageDigestSources equivalent, so the two can never agree. Applied on day 2
+  # they are an ordinary MachineConfig update instead. The install itself does
+  # not need them: the installer generates its own ImageDigestMirrorSet from
+  # imageDigestSources.
+  - name: Apply the mirror registry's day-2 resources (IDMS/ITMS/CatalogSource)
+    ansible.builtin.include_tasks: roles/setup-hub-cluster-disconnected/tasks/apply-day2-mirror-resources.yml
+    vars:
+      kubeconfig_path: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"

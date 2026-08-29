@@ -1,0 +1,71 @@
+---
+# Applies the oc-mirror resources that were deliberately kept out of the install
+# manifests directory: ImageDigestMirrorSet, ImageTagMirrorSet and CatalogSource.
+#
+# They are day-2 because of how the MachineConfigOperator renders them. An IDMS
+# or ITMS in manifests/ is turned into a MachineConfig by the in-cluster MCO,
+# while install-config.yaml's imageDigestSources is what the bootstrap MCO
+# renders from. Supplying the same mirrors through both means two renderers must
+# produce byte-identical MachineConfigs, and the MCD rejects the node on first
+# boot when they differ ("bootstrap generated MC ... and in-cluster generated MC
+# ... for this node do not match"). An ITMS cannot be expressed in
+# install-config.yaml at all, so the two sides can never agree.
+#
+# Applied here instead, they are an ordinary MachineConfig change: the MCO
+# rolls it out with one reboot per node, which is why this waits for the pools.
+#
+# Requires kubeconfig_path. Include after the cluster is up and its
+# ClusterOperators are healthy.
+- name: Check whether oc-mirror produced any day-2 resources
+  ansible.builtin.find:
+    paths: "{{ hub_disconnected_cluster_resources_day2_dir }}"
+    patterns: ['*.yaml', '*.yml', '*.json']
+  register: hubd_day2_files
+
+- name: Report that there is nothing to apply
+  ansible.builtin.debug:
+    msg: >-
+      No ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource in
+      {{ hub_disconnected_cluster_resources_day2_dir }} - nothing to apply.
+      The release payload still resolves through the mirror via the
+      ImageDigestMirrorSet the installer generated from imageDigestSources.
+  when: hubd_day2_files.matched == 0
+
+- name: Apply the mirror registry's day-2 resources
+  ansible.builtin.command:
+    cmd: oc apply -f "{{ hub_disconnected_cluster_resources_day2_dir }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: hubd_day2_apply
+  changed_when: "'created' in hubd_day2_apply.stdout or 'configured' in hubd_day2_apply.stdout"
+  when: hubd_day2_files.matched > 0
+
+- name: Show what was applied
+  ansible.builtin.debug:
+    var: hubd_day2_apply.stdout_lines
+  when: hubd_day2_files.matched > 0
+
+# The pools do not go Updating the instant the objects land - the MCO has to
+# notice them and render a new MachineConfig first. Waiting for Updated=True
+# straight away would match the pools' pre-existing Updated=True and return
+# immediately, so give the MCO a moment before waiting on the rollout.
+- name: Give the MCO time to render the new configuration
+  ansible.builtin.wait_for:
+    timeout: 90
+  when: hubd_day2_files.matched > 0
+
+- name: Wait for every MachineConfigPool to finish rolling out
+  ansible.builtin.command:
+    cmd: oc wait --for=condition=Updated=True machineconfigpool --all --timeout=2400s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+  when: hubd_day2_files.matched > 0
+
+- name: Fail if any MachineConfigPool ended up degraded
+  ansible.builtin.command:
+    cmd: oc wait --for=condition=Degraded=False machineconfigpool --all --timeout=120s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+  when: hubd_day2_files.matched > 0
