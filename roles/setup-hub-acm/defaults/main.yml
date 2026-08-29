@@ -1,24 +1,36 @@
 ---
 # defaults file for setup-hub-acm
 
+## Which hub this role is configuring. Selects each hosted cluster's address
+## out of hosted_cluster_metallb_pools below - pool names are the same on
+## every hub, the addresses are not. Set by setup_hub_cluster.yaml (hub),
+## setup_hub_cluster2.yaml (hub2) and setup_hub_cluster_disconnected.yaml
+## (hubd).
+metallb_hub: hub
+
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs - one
 ## single-address pool per hosted cluster, each bound to that cluster's
 ## control-plane namespace, plus one L2Advertisement per pool. The real map
 ## lives in vars.yaml (hosted_cluster_metallb_pools); the copy below is a
-## fallback only if the role is used without it. Keys are HostedCluster
-## names, 'ip' is a last octet combined with lab_network_prefix, and
-## 'control_plane_namespace' may be set per cluster if a HostedCluster is
+## fallback only if the role is used without it. Keys are HostedCluster names,
+## 'ip' is a per-hub last octet combined with the network prefix for that hub,
+## and 'control_plane_namespace' may be set per cluster if a HostedCluster is
 ## ever created somewhere other than a namespace matching its own name.
 hosted_cluster_metallb_pools:
   hcp-cluster1:
-    ip: 60
     pool: hcp-cluster1-api-pool
+    ip: {hub: 60, hub2: 90, hubd: 64}
   hcp-cluster2:
-    ip: 61
     pool: hcp-cluster2-api-pool
+    ip: {hub: 61, hub2: 91, hubd: 65}
   hcp-cluster3:
-    ip: 62
     pool: hcp-cluster3-api-pool
+    ip: {hub: 62, hub2: 92, hubd: 66}
+
+## Per-hub network prefix for the addresses above; anything not listed falls
+## back to lab_network_prefix. Override in vars.yaml for a hub on its own
+## segment.
+hosted_cluster_metallb_network_prefixes: {}
 
 ## The shared pool/advertisement this role used to create, removed before the
 ## per-cluster pools are applied because its 60-63 range overlaps them and
@@ -28,6 +40,7 @@ hosted_cluster_metallb_pools:
 metallb_remove_legacy_shared_pool: true
 metallb_legacy_pool_name: hcp-ip-pool
 metallb_legacy_l2advertisement_name: l2advertisement
+
 
 ## AgentServiceConfig storage sizes and available RHCOS live-ISO
 ## versions. Both hub1 and hub2 normally want the same os image list

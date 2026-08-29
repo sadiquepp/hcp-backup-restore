@@ -1,4 +1,5 @@
-# Static example; the live pools are rendered from
+# Static example - this is what the PRIMARY hub (metallb_hub: hub) gets. The
+# live pools are rendered from
 # roles/setup-hub-acm/templates/metal-lb/05-ip-pool.yaml.j2 out of
 # hosted_cluster_metallb_pools in vars.yaml.
 #
@@ -6,6 +7,12 @@
 # control-plane namespace (<hostedcluster-namespace>-<hostedcluster-name>), so
 # a hosted cluster's kube-apiserver can only ever be given the address its
 # api/api-int records already point at.
+#
+# The DR hub (metallb_hub: hub2) gets these same pool names holding
+# .90/.91/.92 instead, because it sits on its own network segment where these
+# addresses are not routable. Pool names stay identical so a restored
+# HostedCluster's metallb.io/address-pool annotation still refers to the right
+# pool; DNS is re-rendered with -e target_hub=hub2 at cutover.
 ---
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool

@@ -1,10 +1,21 @@
 {# api/api-int are the hosted cluster's kube-apiserver VIP, handed out by
-   MetalLB on the hub. The address comes from hosted_cluster_metallb_pools
-   (vars.yaml), the same map that defines the single-address IPAddressPool
-   bound to this cluster's control-plane namespace - so this zone and that
-   pool can never drift apart. The leading label of hosted_domain is the
-   HostedCluster name, which is how the two are keyed together. -#}
+   MetalLB on whichever hub currently runs its control plane. Both the
+   address and the network it sits on come from hosted_cluster_metallb_pools
+   (vars.yaml) for the hub named by target_hub - the same map and the same
+   hub selector roles/setup-hub-acm renders that cluster's single-address
+   IPAddressPool from, so this zone and that pool cannot drift apart.
+
+   target_hub is what moves these records at DR cutover: the DR hub is on a
+   different segment where hub1's addresses are not routable, so once the
+   hosted clusters are restored onto hub2, re-run
+     ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+       --ask-vault-pass -e target_hub=hub2
+   and api/api-int follow them there.
+
+   The leading label of hosted_domain is the HostedCluster name, which is how
+   the zone and the pool map are keyed together. -#}
 {% set hcp_name = hosted_domain.split('.') | first -%}
+{% set metallb_prefix = (hosted_cluster_metallb_network_prefixes | default({}))[target_hub] | default(lab_network_prefix) -%}
 $TTL 1D
 @	IN SOA	helper.{{ hub_domain }}. root.{{hub_domain }}. (
 					0	; serial
@@ -16,7 +27,7 @@ $TTL 1D
 worker1		A	{{ lab_network_prefix }}.{{ ip_list.c1worker1 }}
 worker2		A	{{ lab_network_prefix }}.{{ ip_list.c1worker2 }}
 worker3		A	{{ lab_network_prefix }}.{{ ip_list.c1worker3 }}
-api		A	{{ lab_network_prefix }}.{{ hosted_cluster_metallb_pools[hcp_name].ip }}
-api-int		A	{{ lab_network_prefix }}.{{ hosted_cluster_metallb_pools[hcp_name].ip }}
+api		A	{{ metallb_prefix }}.{{ hosted_cluster_metallb_pools[hcp_name].ip[target_hub] }}
+api-int		A	{{ metallb_prefix }}.{{ hosted_cluster_metallb_pools[hcp_name].ip[target_hub] }}
 *.apps		A	{{ lab_network_prefix }}.{{ ip_list.c1lb }}
 

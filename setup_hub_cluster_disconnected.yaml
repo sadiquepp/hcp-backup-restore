@@ -18,13 +18,17 @@
 ##
 ##   - ansible.builtin.import_role:
 ##       name: setup-hub-acm
+##     vars:
+##       metallb_hub: hubd
 ##     environment:
 ##       KUBECONFIG: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
 ##
-## It renders the same hosted_cluster_metallb_pools as the other two hubs.
-## That is safe while all three hubs are up because MetalLB only ARPs for an
-## address once a Service is actually assigned it - just don't run the same
-## hosted cluster on two hubs at once.
+## metallb_hub=hubd gives each hosted cluster this hub's own MetalLB address
+## (.64/.65/.66 by default) under the same pool names the other hubs use, so
+## all three hubs can carry the pools at once - MetalLB only ARPs for an
+## address once a Service is actually assigned it. Point api/api-int at them
+## with -e target_hub=hubd on setup_bm_host.yaml's dns tag if you ever run
+## hosted clusters here.
 ##
 ## Requires disconnected_install: true (vars.yaml, default false) and the
 ## mirror registry already stood up via setup_mirror_registry.yaml (mirror

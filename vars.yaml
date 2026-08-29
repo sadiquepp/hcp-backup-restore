@@ -176,42 +176,68 @@ hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 ## Service take any free address in it, so a cluster could easily come up on
 ## an address its api/api-int records don't point at. A single-address pool
 ## bound to that cluster's control-plane namespace makes that impossible:
-## the address a hosted cluster gets is the address DNS already publishes for
-## it, or it gets none at all. It also frees .63-.69 and .90-.99, which the
-## old ranges reserved without ever using.
+## the address a hosted cluster gets is the address DNS publishes for it on
+## the hub it is running on, or it gets none at all.
 ##
 ## Keyed by HostedCluster name (which roles/create-hosted-cluster also uses
 ## as the HostedCluster's namespace, hence control_plane_namespace defaulting
 ## to '<name>-<name>'). Consumed by:
 ##   - roles/setup-hub-acm  - renders the IPAddressPool + L2Advertisement pair
+##                            for the hub named by metallb_hub
 ##   - roles/create-hosted-cluster - annotates the HostedCluster with 'pool'
-##   - roles/setup-dns      - api/api-int A records point at 'ip'
+##   - roles/setup-dns      - api/api-int A records point at the address for
+##                            the hub named by target_hub
 ##
-## 'ip' is a last octet, combined with lab_network_prefix like ip_list. It must
-## stay clear of every ip_list octet and of the .201-.249 libvirt DHCP range,
-## since MetalLB L2 mode ARPs for these addresses itself and nothing else may
-## own them.
+## 'pool' is the same on every hub. A hosted cluster's identity does not
+## change when its control plane is restored somewhere else, so neither does
+## the pool it belongs to - which is what lets the metallb.io/address-pool
+## annotation on the HostedCluster survive an OADP restore onto the DR hub
+## unchanged.
 ##
-## These are deliberately NOT per-hub: the address belongs to the hosted
-## cluster, not to whichever hub currently runs its control plane, so a
-## cluster restored onto hub2 comes back on the same address its DNS already
-## points at. The pools are identical on every hub; that is safe because
-## MetalLB only ARPs for an address once a Service is actually assigned it,
-## so the constraint is simply that a given hosted cluster is live on ONE hub
-## at a time - which is exactly the DR cutover model (see
-## shutdown_hub_cluster.yaml). If you ever want two hubs serving *different*
-## hosted clusters concurrently, give each cluster its own 'ip' here rather
-## than reintroducing per-hub ranges.
+## 'ip' IS per hub, because the DR hub sits on a different network segment
+## and hub1's addresses are not routable there. Each key is a hub name (the
+## value passed as metallb_hub / target_hub):
+##   hub   - primary hub   (setup_hub_cluster.yaml)
+##   hub2  - DR hub        (setup_hub_cluster2.yaml)
+##   hubd  - disconnected hub (setup_hub_cluster_disconnected.yaml)
+## At DR cutover the hosted cluster comes back on the hub2 address and DNS is
+## re-rendered to match - see the MetalLB section of the README.
+##
+## Each value is a last octet, combined with the network prefix for that hub
+## (hosted_cluster_metallb_network_prefixes below, defaulting to
+## lab_network_prefix). It must stay clear of every ip_list octet on that hub's
+## segment and of the .201-.249 libvirt DHCP range, since MetalLB L2 mode ARPs
+## for these addresses itself and nothing else may own them.
 hosted_cluster_metallb_pools:
   hcp-cluster1:
-    ip: 60
     pool: hcp-cluster1-api-pool
+    ip:
+      hub: 60
+      hub2: 90
+      hubd: 64
   hcp-cluster2:
-    ip: 61
     pool: hcp-cluster2-api-pool
+    ip:
+      hub: 61
+      hub2: 91
+      hubd: 65
   hcp-cluster3:
-    ip: 62
     pool: hcp-cluster3-api-pool
+    ip:
+      hub: 62
+      hub2: 92
+      hubd: 66
+
+## Network the pool addresses sit on, per hub. Anything not listed here uses
+## lab_network_prefix, which is why this is empty by default - in this lab all
+## three hubs share virbr0. Set an entry when a hub really is on its own
+## segment, e.g. a DR hub in another VLAN:
+##   hosted_cluster_metallb_network_prefixes:
+##     hub2: "192.168.150"
+## The matching api/api-int records follow automatically, since roles/setup-dns
+## reads the same prefix for target_hub.
+hosted_cluster_metallb_network_prefixes: {}
+
 
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4
@@ -237,9 +263,13 @@ oadp_backup_ttl: 999h0m0s
 oadp_bminfra_namespace: bminfra
 oadp_storage_location: default
 
-## Which hub's kubeconfig setup_oadp.yaml / backup_hosted_cluster.yaml /
-## restore_hosted_cluster.yaml target by default. Override per-run with
-## -e target_hub=hub2 once you've cut over (see oadp/README.md).
+## Which hub is currently authoritative. It selects the kubeconfig
+## setup_oadp.yaml / backup_hosted_cluster.yaml / restore_hosted_cluster.yaml
+## use, and the hub whose hosted_cluster_metallb_pools addresses roles/setup-dns
+## publishes as api/api-int. Override per-run with -e target_hub=hub2 once
+## you've cut over (see oadp/README.md), and re-run the dns tag of
+## setup_bm_host.yaml with the same override so DNS follows the hosted
+## clusters to the DR hub.
 target_hub: hub
 
 ## ---------------------------------------------------------------------------

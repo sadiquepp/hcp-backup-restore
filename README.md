@@ -384,17 +384,51 @@ Check the status of the restore.
 oc get restore.velero.io -n openshift-adp hcp-cluster1-restore -o yaml
 ```
 
+### Point DNS at the DR hub
+
+The DR hub is on its own network segment, so the restored hosted clusters come
+up on its MetalLB addresses (`.90`/`.91`/`.92`) rather than hub1's - the pool
+names are the same, the addresses are not. Re-render the zone files so
+`api`/`api-int` follow them:
+
+```bash
+ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+  --ask-vault-pass -e target_hub=hub2
+```
+
+Verify DNS and the restored kube-apiserver Service agree:
+
+```bash
+dig +short api.hcp-cluster1.mylab.com @192.168.122.21
+oc get svc kube-apiserver -n hcp-cluster1-hcp-cluster1 \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}{"\n"}'
+```
+
+Set `target_hub: hub2` in `vars.yaml` to make the cutover permanent. See
+[MetalLB Address Pools for Hosted Clusters](#metallb-address-pools-for-hosted-clusters)
+for how the per-hub addresses are defined.
+
 
 ## MetalLB Address Pools for Hosted Clusters
 
 Each hosted cluster gets its **own single-address MetalLB pool**, so its
-kube-apiserver VIP can only ever be the address DNS already publishes for it.
+kube-apiserver VIP can only ever be the address DNS publishes for it on the hub
+it is running on.
 
-| Hosted cluster | Pool                    | Address          | api / api-int                  |
-| -------------- | ----------------------- | ---------------- | ------------------------------ |
-| `hcp-cluster1` | `hcp-cluster1-api-pool` | `192.168.122.60` | `api.hcp-cluster1.mylab.com`   |
-| `hcp-cluster2` | `hcp-cluster2-api-pool` | `192.168.122.61` | `api.hcp-cluster2.mylab.com`   |
-| `hcp-cluster3` | `hcp-cluster3-api-pool` | `192.168.122.62` | `api.hcp-cluster3.mylab.com`   |
+The **pool name is the same on every hub**; the **address it holds is not**.
+The DR hub sits on its own network segment where hub1's addresses are not
+routable, so each cluster carries one address per hub:
+
+| Hosted cluster | Pool                    | hub (primary)    | hub2 (DR)        | hubd (disconnected) |
+| -------------- | ----------------------- | ---------------- | ---------------- | ------------------- |
+| `hcp-cluster1` | `hcp-cluster1-api-pool` | `192.168.122.60` | `192.168.122.90` | `192.168.122.64`    |
+| `hcp-cluster2` | `hcp-cluster2-api-pool` | `192.168.122.61` | `192.168.122.91` | `192.168.122.65`    |
+| `hcp-cluster3` | `hcp-cluster3-api-pool` | `192.168.122.62` | `192.168.122.92` | `192.168.122.66`    |
+
+Keeping the pool names identical across hubs is what lets a HostedCluster's
+`metallb.io/address-pool` annotation survive an OADP restore onto the DR hub
+unchanged - the cluster still belongs to the same pool, that pool just holds a
+different, locally routable address there.
 
 All of it comes from one map in `vars.yaml`, so the pool, the DNS record and
 the HostedCluster annotation cannot drift apart:
@@ -402,25 +436,62 @@ the HostedCluster annotation cannot drift apart:
 ```yaml
 hosted_cluster_metallb_pools:
   hcp-cluster1:
-    ip: 60
     pool: hcp-cluster1-api-pool
+    ip:
+      hub: 60
+      hub2: 90
+      hubd: 64
   hcp-cluster2:
-    ip: 61
     pool: hcp-cluster2-api-pool
+    ip: {hub: 61, hub2: 91, hubd: 65}
   hcp-cluster3:
-    ip: 62
     pool: hcp-cluster3-api-pool
+    ip: {hub: 62, hub2: 92, hubd: 66}
 ```
 
-Three things are generated from it:
+Two variables select the hub:
 
-1. `roles/setup-hub-acm` renders one `IPAddressPool` per cluster (a single
-   address, e.g. `192.168.122.60-192.168.122.60`) and one `L2Advertisement`
-   per pool, so each address is advertised independently.
+- **`metallb_hub`** - which hub `setup-hub-acm` is configuring. Set by
+  `setup_hub_cluster.yaml` (`hub`), `setup_hub_cluster2.yaml` (`hub2`) and the
+  disconnected hub's example block (`hubd`).
+- **`target_hub`** - which hub is currently authoritative. Already used to pick
+  the kubeconfig for the OADP playbooks; it now also selects the address
+  `setup-dns` publishes as `api`/`api-int`. Defaults to `hub`.
+
+Three things are generated from the map:
+
+1. `roles/setup-hub-acm` renders one `IPAddressPool` per cluster holding
+   `metallb_hub`'s address for it (a single address, e.g.
+   `192.168.122.60-192.168.122.60`) and one `L2Advertisement` per pool, so each
+   address is advertised independently.
 2. `roles/setup-dns` points that cluster's `api` and `api-int` A records at
-   the same address.
+   `target_hub`'s address for it.
 3. `roles/create-hosted-cluster` annotates the HostedCluster with
    `metallb.io/address-pool: <pool>`.
+
+If a hub is genuinely on a different subnet rather than a different block of
+the same `/24`, give it its own prefix and the addresses and DNS records both
+follow:
+
+```yaml
+hosted_cluster_metallb_network_prefixes:
+  hub2: "192.168.150"
+```
+
+### DR cutover
+
+The DR hub's pools are created when you build it
+(`setup_hub_cluster2.yaml` passes `metallb_hub: hub2`), so after restoring the
+hosted clusters onto hub2 the only remaining step is to move DNS:
+
+```bash
+ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+  --ask-vault-pass -e target_hub=hub2
+```
+
+`api`/`api-int` for every hosted cluster now resolve to the hub2 addresses
+(`.90`/`.91`/`.92`), which is where their restored kube-apiservers actually
+came up. Set `target_hub: hub2` in `vars.yaml` to make the cutover permanent.
 
 ### What actually pins the address
 
@@ -451,22 +522,20 @@ oc -n hcp-cluster1-hcp-cluster1 annotate svc/kube-apiserver \
 
 - This replaces the old shared `hcp-ip-pool` (hub `60-63`, hubd `64-67`,
   hub2 `90-93`), which let any hosted cluster take any free address in the
-  range. `.63-.69` and `.90-.99` are now free. `roles/setup-hub-acm` deletes
-  the old pool and its `l2advertisement` before applying the new ones, since
+  range. `.63`, `.67` and `.93` are now free. `roles/setup-hub-acm` deletes the
+  old pool and its `l2advertisement` before applying the new ones, since
   MetalLB rejects overlapping pools - set
   `metallb_remove_legacy_shared_pool: false` to skip that.
-- The pools are the **same on every hub** (hub1, hub2, hubd) rather than one
-  range per hub. The address belongs to the hosted cluster, so a cluster
-  restored onto the DR hub comes back on the address its DNS already points
-  at. This is safe because MetalLB only ARPs for an address once a Service is
-  assigned it - just don't run the same hosted cluster on two hubs at once.
+- All three hubs can carry the pools at once, since MetalLB only ARPs for an
+  address once a Service is assigned it. Just don't run the same hosted
+  cluster on two hubs at the same time.
 - Every pool is namespace-constrained and there is no longer a catch-all pool
   on the hub, so a LoadBalancer Service outside these control-plane
   namespaces will sit at `<pending>` until you give it a pool of its own.
 - Adding a fourth hosted cluster means adding it to **both**
-  `hosted_cluster_metallb_pools` and `hosted_clusters`, then re-running
-  `setup-hub-acm` (pools) and `setup-dns` (records).
-  `roles/create-hosted-cluster` fails fast if a cluster has no pool entry.
+  `hosted_cluster_metallb_pools` (with an address for every hub) and
+  `hosted_clusters`, then re-running `setup-hub-acm` (pools) and `setup-dns`
+  (records). Both roles fail fast on a missing entry.
 
 ### Verifying
 

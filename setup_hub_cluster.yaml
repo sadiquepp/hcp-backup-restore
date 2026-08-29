@@ -13,12 +13,13 @@
     vars:
       kubeconfig_path: "{{ hub_install_folder }}/auth/kubeconfig"
 
-  # MetalLB pools come straight from hosted_cluster_metallb_pools in
-  # vars.yaml - one single-address pool per hosted cluster, the same on every
-  # hub, so a hosted cluster keeps its DNS-published address wherever its
-  # control plane runs. Nothing per-hub to map in here any more.
+  # One single-address MetalLB pool per hosted cluster, from
+  # hosted_cluster_metallb_pools in vars.yaml. Pool names are the same on
+  # every hub; metallb_hub picks this hub's address for each cluster.
   - ansible.builtin.import_role:
       name: setup-hub-acm
+    vars:
+      metallb_hub: hub
     environment:
       KUBECONFIG: "{{ hub_install_folder }}/auth/kubeconfig"
     tags:
