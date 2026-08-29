@@ -36,3 +36,27 @@ hub_disconnected_node_ip_keys:
 # manifests from a previous oc-mirror run are never reused.
 hub_disconnected_cluster_resources_archive: /tmp/hubd-cluster-resources.tar.gz
 hub_disconnected_cluster_resources_dir: /tmp/hubd-cluster-resources
+
+# oc-mirror's cluster-resources are split into two sets after being staged.
+#
+# Everything the cluster needs in order to *install* (the mirrored release
+# signature ConfigMap) goes into the install directory's manifests/. The
+# ImageDigestMirrorSet, ImageTagMirrorSet and CatalogSource are day-2: they are
+# applied with `oc apply` once the cluster is up, which is the flow oc-mirror's
+# own documentation describes.
+#
+# The split matters because an IDMS or ITMS sitting in manifests/ is rendered
+# into a MachineConfig by the in-cluster MCO, while install-config.yaml's
+# imageDigestSources is what the *bootstrap* MCO renders from. Feeding the same
+# mirrors through both paths means two renderers have to agree byte for byte,
+# and an ImageTagMirrorSet has no imageDigestSources equivalent at all, so they
+# cannot. Applied on day 2 instead, they produce an ordinary MachineConfig
+# update with one rolling reboot.
+hub_disconnected_cluster_resources_install_dir: "{{ hub_disconnected_cluster_resources_dir }}/install"
+hub_disconnected_cluster_resources_day2_dir: "{{ hub_disconnected_cluster_resources_dir }}/day2"
+
+# Kinds held back for day 2. Anything else is treated as install-time.
+hub_disconnected_day2_kinds:
+  - ImageDigestMirrorSet
+  - ImageTagMirrorSet
+  - CatalogSource

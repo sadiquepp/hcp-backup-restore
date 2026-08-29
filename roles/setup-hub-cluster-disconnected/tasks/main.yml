@@ -475,6 +475,54 @@
   register: hubd_dropped_json
   changed_when: hubd_dropped_json.stdout | trim | length > 0
 
+# oc-mirror's output mixes resources the cluster needs at install time with ones
+# that belong on day 2, and the difference is not cosmetic.
+#
+# An ImageDigestMirrorSet or ImageTagMirrorSet placed in manifests/ is turned
+# into a MachineConfig by the in-cluster MCO. install-config.yaml's
+# imageDigestSources is what the *bootstrap* MCO renders from. Route the same
+# mirrors through both and the two renders have to come out byte for byte
+# identical or the MCD refuses the node on first boot:
+#
+#   Node master1 upgrade failure. bootstrap generated MC rendered-master-<a> and
+#   in-cluster generated MC rendered-master-<b> for this node do not match.
+#
+# An ImageTagMirrorSet makes that impossible on its own - install-config.yaml has
+# no imageTagSources key, so tag mirrors can only ever reach the in-cluster side.
+# Applying them after the cluster is up turns this into an ordinary MachineConfig
+# update with one rolling reboot, which is the flow oc-mirror documents.
+#
+# The release payload still resolves through the mirror during the install: the
+# installer generates its own ImageDigestMirrorSet from imageDigestSources, so
+# nothing here is needed to get the cluster up.
+#
+# A file is held back whole if any document in it carries a day-2 kind, since
+# `oc apply` and manifests/ both take whole files.
+- name: Split the oc-mirror resources into install-time and day-2 sets
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd "{{ hub_disconnected_cluster_resources_dir }}" || exit 1
+    mkdir -p install day2
+    for f in *.yaml *.yml *.json; do
+      [ -e "$f" ] || continue
+      if grep -qE '^[[:space:]]*kind:[[:space:]]*({{ hub_disconnected_day2_kinds | join("|") }})[[:space:]]*$' "$f"; then
+        mv -- "$f" day2/
+      else
+        mv -- "$f" install/
+      fi
+    done
+    echo "install-time: $(ls install | tr '\n' ' ')"
+    echo "day-2:        $(ls day2 | tr '\n' ' ')"
+    exit 0
+  args:
+    executable: /bin/bash
+  register: hubd_resource_split
+  changed_when: false
+
+- name: Show how the oc-mirror resources were split
+  ansible.builtin.debug:
+    var: hubd_resource_split.stdout_lines
+
 - name: Ensure the extracted openshift-install is executable
   ansible.builtin.file:
     path: "{{ hub_disconnected_install_folder }}/openshift-install"
@@ -564,14 +612,14 @@
     regexp: 'mastersSchedulable'
     line: "  mastersSchedulable: false"
 
-# These manifests were already pulled off the mirror-registry VM and staged
-# before the openshift-install extract above, which needs the
-# ImageDigestMirrorSet among them. Copying them in here is the second half of
-# that: --idms-file redirected the *extract*, and these manifests redirect the
-# *installed cluster*, so neither reaches for quay.io.
-- name: Copy the mirror registry's ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource manifests into the install manifests directory
+# Only the install-time half - in practice the mirrored release signature
+# ConfigMap, which the cluster verifies the payload against and which is not an
+# MCO input. The ImageDigestMirrorSet, ImageTagMirrorSet and CatalogSource were
+# moved aside by the split above and are applied on day 2 by
+# tasks/apply-day2-mirror-resources.yml; see the comment there for why.
+- name: Copy the mirror registry's install-time manifests into the install manifests directory
   ansible.builtin.copy:
-    src: "{{ hub_disconnected_cluster_resources_dir }}/"
+    src: "{{ hub_disconnected_cluster_resources_install_dir }}/"
     dest: "{{ hub_disconnected_install_folder }}/manifests/"
     remote_src: true
 

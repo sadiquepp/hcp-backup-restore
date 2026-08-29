@@ -20,9 +20,9 @@ networking:
 platform:
   none: {}
 fips: false
-# Derived from the ImageDigestMirrorSet oc-mirror generated, so this and the
-# manifests copied into manifests/ can never drift apart. Same shape a connected-
-# infrastructure disconnected install writes by hand:
+# Derived from the ImageDigestMirrorSet oc-mirror generated, so the two can never
+# drift apart. Same shape a connected-infrastructure disconnected install writes
+# by hand:
 #
 #   imageDigestSources:
 #   - mirrors:
@@ -32,13 +32,19 @@ fips: false
 #     - <registry>/openshift/release
 #     source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
 #
-# This is not a duplicate of the ImageDigestMirrorSet in manifests/ - the two
-# configure different hosts. manifests/ is applied by the CVO once the cluster
-# exists, and the MCO renders it into /etc/containers/registries.conf on masters
-# and workers. The bootstrap node is not a cluster member and never sees it: its
-# registries.conf comes from the bootstrap ignition, which the installer builds
-# from this key. Without it bootkube resolves the payload's component images to
-# quay.io and bootstrap fails.
+# This is the only place the mirror is configured for the install. oc-mirror's own
+# ImageDigestMirrorSet is deliberately NOT copied into manifests/ - two renderers
+# describing the same mirrors have to agree byte for byte or the MCD rejects
+# every node on first boot, and an ImageTagMirrorSet cannot be expressed here at
+# all, so they cannot. oc-mirror's copies are applied on day 2 instead; see
+# tasks/apply-day2-mirror-resources.yml.
+#
+# This key covers both hosts that matter during the install. The installer builds
+# the bootstrap node's /etc/containers/registries.conf from it - the bootstrap
+# node is not a cluster member and never sees manifests/, and without this
+# bootkube resolves the payload's component images to quay.io and fails - and it
+# also generates the cluster's own ImageDigestMirrorSet, which the MCO renders
+# onto masters and workers.
 #
 # Every mapping oc-mirror emitted is listed, not just the release ones, so the
 # bootstrap node resolves operator images through the mirror too. Only .source
@@ -54,9 +60,9 @@ imageDigestSources:
 {% endfor %}
 # Only the mirror registry's own credentials, not the whole host authfile:
 # tasks/main.yml reduces mirror_registry_authfile down to that single auths
-# entry. The ImageDigestMirrorSet oc-mirror generated (copied into manifests/ in
-# tasks/main.yml) redirects every release and operator image pull to the mirror
-# registry, so the cluster never needs a quay.io or registry.redhat.io
+# entry. The imageDigestSources above redirect every release and operator image
+# pull to the mirror registry, so the cluster never needs a quay.io or
+# registry.redhat.io
 # credential - and giving it one would hand every node a working route back to
 # the real registries, quietly undoing the disconnection.
 #
