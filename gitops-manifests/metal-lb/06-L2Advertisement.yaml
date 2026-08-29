@@ -1,8 +1,32 @@
+# Static example; the live advertisements are rendered from
+# roles/setup-hub-acm/templates/metal-lb/06-L2Advertisement.yaml.j2.
+#
+# One L2Advertisement per pool, so each hosted cluster's address is advertised
+# independently and can be withdrawn without touching the others.
+---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
-  name: l2advertisement
+  name: hcp-cluster1-api-pool-l2
   namespace: metallb-system
 spec:
   ipAddressPools:
-   - hcp-ip-pool
+   - hcp-cluster1-api-pool
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: hcp-cluster2-api-pool-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+   - hcp-cluster2-api-pool
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: hcp-cluster3-api-pool-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+   - hcp-cluster3-api-pool

@@ -6,9 +6,8 @@
 ##
 ## This hub CO-EXISTS with hub1 (setup_hub_cluster.yaml) and hub2
 ## (setup_hub_cluster2.yaml) - it has its own IP block (ip_list.hubd_*), its
-## own subdomain (hub_disconnected_domain), its own MetalLB pool
-## (hub_disconnected_metallb_pool_*) and its own VM/install directories, so
-## all three can be running at the same time. Adding the hubd_* entries to
+## own subdomain (hub_disconnected_domain) and its own VM/install directories,
+## so all three can be running at the same time. Adding the hubd_* entries to
 ## ip_list is what gives it DHCP reservations and DNS records, so re-run
 ## setup_bm_host.yaml (at minimum its dns/lb tags) after pulling these vars
 ## in, otherwise api/api-int/*.apps for this cluster won't resolve.
@@ -19,11 +18,13 @@
 ##
 ##   - ansible.builtin.import_role:
 ##       name: setup-hub-acm
-##     vars:
-##       metallb_pool_start: "{{ hub_disconnected_metallb_pool_start }}"
-##       metallb_pool_end: "{{ hub_disconnected_metallb_pool_end }}"
 ##     environment:
 ##       KUBECONFIG: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
+##
+## It renders the same hosted_cluster_metallb_pools as the other two hubs.
+## That is safe while all three hubs are up because MetalLB only ARPs for an
+## address once a Service is actually assigned it - just don't run the same
+## hosted cluster on two hubs at once.
 ##
 ## Requires disconnected_install: true (vars.yaml, default false) and the
 ## mirror registry already stood up via setup_mirror_registry.yaml (mirror

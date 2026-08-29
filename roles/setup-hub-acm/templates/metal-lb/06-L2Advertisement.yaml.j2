@@ -1,0 +1,14 @@
+{# One L2Advertisement per pool, so each hosted cluster's address is
+   advertised independently and can be disabled without touching the others.
+   Rendered from the same hosted_cluster_metallb_pools map as the pools. #}
+{% for hcp_name, hcp_pool in hosted_cluster_metallb_pools | dictsort %}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: {{ hcp_pool.pool }}-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+   - {{ hcp_pool.pool }}
+{% endfor %}

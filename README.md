@@ -229,6 +229,10 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
     - name: hcp-cluster3
       nodepool_replicas: 3
   ```
+  Every name listed must also have an entry in `hosted_cluster_metallb_pools`
+  - that is what gives the cluster its own single-address MetalLB pool and
+  keeps its kube-apiserver VIP on the address `api`/`api-int` resolve to. See
+  [MetalLB Address Pools for Hosted Clusters](#metallb-address-pools-for-hosted-clusters).
   ```bash
   ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
   ```
@@ -381,6 +385,101 @@ oc get restore.velero.io -n openshift-adp hcp-cluster1-restore -o yaml
 ```
 
 
+## MetalLB Address Pools for Hosted Clusters
+
+Each hosted cluster gets its **own single-address MetalLB pool**, so its
+kube-apiserver VIP can only ever be the address DNS already publishes for it.
+
+| Hosted cluster | Pool                    | Address          | api / api-int                  |
+| -------------- | ----------------------- | ---------------- | ------------------------------ |
+| `hcp-cluster1` | `hcp-cluster1-api-pool` | `192.168.122.60` | `api.hcp-cluster1.mylab.com`   |
+| `hcp-cluster2` | `hcp-cluster2-api-pool` | `192.168.122.61` | `api.hcp-cluster2.mylab.com`   |
+| `hcp-cluster3` | `hcp-cluster3-api-pool` | `192.168.122.62` | `api.hcp-cluster3.mylab.com`   |
+
+All of it comes from one map in `vars.yaml`, so the pool, the DNS record and
+the HostedCluster annotation cannot drift apart:
+
+```yaml
+hosted_cluster_metallb_pools:
+  hcp-cluster1:
+    ip: 60
+    pool: hcp-cluster1-api-pool
+  hcp-cluster2:
+    ip: 61
+    pool: hcp-cluster2-api-pool
+  hcp-cluster3:
+    ip: 62
+    pool: hcp-cluster3-api-pool
+```
+
+Three things are generated from it:
+
+1. `roles/setup-hub-acm` renders one `IPAddressPool` per cluster (a single
+   address, e.g. `192.168.122.60-192.168.122.60`) and one `L2Advertisement`
+   per pool, so each address is advertised independently.
+2. `roles/setup-dns` points that cluster's `api` and `api-int` A records at
+   the same address.
+3. `roles/create-hosted-cluster` annotates the HostedCluster with
+   `metallb.io/address-pool: <pool>`.
+
+### What actually pins the address
+
+Each pool carries a `serviceAllocation` constraint naming that hosted
+cluster's control-plane namespace:
+
+```yaml
+  serviceAllocation:
+    priority: 10
+    namespaces:
+      - hcp-cluster1-hcp-cluster1   # <hostedcluster-namespace>-<hostedcluster-name>
+```
+
+That constraint is what enforces the mapping. **The
+`metallb.io/address-pool` annotation on the HostedCluster does not, on its
+own** - MetalLB reads that annotation from the LoadBalancer *Service*, and
+HyperShift does not copy HostedCluster annotations onto the `kube-apiserver`
+Service it generates. Keep the annotation for what it is: the record, on the
+HostedCluster itself, of which pool that cluster belongs to, and the value to
+pass if you ever need to force a reallocation by hand:
+
+```bash
+oc -n hcp-cluster1-hcp-cluster1 annotate svc/kube-apiserver \
+  metallb.io/address-pool=hcp-cluster1-api-pool --overwrite
+```
+
+### Notes and constraints
+
+- This replaces the old shared `hcp-ip-pool` (hub `60-63`, hubd `64-67`,
+  hub2 `90-93`), which let any hosted cluster take any free address in the
+  range. `.63-.69` and `.90-.99` are now free. `roles/setup-hub-acm` deletes
+  the old pool and its `l2advertisement` before applying the new ones, since
+  MetalLB rejects overlapping pools - set
+  `metallb_remove_legacy_shared_pool: false` to skip that.
+- The pools are the **same on every hub** (hub1, hub2, hubd) rather than one
+  range per hub. The address belongs to the hosted cluster, so a cluster
+  restored onto the DR hub comes back on the address its DNS already points
+  at. This is safe because MetalLB only ARPs for an address once a Service is
+  assigned it - just don't run the same hosted cluster on two hubs at once.
+- Every pool is namespace-constrained and there is no longer a catch-all pool
+  on the hub, so a LoadBalancer Service outside these control-plane
+  namespaces will sit at `<pending>` until you give it a pool of its own.
+- Adding a fourth hosted cluster means adding it to **both**
+  `hosted_cluster_metallb_pools` and `hosted_clusters`, then re-running
+  `setup-hub-acm` (pools) and `setup-dns` (records).
+  `roles/create-hosted-cluster` fails fast if a cluster has no pool entry.
+
+### Verifying
+
+```bash
+oc get ipaddresspool,l2advertisement -n metallb-system
+oc get svc kube-apiserver -n hcp-cluster1-hcp-cluster1 \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}{"\n"}'
+dig +short api.hcp-cluster1.mylab.com @192.168.122.21
+```
+
+The last two must agree - that is the whole point of this layout.
+
+
 ## Playbook Reference
 
 
@@ -406,7 +505,7 @@ oc get restore.velero.io -n openshift-adp hcp-cluster1-restore -o yaml
 
 | Role            | Responsibility                                                        |
 | --------------- | --------------------------------------------------------------------- |
-| `setup-hub-acm` | Installs ACM, LVM-Storage, MetalLB, and OADP operator subscriptions   |
+| `setup-hub-acm` | Installs ACM, LVM-Storage, MetalLB, and OADP operator subscriptions, and creates one single-address MetalLB `IPAddressPool` + `L2Advertisement` per hosted cluster |
 | `setup-oadp`    | Creates the cloud-credentials secret and DataProtectionApplication CR |
 
 

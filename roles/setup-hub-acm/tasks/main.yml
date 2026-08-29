@@ -56,21 +56,44 @@
     oc apply -f "{{ role_path }}/files/lvm-storage/04-lvm-cluster.yaml"
   when: use_lvm_storage == true
 
-- name: Render MetalLB IPAddressPool
+- name: Render MetalLB IPAddressPools (one single-address pool per hosted cluster)
   template:
     src: metal-lb/05-ip-pool.yaml.j2
     dest: "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
 
+- name: Render MetalLB L2Advertisements (one per pool)
+  template:
+    src: metal-lb/06-L2Advertisement.yaml.j2
+    dest: "{{ role_path }}/files/.rendered-06-l2advertisement.yaml"
+
 - name: Setup MetalLB Resource
   shell: |
     oc apply -f "{{ role_path }}/files/metal-lb/04-metalLB.yaml"
+
+# The old shared hcp-ip-pool covered .60-.63, which the per-cluster pools now
+# claim one address at a time. MetalLB refuses overlapping IPAddressPools, so
+# on a hub that was built before this change the old pool has to go first.
+# Any kube-apiserver Service still holding an address from it is reassigned on
+# MetalLB's next converge - to the same address, since the per-cluster pool
+# for that hosted cluster contains exactly the address DNS publishes for it.
+- name: Remove the superseded shared MetalLB pool and advertisement
+  shell: |
+    oc delete l2advertisement "{{ metallb_legacy_l2advertisement_name }}" -n metallb-system --ignore-not-found
+    oc delete ipaddresspool "{{ metallb_legacy_pool_name }}" -n metallb-system --ignore-not-found
+  when: metallb_remove_legacy_shared_pool | bool
+
+- name: Setup per-hosted-cluster MetalLB IPAddressPools and L2Advertisements
+  shell: |
     oc apply -f "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
-    oc apply -f "{{ role_path }}/files/metal-lb/06-L2Advertisement.yaml"
+    oc apply -f "{{ role_path }}/files/.rendered-06-l2advertisement.yaml"
 
 - name: Clean up rendered scratch files
   ansible.builtin.file:
-    path: "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
+    path: "{{ item }}"
     state: absent
+  loop:
+    - "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
+    - "{{ role_path }}/files/.rendered-06-l2advertisement.yaml"
 
 
 - name: Render AgentServiceConfig

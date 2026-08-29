@@ -13,11 +13,12 @@
     vars:
       kubeconfig_path: "{{ hub2_install_folder }}/auth/kubeconfig"
 
+  # Same hosted_cluster_metallb_pools as hub1 - deliberately. After a DR
+  # cutover a restored hosted cluster has to come back on the address its
+  # api/api-int records already point at, and only one hub serves a given
+  # hosted cluster at a time (see shutdown_hub_cluster.yaml).
   - ansible.builtin.import_role:
       name: setup-hub-acm
-    vars:
-      metallb_pool_start: "{{ hub2_metallb_pool_start }}"
-      metallb_pool_end: "{{ hub2_metallb_pool_end }}"
     environment:
       KUBECONFIG: "{{ hub2_install_folder }}/auth/kubeconfig"
     tags:

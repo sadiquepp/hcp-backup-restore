@@ -1,10 +1,53 @@
+# Static example; the live pools are rendered from
+# roles/setup-hub-acm/templates/metal-lb/05-ip-pool.yaml.j2 out of
+# hosted_cluster_metallb_pools in vars.yaml.
+#
+# One single-address pool per hosted cluster, each bound to that cluster's
+# control-plane namespace (<hostedcluster-namespace>-<hostedcluster-name>), so
+# a hosted cluster's kube-apiserver can only ever be given the address its
+# api/api-int records already point at.
+---
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
   namespace: metallb-system
-  name: hcp-ip-pool
+  name: hcp-cluster1-api-pool
 spec:
   addresses:
-  - 192.168.122.60-192.168.122.69   # static example; live pool is roles/setup-hub-acm/templates/metal-lb/05-ip-pool.yaml.j2
+  - 192.168.122.60-192.168.122.60
   autoAssign: true
   avoidBuggyIPs: true
+  serviceAllocation:
+    priority: 10
+    namespaces:
+      - hcp-cluster1-hcp-cluster1
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  namespace: metallb-system
+  name: hcp-cluster2-api-pool
+spec:
+  addresses:
+  - 192.168.122.61-192.168.122.61
+  autoAssign: true
+  avoidBuggyIPs: true
+  serviceAllocation:
+    priority: 10
+    namespaces:
+      - hcp-cluster2-hcp-cluster2
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  namespace: metallb-system
+  name: hcp-cluster3-api-pool
+spec:
+  addresses:
+  - 192.168.122.62-192.168.122.62
+  autoAssign: true
+  avoidBuggyIPs: true
+  serviceAllocation:
+    priority: 10
+    namespaces:
+      - hcp-cluster3-hcp-cluster3
