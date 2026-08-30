@@ -1,0 +1,18 @@
+# One ClusterImageSet per release the hosted clusters may be built from,
+# pointing at the mirror registry's copy of the payload rather than
+# quay.io/openshift-release-dev/ocp-release. A disconnected hub cannot resolve
+# the quay.io pullspec at all, and ACM/HyperShift will not offer a version in
+# the console that has no ClusterImageSet.
+#
+# Derived from acm_disconnected_cluster_image_set_versions (the osImage
+# versions by default) in tasks/disconnected-cluster-image-sets.yml - override
+# acm_disconnected_cluster_image_sets in vars.yaml to spell the list out.
+{% for cis in acm_disconnected_cluster_image_sets_effective %}
+---
+apiVersion: hive.openshift.io/v1
+kind: ClusterImageSet
+metadata:
+  name: {{ cis.name }}
+spec:
+  releaseImage: {{ cis.releaseImage }}
+{% endfor %}

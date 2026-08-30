@@ -3,3 +3,12 @@
 activation_key: "" 
 org_id: ""
 
+
+# Helper VM disk. The 10G rhel9_kvm_image is expanded into a disk this size
+# with virt-resize when the helper is first created - it has to hold the PXE
+# rootfs and, on a disconnected hub, the RHCOS live ISOs roles/setup-hub-acm
+# stages in /var/www/html/bootp. Overridden in vars.yaml.
+helper_disk_size: 100G
+# Partition inside rhel9_kvm_image to expand into the new space. Image
+# specific - check with `virt-filesystems --long --parts --blkdevs -h -a`.
+helper_resize_partition: /dev/sda4

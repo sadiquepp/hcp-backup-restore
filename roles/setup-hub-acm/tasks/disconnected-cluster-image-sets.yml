@@ -1,0 +1,70 @@
+---
+# ClusterImageSets pointing at the mirror registry's copy of the release
+# payload.
+#
+# A hosted cluster is created against a ClusterImageSet, and the ones ACM ships
+# reference quay.io/openshift-release-dev/ocp-release - a pullspec a
+# disconnected hub cannot resolve, and one the console will not offer at all
+# unless a ClusterImageSet exists for it. One is rendered here per osImage
+# version, named the way the ACM console expects (openshift-4-21-0).
+#
+# Included from tasks/main.yml only when acm_disconnected is true. Requires
+# KUBECONFIG in the environment, same as the rest of the role.
+
+- name: Use the ClusterImageSet list from vars.yaml
+  ansible.builtin.set_fact:
+    acm_disconnected_cluster_image_sets_effective: "{{ acm_disconnected_cluster_image_sets }}"
+  when: acm_disconnected_cluster_image_sets is defined
+
+- name: Derive one ClusterImageSet per osImage version
+  ansible.builtin.set_fact:
+    acm_disconnected_cluster_image_sets_effective: >-
+      {{ (acm_disconnected_cluster_image_sets_effective | default([])) + [{
+           'name': 'openshift-' ~ (item | replace('.', '-')),
+           'releaseImage': mirror_registry_domain ~ ':' ~ mirror_registry_port
+                           ~ '/' ~ acm_disconnected_release_repository
+                           ~ ':' ~ item ~ '-' ~ acm_disconnected_cluster_image_set_arch
+         }] }}
+  loop: "{{ acm_disconnected_cluster_image_set_versions }}"
+  when: acm_disconnected_cluster_image_sets is not defined
+
+# Only what oc-mirror actually published is in the registry. A ClusterImageSet
+# for a release that was never mirrored applies quite happily and then fails at
+# hosted-cluster creation time with an image pull error, so say which ones look
+# wrong now rather than then.
+- name: Point out release versions that were not the mirrored one
+  ansible.builtin.debug:
+    msg: >-
+      ClusterImageSet(s) are being created for
+      {{ acm_disconnected_cluster_image_set_versions | difference([mirror_ocp_version]) | join(', ') }},
+      but setup_mirror_registry.yaml mirrored {{ mirror_ocp_version }}. Mirror
+      those releases too, or set acm_disconnected_cluster_image_set_versions to
+      what is actually in {{ mirror_registry_domain }}:{{ mirror_registry_port }}.
+  when:
+    - mirror_ocp_version is defined
+    - acm_disconnected_cluster_image_sets is not defined
+    - acm_disconnected_cluster_image_set_versions | difference([mirror_ocp_version]) | length > 0
+
+- name: Wait for the ClusterImageSet CRD to be established
+  ansible.builtin.command:
+    cmd: oc wait --for=condition=Established crd/clusterimagesets.hive.openshift.io --timeout=300s
+  register: acm_cis_crd_wait
+  retries: 3
+  delay: 20
+  until: acm_cis_crd_wait.rc == 0
+  changed_when: false
+
+- name: Render the ClusterImageSets
+  ansible.builtin.template:
+    src: acm/08-clusterimagesets.yaml.j2
+    dest: "{{ role_path }}/files/.rendered-08-clusterimagesets.yaml"
+
+- name: Create the ClusterImageSets
+  ansible.builtin.command:
+    cmd: oc apply -f "{{ role_path }}/files/.rendered-08-clusterimagesets.yaml"
+  register: acm_cis_apply
+  changed_when: "'created' in acm_cis_apply.stdout or 'configured' in acm_cis_apply.stdout"
+
+- name: Show the ClusterImageSets that were created
+  ansible.builtin.debug:
+    var: acm_cis_apply.stdout_lines

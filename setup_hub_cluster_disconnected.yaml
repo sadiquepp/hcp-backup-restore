@@ -14,16 +14,12 @@
 ## in, otherwise api/api-int/*.apps for this cluster won't resolve.
 ##
 ## Scope is deliberately just the cluster install - it does not chain into
-## setup-hub-acm. Run that separately afterwards, same as the connected flow,
-## once you've decided how ACM/MCE will resolve operator catalogs disconnected:
-##
-##   - ansible.builtin.import_role:
-##       name: setup-hub-acm
-##     vars:
-##       metallb_pool_start: "{{ hub_disconnected_metallb_pool_start }}"
-##       metallb_pool_end: "{{ hub_disconnected_metallb_pool_end }}"
-##     environment:
-##       KUBECONFIG: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
+## setup-hub-acm. Run setup_hub_acm_disconnected.yaml afterwards for that: it
+## imports the same role against this cluster's kubeconfig and MetalLB pool,
+## and renders it disconnected (AgentServiceConfig with a mirrorRegistryRef and
+## osImages served off the helper, the mirror registry CA published to
+## openshift-config, a ClusterImageSet per osImage version against the mirror
+## registry).
 ##
 ## Requires disconnected_install: true (vars.yaml, default false) and the
 ## mirror registry already stood up via setup_mirror_registry.yaml (mirror
