@@ -63,3 +63,138 @@ agent_service_os_images:
     url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
     cpuArchitecture: "x86_64"
 
+
+
+## ---------------------------------------------------------------------------
+## Disconnected rendering
+##
+## None of this is used unless the role runs disconnected. Connected runs
+## render and apply exactly what they always did - the disconnected path is a
+## separate set of templates rather than extra conditionals bolted onto the
+## connected ones.
+##
+## Everything below assumes the mirror registry from setup_mirror_registry.yaml
+## and the hub from setup_hub_cluster_disconnected.yaml, so it reads
+## mirror_registry_* / mirror_release_repository / ip_list from vars.yaml.
+## ---------------------------------------------------------------------------
+
+## The one switch the whole disconnected path hangs off - the same
+## disconnected_install setup_mirror_registry.yaml and
+## setup_hub_cluster_disconnected.yaml already gate on, not a second name for
+## it. Set it in vars.yaml or pass -e disconnected_install=true. Repeated here
+## only so the role still has a value if it is ever run without vars.yaml.
+disconnected_install: false
+
+## The CatalogSource the operator Subscriptions resolve against.
+##
+## Connected that is OpenShift's built-in redhat-operators. Disconnected the
+## built-in sources are gone - setup-hub-cluster-disconnected installs the hub
+## with OperatorHub.spec.disableAllDefaultSources - and the only catalog is the
+## one oc-mirror generated for the mirrored index. oc-mirror names it after the
+## index image, so registry.redhat.io/redhat/redhat-operator-index:v4.21 becomes
+## cs-redhat-operator-index-v4-21; that is derived from mirror_catalog_index
+## here rather than hard-coded, so it follows the index you actually mirrored.
+##
+## Derived is still a guess, so the role checks the CatalogSource really exists
+## before it applies a Subscription against it - a Subscription naming a catalog
+## that is not there just sits in ResolutionFailed. Override acm_catalog_source
+## in vars.yaml if oc-mirror named it something else.
+acm_mirror_catalog_source: "cs-{{ mirror_catalog_index | regex_replace('^.*/', '') | regex_replace('[:.]', '-') }}"
+acm_catalog_source: "{{ acm_mirror_catalog_source if disconnected_install | bool else 'redhat-operators' }}"
+acm_catalog_source_namespace: openshift-marketplace
+
+## Namespace assisted-service (MCE) runs in. AgentServiceConfig's
+## mirrorRegistryRef is a name-only reference resolved in this namespace, so
+## the ConfigMap has to be created here and nowhere else.
+acm_mce_namespace: multicluster-engine
+
+## ConfigMap holding the mirror registry's CA bundle and a registries.conf,
+## referenced from AgentServiceConfig.spec.mirrorRegistryRef. This is what
+## makes assisted-service (and the discovery ISO it builds) resolve release
+## and operator images through the mirror instead of quay.io.
+acm_disconnected_mirror_configmap: mirror-config
+
+## ConfigMap in openshift-config holding the same CA, keyed by
+## "<registry-host>..<port>" - the key format image.config.openshift.io
+## requires for a registry on a non-443 port. It is injected into the cluster
+## image config as spec.additionalTrustedCA so every node's CRI-O trusts the
+## mirror registry when it pulls.
+acm_disconnected_registry_ca_configmap: registry-config
+
+## Where roles/setup-mirror-registry-trust left the mirror registry's
+## self-signed CA on the baremetal host.
+acm_disconnected_mirror_ca_path: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+
+## registries.conf written into the mirror-config ConfigMap above.
+##
+## Keep this in step with what oc-mirror actually published - after the hub is
+## up, `oc get imagedigestmirrorset,imagetagmirrorset -o yaml` is the source of
+## truth, and the role prints a warning listing any source it redirects that is
+## missing from this list. Override the whole list in vars.yaml rather than
+## editing it here.
+##
+## digest_only maps to registries.conf's mirror-by-digest-only: true means the
+## mirror is only consulted for pulls by digest (what oc-mirror's
+## ImageDigestMirrorSet expresses), false also redirects pulls by tag (its
+## ImageTagMirrorSet).
+acm_disconnected_unqualified_search_registries:
+  - registry.access.redhat.com
+  - docker.io
+acm_disconnected_registry_mirrors:
+  - source: quay.io/openshift-release-dev/ocp-release
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}"
+    digest_only: false
+  - source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/openshift/release"
+    digest_only: true
+  - source: registry.redhat.io/multicluster-engine
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/multicluster-engine"
+    digest_only: true
+  - source: registry.redhat.io/rhacm2
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/rhacm2"
+    digest_only: true
+  - source: registry.redhat.io/openshift4
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/openshift4"
+    digest_only: true
+  - source: registry.redhat.io/redhat
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/redhat"
+    digest_only: true
+
+## osImage staging.
+##
+## The urls in agent_service_os_images point at mirror.openshift.com, which a
+## disconnected hub cannot reach - assisted-service would never manage to build
+## a discovery ISO. The baremetal host is still connected (it is what mirrors
+## everything in this lab), so each ISO is downloaded there and pushed to the
+## helper's httpd, which already serves /var/www/html/bootp on port 8080 for
+## PXE (roles/setup-tftp).
+##
+## Set agent_service_os_images_disconnected in vars.yaml - same shape as
+## agent_service_os_images - to skip the download/push entirely and hand the
+## role urls you staged yourself.
+acm_helper_bootp_dir: /var/www/html/bootp
+acm_helper_bootp_url: "http://{{ lab_network_prefix }}.{{ ip_list.helper_server }}:8080/bootp"
+
+## The helper is built from the 10G RHEL9 base image, and two RHCOS live ISOs
+## are roughly 2.5G, so a helper created before helper_disk_size existed can
+## run out of room mid-copy and serve a truncated ISO. The space is checked
+## before anything is copied; set this false to downgrade the failure to a
+## warning.
+acm_disconnected_require_helper_space: true
+## Headroom left free on the helper on top of the ISOs themselves (1G).
+acm_helper_space_margin_bytes: 1073741824
+
+## ClusterImageSets rendered for the hosted clusters, one per osImage version
+## by default - `openshift-4-21-0` pointing at the mirror registry's copy of
+## the 4.21.0 release payload. Override acm_disconnected_cluster_image_set_versions
+## for a different set of versions, or acm_disconnected_cluster_image_sets
+## (a list of {name, releaseImage}) to spell them out completely.
+acm_disconnected_cluster_image_set_versions: "{{ agent_service_os_images | map(attribute='version') | list }}"
+acm_disconnected_cluster_image_set_arch: x86_64
+acm_disconnected_release_repository: "{{ mirror_release_repository | default('openshift/release-images') }}"

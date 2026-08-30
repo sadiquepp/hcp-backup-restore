@@ -1,0 +1,36 @@
+# The ConfigMap AgentServiceConfig.spec.mirrorRegistryRef points at. It has to
+# live in assisted-service's own namespace and carry exactly these two keys:
+#
+#   ca-bundle.crt   trusted by assisted-service itself, and copied into every
+#                   discovery ISO so a host being discovered trusts the mirror
+#                   too.
+#   registries.conf the mirror mappings. Without them assisted-service resolves
+#                   release images to quay.io and the spoke install stalls on
+#                   an unreachable registry.
+#
+# The mappings come from acm_disconnected_registry_mirrors (role defaults,
+# override in vars.yaml). mirror-by-digest-only mirrors what oc-mirror
+# expressed as ImageDigestMirrorSet (true) vs ImageTagMirrorSet (false).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ acm_disconnected_mirror_configmap }}
+  namespace: {{ acm_mce_namespace }}
+  labels:
+    app: assisted-service
+data:
+  ca-bundle.crt: |
+    {{ acm_disconnected_mirror_ca_cert | trim | indent(4) }}
+  registries.conf: |
+    unqualified-search-registries = [{{ acm_disconnected_unqualified_search_registries | map('to_json') | join(', ') }}]
+{% for entry in acm_disconnected_registry_mirrors %}
+
+    [[registry]]
+       prefix = ""
+       location = "{{ entry.source }}"
+       mirror-by-digest-only = {{ entry.digest_only | default(true) | bool | lower }}
+{% for mirror in entry.mirrors %}
+       [[registry.mirror]]
+       location = "{{ mirror }}"
+{% endfor %}
+{% endfor %}

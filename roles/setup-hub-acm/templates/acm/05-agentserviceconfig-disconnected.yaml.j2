@@ -1,0 +1,48 @@
+# Disconnected AgentServiceConfig - the connected template is
+# 05-agentserviceconfig.yaml.j2 and stays as it is. Two differences, both of
+# which only make sense disconnected:
+#
+#   mirrorRegistryRef  the ConfigMap rendered by
+#                      tasks/disconnected-mirror-config.yml, holding the mirror
+#                      registry's CA and a registries.conf. assisted-service
+#                      resolves it by name in its own namespace
+#                      ({{ acm_mce_namespace }}) and bakes it into the
+#                      discovery ISO, so both the service and the hosts it
+#                      discovers pull through the mirror.
+#
+#   osImages[].url     rewritten to the helper's web server by
+#                      tasks/disconnected-os-images.yml. The mirror.openshift.com
+#                      urls in agent_service_os_images are unreachable from a
+#                      disconnected hub.
+apiVersion: agent-install.openshift.io/v1beta1
+kind: AgentServiceConfig
+metadata:
+  name: agent
+spec:
+  databaseStorage:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "{{ agent_service_database_storage }}"
+  filesystemStorage:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "{{ agent_service_filesystem_storage }}"
+  mirrorRegistryRef:
+    name: "{{ acm_disconnected_mirror_configmap }}"
+  imageStorage:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "{{ agent_service_image_storage }}"
+  osImages: # add/remove versions in agent_service_os_images (vars.yaml or role defaults) - not here
+{% for img in agent_service_os_images_effective %}
+    - openshiftVersion: "{{ img.openshiftVersion }}"
+      version: "{{ img.version }}"
+      url: "{{ img.url }}"
+      cpuArchitecture: "{{ img.cpuArchitecture }}"
+{% endfor %}

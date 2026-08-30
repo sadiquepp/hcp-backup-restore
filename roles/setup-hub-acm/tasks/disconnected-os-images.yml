@@ -1,0 +1,161 @@
+---
+# Stages the RHCOS live ISOs on the helper's web server and rewrites the
+# osImage urls to point there.
+#
+# agent_service_os_images (vars.yaml) points at mirror.openshift.com. A
+# disconnected hub cannot reach it, so assisted-service never manages to build
+# a discovery ISO and every InfraEnv sits there with no isoDownloadURL. The
+# baremetal host is still connected - it is what mirrors everything in this lab
+# - so each ISO is downloaded there and pushed to the helper, whose httpd
+# already serves /var/www/html/bootp on port 8080 for PXE (roles/setup-tftp).
+#
+# Sets agent_service_os_images_effective, which is what the disconnected
+# AgentServiceConfig template renders.
+
+- name: Use the pre-staged osImage list from vars.yaml
+  ansible.builtin.set_fact:
+    agent_service_os_images_effective: "{{ agent_service_os_images_disconnected }}"
+  when: agent_service_os_images_disconnected is defined
+
+- name: Stage the osImages on the helper's web server
+  when: agent_service_os_images_disconnected is not defined
+  block:
+    - name: Ensure the download directory exists on the baremetal host
+      ansible.builtin.file:
+        path: "{{ download_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Download each RHCOS live ISO to the baremetal host
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ download_dir }}{{ item.url | basename }}"
+        force: false
+        mode: '0644'
+      loop: "{{ agent_service_os_images }}"
+      loop_control:
+        label: "{{ item.url | basename }}"
+
+    - name: Measure the downloaded ISOs
+      ansible.builtin.stat:
+        path: "{{ download_dir }}{{ item.url | basename }}"
+        get_checksum: false
+      loop: "{{ agent_service_os_images }}"
+      loop_control:
+        label: "{{ item.url | basename }}"
+      register: acm_osimage_stats
+
+    - name: Ensure the helper's bootp web root exists
+      ansible.builtin.file:
+        path: "{{ acm_helper_bootp_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+      become: true
+
+    - name: Find out which of them the helper already has
+      ansible.builtin.stat:
+        path: "{{ acm_helper_bootp_dir }}/{{ item.url | basename }}"
+        get_checksum: false
+      loop: "{{ agent_service_os_images }}"
+      loop_control:
+        label: "{{ item.url | basename }}"
+      register: acm_helper_osimage_stats
+      delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+      become: true
+
+    - name: Check how much room is left on the helper's web root
+      ansible.builtin.shell: |
+        set -o pipefail
+        df -B1 --output=avail {{ acm_helper_bootp_dir | dirname }} | tail -n 1
+      args:
+        executable: /bin/bash
+      register: acm_helper_free
+      changed_when: false
+      delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+      become: true
+
+    # Only the ISOs the helper does not have yet need new space - the ones
+    # already there are behind the free figure df just reported.
+    - name: Total up the bytes the helper still has to find room for
+      ansible.builtin.set_fact:
+        acm_helper_bytes_needed: "{{ (acm_helper_bytes_needed | default(0) | int) + (item.0.stat.size | int) }}"
+      loop: "{{ acm_osimage_stats.results | zip(acm_helper_osimage_stats.results) | list }}"
+      when: not item.1.stat.exists
+      loop_control:
+        label: "{{ item.0.stat.path | basename }}"
+
+    - name: Report the helper's disk situation
+      ansible.builtin.debug:
+        msg: >-
+          Helper {{ acm_helper_bootp_dir }}:
+          {{ (acm_helper_free.stdout | trim | int / 1073741824) | round(1) }}G free,
+          {{ ((acm_helper_bytes_needed | default(0) | int) / 1073741824) | round(1) }}G
+          of RHCOS ISOs to copy.
+
+    # The helper is built from the 10G RHEL9 base image. Two RHCOS live ISOs
+    # are roughly 2.5G on top of the OS, which a helper created before
+    # helper_disk_size existed will not necessarily have - and running out
+    # part-way through leaves a truncated ISO that the web server hands out
+    # quite happily right up until a host tries to boot it.
+    - name: Fail early if the helper has no room for the ISOs
+      ansible.builtin.assert:
+        that:
+          - (acm_helper_free.stdout | trim | int) >
+            (acm_helper_bytes_needed | default(0) | int) + (acm_helper_space_margin_bytes | int)
+        fail_msg: >-
+          The helper has only
+          {{ (acm_helper_free.stdout | trim | int / 1073741824) | round(1) }}G free on
+          {{ acm_helper_bootp_dir }} but needs
+          {{ (((acm_helper_bytes_needed | default(0) | int) + (acm_helper_space_margin_bytes | int)) / 1073741824) | round(1) }}G
+          for the RHCOS live ISOs. The helper VM is built from the 10G RHEL9
+          base image; roles/setup-bm-host now expands that into a
+          {{ helper_disk_size | default('100G') }} disk, so the quickest fix is to
+          delete /var/lib/libvirt/images/{{ helper_disk | default('helper_disk.qcow2') }}
+          and re-run setup_bm_host.yaml. To grow the existing disk instead, shut
+          the helper down and run
+          `qemu-img resize /var/lib/libvirt/images/{{ helper_disk | default('helper_disk.qcow2') }} {{ helper_disk_size | default('100G') }}`,
+          then `growpart /dev/vda 4 && xfs_growfs /` on the booted helper.
+          Alternatively point agent_service_os_images_disconnected (vars.yaml)
+          at ISOs staged on another web server, or set
+          acm_disconnected_require_helper_space to false to copy anyway.
+      when: acm_disconnected_require_helper_space | bool
+
+    - name: Warn that the helper is short of space
+      ansible.builtin.debug:
+        msg: >-
+          WARNING - the helper has
+          {{ (acm_helper_free.stdout | trim | int / 1073741824) | round(1) }}G free on
+          {{ acm_helper_bootp_dir }} for
+          {{ ((acm_helper_bytes_needed | default(0) | int) / 1073741824) | round(1) }}G
+          of ISOs. Copying anyway because
+          acm_disconnected_require_helper_space is false - expect a truncated
+          ISO if it runs out.
+      when:
+        - not (acm_disconnected_require_helper_space | bool)
+        - (acm_helper_free.stdout | trim | int) <=
+          (acm_helper_bytes_needed | default(0) | int) + (acm_helper_space_margin_bytes | int)
+
+    - name: Push the RHCOS live ISOs to the helper's web server
+      ansible.builtin.copy:
+        src: "{{ download_dir }}{{ item.url | basename }}"
+        dest: "{{ acm_helper_bootp_dir }}/{{ item.url | basename }}"
+        mode: '0644'
+      loop: "{{ agent_service_os_images }}"
+      loop_control:
+        label: "{{ item.url | basename }}"
+      delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+      become: true
+
+    - name: Point every osImage url at the helper's web server
+      ansible.builtin.set_fact:
+        agent_service_os_images_effective: >-
+          {{ (agent_service_os_images_effective | default([]))
+             + [ item | combine({'url': acm_helper_bootp_url ~ '/' ~ (item.url | basename)}) ] }}
+      loop: "{{ agent_service_os_images }}"
+      loop_control:
+        label: "{{ item.version }}"
+
+    - name: Report where the osImages are now served from
+      ansible.builtin.debug:
+        msg: "{{ agent_service_os_images_effective | map(attribute='url') | list }}"

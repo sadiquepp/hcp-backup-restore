@@ -1,0 +1,192 @@
+---
+# Mirror registry trust and mirror mappings for a disconnected hub.
+#
+# Three things happen here, in this order:
+#
+#   1. the mirror registry's CA is published as a ConfigMap in openshift-config
+#      and injected into image.config.openshift.io/cluster
+#      (spec.additionalTrustedCA), which is what puts it in every node's CRI-O
+#      trust store - without it every pull from the mirror fails on an unknown
+#      authority;
+#   2. the same CA plus a registries.conf is published as a ConfigMap in
+#      assisted-service's namespace;
+#   3. that second ConfigMap's name is what the disconnected AgentServiceConfig
+#      template puts in spec.mirrorRegistryRef.
+#
+# Included from tasks/main.yml only when disconnected_install is true. Requires
+# KUBECONFIG in the environment, same as the rest of the role.
+
+- name: Check the disconnected variables this role needs are set
+  ansible.builtin.assert:
+    that:
+      - mirror_registry_domain is defined
+      - mirror_registry_port is defined
+      - lab_network_prefix is defined
+      - ip_list.helper_server is defined
+    fail_msg: >-
+      Running setup-hub-acm disconnected needs the mirror registry and lab
+      network variables from vars.yaml (mirror_registry_domain,
+      mirror_registry_port, lab_network_prefix, ip_list.helper_server). Load
+      vars.yaml in the playbook, or drop -e disconnected_install=true.
+
+- name: Check the mirror registry CA is present on the baremetal host
+  ansible.builtin.stat:
+    path: "{{ acm_disconnected_mirror_ca_path }}"
+  register: acm_mirror_ca_status
+
+- ansible.builtin.assert:
+    that:
+      - acm_mirror_ca_status.stat.exists
+    fail_msg: >-
+      {{ acm_disconnected_mirror_ca_path }} not found - run
+      setup_mirror_registry.yaml first (roles/setup-mirror-registry-trust is
+      what fetches the registry's CA back onto this host).
+
+- name: Read the mirror registry CA
+  ansible.builtin.slurp:
+    src: "{{ acm_disconnected_mirror_ca_path }}"
+  register: acm_mirror_ca_b64
+
+- name: Store the mirror registry CA as a fact
+  ansible.builtin.set_fact:
+    acm_disconnected_mirror_ca_cert: "{{ acm_mirror_ca_b64.content | b64decode }}"
+
+# A cluster that already has an additionalTrustedCA ConfigMap is not
+# necessarily one of ours - the image config holds a single name, so writing
+# our own over it would silently drop whatever CA was there. Reuse the name it
+# already points at instead, and merge our key into that ConfigMap further
+# down rather than replacing it.
+- name: Read the cluster image config's current additionalTrustedCA
+  ansible.builtin.command:
+    cmd: oc get image.config.openshift.io/cluster -o jsonpath={.spec.additionalTrustedCA.name}
+  register: acm_existing_trusted_ca
+  changed_when: false
+
+- name: Decide which ConfigMap carries the registry CA
+  ansible.builtin.set_fact:
+    acm_disconnected_registry_ca_configmap_effective: >-
+      {{ acm_existing_trusted_ca.stdout | trim
+         if (acm_existing_trusted_ca.stdout | trim | length > 0)
+         else acm_disconnected_registry_ca_configmap }}
+
+- name: Say so when an existing trust bundle is being reused
+  ansible.builtin.debug:
+    msg: >-
+      image.config.openshift.io/cluster already trusts ConfigMap
+      '{{ acm_disconnected_registry_ca_configmap_effective }}' - the mirror
+      registry CA is merged into that one rather than replacing it with
+      '{{ acm_disconnected_registry_ca_configmap }}'.
+  when: acm_disconnected_registry_ca_configmap_effective != acm_disconnected_registry_ca_configmap
+
+- name: Render the registry CA ConfigMap
+  ansible.builtin.template:
+    src: acm/06-registry-ca-configmap.yaml.j2
+    dest: "{{ role_path }}/files/.rendered-06-registry-ca-configmap.yaml"
+
+- name: Check whether that ConfigMap already exists
+  ansible.builtin.command:
+    cmd: oc get configmap {{ acm_disconnected_registry_ca_configmap_effective }} -n openshift-config
+  register: acm_registry_ca_cm
+  changed_when: false
+  failed_when: false
+
+- name: Create the registry CA ConfigMap
+  ansible.builtin.command:
+    cmd: oc apply -f "{{ role_path }}/files/.rendered-06-registry-ca-configmap.yaml"
+  when: acm_registry_ca_cm.rc != 0
+
+# `oc apply` on a ConfigMap that already exists would prune any key not in our
+# rendered copy, which matters when we are reusing someone else's trust
+# bundle. A merge patch only adds our key. The patch is written to a file
+# rather than passed with -p because the certificate is multi-line.
+- name: Render a merge patch adding the registry CA to the existing ConfigMap
+  ansible.builtin.copy:
+    content: "{{ {'data': {mirror_registry_domain ~ '..' ~ (mirror_registry_port | string): acm_disconnected_mirror_ca_cert}} | to_json }}"
+    dest: "{{ role_path }}/files/.rendered-06-registry-ca-patch.json"
+    mode: '0644'
+  when: acm_registry_ca_cm.rc == 0
+
+- name: Merge the registry CA into the existing ConfigMap
+  ansible.builtin.command:
+    cmd: >
+      oc patch configmap {{ acm_disconnected_registry_ca_configmap_effective }}
+      -n openshift-config --type merge
+      --patch-file "{{ role_path }}/files/.rendered-06-registry-ca-patch.json"
+  register: acm_registry_ca_patch
+  changed_when: "'(no change)' not in acm_registry_ca_patch.stdout"
+  when: acm_registry_ca_cm.rc == 0
+
+- name: Inject the CA ConfigMap into the cluster image config
+  ansible.builtin.shell: >
+    oc patch image.config.openshift.io/cluster --type merge
+    -p {{ {'spec': {'additionalTrustedCA': {'name': acm_disconnected_registry_ca_configmap_effective}}} | to_json | quote }}
+  register: acm_image_config_patch
+  changed_when: "'(no change)' not in acm_image_config_patch.stdout"
+
+# The MCO rolls the new trust store out with one reboot per node. Waiting here
+# keeps the reboot inside this run instead of surfacing later as pull failures
+# on a node that has not picked the CA up yet.
+#
+# The sleep is not padding: the pools do not go Updating the instant the patch
+# lands, and every machine count still matches until the MCO has rendered the
+# new config - so a check that ran straight away would see the pre-rollout
+# state and call it done. Same 90s the day-2 IDMS/ITMS apply gives it in
+# roles/setup-hub-cluster-disconnected.
+- name: Give the MCO time to render the new trust store
+  ansible.builtin.wait_for:
+    timeout: 90
+  when: acm_image_config_patch.changed or (acm_registry_ca_patch.changed | default(false))
+
+- name: Wait for every MachineConfigPool to finish rolling out the CA
+  ansible.builtin.include_tasks: wait-for-machineconfigpools.yml
+  when: acm_image_config_patch.changed or (acm_registry_ca_patch.changed | default(false))
+
+- name: Wait for the multicluster-engine namespace to exist
+  ansible.builtin.command:
+    cmd: oc get namespace {{ acm_mce_namespace }}
+  register: acm_mce_ns
+  until: acm_mce_ns.rc == 0
+  retries: 30
+  delay: 20
+  changed_when: false
+
+- name: Render the mirror registry ConfigMap for assisted-service
+  ansible.builtin.template:
+    src: acm/07-mirror-config-configmap.yaml.j2
+    dest: "{{ role_path }}/files/.rendered-07-mirror-config-configmap.yaml"
+
+- name: Create the mirror registry ConfigMap
+  ansible.builtin.command:
+    cmd: oc apply -f "{{ role_path }}/files/.rendered-07-mirror-config-configmap.yaml"
+  register: acm_mirror_cm_apply
+  changed_when: "'created' in acm_mirror_cm_apply.stdout or 'configured' in acm_mirror_cm_apply.stdout"
+
+# acm_disconnected_registry_mirrors is a hand-maintained list, while the hub
+# itself already carries the mappings oc-mirror generated. They should agree;
+# say so loudly when they do not rather than leaving assisted-service to fail
+# on an image nobody redirected.
+- name: List the mirror sources the hub itself redirects
+  ansible.builtin.shell: >
+    oc get imagedigestmirrorset,imagetagmirrorset
+    -o jsonpath='{range .items[*]}{range .spec.imageDigestMirrors[*]}{.source}{"\n"}{end}{range .spec.imageTagMirrors[*]}{.source}{"\n"}{end}{end}'
+  register: acm_cluster_mirror_sources
+  changed_when: false
+  failed_when: false
+
+- name: Work out which of them acm_disconnected_registry_mirrors does not cover
+  ansible.builtin.set_fact:
+    acm_uncovered_mirror_sources: >-
+      {{ acm_cluster_mirror_sources.stdout_lines | select | unique
+         | difference(acm_disconnected_registry_mirrors | map(attribute='source') | list) }}
+  when: acm_cluster_mirror_sources.rc == 0
+
+- name: Warn about mirror sources missing from acm_disconnected_registry_mirrors
+  ansible.builtin.debug:
+    msg: >-
+      These sources are redirected by the hub's ImageDigestMirrorSet/
+      ImageTagMirrorSet but are not in acm_disconnected_registry_mirrors, so
+      assisted-service will resolve them to their public registry:
+      {{ acm_uncovered_mirror_sources | join(', ') }}. Add them to
+      acm_disconnected_registry_mirrors in vars.yaml if assisted-service needs
+      them.
+  when: acm_uncovered_mirror_sources | default([]) | length > 0

@@ -88,6 +88,18 @@ ip_list:
 
 helper_name: helper
 helper_disk: helper_disk.qcow2
+## The helper's disk is expanded from the 10G rhel9_kvm_image to this size when
+## it is first created (sparse qcow2 - it costs nothing until used). It has to
+## hold the PXE rootfs and, on a disconnected hub, the RHCOS live ISOs
+## roles/setup-hub-acm stages in /var/www/html/bootp for the AgentServiceConfig.
+## An existing helper is not resized - delete its disk and re-run
+## setup_bm_host.yaml to rebuild it at this size.
+helper_disk_size: 100G
+## Partition inside rhel9_kvm_image to expand into all the new space - verify
+## against your actual base image with:
+##   virt-filesystems --long --parts --blkdevs -h -a <image>
+## if you ever change rhel9_kvm_image, since this is image-specific.
+helper_resize_partition: /dev/sda4
 helper_memory: 8192 
 helper_vcpus: 4
 master_memory: 16384
@@ -293,6 +305,48 @@ agent_service_os_images:
     version: "4.22.8"
     url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
     cpuArchitecture: "x86_64"
+
+## setup-hub-acm, disconnected. With disconnected_install true (below, or
+## -e disconnected_install=true) the role renders a different
+## AgentServiceConfig: spec.mirrorRegistryRef pointing at a ConfigMap holding
+## the mirror registry's CA and registries.conf, and osImage urls pointing at
+## the helper's web server instead of mirror.openshift.com. It also publishes
+## the registry CA to image.config.openshift.io/cluster and creates a
+## ClusterImageSet per osImage version against the mirror registry.
+##
+## The defaults derive everything from the mirror_registry_* values further
+## down, so normally nothing here needs setting. Uncomment to override:
+##
+## The CatalogSource the operator Subscriptions resolve against. Derived from
+## mirror_catalog_index below - set this only if oc-mirror named it something
+## other than cs-<index-repo>-<tag>.
+# acm_catalog_source: cs-redhat-operator-index-v4-21
+#
+## The registries.conf written into the mirror-config ConfigMap. Should match
+## the hub's own ImageDigestMirrorSet/ImageTagMirrorSet - the role warns about
+## any source it redirects that is missing here.
+# acm_disconnected_registry_mirrors:
+#   - source: quay.io/openshift-release-dev/ocp-release
+#     mirrors:
+#       - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}"
+#     digest_only: false
+#
+## Skip the ISO download/push entirely and use urls you staged yourself.
+## Same shape as agent_service_os_images.
+# agent_service_os_images_disconnected:
+#   - openshiftVersion: "4.21"
+#     version: "4.21.0"
+#     url: "http://192.168.122.21:8080/bootp/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
+#     cpuArchitecture: "x86_64"
+#
+## Which releases get a ClusterImageSet. Defaults to the agent_service_os_images
+## versions; each one has to actually be in the mirror registry.
+# acm_disconnected_cluster_image_set_versions:
+#   - "4.21.15"
+#
+## Copy the ISOs even when the helper looks too small for them (warn instead of
+## fail). See helper_disk_size above for the better fix.
+# acm_disconnected_require_helper_space: false
 
 ## setup-bminfra: bare-metal infra namespace and InfraEnv OCP version.
 ## osImageVersion must match an entry in agent_service_os_images above.

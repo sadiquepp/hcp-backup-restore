@@ -54,11 +54,33 @@
   tags:
     - virt
    
-# Prepare the Helper Image 
-- name: Create Helper VM Disk
-  ansible.builtin.copy:
-    src: "{{ role_path }}/files/{{ rhel9_kvm_image }}"
-    dest: "/var/lib/libvirt/images/{{ helper_disk }}"
+# Prepare the Helper Image
+#
+# The RHEL9 base image is only 10G, and the helper is not just DNS/HAProxy -
+# its httpd serves the PXE rootfs and, on a disconnected hub, the RHCOS live
+# ISOs the AgentServiceConfig points at (roles/setup-hub-acm stages them in
+# /var/www/html/bootp, ~1.3G each). 10G runs out part-way through that copy,
+# so the base image is expanded into a helper_disk_size disk instead of being
+# copied as-is. Same offline virt-resize pattern as setup-minio-vm and
+# setup-ceph-vm; the qcow2 is sparse, so the larger size costs nothing until
+# it is used.
+#
+# This only applies to a helper that does not exist yet. An existing 10G
+# helper is left alone - delete its disk and re-run this play to rebuild it at
+# the new size, or grow it in place with qemu-img resize + growpart/xfs_growfs.
+- name: Create Helper VM Disk ({{ helper_disk_size }}, sparse, no preallocation)
+  ansible.builtin.command:
+    cmd: "qemu-img create -f qcow2 /var/lib/libvirt/images/{{ helper_disk }} {{ helper_disk_size }}"
+  when: helper_disk_status.stat.exists == false
+  tags:
+  - virt
+
+- name: Expand base RHEL9 image into the new helper disk (virt-resize)
+  ansible.builtin.command:
+    cmd: >
+      virt-resize --expand {{ helper_resize_partition }}
+      {{ role_path }}/files/{{ rhel9_kvm_image }}
+      /var/lib/libvirt/images/{{ helper_disk }}
   when: helper_disk_status.stat.exists == false
   tags:
   - virt
