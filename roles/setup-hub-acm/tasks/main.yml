@@ -4,18 +4,45 @@
   ansible.builtin.wait_for:
     timeout: 120
 
+# Every operator Subscription below names a CatalogSource, and that is the one
+# thing about them that differs disconnected: the built-in redhat-operators is
+# disabled on a disconnected hub, so they have to resolve against the catalog
+# oc-mirror generated for the mirrored index (cs-redhat-operator-index-v4-21 and
+# the like). It is one value, acm_catalog_source, so the Subscriptions are one
+# template per operator rather than a connected and a disconnected copy of each.
+- name: Check the mirrored CatalogSource exists before subscribing to anything
+  ansible.builtin.include_tasks: disconnected-catalog-source.yml
+  when: disconnected_install | bool
+
+- name: Render the operator Subscriptions
+  ansible.builtin.template:
+    src: "{{ item }}/03-subscription.yaml.j2"
+    dest: "{{ role_path }}/files/{{ item }}/.rendered-03-subscription.yaml"
+  loop:
+    - acm
+    - lvm-storage
+    - metal-lb
+    - oadp
+
+- name: Report which catalog the operators will resolve against
+  ansible.builtin.debug:
+    msg: >-
+      Subscriptions point at CatalogSource '{{ acm_catalog_source }}' in
+      {{ acm_catalog_source_namespace }}
+      ({{ 'disconnected' if disconnected_install | bool else 'connected' }}).
+
 - name: Deploy ACM Operator
   shell: |
     oc apply -f "{{ role_path }}/files/acm/01-namespace.yaml"
     oc apply -f "{{ role_path }}/files/acm/02-acm-operatorgroup.yaml"
-    oc apply -f "{{ role_path }}/files/acm/03-subscription.yaml"
+    oc apply -f "{{ role_path }}/files/acm/.rendered-03-subscription.yaml"
 
 
 - name: Deploy LVM Storage Operator
   shell: |
     oc apply -f "{{ role_path }}/files/lvm-storage/01-namespace.yaml"
     oc apply -f "{{ role_path }}/files/lvm-storage/02-operatorGroup.yaml"
-    oc apply -f "{{ role_path }}/files/lvm-storage/03-subscription.yaml"
+    oc apply -f "{{ role_path }}/files/lvm-storage/.rendered-03-subscription.yaml"
   when: use_lvm_storage == true
 
 
@@ -23,13 +50,13 @@
   shell: |
     oc apply -f "{{ role_path }}/files/metal-lb/01-namespace.yaml"
     oc apply -f "{{ role_path }}/files/metal-lb/02-operatorGroup.yaml"
-    oc apply -f "{{ role_path }}/files/metal-lb/03-subscription.yaml"
+    oc apply -f "{{ role_path }}/files/metal-lb/.rendered-03-subscription.yaml"
 
 - name: Deploy OADP Operator
   shell: |
     oc apply -f "{{ role_path }}/files/oadp/01-namespace.yaml"
     oc apply -f "{{ role_path }}/files/oadp/02-operatorGroup.yaml"
-    oc apply -f "{{ role_path }}/files/oadp/03-subscription.yaml"
+    oc apply -f "{{ role_path }}/files/oadp/.rendered-03-subscription.yaml"
 
 - name: Lets wait for 300 seconds for Operators to be ACTIVE
   ansible.builtin.wait_for:

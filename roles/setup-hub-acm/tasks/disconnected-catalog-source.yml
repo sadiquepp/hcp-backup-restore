@@ -1,0 +1,71 @@
+---
+# Checks the catalog the Subscriptions are about to name actually exists.
+#
+# Disconnected, acm_catalog_source is not openshift-marketplace's built-in
+# redhat-operators - that one is disabled on this hub - but the CatalogSource
+# oc-mirror generated for the mirrored index and
+# setup_hub_cluster_disconnected.yaml applied on day 2. Its name is derived from
+# mirror_catalog_index, which is a good guess and not a guarantee, and a
+# Subscription pointing at a CatalogSource that is not there sits in
+# ResolutionFailed indefinitely without saying why. Cheaper to find out here.
+#
+# Included from tasks/main.yml only when disconnected_install is true, before
+# any Subscription is applied. Requires KUBECONFIG in the environment.
+
+- name: Wait for the mirrored CatalogSource to appear
+  ansible.builtin.command:
+    cmd: oc get catalogsource {{ acm_catalog_source }} -n {{ acm_catalog_source_namespace }}
+  register: acm_catalog_source_check
+  until: acm_catalog_source_check.rc == 0
+  retries: 10
+  delay: 15
+  changed_when: false
+  failed_when: false
+
+- name: List the CatalogSources that are there instead
+  ansible.builtin.command:
+    cmd: oc get catalogsource -n {{ acm_catalog_source_namespace }} -o name
+  register: acm_catalog_sources_present
+  changed_when: false
+  failed_when: false
+  when: acm_catalog_source_check.rc != 0
+
+- name: Fail with the CatalogSources the cluster actually has
+  ansible.builtin.assert:
+    that:
+      - acm_catalog_source_check.rc == 0
+    fail_msg: >-
+      CatalogSource '{{ acm_catalog_source }}' does not exist in
+      {{ acm_catalog_source_namespace }}, so every operator Subscription this
+      role applies would fail to resolve. What is there:
+      {{ acm_catalog_sources_present.stdout_lines | default([]) | join(', ') | default('nothing', true) }}.
+      Set acm_catalog_source in vars.yaml to the right name, or apply the
+      CatalogSource oc-mirror generated first (setup_hub_cluster_disconnected.yaml
+      does that in its day-2 step).
+
+# Not fatal: OLM retries the connection, so a catalog that is still starting
+# resolves on its own. Worth saying out loud though, because it is the other
+# reason a Subscription sits unresolved for a long time.
+- name: Wait for the mirrored CatalogSource to report READY
+  ansible.builtin.command:
+    cmd: >
+      oc get catalogsource {{ acm_catalog_source }} -n {{ acm_catalog_source_namespace }}
+      -o jsonpath={.status.connectionState.lastObservedState}
+  register: acm_catalog_source_state
+  until: acm_catalog_source_state.stdout | trim == 'READY'
+  retries: 20
+  delay: 15
+  changed_when: false
+  failed_when: false
+
+- name: Warn that the CatalogSource is not READY yet
+  ansible.builtin.debug:
+    msg: >-
+      WARNING - CatalogSource '{{ acm_catalog_source }}' is
+      '{{ acm_catalog_source_state.stdout | trim | default('unknown', true) }}',
+      not READY. Its pod may still be pulling from
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }}. OLM keeps
+      retrying, so the Subscriptions below may still resolve - if they do not,
+      start with `oc -n {{ acm_catalog_source_namespace }} describe catalogsource
+      {{ acm_catalog_source }}`.
+  when: acm_catalog_source_state.stdout | trim != 'READY'

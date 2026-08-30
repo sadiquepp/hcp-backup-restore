@@ -196,6 +196,14 @@ ansible-playbook -i inventory/hosts setup_hub_cluster_disconnected.yaml --ask-va
 
 What the disconnected run does on top of the connected one:
 
+- Points every operator `Subscription` (ACM, LVM Storage, MetalLB, OADP) at the
+  CatalogSource oc-mirror generated instead of the built-in `redhat-operators`,
+  which a disconnected hub has disabled. The name is derived from
+  `mirror_catalog_index` (`...redhat-operator-index:v4.21` →
+  `cs-redhat-operator-index-v4-21`); override `acm_catalog_source` in
+  `vars.yaml` if oc-mirror named it something else. The role checks the
+  CatalogSource exists before subscribing, since a Subscription naming a
+  missing catalog just sits in `ResolutionFailed`.
 - Publishes the mirror registry CA as the `registry-config` ConfigMap in
   `openshift-config`, keyed `<registry-host>..<port>`, and sets it as
   `spec.additionalTrustedCA` on `image.config.openshift.io/cluster` so every
