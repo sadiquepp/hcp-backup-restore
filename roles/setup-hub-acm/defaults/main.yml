@@ -44,11 +44,12 @@ agent_service_os_images:
 ## mirror_registry_* / mirror_release_repository / ip_list from vars.yaml.
 ## ---------------------------------------------------------------------------
 
-## The one switch the whole disconnected path hangs off.
-## `-e disconnected=true` is the short form to drive a single run with;
-## disconnected_install is the vars.yaml flag setup_mirror_registry.yaml and
-## setup_hub_cluster_disconnected.yaml already gate on. Either is enough.
-acm_disconnected: "{{ (disconnected | default(disconnected_install | default(false))) | bool }}"
+## The one switch the whole disconnected path hangs off - the same
+## disconnected_install setup_mirror_registry.yaml and
+## setup_hub_cluster_disconnected.yaml already gate on, not a second name for
+## it. Set it in vars.yaml or pass -e disconnected_install=true. Repeated here
+## only so the role still has a value if it is ever run without vars.yaml.
+disconnected_install: false
 
 ## Namespace assisted-service (MCE) runs in. AgentServiceConfig's
 ## mirrorRegistryRef is a name-only reference resolved in this namespace, so

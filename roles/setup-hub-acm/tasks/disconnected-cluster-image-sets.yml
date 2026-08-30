@@ -8,7 +8,7 @@
 # unless a ClusterImageSet exists for it. One is rendered here per osImage
 # version, named the way the ACM console expects (openshift-4-21-0).
 #
-# Included from tasks/main.yml only when acm_disconnected is true. Requires
+# Included from tasks/main.yml only when disconnected_install is true. Requires
 # KUBECONFIG in the environment, same as the rest of the role.
 
 - name: Use the ClusterImageSet list from vars.yaml

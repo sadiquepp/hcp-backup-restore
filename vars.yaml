@@ -244,8 +244,8 @@ agent_service_os_images:
     url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
     cpuArchitecture: "x86_64"
 
-## setup-hub-acm, disconnected. Run the role with -e disconnected=true (or
-## with disconnected_install: true below) and it renders a different
+## setup-hub-acm, disconnected. With disconnected_install true (below, or
+## -e disconnected_install=true) the role renders a different
 ## AgentServiceConfig: spec.mirrorRegistryRef pointing at a ConfigMap holding
 ## the mirror registry's CA and registries.conf, and osImage urls pointing at
 ## the helper's web server instead of mirror.openshift.com. It also publishes

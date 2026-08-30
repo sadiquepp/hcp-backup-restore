@@ -13,7 +13,7 @@
 #   3. that second ConfigMap's name is what the disconnected AgentServiceConfig
 #      template puts in spec.mirrorRegistryRef.
 #
-# Included from tasks/main.yml only when acm_disconnected is true. Requires
+# Included from tasks/main.yml only when disconnected_install is true. Requires
 # KUBECONFIG in the environment, same as the rest of the role.
 
 - name: Check the disconnected variables this role needs are set
@@ -27,7 +27,7 @@
       Running setup-hub-acm disconnected needs the mirror registry and lab
       network variables from vars.yaml (mirror_registry_domain,
       mirror_registry_port, lab_network_prefix, ip_list.helper_server). Load
-      vars.yaml in the playbook, or drop -e disconnected=true.
+      vars.yaml in the playbook, or drop -e disconnected_install=true.
 
 - name: Check the mirror registry CA is present on the baremetal host
   ansible.builtin.stat:

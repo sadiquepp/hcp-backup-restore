@@ -180,9 +180,10 @@ ansible-playbook -i inventory/hosts setup_hub_cluster_disconnected.yaml --ask-va
 
 ### Prepare ACM (Disconnected Deployment)
 
-`setup-hub-acm` renders differently when it is run disconnected - it does so
-whenever `disconnected_install: true` is set in `vars.yaml` or `-e disconnected=true`
-is passed. Connected runs are unaffected.
+`setup-hub-acm` renders differently when it is run disconnected. It hangs off
+the same `disconnected_install` flag as the rest of the disconnected flow - set
+it in `vars.yaml` or pass `-e disconnected_install=true`. Connected runs are
+unaffected.
 
 `setup_hub_cluster_disconnected.yaml` chains into the role once the cluster is
 up, the same way `setup_hub_cluster.yaml` does for hub1, so the command in the
