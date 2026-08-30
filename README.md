@@ -178,6 +178,67 @@ Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP operat
 ansible-playbook -i inventory/hosts setup_hub_cluster_disconnected.yaml --ask-vault-pass -e disconnected_install=true
 ```
 
+### Prepare ACM (Disconnected Deployment)
+
+`setup-hub-acm` renders differently when it is run disconnected. It hangs off
+the same `disconnected_install` flag as the rest of the disconnected flow - set
+it in `vars.yaml` or pass `-e disconnected_install=true`. Connected runs are
+unaffected.
+
+`setup_hub_cluster_disconnected.yaml` chains into the role once the cluster is
+up, the same way `setup_hub_cluster.yaml` does for hub1, so the command in the
+section above already covers it. To re-run just the ACM part against an
+existing disconnected hub:
+
+```bash
+ansible-playbook -i inventory/hosts setup_hub_cluster_disconnected.yaml --ask-vault-pass -e disconnected_install=true --tags acm
+```
+
+What the disconnected run does on top of the connected one:
+
+- Publishes the mirror registry CA as the `registry-config` ConfigMap in
+  `openshift-config`, keyed `<registry-host>..<port>`, and sets it as
+  `spec.additionalTrustedCA` on `image.config.openshift.io/cluster` so every
+  node's CRI-O trusts the mirror. This is a MachineConfig change - the role
+  waits for the pools to roll it out.
+- Creates the `mirror-config` ConfigMap in `multicluster-engine` (mirror
+  registry CA + `registries.conf`) and renders
+  `AgentServiceConfig.spec.mirrorRegistryRef` pointing at it, so
+  assisted-service and the discovery ISOs it builds pull through the mirror.
+  The mappings come from `acm_disconnected_registry_mirrors`; the role warns
+  about any source the hub's own IDMS/ITMS redirects that is missing from it.
+- Downloads each `agent_service_os_images` RHCOS live ISO to the bare-metal
+  host and pushes it to the helper's web server
+  (`/var/www/html/bootp`, served on port 8080), then rewrites the `osImages`
+  urls to point there - the `mirror.openshift.com` urls are unreachable from a
+  disconnected hub. Set `agent_service_os_images_disconnected` in `vars.yaml`
+  to skip this and use urls you staged yourself.
+- Creates one `ClusterImageSet` per osImage version
+  (`openshift-4-21-0`, ...) pointing at the mirror registry's copy of the
+  release payload, since ACM/HyperShift will not offer a version that has no
+  ClusterImageSet and cannot resolve the quay.io pullspec anyway.
+
+The ISOs are ~1.3G each and the helper is built from the 10G RHEL9 base image,
+so `roles/setup-bm-host` now expands that base image into a `helper_disk_size`
+(100G, sparse) disk with `virt-resize`. An **existing** helper is not resized -
+if the role stops with "the helper has only N G free", either delete
+`/var/lib/libvirt/images/helper_disk.qcow2` and re-run `setup_bm_host.yaml`, or
+grow the disk in place:
+
+```bash
+virsh shutdown helper
+qemu-img resize /var/lib/libvirt/images/helper_disk.qcow2 100G
+virsh start helper
+# on the helper
+growpart /dev/vda 4 && xfs_growfs /
+```
+
+The rendered files are left in `roles/setup-hub-acm/files/` for review:
+`.rendered-05-agentserviceconfig.yaml` (the disconnected rendering, applied
+manually as below), plus `.rendered-06-registry-ca-configmap.yaml`,
+`.rendered-07-mirror-config-configmap.yaml` and
+`.rendered-08-clusterimagesets.yaml`, which the role applies itself.
+
 ### Prepare ACM and Inventory
 
 - Configure CIM. Apply the AgentServiceConfig to the ACM cluster. Customize the OS images using `osImages` to the ones you want to use for the hosted clusters. Review the rendendered yaml file at `roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml` and apply it to the ACM cluster.

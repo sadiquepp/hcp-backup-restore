@@ -73,10 +73,37 @@
     state: absent
 
 
-- name: Render AgentServiceConfig
+# Everything below this point renders differently depending on whether the hub
+# talks to the internet or only to the mirror registry. The three includes are
+# prerequisites for the disconnected AgentServiceConfig rather than optional
+# extras: it references the mirror-registry ConfigMap the first one creates,
+# and the osImage urls the second one stages. Connected runs skip all of it and
+# render exactly what they always did.
+- name: Set up the mirror registry trust and mirror mappings (disconnected)
+  ansible.builtin.include_tasks: disconnected-mirror-config.yml
+  when: disconnected_install | bool
+
+- name: Stage the RHCOS live ISOs on the helper's web server (disconnected)
+  ansible.builtin.include_tasks: disconnected-os-images.yml
+  when: disconnected_install | bool
+
+- name: Create the ClusterImageSets for the mirrored releases (disconnected)
+  ansible.builtin.include_tasks: disconnected-cluster-image-sets.yml
+  when: disconnected_install | bool
+
+# Both branches render to the same path, so the review-and-apply step below
+# (and the one in the README) is the same either way.
+- name: Render AgentServiceConfig (connected)
   template:
     src: acm/05-agentserviceconfig.yaml.j2
     dest: "{{ role_path }}/files/.rendered-05-agentserviceconfig.yaml"
+  when: not (disconnected_install | bool)
+
+- name: Render AgentServiceConfig (disconnected)
+  template:
+    src: acm/05-agentserviceconfig-disconnected.yaml.j2
+    dest: "{{ role_path }}/files/.rendered-05-agentserviceconfig.yaml"
+  when: disconnected_install | bool
 
 #- name: Wait for the AgentServiceConfig CRD to be established
 #  shell: |
@@ -98,6 +125,7 @@
     msg: >-
       Apply is commented out - review
       {{ role_path }}/files/.rendered-05-agentserviceconfig.yaml
+      ({{ 'disconnected' if disconnected_install | bool else 'connected' }} rendering)
       then re-enable the 'Apply AgentServiceConfig' task in
       roles/setup-hub-acm/tasks/main.yml.
 

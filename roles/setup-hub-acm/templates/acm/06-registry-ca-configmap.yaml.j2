@@ -1,0 +1,17 @@
+# The mirror registry's CA, in the shape image.config.openshift.io/cluster
+# wants it: one key per registry, named "<host>..<port>" (a literal '..'
+# stands in for the ':' a ConfigMap key cannot contain). A key of just the
+# host would only cover port 443, and this registry listens on
+# {{ mirror_registry_port }}.
+#
+# tasks/disconnected-mirror-config.yml applies this and then sets
+# spec.additionalTrustedCA on the cluster image config to point at it, which
+# is what gets the CA onto every node's CRI-O trust store.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ acm_disconnected_registry_ca_configmap_effective }}
+  namespace: openshift-config
+data:
+  {{ mirror_registry_domain }}..{{ mirror_registry_port }}: |
+    {{ acm_disconnected_mirror_ca_cert | trim | indent(4) }}
