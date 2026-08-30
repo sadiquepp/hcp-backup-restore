@@ -10,6 +10,12 @@
 # rendering something unexpected if vars.yaml isn't loaded.
 hosted_clusters: []
 
+# Rendered instead of hosted_clusters when disconnected_install is true - the
+# hosted clusters whose worker VMs have no route off the lab (see vars.yaml and
+# setup_hosted_cluster_vm.yaml). Same entry shape as hosted_clusters.
+hosted_clusters_disconnected: []
+disconnected_install: false
+
 hosted_cluster_clusterset: default
 hosted_cluster_channel: fast-4.21
 # Keep in sync with roles/setup-hub-acm's agent_service_os_images list -

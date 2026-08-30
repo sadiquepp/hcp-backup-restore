@@ -1,20 +1,88 @@
+## Creates the worker VMs a hosted cluster's NodePool draws its Agents from,
+## and boots them off the hub InfraEnv's discovery ISO so they register as
+## Agents in the bminfra namespace.
+##
+## Connected (default):
+##   ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass
+## builds hosted_cluster_workers (c1_worker1..3, ip_list.c1worker*) against the
+## hub selected by target_hub, exactly as before.
+##
+## Disconnected:
+##   ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass \
+##     -e disconnected_install=true
+## builds hosted_cluster_disconnected_workers (c1-d-worker1..3,
+## ip_list.c1dworker*) instead, against the hub installed by
+## setup_hub_cluster_disconnected.yaml, and cuts those three IPs off from the
+## real internet first so the cluster can only ever pull from the local mirror
+## registry. disconnected_install wins over target_hub, same as in
+## setup_bminfra.yaml.
+##
+## Both paths run the same tasks - only the worker set, the VM folder and the
+## sizing differ (see the "Select the worker set" task below and the
+## disconnected block in vars.yaml).
+
 - name: Setting Up Hosted Cluster
   hosts: localhost
   become: true
   vars_files:
     - vars.yaml
   vars:
-    hub_kubeconfig: >-
-      {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+    hub_install_folder_selected: >-
+      {{ hub_disconnected_install_folder
+         if (disconnected_install | default(false) | bool)
+         else ((target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder)) }}
+    hub_kubeconfig: "{{ hub_install_folder_selected }}/auth/kubeconfig"
   environment:
     KUBECONFIG: "{{ hub_kubeconfig }}"
   tasks:
+    # One set of facts drives every task below, so the connected and
+    # disconnected runs differ in their inputs rather than in their steps.
+    - name: Select the worker set, VM folder and sizing for this run
+      ansible.builtin.set_fact:
+        hcp_disconnected: "{{ disconnected_install | default(false) | bool }}"
+        hcp_workers: >-
+          {{ hosted_cluster_disconnected_workers
+             if (disconnected_install | default(false) | bool)
+             else hosted_cluster_workers }}
+        hcp_vm_folder: >-
+          {{ hosted_cluster_disconnected_vm_folder
+             if (disconnected_install | default(false) | bool)
+             else hosted_cluster_vm_folder }}
+        hcp_vm_memory: >-
+          {{ hosted_cluster_disconnected_memory
+             if (disconnected_install | default(false) | bool)
+             else hosted_cluster_memory }}
+        hcp_vm_cpu: >-
+          {{ hosted_cluster_disconnected_cpu
+             if (disconnected_install | default(false) | bool)
+             else hosted_cluster_cpu }}
+
+    - name: Report which hosted cluster's VMs are being built
+      ansible.builtin.debug:
+        msg: >-
+          {{ hcp_disconnected | ternary('Disconnected', 'Connected') }} hosted
+          cluster VMs: {{ hcp_workers | map(attribute='name') | join(', ') }}
+          in {{ hcp_vm_folder }}, discovery ISO from {{ hub_kubeconfig }}
+
+    # Only the disconnected workers get their egress cut - the connected
+    # hosted clusters, the mirror registry, MinIO, the helper and the load
+    # balancer all stay reachable. Done before the VMs exist so nothing ever
+    # boots with a working route to quay.io.
+    - name: Cut the disconnected hosted cluster's workers off from the real internet
+      ansible.builtin.include_tasks: roles/setup-hub-cluster-disconnected/tasks/block-node-nat.yml
+      vars:
+        disconnected_nat_enabled: "{{ hosted_cluster_disconnected_block_node_nat }}"
+        disconnected_nat_ip_keys: "{{ hcp_workers | map(attribute='ip_key') | list }}"
+        disconnected_nat_label: "{{ (hosted_clusters_disconnected | default(['hcp-disconnected'])) | first }}"
+      when: hcp_disconnected
+      tags: [disconnected-nat]
+
     - name: Download discovery ISO from hub InfraEnv
       ansible.builtin.include_tasks: roles/setup-bminfra/tasks/download-discovery-iso.yml
 
     - name: Create Directory for Hosted Cluster VMs
       file:
-        path: "{{ hosted_cluster_vm_folder }}"
+        path: "{{ hcp_vm_folder }}"
         state: directory
 
     - name: Define Disks for Hosted Cluster
@@ -22,45 +90,26 @@
         qemu-img create \
         -f qcow2 \
         -o preallocation=metadata \
-        {{ hosted_cluster_vm_folder }}/c1_worker1.qcow2 \
+        {{ hcp_vm_folder }}/{{ item.name }}.qcow2 \
         120G
-        
-        qemu-img create \
-        -f qcow2 \
-        -o preallocation=metadata \
-        {{ hosted_cluster_vm_folder }}/c1_worker2.qcow2 \
-        120G
-        
-        qemu-img create \
-        -f qcow2 \
-        -o preallocation=metadata \
-        {{ hosted_cluster_vm_folder }}/c1_worker3.qcow2 \
-        120G
+      loop: "{{ hcp_workers }}"
+      loop_control:
+        label: "{{ item.name }}"
 
     - name: Deploy Workers for Hosted Cluster
       shell: |
         virt-install \
-        --ram {{ hosted_cluster_memory }} \
-        --vcpus {{ hosted_cluster_cpu }} \
+        --ram {{ hcp_vm_memory }} \
+        --vcpus {{ hcp_vm_cpu }} \
         --os-variant rhel9.5 \
         --cdrom {{ discovery_image_url }} \
-        --disk path={{ hosted_cluster_vm_folder }}/c1_worker1.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+        --disk path={{ hcp_vm_folder }}/{{ item.name }}.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
         --memballoon model=virtio,freePageReporting=on \
         --noautoconsole \
         --vnc \
-        --network network:default,mac=52:54:00:e2:54:{{ ip_list.c1worker1 }} \
-        --name c1_worker1 \
+        --network network:default,mac=52:54:00:e2:54:{{ ip_list[item.ip_key] }} \
+        --name {{ item.name }} \
         --cpu host-passthrough
-        
-        virt-install \
-        --ram {{ hosted_cluster_memory }} \
-        --vcpus {{ hosted_cluster_cpu }} \
-        --os-variant rhel9.5 \
-        --cdrom {{ discovery_image_url }} \
-        --disk path={{ hosted_cluster_vm_folder }}/c1_worker2.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
-        --memballoon model=virtio,freePageReporting=on \
-        --noautoconsole \
-        --vnc \
-        --network network:default,mac=52:54:00:e2:54:{{ ip_list.c1worker2 }} \
-        --name c1_worker2 \
-        --cpu host-passthrough
+      loop: "{{ hcp_workers }}"
+      loop_control:
+        label: "{{ item.name }} ({{ lab_network_prefix }}.{{ ip_list[item.ip_key] }})"

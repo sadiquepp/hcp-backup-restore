@@ -102,6 +102,21 @@
   notify:
     -  Restart_Named
 
+# Deployed unconditionally, exactly like the hub_disconnected_domain zone
+# above: the zone costs nothing when the disconnected hosted cluster has not
+# been built, and having it always present means `--tags dns` never has to be
+# re-run with -e disconnected_install=true just to make its names resolve.
+# What target_hub it is rendered with still matters - see the template.
+- name: Deploy "{{ hosted_domain_disconnected }}" zonefile
+  template:
+    src: hosted_domain_disconnected.j2
+    dest: "/var/named/{{ hosted_domain_disconnected }}.db"
+    owner: root
+    group: named
+    mode: u=rw,g=r,o=r
+  notify:
+    -  Restart_Named
+
 - name: Start Named Service
   service:
     name: named

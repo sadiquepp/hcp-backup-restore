@@ -80,3 +80,8 @@ zone "{{ hosted_domain3 }}" IN {
 	file "{{hosted_domain3}}.db";
 	allow-update { none; };
 };
+zone "{{ hosted_domain_disconnected }}" IN {
+	type master;
+	file "{{hosted_domain_disconnected}}.db";
+	allow-update { none; };
+};
