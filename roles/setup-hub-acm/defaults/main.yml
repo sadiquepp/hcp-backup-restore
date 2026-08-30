@@ -51,6 +51,24 @@ agent_service_os_images:
 ## only so the role still has a value if it is ever run without vars.yaml.
 disconnected_install: false
 
+## The CatalogSource the operator Subscriptions resolve against.
+##
+## Connected that is OpenShift's built-in redhat-operators. Disconnected the
+## built-in sources are gone - setup-hub-cluster-disconnected installs the hub
+## with OperatorHub.spec.disableAllDefaultSources - and the only catalog is the
+## one oc-mirror generated for the mirrored index. oc-mirror names it after the
+## index image, so registry.redhat.io/redhat/redhat-operator-index:v4.21 becomes
+## cs-redhat-operator-index-v4-21; that is derived from mirror_catalog_index
+## here rather than hard-coded, so it follows the index you actually mirrored.
+##
+## Derived is still a guess, so the role checks the CatalogSource really exists
+## before it applies a Subscription against it - a Subscription naming a catalog
+## that is not there just sits in ResolutionFailed. Override acm_catalog_source
+## in vars.yaml if oc-mirror named it something else.
+acm_mirror_catalog_source: "cs-{{ mirror_catalog_index | regex_replace('^.*/', '') | regex_replace('[:.]', '-') }}"
+acm_catalog_source: "{{ acm_mirror_catalog_source if disconnected_install | bool else 'redhat-operators' }}"
+acm_catalog_source_namespace: openshift-marketplace
+
 ## Namespace assisted-service (MCE) runs in. AgentServiceConfig's
 ## mirrorRegistryRef is a name-only reference resolved in this namespace, so
 ## the ConfigMap has to be created here and nowhere else.

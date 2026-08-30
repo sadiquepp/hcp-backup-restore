@@ -1,0 +1,15 @@
+# Rendered per-run so the catalog the operator resolves against can differ
+# between a connected and a disconnected hub - see acm_catalog_source in
+# roles/setup-hub-acm/defaults/main.yml. Everything else about this
+# Subscription is the same either way, so this is one template rather than a
+# connected and a disconnected copy.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: lvms
+  namespace: openshift-storage
+spec:
+  installPlanApproval: Automatic
+  name: lvms-operator
+  source: "{{ acm_catalog_source }}"
+  sourceNamespace: "{{ acm_catalog_source_namespace }}"

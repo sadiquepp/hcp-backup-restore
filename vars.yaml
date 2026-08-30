@@ -255,6 +255,11 @@ agent_service_os_images:
 ## The defaults derive everything from the mirror_registry_* values further
 ## down, so normally nothing here needs setting. Uncomment to override:
 ##
+## The CatalogSource the operator Subscriptions resolve against. Derived from
+## mirror_catalog_index below - set this only if oc-mirror named it something
+## other than cs-<index-repo>-<tag>.
+# acm_catalog_source: cs-redhat-operator-index-v4-21
+#
 ## The registries.conf written into the mirror-config ConfigMap. Should match
 ## the hub's own ImageDigestMirrorSet/ImageTagMirrorSet - the role warns about
 ## any source it redirects that is missing here.
