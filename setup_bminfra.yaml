@@ -6,6 +6,12 @@
 ## Usage:
 ##   ansible-playbook setup_bminfra.yaml --ask-vault-pass                    # targets hub1 (default)
 ##   ansible-playbook setup_bminfra.yaml --ask-vault-pass -e target_hub=hub2 # targets hub2
+##   ansible-playbook setup_bminfra.yaml --ask-vault-pass -e disconnected_install=true # targets the disconnected hub
+##
+## disconnected_install (vars.yaml, default false) wins over target_hub: with
+## it set the playbook uses hub_disconnected_install_folder/auth/kubeconfig
+## (the hub installed by setup_hub_cluster_disconnected.yaml), so target_hub
+## is ignored in that case.
 
 - name: Setup bare-metal infra (namespace, pull-secret, InfraEnv, RBAC)
   hosts: localhost
@@ -14,8 +20,11 @@
     - vars.yaml
     - vault.yaml
   vars:
-    hub_kubeconfig: >-
-      {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+    hub_install_folder_selected: >-
+      {{ hub_disconnected_install_folder
+         if (disconnected_install | default(false) | bool)
+         else ((target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder)) }}
+    hub_kubeconfig: "{{ hub_install_folder_selected }}/auth/kubeconfig"
   tasks:
   - name: Fail fast if pull_secret/ssh_key are missing from vault.yaml
     ansible.builtin.assert:
