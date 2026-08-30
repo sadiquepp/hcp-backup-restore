@@ -83,21 +83,65 @@
     oc apply -f "{{ role_path }}/files/lvm-storage/04-lvm-cluster.yaml"
   when: use_lvm_storage == true
 
-- name: Render MetalLB IPAddressPool
+# Pool names are hub-independent but their addresses are not: hub2 is the DR
+# hub on its own segment, so each hosted cluster carries one address per hub.
+# Checked here so a hub with no address for a cluster is an obvious message
+# rather than an undefined-key error inside the template.
+- name: Fail fast if a hosted cluster has no MetalLB address for this hub
+  ansible.builtin.assert:
+    that:
+      - metallb_hub in item.value.ip
+    fail_msg: >-
+      Hosted cluster '{{ item.key }}' has no '{{ metallb_hub }}' address in
+      hosted_cluster_metallb_pools (vars.yaml). Add one, e.g.
+      "ip: {hub: 60, hub2: 90}", so this hub can hand the cluster an address
+      that is routable on its own segment - then re-run the dns tag of
+      setup_bm_host.yaml with -e target_hub={{ metallb_hub }} so api/api-int
+      match.
+  loop: "{{ hosted_cluster_metallb_pools | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Render MetalLB IPAddressPools (one single-address pool per hosted cluster)
   template:
     src: metal-lb/05-ip-pool.yaml.j2
     dest: "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
 
+- name: Render MetalLB L2Advertisements (one per pool)
+  template:
+    src: metal-lb/06-L2Advertisement.yaml.j2
+    dest: "{{ role_path }}/files/.rendered-06-l2advertisement.yaml"
+
 - name: Setup MetalLB Resource
   shell: |
     oc apply -f "{{ role_path }}/files/metal-lb/04-metalLB.yaml"
+
+# The old shared hcp-ip-pool covered a whole range per hub (.60-.63 on hub,
+# .64-.67 on hubd, .90-.93 on hub2), which the per-cluster pools now claim one
+# address at a time. MetalLB refuses overlapping IPAddressPools, so on a hub
+# that was built before this change the old pool has to go first. Any
+# kube-apiserver Service still holding an address from it is reassigned on
+# MetalLB's next converge - to the same address, since the per-cluster pool for
+# that hosted cluster contains exactly the address DNS publishes for it on
+# this hub.
+- name: Remove the superseded shared MetalLB pool and advertisement
+  shell: |
+    oc delete l2advertisement "{{ metallb_legacy_l2advertisement_name }}" -n metallb-system --ignore-not-found
+    oc delete ipaddresspool "{{ metallb_legacy_pool_name }}" -n metallb-system --ignore-not-found
+  when: metallb_remove_legacy_shared_pool | bool
+
+- name: Setup per-hosted-cluster MetalLB IPAddressPools and L2Advertisements
+  shell: |
     oc apply -f "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
-    oc apply -f "{{ role_path }}/files/metal-lb/06-L2Advertisement.yaml"
+    oc apply -f "{{ role_path }}/files/.rendered-06-l2advertisement.yaml"
 
 - name: Clean up rendered scratch files
   ansible.builtin.file:
-    path: "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
+    path: "{{ item }}"
     state: absent
+  loop:
+    - "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
+    - "{{ role_path }}/files/.rendered-06-l2advertisement.yaml"
 
 
 # Everything below this point renders differently depending on whether the hub

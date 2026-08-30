@@ -1,0 +1,15 @@
+{# One L2Advertisement per pool, so each hosted cluster's address is
+   advertised independently and can be withdrawn without touching the others.
+   Pool names are hub-independent, so this template is too - only the address
+   inside each pool changes from hub to hub. #}
+{% for hcp_name, hcp_pool in hosted_cluster_metallb_pools | dictsort %}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: {{ hcp_pool.pool }}-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+   - {{ hcp_pool.pool }}
+{% endfor %}

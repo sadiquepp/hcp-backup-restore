@@ -179,19 +179,77 @@ hub_disconnected_name: hubd
 hub_disconnected_vm_folder: /var/lib/libvirt/images/hubd
 hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 
-## MetalLB IPAddressPool ranges for HCP APIServer/apps VIPs (setup-hub-acm).
-## Mapped to metallb_pool_start/end in setup_hub_cluster*.yaml. Ranges must not
-## overlap while all three hubs share the same L2 network ({{ lab_network_prefix }}.0/24).
-hub_metallb_pool_start: 60
-hub_metallb_pool_end: 63
-hub2_metallb_pool_start: 90
-hub2_metallb_pool_end: 93
-## Disconnected hub's pool, carved out of the same 60-69 span as hub1's
-## (hub1 60-63, hubd 64-67). Like the other two it must stay clear of every
-## ip_list octet and of the .201-.249 libvirt DHCP range, since MetalLB L2
-## mode ARPs for these addresses itself and nothing else may own them.
-hub_disconnected_metallb_pool_start: 64
-hub_disconnected_metallb_pool_end: 67
+## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
+## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE
+## address, plus one L2Advertisement per pool.
+##
+## This replaces the old shared hcp-ip-pool range (hub 60-63, hubd 64-67,
+## hub2 90-93). A shared range let any hosted cluster's kube-apiserver
+## Service take any free address in it, so a cluster could easily come up on
+## an address its api/api-int records don't point at. A single-address pool
+## bound to that cluster's control-plane namespace makes that impossible:
+## the address a hosted cluster gets is the address DNS publishes for it on
+## the hub it is running on, or it gets none at all.
+##
+## Keyed by HostedCluster name (which roles/create-hosted-cluster also uses
+## as the HostedCluster's namespace, hence control_plane_namespace defaulting
+## to '<name>-<name>'). Consumed by:
+##   - roles/setup-hub-acm  - renders the IPAddressPool + L2Advertisement pair
+##                            for the hub named by metallb_hub
+##   - roles/create-hosted-cluster - annotates the HostedCluster with 'pool'
+##   - roles/setup-dns      - api/api-int A records point at the address for
+##                            the hub named by target_hub
+##
+## 'pool' is the same on every hub. A hosted cluster's identity does not
+## change when its control plane is restored somewhere else, so neither does
+## the pool it belongs to - which is what lets the metallb.io/address-pool
+## annotation on the HostedCluster survive an OADP restore onto the DR hub
+## unchanged.
+##
+## 'ip' IS per hub, because the DR hub sits on a different network segment
+## and hub1's addresses are not routable there. Each key is a hub name (the
+## value passed as metallb_hub / target_hub):
+##   hub   - primary hub   (setup_hub_cluster.yaml)
+##   hub2  - DR hub        (setup_hub_cluster2.yaml)
+##   hubd  - disconnected hub (setup_hub_cluster_disconnected.yaml)
+## At DR cutover the hosted cluster comes back on the hub2 address and DNS is
+## re-rendered to match - see the MetalLB section of the README.
+##
+## Each value is a last octet, combined with the network prefix for that hub
+## (hosted_cluster_metallb_network_prefixes below, defaulting to
+## lab_network_prefix). It must stay clear of every ip_list octet on that hub's
+## segment and of the .201-.249 libvirt DHCP range, since MetalLB L2 mode ARPs
+## for these addresses itself and nothing else may own them.
+hosted_cluster_metallb_pools:
+  hcp-cluster1:
+    pool: hcp-cluster1-api-pool
+    ip:
+      hub: 60
+      hub2: 90
+      hubd: 64
+  hcp-cluster2:
+    pool: hcp-cluster2-api-pool
+    ip:
+      hub: 61
+      hub2: 91
+      hubd: 65
+  hcp-cluster3:
+    pool: hcp-cluster3-api-pool
+    ip:
+      hub: 62
+      hub2: 92
+      hubd: 66
+
+## Network the pool addresses sit on, per hub. Anything not listed here uses
+## lab_network_prefix, which is why this is empty by default - in this lab all
+## three hubs share virbr0. Set an entry when a hub really is on its own
+## segment, e.g. a DR hub in another VLAN:
+##   hosted_cluster_metallb_network_prefixes:
+##     hub2: "192.168.150"
+## The matching api/api-int records follow automatically, since roles/setup-dns
+## reads the same prefix for target_hub.
+hosted_cluster_metallb_network_prefixes: {}
+
 
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4
@@ -217,9 +275,13 @@ oadp_backup_ttl: 999h0m0s
 oadp_bminfra_namespace: bminfra
 oadp_storage_location: default
 
-## Which hub's kubeconfig setup_oadp.yaml / backup_hosted_cluster.yaml /
-## restore_hosted_cluster.yaml target by default. Override per-run with
-## -e target_hub=hub2 once you've cut over (see oadp/README.md).
+## Which hub is currently authoritative. It selects the kubeconfig
+## setup_oadp.yaml / backup_hosted_cluster.yaml / restore_hosted_cluster.yaml
+## use, and the hub whose hosted_cluster_metallb_pools addresses roles/setup-dns
+## publishes as api/api-int. Override per-run with -e target_hub=hub2 once
+## you've cut over (see oadp/README.md), and re-run the dns tag of
+## setup_bm_host.yaml with the same override so DNS follows the hosted
+## clusters to the DR hub.
 target_hub: hub
 
 ## ---------------------------------------------------------------------------
@@ -306,12 +368,14 @@ discovery_boot_rootfs_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-roo
 ## reaches it over the Konnectivity tunnel). Override them per-cluster only
 ## if you have a reason to, e.g. direct pod-to-pod connectivity between two
 ## hosted clusters (Submariner without globalnet).
+## Every name listed here needs a matching entry in
+## hosted_cluster_metallb_pools above - that is what gives the cluster its
+## own single-address MetalLB pool and the metallb.io/address-pool annotation
+## on its HostedCluster.
 hosted_clusters:
   - hcp-cluster1
-  # - hcp-cluster2
-  # - name: hcp-cluster3
-  #   cluster_cidr: 10.136.0.0/14
-  #   service_cidr: 172.32.0.0/16
+  - hcp-cluster2
+  - hcp-cluster3
 
 ## Defaults for every entry above that doesn't override them; they match
 ## hcp-cluster1. release image should correspond to an entry in
@@ -402,8 +466,8 @@ minio_bucket_name: adp-backup-disconnected
 # 1) Four new entries in the existing `ip_list:` map (pick any free
 #    two-digit last-octets - these four are free as of this repo's
 #    current vars.yaml: 21,22,23 are used by helper/mirror_registry/
-#    minio, 60-69 and 90-99 are reserved for the hub1/hub2 MetalLB
-#    pools, everything else in 24-27 is open):
+#    minio, 60-62 are the per-hosted-cluster MetalLB pools
+#    (hosted_cluster_metallb_pools), everything else in 24-27 is open):
 # -----------------------------------------------------------------------
 #   ceph1: 24
 #   ceph2: 25

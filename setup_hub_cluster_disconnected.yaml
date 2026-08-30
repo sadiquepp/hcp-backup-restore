@@ -6,9 +6,8 @@
 ##
 ## This hub CO-EXISTS with hub1 (setup_hub_cluster.yaml) and hub2
 ## (setup_hub_cluster2.yaml) - it has its own IP block (ip_list.hubd_*), its
-## own subdomain (hub_disconnected_domain), its own MetalLB pool
-## (hub_disconnected_metallb_pool_*) and its own VM/install directories, so
-## all three can be running at the same time. Adding the hubd_* entries to
+## own subdomain (hub_disconnected_domain) and its own VM/install directories,
+## so all three can be running at the same time. Adding the hubd_* entries to
 ## ip_list is what gives it DHCP reservations and DNS records, so re-run
 ## setup_bm_host.yaml (at minimum its dns/lb tags) after pulling these vars
 ## in, otherwise api/api-int/*.apps for this cluster won't resolve.
@@ -19,6 +18,13 @@
 ## off the helper, the mirror registry CA published to openshift-config and
 ## injected into the cluster image config, and a ClusterImageSet per osImage
 ## version against the mirror registry. Re-run just that part with --tags acm.
+##
+## That step also creates this hub's MetalLB pools. metallb_hub=hubd gives each
+## hosted cluster this hub's own address (.64/.65/.66 by default) under the same
+## pool names the other hubs use, so all three hubs can carry the pools at once
+## - MetalLB only ARPs for an address once a Service is actually assigned it.
+## Point api/api-int at them with -e target_hub=hubd on setup_bm_host.yaml's dns
+## tag if you ever run hosted clusters here.
 ##
 ## Requires disconnected_install: true (vars.yaml, default false) and the
 ## mirror registry already stood up via setup_mirror_registry.yaml (mirror
@@ -80,9 +86,10 @@
       kubeconfig_path: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
 
   # Same step setup_hub_cluster.yaml runs for hub1, against this cluster's
-  # kubeconfig and MetalLB pool. The role reads disconnected_install (asserted
-  # true above), so it renders the disconnected AgentServiceConfig and puts its
-  # prerequisites in place first - see roles/setup-hub-acm/defaults/main.yml.
+  # kubeconfig and MetalLB addresses. The role reads disconnected_install
+  # (asserted true above), so it renders the disconnected AgentServiceConfig and
+  # puts its prerequisites in place first - see
+  # roles/setup-hub-acm/defaults/main.yml.
   #
   # The AgentServiceConfig itself is only rendered, not applied: review
   # roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml and apply it
@@ -90,8 +97,7 @@
   - ansible.builtin.import_role:
       name: setup-hub-acm
     vars:
-      metallb_pool_start: "{{ hub_disconnected_metallb_pool_start }}"
-      metallb_pool_end: "{{ hub_disconnected_metallb_pool_end }}"
+      metallb_hub: hubd
     environment:
       KUBECONFIG: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
     tags:

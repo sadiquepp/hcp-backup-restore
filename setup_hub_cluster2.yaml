@@ -13,11 +13,19 @@
     vars:
       kubeconfig_path: "{{ hub2_install_folder }}/auth/kubeconfig"
 
+  # Same pool names as hub1, different addresses: this hub is on its own
+  # network segment where hub1's MetalLB addresses are not routable, so
+  # metallb_hub=hub2 selects the hub2 address for each hosted cluster
+  # (.90/.91/.92 by default). Keeping the pool names identical is what lets a
+  # HostedCluster's metallb.io/address-pool annotation survive the OADP
+  # restore onto this hub unchanged. After restoring the hosted clusters,
+  # re-render DNS so api/api-int follow them here:
+  #   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+  #     --ask-vault-pass -e target_hub=hub2
   - ansible.builtin.import_role:
       name: setup-hub-acm
     vars:
-      metallb_pool_start: "{{ hub2_metallb_pool_start }}"
-      metallb_pool_end: "{{ hub2_metallb_pool_end }}"
+      metallb_hub: hub2
     environment:
       KUBECONFIG: "{{ hub2_install_folder }}/auth/kubeconfig"
     tags:

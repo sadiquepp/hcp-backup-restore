@@ -13,11 +13,13 @@
     vars:
       kubeconfig_path: "{{ hub_install_folder }}/auth/kubeconfig"
 
+  # One single-address MetalLB pool per hosted cluster, from
+  # hosted_cluster_metallb_pools in vars.yaml. Pool names are the same on
+  # every hub; metallb_hub picks this hub's address for each cluster.
   - ansible.builtin.import_role:
       name: setup-hub-acm
     vars:
-      metallb_pool_start: "{{ hub_metallb_pool_start }}"
-      metallb_pool_end: "{{ hub_metallb_pool_end }}"
+      metallb_hub: hub
     environment:
       KUBECONFIG: "{{ hub_install_folder }}/auth/kubeconfig"
     tags:

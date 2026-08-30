@@ -1,10 +1,43 @@
+{# One single-address IPAddressPool per hosted cluster, rendered from
+   hosted_cluster_metallb_pools (vars.yaml) for the hub named by metallb_hub.
+
+   Pool names are the same on every hub; the address they hold is not. hub2 is
+   the DR hub on its own network segment, where hub1's addresses are not
+   routable, so each cluster's entry carries one address per hub and this
+   picks the one for the hub being configured.
+
+   Each pool is bound - via serviceAllocation - to that hosted cluster's
+   control-plane namespace, so the only Service that can ever be given the
+   address is that cluster's kube-apiserver. This is what actually keeps a
+   hosted cluster off an address its api/api-int records don't point at; the
+   metallb.io/address-pool annotation that roles/create-hosted-cluster puts on
+   the HostedCluster records the same intent, but HyperShift does not copy
+   HostedCluster annotations onto the kube-apiserver Service it creates, so the
+   annotation alone would not bind anything.
+
+   NOTE: every pool here is namespace-constrained, and there is no longer an
+   unconstrained catch-all pool on the hub. A LoadBalancer Service outside
+   these control-plane namespaces will therefore stay <pending> until you
+   give it a pool of its own. #}
+{% set metallb_prefix = (hosted_cluster_metallb_network_prefixes | default({}))[metallb_hub] | default(lab_network_prefix) %}
+{% for hcp_name, hcp_pool in hosted_cluster_metallb_pools | dictsort %}
+---
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
   namespace: metallb-system
-  name: hcp-ip-pool
+  name: {{ hcp_pool.pool }}
 spec:
   addresses:
-  - {{ lab_network_prefix }}.{{ metallb_pool_start }}-{{ lab_network_prefix }}.{{ metallb_pool_end }}
+  # {{ metallb_hub }}'s address for {{ hcp_name }}.
+  - {{ metallb_prefix }}.{{ hcp_pool.ip[metallb_hub] }}-{{ metallb_prefix }}.{{ hcp_pool.ip[metallb_hub] }}
   autoAssign: true
   avoidBuggyIPs: true
+  serviceAllocation:
+    priority: 10
+    namespaces:
+      # HostedCluster '{{ hcp_name }}' lives in namespace '{{ hcp_name }}', so
+      # HyperShift puts its control plane (and the kube-apiserver Service that
+      # asks for this address) in '<namespace>-<name>'.
+      - {{ hcp_pool.control_plane_namespace | default(hcp_name ~ '-' ~ hcp_name) }}
+{% endfor %}

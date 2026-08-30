@@ -12,6 +12,21 @@ kind: HostedCluster
 metadata:
   name: '{{ hcp.name }}'
   namespace: '{{ hcp.name }}'
+{# metallb.io/address-pool names the MetalLB IPAddressPool this cluster's
+   kube-apiserver VIP must come from - the single-address pool
+   roles/setup-hub-acm creates for it, whose address is what roles/setup-dns
+   publishes as api/api-int.
+
+   Read it as the record, on the HostedCluster itself, of which pool this
+   cluster belongs to. It is not what binds the address: MetalLB reads that
+   annotation from the LoadBalancer *Service*, and HyperShift does not copy
+   HostedCluster annotations onto the kube-apiserver Service it generates.
+   What actually binds the address is the pool's serviceAllocation, which
+   restricts it to this cluster's control-plane namespace. This is also the
+   value to pass to 'oc annotate svc/kube-apiserver' if you ever need to force
+   a reallocation by hand - see the MetalLB section of the README. #}
+  annotations:
+    metallb.io/address-pool: '{{ hcp.metallb_pool | default(hosted_cluster_metallb_pools[hcp.name].pool) }}'
   labels:
     "cluster.open-cluster-management.io/clusterset": '{{ hcp.clusterset | default(hosted_cluster_clusterset) }}'
 spec:

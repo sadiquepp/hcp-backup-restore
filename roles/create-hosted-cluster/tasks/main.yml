@@ -59,6 +59,29 @@
       (a list of names, or of dicts each with a 'name' key), or pass
       -e hcp_cluster_name=<name>.
 
+# Every cluster needs a MetalLB pool: it is what the metallb.io/address-pool
+# annotation on the HostedCluster names, and - via that pool's single address
+# and serviceAllocation - what keeps the cluster's kube-apiserver VIP on the
+# address roles/setup-dns publishes as api/api-int. Checked here so a missing
+# entry is an obvious message rather than an undefined-key error inside the
+# template.
+- name: Fail fast if a hosted cluster has no MetalLB pool
+  ansible.builtin.assert:
+    that:
+      - item.metallb_pool is defined
+        or item.name in (hosted_cluster_metallb_pools | default({}))
+    fail_msg: >-
+      Hosted cluster '{{ item.name }}' has no entry in
+      hosted_cluster_metallb_pools (vars.yaml). Add one giving it its own
+      single-address MetalLB pool, e.g.
+      "{{ item.name }}: {ip: 63, pool: {{ item.name }}-api-pool}", and re-run
+      setup-hub-acm (MetalLB pools) and setup-dns (api/api-int records) so the
+      pool and the DNS records are created together. Setting 'metallb_pool' on
+      the hosted_clusters entry itself also satisfies this.
+  loop: "{{ hosted_cluster_specs }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Render hosted cluster bundles
   ansible.builtin.template:
     src: hosted-cluster.yaml.j2
