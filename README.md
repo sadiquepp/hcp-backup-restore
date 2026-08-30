@@ -184,16 +184,14 @@ ansible-playbook -i inventory/hosts setup_hub_cluster_disconnected.yaml --ask-va
 whenever `disconnected_install: true` is set in `vars.yaml` or `-e disconnected=true`
 is passed. Connected runs are unaffected.
 
-`setup_hub_cluster_disconnected.yaml` stops at the cluster install, so ACM is a
-separate playbook here rather than the chained step it is for hub1:
+`setup_hub_cluster_disconnected.yaml` chains into the role once the cluster is
+up, the same way `setup_hub_cluster.yaml` does for hub1, so the command in the
+section above already covers it. To re-run just the ACM part against an
+existing disconnected hub:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_hub_acm_disconnected.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_hub_cluster_disconnected.yaml --ask-vault-pass -e disconnected_install=true --tags acm
 ```
-
-That runs `setup-hub-acm` against the disconnected hub's kubeconfig and MetalLB
-pool with `disconnected: true` already set. To run the role disconnected against
-some other hub, pass `-e disconnected=true` on that hub's own playbook.
 
 What the disconnected run does on top of the connected one:
 

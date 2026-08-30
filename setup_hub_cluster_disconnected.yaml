@@ -13,13 +13,12 @@
 ## setup_bm_host.yaml (at minimum its dns/lb tags) after pulling these vars
 ## in, otherwise api/api-int/*.apps for this cluster won't resolve.
 ##
-## Scope is deliberately just the cluster install - it does not chain into
-## setup-hub-acm. Run setup_hub_acm_disconnected.yaml afterwards for that: it
-## imports the same role against this cluster's kubeconfig and MetalLB pool,
-## and renders it disconnected (AgentServiceConfig with a mirrorRegistryRef and
-## osImages served off the helper, the mirror registry CA published to
-## openshift-config, a ClusterImageSet per osImage version against the mirror
-## registry).
+## Like setup_hub_cluster.yaml, this chains into setup-hub-acm once the cluster
+## is up, and the role renders itself disconnected because disconnected_install
+## is true: AgentServiceConfig with a spec.mirrorRegistryRef and osImages served
+## off the helper, the mirror registry CA published to openshift-config and
+## injected into the cluster image config, and a ClusterImageSet per osImage
+## version against the mirror registry. Re-run just that part with --tags acm.
 ##
 ## Requires disconnected_install: true (vars.yaml, default false) and the
 ## mirror registry already stood up via setup_mirror_registry.yaml (mirror
@@ -28,6 +27,7 @@
 ##
 ## Usage:
 ##   ansible-playbook setup_hub_cluster_disconnected.yaml --ask-vault-pass
+##   ansible-playbook setup_hub_cluster_disconnected.yaml --ask-vault-pass --tags acm
 
 - name: Setting Up Hub Cluster (disconnected)
   hosts: localhost
@@ -78,3 +78,21 @@
     ansible.builtin.include_tasks: roles/setup-hub-cluster-disconnected/tasks/apply-day2-mirror-resources.yml
     vars:
       kubeconfig_path: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
+
+  # Same step setup_hub_cluster.yaml runs for hub1, against this cluster's
+  # kubeconfig and MetalLB pool. The role reads disconnected_install (asserted
+  # true above), so it renders the disconnected AgentServiceConfig and puts its
+  # prerequisites in place first - see roles/setup-hub-acm/defaults/main.yml.
+  #
+  # The AgentServiceConfig itself is only rendered, not applied: review
+  # roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml and apply it
+  # by hand, same as the connected flow.
+  - ansible.builtin.import_role:
+      name: setup-hub-acm
+    vars:
+      metallb_pool_start: "{{ hub_disconnected_metallb_pool_start }}"
+      metallb_pool_end: "{{ hub_disconnected_metallb_pool_end }}"
+    environment:
+      KUBECONFIG: "{{ hub_disconnected_install_folder }}/auth/kubeconfig"
+    tags:
+      - acm
