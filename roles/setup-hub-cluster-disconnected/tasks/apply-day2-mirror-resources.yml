@@ -54,18 +54,9 @@
     timeout: 90
   when: hubd_day2_files.matched > 0
 
+# Polled rather than watched with a single `oc wait --timeout=2400s`: this
+# rollout reboots the masters, so the API server goes with them and any
+# long-lived watch is dropped mid-rollout. See wait-for-machineconfigpools.yml.
 - name: Wait for every MachineConfigPool to finish rolling out
-  ansible.builtin.command:
-    cmd: oc wait --for=condition=Updated=True machineconfigpool --all --timeout=2400s
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path }}"
-  changed_when: false
-  when: hubd_day2_files.matched > 0
-
-- name: Fail if any MachineConfigPool ended up degraded
-  ansible.builtin.command:
-    cmd: oc wait --for=condition=Degraded=False machineconfigpool --all --timeout=120s
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path }}"
-  changed_when: false
+  ansible.builtin.include_tasks: wait-for-machineconfigpools.yml
   when: hubd_day2_files.matched > 0

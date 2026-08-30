@@ -126,15 +126,19 @@
 # The MCO rolls the new trust store out with one reboot per node. Waiting here
 # keeps the reboot inside this run instead of surfacing later as pull failures
 # on a node that has not picked the CA up yet.
+#
+# The sleep is not padding: the pools do not go Updating the instant the patch
+# lands, and every machine count still matches until the MCO has rendered the
+# new config - so a check that ran straight away would see the pre-rollout
+# state and call it done. Same 90s the day-2 IDMS/ITMS apply gives it in
+# roles/setup-hub-cluster-disconnected.
 - name: Give the MCO time to render the new trust store
   ansible.builtin.wait_for:
-    timeout: 60
+    timeout: 90
   when: acm_image_config_patch.changed or (acm_registry_ca_patch.changed | default(false))
 
 - name: Wait for every MachineConfigPool to finish rolling out the CA
-  ansible.builtin.command:
-    cmd: oc wait --for=condition=Updated=True machineconfigpool --all --timeout=2400s
-  changed_when: false
+  ansible.builtin.include_tasks: wait-for-machineconfigpools.yml
   when: acm_image_config_patch.changed or (acm_registry_ca_patch.changed | default(false))
 
 - name: Wait for the multicluster-engine namespace to exist
