@@ -1,0 +1,47 @@
+---
+# Poll until every MachineConfigPool has finished applying its rendered
+# MachineConfig: machineCount == updatedMachineCount == readyMachineCount with
+# nothing degraded. Same shape as wait-for-cluster-operators.yml in
+# roles/setup-hub-cluster*.
+#
+# Deliberately NOT `oc wait --for=condition=Updated=True machineconfigpool
+# --all --timeout=2400s`. That is a single long-lived watch, and the rollout it
+# is watching reboots the masters - the API server goes down with them, the
+# watch is dropped, and oc exits non-zero on the spot:
+#
+#   Error from server (Timeout): the server was unable to return a response in
+#   the time allotted, but may still be processing the request
+#   (get machineconfigpools.machineconfiguration.openshift.io)
+#
+# That blackout is the middle of a healthy rollout, not a failure, but it ends
+# the play. Polling makes every attempt one short-lived call, so a blackout
+# costs a single attempt and the next one carries on.
+#
+# The `|| exit 1` matters as much as the polling: when the API is down `oc`
+# writes nothing to stdout, and an awk with no input reaches END and exits 0 -
+# an unreachable cluster would otherwise read as "all pools updated".
+#
+# Requires KUBECONFIG in the environment, same as the rest of the role.
+
+- name: Wait for every MachineConfigPool to finish rolling out
+  ansible.builtin.shell: |
+    pools=$(oc get machineconfigpool -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.machineCount}{"\t"}{.status.updatedMachineCount}{"\t"}{.status.readyMachineCount}{"\t"}{.status.degradedMachineCount}{"\n"}{end}') || exit 1
+    [ -n "$pools" ] || exit 1
+    printf '%s\n' "$pools" \
+      | awk -F'\t' 'NF != 5 || $2 != $3 || $2 != $4 || $5 != "0" { print; bad = 1 } END { exit bad + 0 }'
+  register: acm_mcp_rollout
+  until: acm_mcp_rollout.rc == 0
+  retries: "{{ mcp_rollout_retries | default(80) }}"
+  delay: "{{ mcp_rollout_delay | default(30) }}"
+  changed_when: false
+
+# By now the API is back and the pools have settled, so this one can be a
+# plain wait - it is reporting the end state, not watching a rollout.
+- name: Fail if any MachineConfigPool ended up degraded
+  ansible.builtin.command:
+    cmd: oc wait --for=condition=Degraded=False machineconfigpool --all --timeout=120s
+  changed_when: false
+
+- name: Report MachineConfigPool status
+  ansible.builtin.debug:
+    msg: "Every MachineConfigPool has applied its rendered MachineConfig"
