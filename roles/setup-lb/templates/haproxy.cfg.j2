@@ -317,7 +317,44 @@ backend hcp_cluster1_apps_https_backend
     server worker1 {{ lab_network_prefix }}.{{ip_list.c1worker1}}:443 check
     server worker2 {{ lab_network_prefix }}.{{ip_list.c1worker2}}:443 check
     server worker3 {{ lab_network_prefix }}.{{ip_list.c1worker3}}:443 check
-#
+
+#------------------- HCP-Cluster1-DISCONNECTED APPS ------------------------#
+{# The disconnected hosted cluster (hosted_domain_disconnected /
+   hosted_clusters_disconnected in vars.yaml). Its own VIP and its own
+   backends, so *.apps.<hosted_domain_disconnected> is served entirely
+   separately from hcp-cluster1's - which is what lets the connected and the
+   disconnected hosted cluster be up at the same time. api/api-int for it do
+   NOT come through here: like every hosted cluster they are a MetalLB address
+   on the hub (hosted_cluster_metallb_pools['hcp-cluster1-d']).
+
+   Rendered unconditionally, exactly like the hubd frontends above - the
+   backends simply stay DOWN until setup_hosted_cluster_vm.yaml has been run
+   with -e disconnected_install=true. #}
+frontend hcp_cluster1_disconnected_apps
+    bind  {{ lab_network_prefix }}.{{ip_list.c1dlb}}:80
+    use_backend hcp_cluster1_disconnected_apps_backend
+    mode tcp
+
+backend hcp_cluster1_disconnected_apps_backend
+    mode tcp
+    balance roundrobin
+    server worker1 {{ lab_network_prefix }}.{{ip_list.c1dworker1}}:80 check
+    server worker2 {{ lab_network_prefix }}.{{ip_list.c1dworker2}}:80 check
+    server worker3 {{ lab_network_prefix }}.{{ip_list.c1dworker3}}:80 check
+
+#------------------- HCP-Cluster1-DISCONNECTED APPS - HTTPS  ---------------#
+frontend hcp_cluster1_disconnected_apps_https
+    bind  {{ lab_network_prefix }}.{{ip_list.c1dlb}}:443
+    use_backend hcp_cluster1_disconnected_apps_https_backend
+    mode tcp
+
+backend hcp_cluster1_disconnected_apps_https_backend
+    balance roundrobin
+    mode tcp
+    server worker1 {{ lab_network_prefix }}.{{ip_list.c1dworker1}}:443 check
+    server worker2 {{ lab_network_prefix }}.{{ip_list.c1dworker2}}:443 check
+    server worker3 {{ lab_network_prefix }}.{{ip_list.c1dworker3}}:443 check
+
 #------------------- HCP-Cluster2 APPS -------------------------------------#
 frontend hcp_cluster2_apps
     bind  {{ lab_network_prefix }}.{{ip_list.c2lb}}:80

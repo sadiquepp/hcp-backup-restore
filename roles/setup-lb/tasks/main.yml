@@ -37,6 +37,7 @@
   loop:
     - "{{ ip_list.hublb }}"
     - "{{ ip_list.c1lb }}"
+    - "{{ ip_list.c1dlb }}"
     - "{{ ip_list.c2lb }}"
     - "{{ ip_list.c3lb }}"
     - "{{ ip_list.hub2lb }}"

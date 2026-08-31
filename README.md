@@ -320,6 +320,9 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
   ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
   ```
   - Add `-e hcp_cluster_name=hcp-cluster2` to render just one of them.
+  - Add `-e disconnected_install=true` to render the **disconnected** hosted
+    clusters (`hosted_clusters_disconnected`) instead - see
+    [Disconnected Hosted Cluster](#disconnected-hosted-cluster).
   - Review and apply the rendered yaml files (one `.rendered-<cluster>.yaml` per entry) to the ACM cluster.
   ```bash
   oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml
@@ -492,6 +495,102 @@ Set `target_hub: hub2` in `vars.yaml` to make the cutover permanent. See
 for how the per-hub addresses are defined.
 
 
+## Disconnected Hosted Cluster
+
+A hosted cluster whose worker VMs have **no route off the lab network**, so it
+can only ever pull from the local mirror registry. It runs on the disconnected
+hub (`setup_hub_cluster_disconnected.yaml`) and is deliberately built to sit
+*alongside* `hcp-cluster1` rather than replace it - both can be up at once.
+
+Everything hangs off the same `disconnected_install` flag as the rest of the
+disconnected flow (`vars.yaml`, or `-e disconnected_install=true`). Connected
+runs are completely unaffected: the same playbooks, the same role and the same
+`hosted-cluster.yaml.j2` template are used for both.
+
+What is distinct about it:
+
+| | Connected (`hcp-cluster1`) | Disconnected (`hcp-cluster1-d`) |
+| --- | --- | --- |
+| Worker VMs | `c1_worker1..3` | `c1-d-worker1..3` |
+| Worker IPs | `.41` `.42` `.43` | `.44` `.45` `.46` |
+| Internet access from workers | yes | **cut** (no NAT, egress rejected) |
+| DNS zone | `hcp-cluster1.mylab.com` | `hcp-cluster1-d.mylab.com` |
+| `api` / `api-int` | MetalLB `hcp-cluster1-api-pool` | MetalLB `hcp-cluster1-d-api-pool` |
+| `*.apps` VIP (haproxy) | `.49` (`c1lb`) | `.48` (`c1dlb`) |
+| VM folder | `/var/lib/libvirt/images/hosted_cluster` | `/var/lib/libvirt/images/hosted_cluster_disconnected` |
+
+The `api`/`api-int` split is what makes the two clusters independent: each
+hosted cluster's kube-apiserver VIP comes from its own single-address MetalLB
+pool, and each has its own zone publishing that address, so nothing collides.
+`*.apps` for the disconnected cluster is served by its own haproxy frontends on
+`c1dlb`, whose backends are the three `c1dworker*` addresses.
+
+### How the workers are cut off
+
+Before any VM is created, the three worker IPs get the same two rules the
+disconnected hub's nodes get (see
+`roles/setup-hub-cluster-disconnected/tasks/block-node-nat.yml`, which both
+share):
+
+1. `RETURN` at the top of libvirt's `LIBVIRT_PRT` chain (**nat** table), so
+   their traffic is never MASQUERADEd out to the real internet.
+2. `REJECT` at the top of `LIBVIRT_FWO` (**filter** table), so the un-NATed
+   packets do not leave the hypervisor either and the node fails fast instead
+   of timing out.
+
+Both matches are "from this worker, NOT to `192.168.122.0/24`", so the mirror
+registry, MinIO, the helper's DNS/DHCP/TFTP, the load balancer and the workers
+themselves all stay fully reachable - only egress past the lab is cut. The
+rules live in the running ruleset only; libvirt rebuilds those chains when
+libvirtd restarts or a network is stopped/started, so re-run the playbook (or
+just `--tags disconnected-nat`) if that happens. Set
+`hosted_cluster_disconnected_block_node_nat: false` to leave the workers
+connected while still installing from the mirror - useful when checking whether
+a failure is genuinely caused by the disconnection.
+
+### Building it
+
+Same order as a connected hosted cluster, with `-e disconnected_install=true`
+on each step so the disconnected hub's kubeconfig and the disconnected cluster
+list are used (`disconnected_install` wins over `target_hub`):
+
+```bash
+# 1. worker VMs (.44-.46), NAT cut first, booted off the hubd InfraEnv ISO
+ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass \
+  -e disconnected_install=true
+
+# 2. approve the discovered agents in the ACM/MCE Web UI, then render the bundle
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass \
+  -e disconnected_install=true
+
+# 3. review and apply it
+oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1-d.yaml
+```
+
+DNS for the zone is rendered by `setup-dns` like every other zone (no flag
+needed - the zone is always present). Point its `api`/`api-int` at the
+disconnected hub with the usual `target_hub` override:
+
+```bash
+ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass \
+  -e target_hub=hubd
+```
+
+Verify:
+
+```bash
+dig +short api.hcp-cluster1-d.mylab.com @192.168.122.21     # -> 192.168.122.67 on hubd
+dig +short console-openshift-console.apps.hcp-cluster1-d.mylab.com @192.168.122.21  # -> 192.168.122.48
+sudo iptables -t nat -nL LIBVIRT_PRT --line-numbers | grep hcp-cluster1-d
+```
+
+Adding a second disconnected hosted cluster is the same three edits as a
+connected one: a name in `hosted_clusters_disconnected`, an entry in
+`hosted_cluster_metallb_pools`, and its workers in
+`hosted_cluster_disconnected_workers` (plus their `ip_list` octets, a zone and
+haproxy frontends if it needs its own ingress VIP).
+
+
 ## MetalLB Address Pools for Hosted Clusters
 
 Each hosted cluster gets its **own single-address MetalLB pool**, so its
@@ -507,6 +606,7 @@ routable, so each cluster carries one address per hub:
 | `hcp-cluster1` | `hcp-cluster1-api-pool` | `192.168.122.60` | `192.168.122.90` | `192.168.122.64`    |
 | `hcp-cluster2` | `hcp-cluster2-api-pool` | `192.168.122.61` | `192.168.122.91` | `192.168.122.65`    |
 | `hcp-cluster3` | `hcp-cluster3-api-pool` | `192.168.122.62` | `192.168.122.92` | `192.168.122.66`    |
+| `hcp-cluster1-d` | `hcp-cluster1-d-api-pool` | `192.168.122.63` | `192.168.122.93` | `192.168.122.67` |
 
 Keeping the pool names identical across hubs is what lets a HostedCluster's
 `metallb.io/address-pool` annotation survive an OADP restore onto the DR hub
@@ -648,6 +748,8 @@ The last two must agree - that is the whole point of this layout.
 | `shutdown_hub_cluster.yaml`   | Gracefully stop hub1 VMs (preserves disks)    |
 | `cleanup-hub.yaml`            | Destroy hub1 VMs and delete disks             |
 | `cleanup.yaml`                | Destroy all VMs (hub + helper)                |
+| `setup_hosted_cluster_vm.yaml` | Create a hosted cluster's worker VMs; `-e disconnected_install=true` builds the disconnected set |
+| `create_hosted_cluster.yaml`  | Render the HostedCluster/NodePool bundle; `-e disconnected_install=true` renders the disconnected clusters |
 
 
 

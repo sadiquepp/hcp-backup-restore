@@ -47,6 +47,14 @@
       rm -f /var/lib/libvirt/images/hosted_cluster/c1_worker2.qcow2 
       rm -f /var/lib/libvirt/images/hosted_cluster/c1_worker3.qcow2 
 
+  - name: Destroy disconnected hosted cluster workers
+    shell: |
+      virsh undefine c1-d-worker1 && virsh undefine c1-d-worker2 && virsh undefine c1-d-worker3
+      virsh destroy c1-d-worker1 && virsh destroy c1-d-worker2 && virsh destroy c1-d-worker3
+      rm -f /var/lib/libvirt/images/hosted_cluster_disconnected/c1-d-worker1.qcow2
+      rm -f /var/lib/libvirt/images/hosted_cluster_disconnected/c1-d-worker2.qcow2
+      rm -f /var/lib/libvirt/images/hosted_cluster_disconnected/c1-d-worker3.qcow2
+
   - name: Destroy Hub Bootstrap
     shell: |
       virsh undefine hub_bootstrap  && virsh destroy hub_bootstrap

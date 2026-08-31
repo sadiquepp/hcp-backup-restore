@@ -19,6 +19,15 @@
 # Passing -e hcp_cluster_name=<name> still works: it renders just that
 # one cluster (using its hosted_clusters entry if it has one).
 #
+# With disconnected_install true (vars.yaml, or -e disconnected_install=true)
+# hosted_clusters_disconnected is rendered INSTEAD of hosted_clusters, the same
+# way disconnected_install wins over target_hub in setup_bminfra.yaml. A
+# disconnected run is its own environment on the disconnected hub: the connected
+# clusters' worker VMs are not cut off from the internet and their control
+# planes belong on hub1/hub2, so rendering them here as well would be wrong.
+# Nothing else about the bundle changes - same template, same per-cluster
+# override keys - which is why there is no second template and no second role.
+#
 # This is the most consequential apply in the whole chain (it's what
 # actually starts node provisioning), so - matching how AgentServiceConfig
 # and bminfra are handled - apply starts out commented pending manual
@@ -28,12 +37,19 @@
 # confirmed working (roles/setup-hub-acm, roles/setup-bminfra) - a
 # HostedCluster on Agent platform can't provision nodes without both.
 
-- name: Normalise hosted_clusters into a list of dicts
+- name: Select the cluster list this run renders
+  ansible.builtin.set_fact:
+    hosted_clusters_selected: >-
+      {{ hosted_clusters_disconnected | default([])
+         if (disconnected_install | default(false) | bool)
+         else hosted_clusters | default([]) }}
+
+- name: Normalise the selected cluster list into a list of dicts
   ansible.builtin.set_fact:
     hosted_cluster_specs: >-
       {{ hosted_cluster_specs | default([])
          + [ (item is mapping) | ternary(item, {'name': item}) ] }}
-  loop: "{{ hosted_clusters | default([]) }}"
+  loop: "{{ hosted_clusters_selected }}"
   loop_control:
     label: "{{ (item is mapping) | ternary(item.name | default('<unnamed>'), item) }}"
 
@@ -55,9 +71,11 @@
       - hosted_cluster_specs | default([]) | length > 0
       - hosted_cluster_specs | rejectattr('name', 'defined') | list | length == 0
     fail_msg: >-
-      No hosted clusters to render. Define hosted_clusters in vars.yaml
-      (a list of names, or of dicts each with a 'name' key), or pass
-      -e hcp_cluster_name=<name>.
+      No hosted clusters to render. Define
+      {{ (disconnected_install | default(false) | bool)
+         | ternary('hosted_clusters_disconnected', 'hosted_clusters') }}
+      in vars.yaml (a list of names, or of dicts each with a 'name' key), or
+      pass -e hcp_cluster_name=<name>.
 
 # Every cluster needs a MetalLB pool: it is what the metallb.io/address-pool
 # annotation on the HostedCluster names, and - via that pool's single address
