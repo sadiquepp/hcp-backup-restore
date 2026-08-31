@@ -441,6 +441,17 @@ hosted_cluster_addon_cert_policy_controller: true
 #
 ## Leave the hosted cluster's default OperatorHub catalogs enabled.
 # hosted_cluster_disable_default_catalog_sources: false
+#
+## APIServer LoadBalancer hostname. Must resolve to this cluster's MetalLB
+## address on the hub it is running on - for a disconnected cluster that is the
+## zone roles/setup-dns renders with -e target_hub=hubd. The default,
+## api.<cluster-name>.<base_domain>, is already right when the cluster is named
+## after its own DNS zone (the hcp-cluster1-d pattern). Set this only when it
+## is not - e.g. rendering plain 'hcp-cluster1' disconnected, whose zone points
+## at hub1:
+# hosted_clusters:
+#   - name: hcp-cluster1
+#     api_hostname: api.hcp-cluster1-d.mylab.com
 
 ## setup-mirror-registry-vm / setup-mirror-registry: the standalone VM
 ## used to simulate a disconnected install (see setup_mirror_registry.yaml).

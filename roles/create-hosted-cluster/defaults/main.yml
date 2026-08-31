@@ -28,6 +28,16 @@ hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:
 hosted_cluster_cluster_cidr: 10.132.0.0/14
 hosted_cluster_service_cidr: 172.31.0.0/16
 
+# APIServer LoadBalancer hostname. Must be the name whose 'api' A record holds
+# this cluster's MetalLB address on the hub it runs on (roles/setup-dns renders
+# that zone for target_hub). The default follows the repo convention that a
+# hosted cluster's DNS zone is named after the cluster itself, which is what
+# keeps this in step with hosted_cluster_metallb_pools without a second source
+# of truth. Override per cluster with 'api_hostname' when a cluster's zone is
+# not named after it - in particular a disconnected cluster whose api/api-int
+# live in a hubd zone under a different label.
+hosted_cluster_api_hostname: "api.{{ hcp.name }}.{{ base_domain }}"
+
 hosted_cluster_availability_policy: HighlyAvailable
 hosted_cluster_olm_catalog_placement: management
 hosted_cluster_nodepool_replicas: 2
@@ -41,12 +51,14 @@ hosted_cluster_addon_cert_policy_controller: true
 ## ---------------------------------------------------------------------------
 ## Disconnected rendering
 ##
-## None of this is used unless the role runs disconnected. A connected run
-## renders exactly what it always did - the disconnected extras are guarded
-## blocks inside the one generic template, not a second template, because the
-## delta is small (one ConfigMap, three fields on the HostedCluster) and a
-## duplicate would have to be kept in step with every future change to the
-## bundle.
+## None of this is used unless the role runs disconnected. Connected and
+## disconnected are two separate templates - templates/hosted-cluster.yaml.j2
+## and templates/hosted-cluster-disconnected.yaml.j2 - matching how
+## roles/setup-hub-acm keeps its disconnected AgentServiceConfig separate rather
+## than adding conditionals to the connected one. tasks/main.yml picks between
+## them per cluster, so a connected run renders byte-for-byte what it always
+## did. The two share the NodePool/ManagedCluster/KlusterletAddonConfig tail;
+## change one and check the other.
 ##
 ## Everything below assumes the mirror registry from setup_mirror_registry.yaml
 ## and the hub from setup_hub_cluster_disconnected.yaml, so it reads

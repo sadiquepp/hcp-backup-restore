@@ -3,7 +3,8 @@
 #
 # Renders the HostedCluster/Secrets/NodePool/ManagedCluster/
 # KlusterletAddonConfig bundle once per entry in hosted_clusters (see
-# vars.yaml). One generic template drives all of them - to add another
+# vars.yaml). Two templates drive all of them - hosted-cluster.yaml.j2 and
+# hosted-cluster-disconnected.yaml.j2, picked per cluster below. To add another
 # hosted cluster, add a name to that list, not a new template.
 #
 # Each entry is either a bare name:
@@ -28,7 +29,7 @@
 # confirmed working (roles/setup-hub-acm, roles/setup-bminfra) - a
 # HostedCluster on Agent platform can't provision nodes without both.
 #
-# Disconnected runs use the same template and the same list of clusters - see
+# Disconnected runs use the same list of clusters but a separate template - see
 # the block below 'Fail fast if there is nothing to render', and the
 # "Disconnected rendering" section of defaults/main.yml.
 
@@ -80,6 +81,10 @@
          + (hosted_cluster_specs | rejectattr('disconnected', 'defined') | list
             if disconnected_install | bool else []) }}
 
+- name: Note which cluster names render disconnected
+  ansible.builtin.set_fact:
+    hosted_cluster_disconnected_names: "{{ hosted_cluster_disconnected_specs | map(attribute='name') | list }}"
+
 - name: Gather the mirror registry inputs for disconnected rendering
   ansible.builtin.include_tasks: disconnected-inputs.yml
   when: hosted_cluster_disconnected_specs | length > 0
@@ -120,13 +125,21 @@
   loop_control:
     label: "{{ item.name }}"
 
+# Connected and disconnected are two separate templates rather than one with
+# conditionals, matching how roles/setup-hub-acm keeps its disconnected
+# AgentServiceConfig separate. They share the NodePool/ManagedCluster/
+# KlusterletAddonConfig tail - change one, check the other.
 - name: Render hosted cluster bundles
   ansible.builtin.template:
-    src: hosted-cluster.yaml.j2
+    src: >-
+      {{ (hcp.name in hosted_cluster_disconnected_names)
+         | ternary('hosted-cluster-disconnected.yaml.j2', 'hosted-cluster.yaml.j2') }}
     dest: "{{ role_path }}/templates/.rendered-{{ hcp.name }}.yaml"
   loop: "{{ hosted_cluster_specs }}"
   loop_control:
-    label: "{{ hcp.name }}"
+    label: >-
+      {{ hcp.name }}
+      ({{ (hcp.name in hosted_cluster_disconnected_names) | ternary('disconnected', 'connected') }})
   vars:
     hcp: "{{ item }}"
 

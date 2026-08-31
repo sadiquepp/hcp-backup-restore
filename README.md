@@ -290,7 +290,7 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
 
 - Create a Hosted Cluster from the Web UI using the discovered nodes.
 
-  - List the hosted clusters you want in `hosted_clusters` in `vars.yaml`, then render them all by invoking the create-hosted-cluster role. One generic template covers every cluster; an entry is a bare name, or a dict with `name` plus any per-cluster override. Concurrent hosted clusters on the same hub can share `cluster_cidr`/`service_cidr` - each is its own OVN-Kubernetes cluster and those CIDRs never leave its data plane.
+  - List the hosted clusters you want in `hosted_clusters` in `vars.yaml`, then render them all by invoking the create-hosted-cluster role. One template covers every connected cluster (a second one covers disconnected clusters - see below); an entry is a bare name, or a dict with `name` plus any per-cluster override. Concurrent hosted clusters on the same hub can share `cluster_cidr`/`service_cidr` - each is its own OVN-Kubernetes cluster and those CIDRs never leave its data plane.
   ```yaml
   hosted_clusters:
     - hcp-cluster1
@@ -362,6 +362,23 @@ What the disconnected run adds to each bundle:
   up as failing CatalogSource pods. Set
   `hosted_cluster_disable_default_catalog_sources: false` if you are mirroring
   them.
+- An APIServer `loadBalancer.hostname` that has to resolve to this cluster's
+  MetalLB address **on the hub it is running on**. For a disconnected cluster
+  that is the zone `roles/setup-dns` renders with `-e target_hub=hubd`, not
+  hub1's. The default (`api.<cluster-name>.<base_domain>`) is correct by
+  construction under the repo convention that a hosted cluster's DNS zone is
+  named after the cluster - a cluster named `hcp-cluster1-d` gets
+  `api.hcp-cluster1-d.mylab.com`. If you render a cluster disconnected under a
+  name whose zone points at another hub - e.g. plain `hcp-cluster1` with
+  `-e disconnected_install=true` - set `api_hostname` on its `hosted_clusters`
+  entry, or `hosted_cluster_api_hostname` in `vars.yaml`.
+
+The connected and disconnected renderings are **two separate templates**
+(`templates/hosted-cluster.yaml.j2` and
+`templates/hosted-cluster-disconnected.yaml.j2`), the same way `setup-hub-acm`
+keeps its disconnected `AgentServiceConfig` separate. `tasks/main.yml` picks
+between them per cluster. They share the NodePool / ManagedCluster /
+KlusterletAddonConfig tail, so a change to one usually belongs in both.
 
 The release image stays the canonical, digest-pinned `quay.io` pullspec -
 `imageContentSources` is what redirects it to the mirror, and keeping the

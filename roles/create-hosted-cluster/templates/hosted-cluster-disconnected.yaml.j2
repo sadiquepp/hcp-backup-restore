@@ -1,0 +1,239 @@
+---
+{# Hosted cluster bundle for a DISCONNECTED hub - rendered once per
+   hosted_clusters entry that is being built against the mirror registry.
+   'hcp' is that entry: hcp.name is required, every other key is optional and
+   falls back to the matching hosted_cluster_* var in vars.yaml.
+
+   This is a full copy of hosted-cluster.yaml.j2 rather than conditionals bolted
+   onto it, matching how roles/setup-hub-acm keeps its disconnected
+   AgentServiceConfig separate. Keep the two in step when you change the parts
+   they share (NodePool, ManagedCluster, KlusterletAddonConfig, the services
+   list). tasks/main.yml picks between them per cluster.
+
+   Everything a connected bundle does not have is marked "DISCONNECTED:" below. #}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: '{{ hcp.name }}'
+---
+{# DISCONNECTED: the mirror registry's CA, under the key both of the
+   HostedCluster fields below look for. One ConfigMap serves both:
+
+     spec.configuration.proxy.trustedCA - the hosted cluster's cluster-wide
+        proxy trust bundle, which is what its control-plane operators use when
+        they talk to the mirror registry over TLS.
+     spec.additionalTrustBundle - HyperShift carries this into the nodes' own
+        trust store through the ignition it generates, so CRI-O on a worker
+        trusts the mirror registry when it pulls.
+
+   Without it every pull from the mirror fails on an unknown authority, since
+   the registry is self-signed (roles/setup-mirror-registry). #}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: '{{ hcp.ca_bundle_configmap | default(hosted_cluster_ca_bundle_configmap) }}'
+  namespace: '{{ hcp.name }}'
+data:
+  ca-bundle.crt: |
+    {{ hosted_cluster_mirror_ca_cert | trim | indent(4) }}
+---
+apiVersion: hypershift.openshift.io/v1beta1
+kind: HostedCluster
+metadata:
+  name: '{{ hcp.name }}'
+  namespace: '{{ hcp.name }}'
+{# metallb.io/address-pool names the MetalLB IPAddressPool this cluster's
+   kube-apiserver VIP must come from - the single-address pool
+   roles/setup-hub-acm creates for it, whose address is what roles/setup-dns
+   publishes as api/api-int.
+
+   Read it as the record, on the HostedCluster itself, of which pool this
+   cluster belongs to. It is not what binds the address: MetalLB reads that
+   annotation from the LoadBalancer *Service*, and HyperShift does not copy
+   HostedCluster annotations onto the kube-apiserver Service it generates.
+   What actually binds the address is the pool's serviceAllocation, which
+   restricts it to this cluster's control-plane namespace. #}
+  annotations:
+    metallb.io/address-pool: '{{ hcp.metallb_pool | default(hosted_cluster_metallb_pools[hcp.name].pool) }}'
+  labels:
+    "cluster.open-cluster-management.io/clusterset": '{{ hcp.clusterset | default(hosted_cluster_clusterset) }}'
+spec:
+  channel: "{{ hcp.channel | default(hosted_cluster_channel) }}"
+  release:
+{# DISCONNECTED: still the canonical, digest-pinned quay.io pullspec by default -
+   the imageContentSources below are what redirect it to the mirror, and keeping
+   the canonical name is what lets this same HostedCluster be restored onto a
+   connected hub unchanged. Override hosted_cluster_release_image_disconnected
+   to pin it at the mirror registry directly. #}
+    image: "{{ hcp.release_image | default(hosted_cluster_release_image_disconnected) }}"
+  pullSecret:
+    name: pullsecret-cluster-{{ hcp.name }}
+  sshKey:
+    name: sshkey-cluster-{{ hcp.name }}
+  networking:
+    clusterNetwork:
+      - cidr: "{{ hcp.cluster_cidr | default(hosted_cluster_cluster_cidr) }}"
+    serviceNetwork:
+      - cidr: "{{ hcp.service_cidr | default(hosted_cluster_service_cidr) }}"
+    networkType: OVNKubernetes
+  controllerAvailabilityPolicy: "{{ hcp.availability_policy | default(hosted_cluster_availability_policy) }}"
+  infrastructureAvailabilityPolicy: "{{ hcp.availability_policy | default(hosted_cluster_availability_policy) }}"
+  olmCatalogPlacement: "{{ hcp.olm_catalog_placement | default(hosted_cluster_olm_catalog_placement) }}"
+{# DISCONNECTED: proxy trust + OperatorHub. #}
+  configuration:
+    proxy:
+      trustedCA:
+        name: '{{ hcp.ca_bundle_configmap | default(hosted_cluster_ca_bundle_configmap) }}'
+{% if hcp.disable_default_catalog_sources | default(hosted_cluster_disable_default_catalog_sources) | bool %}
+{# The built-in catalogs resolve against registry.redhat.io, which this cluster
+   cannot reach - left enabled they only ever show up as CrashLoopBackOff
+   CatalogSource pods in openshift-marketplace. #}
+    operatorhub:
+      disableAllDefaultSources: true
+{% endif %}
+{# DISCONNECTED: node-side trust for the same CA. #}
+  additionalTrustBundle:
+    name: '{{ hcp.ca_bundle_configmap | default(hosted_cluster_ca_bundle_configmap) }}'
+{# DISCONNECTED: the hosted cluster's own registries.conf is rendered from this
+   list. The hub's ImageDigestMirrorSet/ImageTagMirrorSet only redirect pulls
+   made by the hub itself, so without these mappings the hosted cluster resolves
+   every pullspec to its public registry.
+
+   registry.redhat.io/multicluster-engine is the one that is easy to forget and
+   fatal to omit on Agent platform: the agent and assisted-installer images the
+   nodes run come from there, so the control plane comes up while the NodePool
+   never finishes joining. tasks/disconnected-inputs.yml asserts it is present.
+
+   Deliberately not machine-generated from the hub's IDMS/ITMS - a hosted
+   cluster's mirror map is part of its own spec and has to survive an OADP
+   restore onto another hub unchanged, so it is pinned in vars.yaml and checked
+   against the hub rather than derived from it. #}
+  imageContentSources:
+{% for entry in hcp.image_content_sources | default(hosted_cluster_image_content_sources) %}
+  - source: {{ entry.source }}
+    mirrors:
+{% for mirror in entry.mirrors %}
+    - {{ mirror }}
+{% endfor %}
+{% endfor %}
+  platform:
+    type: Agent
+    agent:
+      agentNamespace: '{{ oadp_bminfra_namespace }}'
+  infraID: '{{ hcp.name }}'
+  dns:
+    baseDomain: '{{ base_domain }}'
+  services:
+  - service: APIServer
+    servicePublishingStrategy:
+      type: LoadBalancer
+      loadBalancer:
+{# DISCONNECTED: this has to be the name whose 'api' A record carries this
+   cluster's MetalLB address ON THE HUB IT IS RUNNING ON - for a disconnected
+   cluster that is the zone roles/setup-dns renders with -e target_hub=hubd,
+   not hub1's. The repo's convention is that a hosted cluster's DNS zone is
+   named after the cluster, so a cluster named 'hcp-cluster1-d' gets
+   'api.hcp-cluster1-d.mylab.com' from the default below and resolves to the
+   hubd address by construction.
+
+   If you render a cluster disconnected under a name that has no matching
+   zone on hubd - e.g. running 'hcp-cluster1' with -e disconnected_install=true,
+   whose zone points at hub1 - set hosted_cluster_api_hostname in vars.yaml, or
+   'api_hostname' on this cluster's hosted_clusters entry, to the hubd name. #}
+        hostname: {{ hcp.api_hostname | default(hosted_cluster_api_hostname) }}
+  - service: OAuthServer
+    servicePublishingStrategy:
+      type: Route
+  - service: OIDC
+    servicePublishingStrategy:
+      type: Route
+  - service: Konnectivity
+    servicePublishingStrategy:
+      type: Route
+  - service: Ignition
+    servicePublishingStrategy:
+      type: Route
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pullsecret-cluster-{{ hcp.name }}
+  namespace: {{ hcp.name }}
+data:
+{% if hosted_cluster_disconnected_pull_secret | bool %}
+{# DISCONNECTED: reduced to the mirror registry's own credentials by
+   tasks/disconnected-pull-secret.yml. Vault's pull_secret also carries live
+   quay.io / registry.redhat.io / cloud.openshift.com credentials, and handing
+   those to a disconnected hosted cluster gives its nodes a working route back
+   to the real registries - a pull the mirror is missing would then succeed for
+   the wrong reason. Serialised with to_json rather than pasted as raw text
+   because Red Hat pull secrets carry "email" fields, and an apostrophe in one
+   closes a single-quoted YAML scalar early. #}
+  '.dockerconfigjson': '{{ hosted_cluster_disconnected_pull_secret_content | to_json | b64encode }}'
+{% else %}
+  '.dockerconfigjson': '{{ pull_secret | b64encode }}'
+{% endif %}
+type: kubernetes.io/dockerconfigjson
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sshkey-cluster-{{ hcp.name }}
+  namespace: '{{ hcp.name }}'
+stringData:
+  id_rsa.pub: {{ ssh_key }}
+---
+apiVersion: hypershift.openshift.io/v1beta1
+kind: NodePool
+metadata:
+  name: 'nodepool-{{ hcp.name }}-1'
+  namespace: '{{ hcp.name }}'
+spec:
+  clusterName: '{{ hcp.name }}'
+  replicas: {{ hcp.nodepool_replicas | default(hosted_cluster_nodepool_replicas) }}
+  management:
+    autoRepair: false
+    upgradeType: InPlace
+  platform:
+    type: Agent
+    agent:
+      agentLabelSelector:
+        matchLabels: {}
+  release:
+    image: "{{ hcp.release_image | default(hosted_cluster_release_image_disconnected) }}"
+---
+apiVersion: cluster.open-cluster-management.io/v1
+kind: ManagedCluster
+metadata:
+  annotations:
+    import.open-cluster-management.io/hosting-cluster-name: local-cluster
+    import.open-cluster-management.io/klusterlet-deploy-mode: Hosted
+    open-cluster-management/created-via: hypershift
+  labels:
+    cloud: BareMetal
+    vendor: OpenShift
+    name: '{{ hcp.name }}'
+    cluster.open-cluster-management.io/clusterset: '{{ hcp.clusterset | default(hosted_cluster_clusterset) }}'
+  name: '{{ hcp.name }}'
+spec:
+  hubAcceptsClient: true
+---
+apiVersion: agent.open-cluster-management.io/v1
+kind: KlusterletAddonConfig
+metadata:
+  name: '{{ hcp.name }}'
+  namespace: '{{ hcp.name }}'
+spec:
+  clusterName: '{{ hcp.name }}'
+  clusterNamespace: '{{ hcp.name }}'
+  clusterLabels:
+    cloud: BareMetal
+    vendor: OpenShift
+  applicationManager:
+    enabled: {{ hcp.addon_application_manager | default(hosted_cluster_addon_application_manager) | lower }}
+  policyController:
+    enabled: {{ hcp.addon_policy_controller | default(hosted_cluster_addon_policy_controller) | lower }}
+  searchCollector:
+    enabled: {{ hcp.addon_search_collector | default(hosted_cluster_addon_search_collector) | lower }}
+  certPolicyController:
+    enabled: {{ hcp.addon_cert_policy_controller | default(hosted_cluster_addon_cert_policy_controller) | lower }}
