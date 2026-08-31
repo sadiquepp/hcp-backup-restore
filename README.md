@@ -428,10 +428,32 @@ ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass 
   -e disconnected_install=true -e target_hub=hubd
 ```
 
-**`roles/setup-dns` still needs a forward zone per `-d` name**, the way
-`hosted_domain`/`2`/`3` exist for the connected three, rendered with
-`-e target_hub=hubd` so `api`/`api-int` carry the `hubd` address. Until those
-zones exist the HostedCluster publishes a name nothing resolves.
+`setup_bm_host.yaml` renders the helper for **both** kinds in one
+unconditional pass - there is no `disconnected_install` switch anywhere in
+`setup-bm-host` / `setup-dns` / `setup-lb` / `setup-tftp`, so the helper never
+needs rebuilding to move between connected and disconnected. That pass now
+covers the `-d` clusters:
+
+- a forward zone per hosted cluster, connected and disconnected, derived from
+  the two cluster lists (`<cluster-name>.<base_domain>`) instead of the old
+  `hosted_domain`/`2`/`3` variables. One shared template replaces the three
+  copy-pasted ones, which is why adding the `-d` clusters needed no new
+  template.
+- a matching `zone` stanza in `named.conf` and PTRs in the reverse zone, driven
+  from the same lists so a zone file and its stanza can never disagree.
+- a `<forwarder>` in the libvirt `default` network per zone, so those names
+  resolve from the VMs on `virbr0` and not just from the helper.
+
+Which hub each zone's `api`/`api-int` points at is resolved **per cluster**:
+connected clusters follow `target_hub`, disconnected ones use `hubd`, and both
+move to `hub2` under `-e target_hub=hub2` for a DR cutover. `-e target_hub=hubd`
+leaves the connected clusters on their `hub` addresses rather than failing,
+since they do not run there.
+
+Worker and `*.apps` records are rendered only for `ip_list` keys that exist
+(see `hosted_cluster_node_keys`), so a `-d` cluster gets a valid zone carrying
+the `api`/`api-int` records its HostedCluster publishes before its worker VMs
+are built, and picks up the rest when you add the octets.
 
 Review and apply the rendered bundles exactly as in the connected flow -
 `roles/create-hosted-cluster/templates/.rendered-<cluster>.yaml`. Keep

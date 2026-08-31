@@ -65,18 +65,20 @@ zone "{{ hub_disconnected_domain }}" IN {
 	file "{{hub_disconnected_domain}}.db";
 	allow-update { none; };
 };
-zone "{{ hosted_domain }}" IN {
+{# One zone per hosted cluster, connected and disconnected alike, derived from
+   the cluster lists so a new cluster needs no edit here. The zone name is
+   <cluster-name>.<base_domain>, matching the .db files tasks/main.yml writes -
+   a stanza naming a file that is not rendered would stop named starting, so
+   both are driven from the same lists. #}
+{% for name in (hosted_clusters | default([]) | select('mapping') | map(attribute='name') | list)
+                + (hosted_clusters | default([]) | reject('mapping') | list)
+                + (hosted_clusters_disconnected | default([]) | select('mapping') | map(attribute='name') | list)
+                + (hosted_clusters_disconnected | default([]) | reject('mapping') | list) %}
+{% if name in (hosted_cluster_metallb_pools | default({})) %}
+zone "{{ name }}.{{ base_domain }}" IN {
 	type master;
-	file "{{hosted_domain}}.db";
+	file "{{ name }}.{{ base_domain }}.db";
 	allow-update { none; };
 };
-zone "{{ hosted_domain2 }}" IN {
-	type master;
-	file "{{hosted_domain2}}.db";
-	allow-update { none; };
-};
-zone "{{ hosted_domain3 }}" IN {
-	type master;
-	file "{{hosted_domain3}}.db";
-	allow-update { none; };
-};
+{% endif %}
+{% endfor %}

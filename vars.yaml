@@ -509,6 +509,46 @@ hosted_cluster_addon_cert_policy_controller: true
 #   - name: hcp-cluster1
 #     api_hostname: api.hcp-cluster1-d.mylab.com
 
+## ip_list keys for each hosted cluster's worker VMs and its *.apps VIP on the
+## helper's haproxy. Keyed by HostedCluster name, so it lines up with
+## hosted_cluster_metallb_pools and with the cluster's DNS zone (whose leading
+## label is the cluster name).
+##
+## Consumed by:
+##   - roles/setup-dns    - worker A records, the *.apps wildcard and the PTRs
+##   - roles/setup-bm-host - the libvirt network's DHCP host FQDNs
+##
+## Only keys that actually exist in ip_list are rendered. That is what lets the
+## '-d' clusters have valid zones (api/api-int, which is what the HostedCluster
+## publishes) before their worker VMs exist - add the octets to ip_list and the
+## worker and *.apps records appear on the next run, with no template change.
+hosted_cluster_node_keys:
+  hcp-cluster1:
+    workers: [c1worker1, c1worker2, c1worker3]
+    apps_lb: c1lb
+  hcp-cluster2:
+    workers: [c2worker1, c2worker2, c2worker3]
+    apps_lb: c2lb
+  hcp-cluster3:
+    workers: [c3worker1, c3worker2, c3worker3]
+    apps_lb: c3lb
+  hcp-cluster1-d:
+    workers: [c1dworker1, c1dworker2, c1dworker3]
+    apps_lb: c1dlb
+  hcp-cluster2-d:
+    workers: [c2dworker1, c2dworker2, c2dworker3]
+    apps_lb: c2dlb
+  hcp-cluster3-d:
+    workers: [c3dworker1, c3dworker2, c3dworker3]
+    apps_lb: c3dlb
+
+## LEGACY: hosted_domain / hosted_domain2 / hosted_domain3 above are the same
+## information as hosted_clusters, written twice. Nothing renders from them any
+## more - every hosted cluster zone is now derived as <cluster-name>.<base_domain>
+## from hosted_clusters + hosted_clusters_disconnected, which is why the '-d'
+## clusters get zones without three more copies of the zone template. They are
+## kept only for older playbooks that still reference them.
+
 ## setup-mirror-registry-vm / setup-mirror-registry: the standalone VM
 ## used to simulate a disconnected install (see setup_mirror_registry.yaml).
 ## disconnected_install gates whether any of this is used at all - default
