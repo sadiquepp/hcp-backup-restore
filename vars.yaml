@@ -40,6 +40,29 @@ ip_list:
   c3lb: 58
   c2vbmc: 71
 
+  # Disconnected hosted clusters (hosted_clusters_disconnected) - worker VMs
+  # and the *.apps ingress VIP each one gets on the helper's haproxy. Separate
+  # addresses from the connected c1/c2/c3 sets, so both kinds run at once.
+  #
+  # c1dworker*/c1dlb match the octets the disconnected-cluster-vms work already
+  # uses, so the two do not fight over addresses. The rest are picked from what
+  # is free, deliberately avoiding 60-69 and 90-99 where the hosted clusters'
+  # MetalLB pool addresses live (hosted_cluster_metallb_pools) - .63 in
+  # particular is left alone because it is already spoken for elsewhere.
+  # Remaining free octets after these: 40, 47, 50, 57, 64-66, 70, 87, 88.
+  c1dworker1: 44
+  c1dworker2: 45
+  c1dworker3: 46
+  c1dlb: 48
+  c2dworker1: 28
+  c2dworker2: 29
+  c2dworker3: 37
+  c2dlb: 38
+  c3dworker1: 96
+  c3dworker2: 97
+  c3dworker3: 98
+  c3dlb: 99
+
   # Hub2 - replacement management/hub cluster used for the OADP
   # backup/restore-to-new-hub DR flow. Kept on its own IP block so it
   # can be built (and its DNS resolved) while hub1 still exists.

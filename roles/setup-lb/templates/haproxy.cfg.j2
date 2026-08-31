@@ -292,81 +292,52 @@ backend hubd_apps_https_backend
     server worker2 {{ lab_network_prefix }}.{{ip_list.hubd_worker2}}:443 check
     server worker3 {{ lab_network_prefix }}.{{ip_list.hubd_worker3}}:443 check
 
-#------------------- HCP-Cluster1 APPS -------------------------------------#
-frontend hcp_cluster1_apps
-    bind  {{ lab_network_prefix }}.{{ip_list.c1lb}}:80
-    use_backend hcp_cluster1_apps_backend
+{# One *.apps frontend/backend pair per hosted cluster - connected AND
+   disconnected - derived from hosted_clusters + hosted_clusters_disconnected
+   and hosted_cluster_node_keys (vars.yaml), replacing three hand-written
+   copies. That duplication is why the '-d' clusters had no ingress path at
+   all: their VIP was never bound and their workers were never backends.
+
+   A cluster is rendered only when its VIP and at least one worker are in
+   ip_list, so a cluster whose VMs do not exist yet is simply absent rather
+   than producing a frontend with no backend.
+
+   Proxy names keep the hcp_clusterN_apps spelling the hand-written sections
+   used (dashes are not valid in a haproxy proxy name), so hcp-cluster1-d
+   becomes hcp_cluster1_d_apps. #}
+{% for hcp_lb_name in (hosted_clusters | default([]) | select('mapping') | map(attribute='name') | list)
+                      + (hosted_clusters | default([]) | reject('mapping') | list)
+                      + (hosted_clusters_disconnected | default([]) | select('mapping') | map(attribute='name') | list)
+                      + (hosted_clusters_disconnected | default([]) | reject('mapping') | list) %}
+{% set nk = (hosted_cluster_node_keys | default({}))[hcp_lb_name] | default({}) %}
+{% set hcp_lb_workers = nk.workers | default([]) | select('in', ip_list) | list %}
+{% if (nk.apps_lb | default('')) in ip_list and hcp_lb_workers | length > 0 %}
+{% set proxy = hcp_lb_name | replace('-', '_') %}
+#------------------- {{ hcp_lb_name }} APPS -------------------------------------#
+frontend {{ proxy }}_apps
+    bind  {{ lab_network_prefix }}.{{ ip_list[nk.apps_lb] }}:80
+    use_backend {{ proxy }}_apps_backend
     mode tcp
 
-backend hcp_cluster1_apps_backend
+backend {{ proxy }}_apps_backend
     mode tcp
     balance roundrobin
-    server worker1 {{ lab_network_prefix }}.{{ip_list.c1worker1}}:80 check
-    server worker2 {{ lab_network_prefix }}.{{ip_list.c1worker2}}:80 check
-    server worker3 {{ lab_network_prefix }}.{{ip_list.c1worker3}}:80 check
+{% for key in hcp_lb_workers %}
+    server worker{{ loop.index }} {{ lab_network_prefix }}.{{ ip_list[key] }}:80 check
+{% endfor %}
 
-#------------------- HCP-Cluster1 APPS - HTTPS  ----------------------------#
-frontend hcp_cluster1_apps_https
-    bind  {{ lab_network_prefix }}.{{ip_list.c1lb}}:443
-    use_backend hcp_cluster1_apps_https_backend
+#------------------- {{ hcp_lb_name }} APPS - HTTPS  ----------------------------#
+frontend {{ proxy }}_apps_https
+    bind  {{ lab_network_prefix }}.{{ ip_list[nk.apps_lb] }}:443
+    use_backend {{ proxy }}_apps_https_backend
     mode tcp
 
-backend hcp_cluster1_apps_https_backend
+backend {{ proxy }}_apps_https_backend
     balance roundrobin
     mode tcp
-    server worker1 {{ lab_network_prefix }}.{{ip_list.c1worker1}}:443 check
-    server worker2 {{ lab_network_prefix }}.{{ip_list.c1worker2}}:443 check
-    server worker3 {{ lab_network_prefix }}.{{ip_list.c1worker3}}:443 check
-#
-#------------------- HCP-Cluster2 APPS -------------------------------------#
-frontend hcp_cluster2_apps
-    bind  {{ lab_network_prefix }}.{{ip_list.c2lb}}:80
-    use_backend hcp_cluster2_apps_backend
-    mode tcp
+{% for key in hcp_lb_workers %}
+    server worker{{ loop.index }} {{ lab_network_prefix }}.{{ ip_list[key] }}:443 check
+{% endfor %}
 
-backend hcp_cluster2_apps_backend
-    mode tcp
-    balance roundrobin
-    server worker1 {{ lab_network_prefix }}.{{ip_list.c2worker1}}:80 check
-    server worker2 {{ lab_network_prefix }}.{{ip_list.c2worker2}}:80 check
-    server worker3 {{ lab_network_prefix }}.{{ip_list.c2worker3}}:80 check
-
-#------------------- HCP-Cluster1 APPS - HTTPS  ----------------------------#
-frontend hcp_cluster2_apps_https
-    bind  {{ lab_network_prefix }}.{{ip_list.c2lb}}:443
-    use_backend hcp_cluster2_apps_https_backend
-    mode tcp
-
-backend hcp_cluster2_apps_https_backend
-    balance roundrobin
-    mode tcp
-    server worker1 {{ lab_network_prefix }}.{{ip_list.c2worker1}}:443 check
-    server worker2 {{ lab_network_prefix }}.{{ip_list.c2worker2}}:443 check
-    server worker3 {{ lab_network_prefix }}.{{ip_list.c2worker3}}:443 check
-
-#------------------- HCP-Cluster3 APPS -------------------------------------#
-frontend hcp_cluster3_apps
-    bind  {{ lab_network_prefix }}.{{ip_list.c3lb}}:80
-    use_backend hcp_cluster3_apps_backend
-    mode tcp
-
-backend hcp_cluster3_apps_backend
-    mode tcp
-    balance roundrobin
-    server worker1 {{ lab_network_prefix }}.{{ip_list.c3worker1}}:80 check
-    server worker2 {{ lab_network_prefix }}.{{ip_list.c3worker2}}:80 check
-    server worker3 {{ lab_network_prefix }}.{{ip_list.c3worker3}}:80 check
-
-#------------------- HCP-Cluster3 APPS - HTTPS  ----------------------------#
-frontend hcp_cluster3_apps_https
-    bind  {{ lab_network_prefix }}.{{ip_list.c3lb}}:443
-    use_backend hcp_cluster3_apps_https_backend
-    mode tcp
-
-backend hcp_cluster3_apps_https_backend
-    balance roundrobin
-    mode tcp
-    server worker1 {{ lab_network_prefix }}.{{ip_list.c3worker1}}:443 check
-    server worker2 {{ lab_network_prefix }}.{{ip_list.c3worker2}}:443 check
-    server worker3 {{ lab_network_prefix }}.{{ip_list.c3worker3}}:443 check
-
+{% endif %}
+{% endfor %}

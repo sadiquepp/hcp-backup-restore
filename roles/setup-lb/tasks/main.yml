@@ -30,17 +30,26 @@
       Check the interface name on this VM with `ip -4 addr` and adjust
       the awk filter above if it differs.
 
+# The three hub VIPs, plus one *.apps VIP per hosted cluster taken from
+# hosted_cluster_node_keys (vars.yaml) - the same map haproxy.cfg.j2 binds and
+# roles/setup-dns publishes as the *.apps wildcard. Derived rather than listed
+# so a hosted cluster added to either cluster list gets its VIP bound here
+# without a second edit; the '-d' clusters were missing precisely because this
+# list was hand-maintained. Only VIPs whose ip_list key exists are bound.
+- name: Work out the VIPs haproxy has to bind
+  ansible.builtin.set_fact:
+    lb_vip_octets: >-
+      {{ [ip_list.hublb, ip_list.hub2lb, ip_list.hubdlb]
+         + ((hosted_cluster_node_keys | default({})).values() | list
+            | map(attribute='apps_lb') | list
+            | select('in', ip_list) | list
+            | map('extract', ip_list) | list) }}
+
 - name: Add each VIP as a secondary address on the primary interface (idempotent)
   shell: |
     nmcli -g ipv4.addresses connection show "{{ primary_conn.stdout }}" | grep -qw "{{ lab_network_prefix }}.{{ item }}/24" || \
     nmcli connection modify "{{ primary_conn.stdout }}" +ipv4.addresses "{{ lab_network_prefix }}.{{ item }}/24"
-  loop:
-    - "{{ ip_list.hublb }}"
-    - "{{ ip_list.c1lb }}"
-    - "{{ ip_list.c2lb }}"
-    - "{{ ip_list.c3lb }}"
-    - "{{ ip_list.hub2lb }}"
-    - "{{ ip_list.hubdlb }}"
+  loop: "{{ lb_vip_octets }}"
   loop_control:
     label: "{{ lab_network_prefix }}.{{ item }}/24"
 

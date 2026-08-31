@@ -450,10 +450,24 @@ move to `hub2` under `-e target_hub=hub2` for a DR cutover. `-e target_hub=hubd`
 leaves the connected clusters on their `hub` addresses rather than failing,
 since they do not run there.
 
-Worker and `*.apps` records are rendered only for `ip_list` keys that exist
-(see `hosted_cluster_node_keys`), so a `-d` cluster gets a valid zone carrying
-the `api`/`api-int` records its HostedCluster publishes before its worker VMs
-are built, and picks up the rest when you add the octets.
+`*.apps` is wired for the `-d` clusters too. `setup-lb` binds one ingress VIP
+per hosted cluster as a secondary address on the helper and renders an haproxy
+frontend/backend pair per cluster on :80 and :443, all derived from
+`hosted_cluster_node_keys` rather than hand-listed - the `-d` clusters had no
+ingress path before simply because that list was maintained by hand:
+
+| cluster | `*.apps` VIP | worker backends |
+|---|---|---|
+| hcp-cluster1 / 2 / 3 | .49 / .59 / .58 | .41-.43 / .51-.53 / .54-.56 |
+| hcp-cluster1-d | .48 | .44-.46 |
+| hcp-cluster2-d | .38 | .28, .29, .37 |
+| hcp-cluster3-d | .99 | .96-.98 |
+
+Worker, PTR, DHCP and `*.apps` records are all rendered only for `ip_list` keys
+that exist, so a cluster whose VMs have not been built yet still gets a valid
+zone carrying the `api`/`api-int` records its HostedCluster publishes, and an
+haproxy section appears only once it has both a VIP and at least one worker -
+never a frontend with no backend.
 
 Review and apply the rendered bundles exactly as in the connected flow -
 `roles/create-hosted-cluster/templates/.rendered-<cluster>.yaml`. Keep
