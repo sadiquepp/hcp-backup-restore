@@ -264,7 +264,21 @@ oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 
 ```bash
 ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass
+# disconnected hub:
+ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass -e disconnected_install=true
 ```
+
+  With `disconnected_install=true` the rendered pull-secret carries only the
+  mirror registry's credentials (read from `mirror_registry_authfile`, the
+  authfile `setup_mirror_registry.yaml` logs podman into), not vault.yaml's
+  `pull_secret`. The discovery agent resolves its image through the mirror
+  mappings in the ConfigMap `roles/setup-hub-acm` publishes, so the pull is
+  against the mirror registry and is authenticated against that host - with the
+  Red Hat pull secret instead it fails `unauthorized` on the mirror and then
+  `no route to host` on `registry.redhat.io`. Same reduction the disconnected
+  hub's own `install-config.yaml` does, and for the same reason: nothing in a
+  disconnected lab should hold a working credential back to the real registries.
+
 - Then apply the rendered yaml files to the ACM cluster.
 
 ```bash

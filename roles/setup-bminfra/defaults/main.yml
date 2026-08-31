@@ -2,3 +2,16 @@
 # defaults file for setup-bminfra
 bminfra_location: singapore
 bminfra_ocp_version: '4.21'
+
+## Gates the disconnected rendering below. setup_mirror_registry.yaml and
+## setup_hub_cluster_disconnected.yaml are what make it meaningful; set it in
+## vars.yaml or pass -e disconnected_install=true. Repeated here so the role
+## still evaluates standalone.
+disconnected_install: false
+
+## What templates/02-pullsecret.yaml.j2 encodes into the InfraEnv's pull-secret,
+## as a JSON string. Connected runs use vault.yaml's pull_secret unchanged;
+## disconnected runs overwrite this with the mirror registry's own credentials
+## in tasks/disconnected-pull-secret.yml (a set_fact, which wins over this
+## default) - see that file for why the vault secret is wrong there.
+bminfra_pull_secret: "{{ pull_secret }}"
