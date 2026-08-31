@@ -31,8 +31,16 @@
 ##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
 ##     -e disconnected_install=true
 ## Requires setup_mirror_registry.yaml to have run (that is what puts the
-## registry CA and a podman login on this host). Individual clusters can opt in
-## or out with 'disconnected: true|false' on their hosted_clusters entry.
+## registry CA and a podman login on this host).
+##
+## A disconnected run renders hosted_clusters_disconnected (hcp-cluster1-d,
+## hcp-cluster2-d, hcp-cluster3-d), NOT hosted_clusters - those names are
+## reserved for connected clusters. The two are separate clusters with their
+## own namespaces, MetalLB pools (hubd 67-69) and DNS zones, so both kinds can
+## be up on this lab at once. Pair it with -e target_hub=hubd so the run uses
+## the disconnected hub's kubeconfig:
+##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
+##     -e disconnected_install=true -e target_hub=hubd
 
 - name: Create Hosted Cluster
   hosts: localhost

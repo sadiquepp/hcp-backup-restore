@@ -10,6 +10,13 @@
 # rendering something unexpected if vars.yaml isn't loaded.
 hosted_clusters: []
 
+# Disconnected clusters - a separate set, rendered instead of hosted_clusters
+# when disconnected_install is true. Never the same names: a disconnected
+# hosted cluster is its own cluster (own namespace, MetalLB pool on hubd, DNS
+# zone, worker VMs), not a connected one rendered differently. The convention
+# is a '-d' suffix - hcp-cluster1 connected, hcp-cluster1-d disconnected.
+hosted_clusters_disconnected: []
+
 hosted_cluster_clusterset: default
 hosted_cluster_channel: fast-4.21
 # Keep in sync with roles/setup-hub-acm's agent_service_os_images list -
@@ -47,6 +54,12 @@ hosted_cluster_service_cidr: 172.31.0.0/16
 # rather than to target_hub. Override per cluster with 'metallb_hub' on the
 # hosted_clusters entry.
 hosted_cluster_metallb_hub: "{{ target_hub | default('hub') }}"
+# Disconnected clusters live on hubd, so they do NOT follow target_hub - it is
+# the connected flow's hub selector and a disconnected run would otherwise
+# publish hub1 addresses. To restore a disconnected hosted cluster onto the DR
+# hub (its hub2 address, 93-95), override this rather than target_hub:
+#   -e disconnected_install=true -e hosted_cluster_metallb_hub_disconnected=hub2
+# and re-render that cluster's DNS zone with -e target_hub=hub2 to match.
 hosted_cluster_metallb_hub_disconnected: hubd
 
 # APIServer LoadBalancer hostname. Must be the name whose 'api' A record holds
@@ -90,8 +103,13 @@ hosted_cluster_addon_cert_policy_controller: true
 ## disconnected_install setup_mirror_registry.yaml, setup_hub_cluster_disconnected.yaml
 ## and setup-hub-acm already gate on, not a second name for it. Set it in
 ## vars.yaml or pass -e disconnected_install=true. Repeated here only so the
-## role still has a value if it is ever run without vars.yaml. A single cluster
-## can opt in or out with 'disconnected' on its hosted_clusters entry.
+## role still has a value if it is ever run without vars.yaml.
+##
+## It selects the whole cluster list for the run: true renders
+## hosted_clusters_disconnected with the disconnected template, false renders
+## hosted_clusters with the connected one. There is no per-cluster override,
+## because the two lists are different clusters rather than two renderings of
+## the same ones.
 disconnected_install: false
 
 ## Where roles/setup-mirror-registry-trust left the mirror registry's

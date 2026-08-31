@@ -395,15 +395,43 @@ canonical name is what lets the same HostedCluster be restored onto a connected
 hub unchanged. Set `hosted_cluster_release_image_disconnected` to pin it at the
 mirror registry by tag instead.
 
-Individual clusters can opt in or out, which is what you want in a lab running
-a connected and a disconnected hub side by side:
+Connected and disconnected clusters are **two separate lists of separate
+clusters**, which is what lets a connected and a disconnected hosted cluster be
+up on this lab at the same time:
 
 ```yaml
+## connected - these names are reserved for connected runs
 hosted_clusters:
-  - hcp-cluster1            # follows disconnected_install
-  - name: hcp-cluster3
-    disconnected: false     # always rendered connected
+  - hcp-cluster1
+  - hcp-cluster2
+  - hcp-cluster3
+
+## disconnected - rendered instead of the above when disconnected_install=true
+hosted_clusters_disconnected:
+  - hcp-cluster1-d
+  - hcp-cluster2-d
+  - hcp-cluster3-d
 ```
+
+A `-d` cluster is a cluster in its own right: its own namespace, its own
+MetalLB pool (`hubd` .67-.69), its own DNS zone and its own worker VMs. It is
+not `hcp-cluster1` rendered differently, and the role refuses to run if a name
+appears in both lists, since the two would collide on all three. Note the
+connected clusters carry **no `hubd` address** - they never run on the
+disconnected hub, and a stray entry would make `setup-hub-acm` create pools
+there for clusters that will never ask for them.
+
+Run a disconnected render against the disconnected hub's kubeconfig:
+
+```bash
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass \
+  -e disconnected_install=true -e target_hub=hubd
+```
+
+**`roles/setup-dns` still needs a forward zone per `-d` name**, the way
+`hosted_domain`/`2`/`3` exist for the connected three, rendered with
+`-e target_hub=hubd` so `api`/`api-int` carry the `hubd` address. Until those
+zones exist the HostedCluster publishes a name nothing resolves.
 
 Review and apply the rendered bundles exactly as in the connected flow -
 `roles/create-hosted-cluster/templates/.rendered-<cluster>.yaml`. Keep

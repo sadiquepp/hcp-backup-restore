@@ -215,6 +215,14 @@ hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 ## At DR cutover the hosted cluster comes back on the hub2 address and DNS is
 ## re-rendered to match - see the MetalLB section of the README.
 ##
+## A cluster only carries an address for the hubs it can actually run on.
+## The connected three have 'hub' and 'hub2' (primary and DR) but deliberately
+## no 'hubd': hubd is the disconnected hub and the connected clusters never run
+## there. That matters beyond documentation - roles/setup-hub-acm renders one
+## IPAddressPool per entry in this map for the hub it is configuring, so a
+## stray 'hubd' address here would put pools on the disconnected hub for
+## clusters that will never ask for them.
+##
 ## Each value is a last octet, combined with the network prefix for that hub
 ## (hosted_cluster_metallb_network_prefixes below, defaulting to
 ## lab_network_prefix). It must stay clear of every ip_list octet on that hub's
@@ -226,19 +234,44 @@ hosted_cluster_metallb_pools:
     ip:
       hub: 60
       hub2: 90
-      hubd: 64
   hcp-cluster2:
     pool: hcp-cluster2-api-pool
     ip:
       hub: 61
       hub2: 91
-      hubd: 65
   hcp-cluster3:
     pool: hcp-cluster3-api-pool
     ip:
       hub: 62
       hub2: 92
-      hubd: 66
+
+  ## Disconnected hosted clusters. Separate clusters from hcp-cluster1/2/3 -
+  ## their own names, namespaces, pools and DNS zones - so a connected and a
+  ## disconnected hosted cluster can be up on this lab at the same time.
+  ##
+  ## Deliberately NO 'hub' address: hub1 is the connected hub and a '-d'
+  ## cluster has no business running there. roles/create-hosted-cluster fails
+  ## with an explicit message if one is ever rendered for a hub it has no
+  ## address on, which is what keeps the reservation real rather than just
+  ## documented. 'hub2' is kept because the DR hub is a legitimate restore
+  ## target - the bundle pins the canonical quay.io release digest, so a
+  ## disconnected hosted cluster restores onto a connected hub unchanged.
+  ## Add a 'hub' entry here if you ever do want one on hub1.
+  hcp-cluster1-d:
+    pool: hcp-cluster1-d-api-pool
+    ip:
+      hub2: 93
+      hubd: 67
+  hcp-cluster2-d:
+    pool: hcp-cluster2-d-api-pool
+    ip:
+      hub2: 94
+      hubd: 68
+  hcp-cluster3-d:
+    pool: hcp-cluster3-d-api-pool
+    ip:
+      hub2: 95
+      hubd: 69
 
 ## Network the pool addresses sit on, per hub. Anything not listed here uses
 ## lab_network_prefix, which is why this is empty by default - in this lab all
@@ -372,10 +405,32 @@ discovery_boot_rootfs_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-roo
 ## hosted_cluster_metallb_pools above - that is what gives the cluster its
 ## own single-address MetalLB pool and the metallb.io/address-pool annotation
 ## on its HostedCluster.
+## CONNECTED hosted clusters. These names are reserved for connected runs -
+## a disconnected run never renders them.
 hosted_clusters:
   - hcp-cluster1
   - hcp-cluster2
   - hcp-cluster3
+
+## DISCONNECTED hosted clusters, rendered instead of the list above when
+## disconnected_install is true. Same shape (a bare name, or a dict with 'name'
+## plus per-cluster overrides), and the same hosted_cluster_* defaults apply.
+##
+## These are their own clusters, not hcp-cluster1/2/3 rendered differently:
+## their own namespace, MetalLB pool (hubd 67-69 above), DNS zone and worker
+## VMs. The role refuses to run if a name appears in both lists, since it would
+## collide on all three. The '-d' suffix is just the convention - what matters
+## is that the sets are disjoint and each name here has a pool entry with a
+## 'hubd' address and a matching DNS zone whose leading label is the name.
+##
+## NOTE: roles/setup-dns needs a forward zone per name here (the way
+## hosted_domain/2/3 exist for the connected three), rendered with
+## -e target_hub=hubd so api/api-int carry the hubd address. Without it the
+## HostedCluster publishes a name nothing resolves.
+hosted_clusters_disconnected:
+  - hcp-cluster1-d
+  - hcp-cluster2-d
+  - hcp-cluster3-d
 
 ## Defaults for every entry above that doesn't override them; they match
 ## hcp-cluster1. release image should correspond to an entry in
@@ -412,11 +467,12 @@ hosted_cluster_addon_cert_policy_controller: true
 ## The defaults derive everything from the mirror_registry_* values further
 ## down, so normally nothing here needs setting. Uncomment to override:
 ##
-## Per-cluster opt in/out, for a lab running both kinds of hub at once:
-# hosted_clusters:
-#   - hcp-cluster1
-#   - name: hcp-cluster3
-#     disconnected: false
+## Per-cluster overrides work the same as for connected clusters - a bare name,
+## or a dict with 'name' plus any hosted_cluster_* key minus the prefix:
+# hosted_clusters_disconnected:
+#   - hcp-cluster1-d
+#   - name: hcp-cluster3-d
+#     nodepool_replicas: 3
 #
 ## The mirror map written to HostedCluster.spec.imageContentSources. Should
 ## agree with acm_disconnected_registry_mirrors above and with the hub's own
