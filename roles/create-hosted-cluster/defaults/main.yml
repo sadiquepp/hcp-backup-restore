@@ -36,3 +36,126 @@ hosted_cluster_addon_application_manager: true
 hosted_cluster_addon_policy_controller: true
 hosted_cluster_addon_search_collector: true
 hosted_cluster_addon_cert_policy_controller: true
+
+
+## ---------------------------------------------------------------------------
+## Disconnected rendering
+##
+## None of this is used unless the role runs disconnected. A connected run
+## renders exactly what it always did - the disconnected extras are guarded
+## blocks inside the one generic template, not a second template, because the
+## delta is small (one ConfigMap, three fields on the HostedCluster) and a
+## duplicate would have to be kept in step with every future change to the
+## bundle.
+##
+## Everything below assumes the mirror registry from setup_mirror_registry.yaml
+## and the hub from setup_hub_cluster_disconnected.yaml, so it reads
+## mirror_registry_* / mirror_release_repository from vars.yaml.
+## ---------------------------------------------------------------------------
+
+## The one switch the whole disconnected path hangs off - the same
+## disconnected_install setup_mirror_registry.yaml, setup_hub_cluster_disconnected.yaml
+## and setup-hub-acm already gate on, not a second name for it. Set it in
+## vars.yaml or pass -e disconnected_install=true. Repeated here only so the
+## role still has a value if it is ever run without vars.yaml. A single cluster
+## can opt in or out with 'disconnected' on its hosted_clusters entry.
+disconnected_install: false
+
+## Where roles/setup-mirror-registry-trust left the mirror registry's
+## self-signed CA on the baremetal host. Same path setup-hub-acm reads.
+hosted_cluster_mirror_ca_path: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+
+## Name of the per-cluster ConfigMap carrying that CA under the key
+## 'ca-bundle.crt'. It is rendered into the HostedCluster's own namespace and
+## referenced twice on the HostedCluster:
+##
+##   spec.configuration.proxy.trustedCA  - puts the CA in the hosted cluster's
+##       cluster-wide proxy trust bundle, which is what the hosted control
+##       plane's operators (and anything else honouring the cluster proxy
+##       config) use when they talk to the mirror registry over TLS.
+##   spec.additionalTrustBundle          - HyperShift carries this into the
+##       nodes' own trust store via the ignition/machine config it generates,
+##       so a worker trusts the mirror registry when CRI-O pulls from it.
+##
+## Both look for 'ca-bundle.crt' in the referenced ConfigMap, which is why one
+## ConfigMap can serve both. Overridable per cluster with 'ca_bundle_configmap'.
+hosted_cluster_ca_bundle_configmap: "{{ hcp.name }}-user-ca-bundle"
+
+## spec.imageContentSources on the HostedCluster.
+##
+## This is the hosted cluster's own copy of the mirror mappings. The hub's
+## ImageDigestMirrorSet/ImageTagMirrorSet only redirect pulls made *by the hub*;
+## the hosted cluster is a separate cluster with its own registries.conf, which
+## HyperShift renders from exactly this list. Without it a hosted cluster's
+## nodes resolve every pullspec to its public registry and stall.
+##
+## registry.redhat.io/multicluster-engine is not optional here and the role
+## asserts it is present: on Agent platform the hosted cluster's nodes are
+## driven by MCE/assisted-installer images (the agent, the assisted-installer
+## controller that runs inside the spoke), all of which live under that
+## repository. Miss it and the control plane comes up while the NodePool never
+## finishes joining - the agents cannot pull their own image.
+##
+## Keep this in step with acm_disconnected_registry_mirrors (setup-hub-acm) and
+## with what oc-mirror actually published - after the hub is up,
+## `oc get imagedigestmirrorset,imagetagmirrorset -o yaml` is the source of
+## truth. Override the whole list in vars.yaml rather than editing it here, or
+## per cluster with 'image_content_sources'.
+hosted_cluster_image_content_sources:
+  - source: quay.io/openshift-release-dev/ocp-release
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository | default('openshift/release-images') }}"
+  - source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/openshift/release"
+  - source: registry.redhat.io/multicluster-engine
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/multicluster-engine"
+  - source: registry.redhat.io/rhacm2
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/rhacm2"
+  - source: registry.redhat.io/openshift4
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/openshift4"
+  - source: registry.redhat.io/redhat
+    mirrors:
+      - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/redhat"
+
+## Repository prefixes that must appear as a source in the list above before
+## the role will render anything. Purely a guard against an override in
+## vars.yaml quietly dropping a mapping the hosted cluster cannot come up
+## without.
+hosted_cluster_required_image_content_sources:
+  - registry.redhat.io/multicluster-engine
+  - quay.io/openshift-release-dev/ocp-release
+
+## Release image for a disconnected hosted cluster. Defaults to the same
+## digest-pinned quay.io pullspec a connected run uses, which is correct:
+## imageContentSources above redirects it to the mirror, and keeping the
+## canonical pullspec is what lets the same HostedCluster be restored onto a
+## connected hub unchanged. Point this at the mirror registry directly
+## (e.g. "<registry>:<port>/openshift/release-images:4.21.15-x86_64") only if
+## you deliberately want the hosted cluster pinned to the mirror by tag.
+hosted_cluster_release_image_disconnected: "{{ hosted_cluster_release_image }}"
+
+## spec.configuration.operatorhub.disableAllDefaultSources on the HostedCluster.
+## The default catalogs point at registry.redhat.io, which a disconnected
+## hosted cluster cannot reach, so they only ever show up as failing
+## CatalogSource pods. Set false if you are mirroring the default sources
+## themselves.
+hosted_cluster_disable_default_catalog_sources: true
+
+## Whether the rendered pull secret is reduced to the mirror registry's own
+## credentials when disconnected.
+##
+## Same reasoning as roles/setup-hub-cluster-disconnected: vault's pull_secret
+## carries live credentials for quay.io/registry.redhat.io/cloud.openshift.com,
+## and handing those to a hosted cluster gives its nodes a working route back
+## to the real registries - a pull the mirror is missing would then succeed for
+## the wrong reason, so the cluster is only "disconnected" by accident. The
+## mirror registry entry is read from mirror_registry_authfile, which
+## roles/setup-mirror-registry-trust logs podman into.
+##
+## Set false to render vault's pull_secret unchanged (useful when debugging
+## whether a failure is genuinely caused by the disconnection).
+hosted_cluster_disconnected_pull_secret: true

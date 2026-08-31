@@ -393,6 +393,55 @@ hosted_cluster_addon_policy_controller: true
 hosted_cluster_addon_search_collector: true
 hosted_cluster_addon_cert_policy_controller: true
 
+## create-hosted-cluster, disconnected. With disconnected_install true (below,
+## or -e disconnected_install=true) the role renders each bundle with three
+## extra things, none of which appear in a connected run:
+##
+##   - a '<cluster>-user-ca-bundle' ConfigMap in the hosted cluster's namespace
+##     carrying the mirror registry CA under 'ca-bundle.crt', referenced from
+##     the HostedCluster's spec.configuration.proxy.trustedCA (the hosted
+##     cluster's proxy trust bundle) and spec.additionalTrustBundle (which
+##     HyperShift carries into the nodes' own trust store);
+##   - spec.imageContentSources redirecting the release payload and
+##     registry.redhat.io/multicluster-engine to the mirror registry - the
+##     hosted cluster is its own cluster and does not inherit the hub's
+##     ImageDigestMirrorSet/ImageTagMirrorSet;
+##   - a pull secret reduced to the mirror registry's own credentials, so the
+##     nodes have no working route back to quay.io/registry.redhat.io.
+##
+## The defaults derive everything from the mirror_registry_* values further
+## down, so normally nothing here needs setting. Uncomment to override:
+##
+## Per-cluster opt in/out, for a lab running both kinds of hub at once:
+# hosted_clusters:
+#   - hcp-cluster1
+#   - name: hcp-cluster3
+#     disconnected: false
+#
+## The mirror map written to HostedCluster.spec.imageContentSources. Should
+## agree with acm_disconnected_registry_mirrors above and with the hub's own
+## IDMS/ITMS. registry.redhat.io/multicluster-engine has to stay in it - see
+## hosted_cluster_required_image_content_sources in the role defaults.
+# hosted_cluster_image_content_sources:
+#   - source: quay.io/openshift-release-dev/ocp-release
+#     mirrors:
+#       - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}"
+#   - source: registry.redhat.io/multicluster-engine
+#     mirrors:
+#       - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/multicluster-engine"
+#
+## Pin the release image at the mirror registry by tag instead of leaving the
+## canonical quay.io digest for imageContentSources to redirect.
+# hosted_cluster_release_image_disconnected: "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}:{{ mirror_ocp_version }}-x86_64"
+#
+## Render vault's full pull_secret rather than reducing it to the mirror
+## registry - useful when checking whether a failure is really the
+## disconnection.
+# hosted_cluster_disconnected_pull_secret: false
+#
+## Leave the hosted cluster's default OperatorHub catalogs enabled.
+# hosted_cluster_disable_default_catalog_sources: false
+
 ## setup-mirror-registry-vm / setup-mirror-registry: the standalone VM
 ## used to simulate a disconnected install (see setup_mirror_registry.yaml).
 ## disconnected_install gates whether any of this is used at all - default

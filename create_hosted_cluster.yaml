@@ -20,6 +20,19 @@
 ## To render just one of them:
 ##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
 ##     -e hcp_cluster_name=hcp-cluster2
+##
+## Disconnected: pass the same disconnected_install flag the rest of the
+## disconnected flow uses (or set it in vars.yaml) and the same role renders
+## each bundle against the mirror registry instead - a '<cluster>-user-ca-bundle'
+## ConfigMap wired into the HostedCluster's proxy.trustedCA and
+## additionalTrustBundle, a spec.imageContentSources map that includes the
+## registry.redhat.io/multicluster-engine redirection the Agent platform needs,
+## and a pull secret holding only the mirror registry's credentials:
+##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
+##     -e disconnected_install=true
+## Requires setup_mirror_registry.yaml to have run (that is what puts the
+## registry CA and a podman login on this host). Individual clusters can opt in
+## or out with 'disconnected: true|false' on their hosted_clusters entry.
 
 - name: Create Hosted Cluster
   hosts: localhost

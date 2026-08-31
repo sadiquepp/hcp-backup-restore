@@ -1,11 +1,46 @@
 ---
 {# Generic hosted cluster bundle - rendered once per hosted_clusters entry.
    'hcp' is that entry: hcp.name is required, every other key is optional
-   and falls back to the matching hosted_cluster_* var in vars.yaml. #}
+   and falls back to the matching hosted_cluster_* var in vars.yaml.
+
+   Disconnected renders from this same template rather than a second copy -
+   the delta is one extra ConfigMap plus three fields on the HostedCluster, and
+   a duplicate template would have to be kept in step with every future change
+   to the rest of the bundle. Everything disconnected-only sits inside a
+   hcp_disconnected conditional, so a connected run renders exactly what it
+   always did. #}
+{%- set hcp_disconnected = (hcp.disconnected | default(disconnected_install)) | bool %}
+{%- if hcp_disconnected %}
+{%- set hcp_ca_configmap = hcp.ca_bundle_configmap | default(hosted_cluster_ca_bundle_configmap) %}
+{%- set hcp_image_content_sources = hcp.image_content_sources | default(hosted_cluster_image_content_sources) %}
+{%- endif %}
 apiVersion: v1
 kind: Namespace
 metadata:
   name: '{{ hcp.name }}'
+{%- if hcp_disconnected %}
+---
+{# The mirror registry's CA, under the key both of the HostedCluster fields
+   below look for. One ConfigMap serves both:
+
+     spec.configuration.proxy.trustedCA - the hosted cluster's cluster-wide
+        proxy trust bundle, which is what its control-plane operators use when
+        they talk to the mirror registry over TLS.
+     spec.additionalTrustBundle - HyperShift carries this into the nodes' own
+        trust store through the ignition it generates, so CRI-O on a worker
+        trusts the mirror registry when it pulls.
+
+   Without it every pull from the mirror fails on an unknown authority, since
+   the registry is self-signed (roles/setup-mirror-registry). #}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: '{{ hcp_ca_configmap }}'
+  namespace: '{{ hcp.name }}'
+data:
+  ca-bundle.crt: |
+    {{ hosted_cluster_mirror_ca_cert | trim | indent(4) }}
+{%- endif %}
 ---
 apiVersion: hypershift.openshift.io/v1beta1
 kind: HostedCluster
@@ -32,7 +67,16 @@ metadata:
 spec:
   channel: "{{ hcp.channel | default(hosted_cluster_channel) }}"
   release:
+{%- if hcp_disconnected %}
+{# Still the canonical, digest-pinned quay.io pullspec by default - the
+   imageContentSources below are what redirect it to the mirror, and keeping
+   the canonical name is what lets this same HostedCluster be restored onto a
+   connected hub unchanged. Override hosted_cluster_release_image_disconnected
+   to pin it at the mirror registry directly. #}
+    image: "{{ hcp.release_image | default(hosted_cluster_release_image_disconnected) }}"
+{%- else %}
     image: "{{ hcp.release_image | default(hosted_cluster_release_image) }}"
+{%- endif %}
   pullSecret:
     name: pullsecret-cluster-{{ hcp.name }}
   sshKey:
@@ -46,6 +90,43 @@ spec:
   controllerAvailabilityPolicy: "{{ hcp.availability_policy | default(hosted_cluster_availability_policy) }}"
   infrastructureAvailabilityPolicy: "{{ hcp.availability_policy | default(hosted_cluster_availability_policy) }}"
   olmCatalogPlacement: "{{ hcp.olm_catalog_placement | default(hosted_cluster_olm_catalog_placement) }}"
+{%- if hcp_disconnected %}
+  configuration:
+    proxy:
+      trustedCA:
+        name: '{{ hcp_ca_configmap }}'
+{%- if hcp.disable_default_catalog_sources | default(hosted_cluster_disable_default_catalog_sources) | bool %}
+{# The built-in catalogs resolve against registry.redhat.io, which this cluster
+   cannot reach - left enabled they only ever show up as CrashLoopBackOff
+   CatalogSource pods in openshift-marketplace. #}
+    operatorhub:
+      disableAllDefaultSources: true
+{%- endif %}
+  additionalTrustBundle:
+    name: '{{ hcp_ca_configmap }}'
+{# The hosted cluster's own registries.conf is rendered from this list. The
+   hub's ImageDigestMirrorSet/ImageTagMirrorSet only redirect pulls made by the
+   hub itself, so without these mappings the hosted cluster resolves every
+   pullspec to its public registry.
+
+   registry.redhat.io/multicluster-engine is the one that is easy to forget and
+   fatal to omit on Agent platform: the agent and assisted-installer images the
+   nodes run come from there, so the control plane comes up while the NodePool
+   never finishes joining. tasks/disconnected-inputs.yml asserts it is present.
+
+   Deliberately not machine-generated from the hub's IDMS/ITMS - a hosted
+   cluster's mirror map is part of its own spec and has to survive an OADP
+   restore onto another hub unchanged, so it is pinned in vars.yaml and checked
+   against the hub rather than derived from it. #}
+  imageContentSources:
+{%- for entry in hcp_image_content_sources %}
+  - source: {{ entry.source }}
+    mirrors:
+{%- for mirror in entry.mirrors %}
+    - {{ mirror }}
+{%- endfor %}
+{%- endfor %}
+{%- endif %}
   platform:
     type: Agent
     agent:
@@ -78,7 +159,19 @@ metadata:
   name: pullsecret-cluster-{{ hcp.name }}
   namespace: {{ hcp.name }}
 data:
+{%- if hcp_disconnected and (hosted_cluster_disconnected_pull_secret | bool) %}
+{# Reduced to the mirror registry's own credentials by
+   tasks/disconnected-pull-secret.yml. Vault's pull_secret also carries live
+   quay.io / registry.redhat.io / cloud.openshift.com credentials, and handing
+   those to a disconnected hosted cluster gives its nodes a working route back
+   to the real registries - a pull the mirror is missing would then succeed for
+   the wrong reason. Serialised with to_json rather than pasted as raw text
+   because Red Hat pull secrets carry "email" fields, and an apostrophe in one
+   closes a single-quoted YAML scalar early. #}
+  '.dockerconfigjson': '{{ hosted_cluster_disconnected_pull_secret_content | to_json | b64encode }}'
+{%- else %}
   '.dockerconfigjson': '{{ pull_secret | b64encode }}'
+{%- endif %}
 type: kubernetes.io/dockerconfigjson
 ---
 apiVersion: v1
@@ -106,7 +199,11 @@ spec:
       agentLabelSelector:
         matchLabels: {}
   release:
+{%- if hcp_disconnected %}
+    image: "{{ hcp.release_image | default(hosted_cluster_release_image_disconnected) }}"
+{%- else %}
     image: "{{ hcp.release_image | default(hosted_cluster_release_image) }}"
+{%- endif %}
 ---
 apiVersion: cluster.open-cluster-management.io/v1
 kind: ManagedCluster

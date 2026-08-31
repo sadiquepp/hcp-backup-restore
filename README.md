@@ -310,6 +310,82 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
   ```bash
   oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml
   ```
+### Create a Hosted Cluster (Disconnected Deployment)
+
+`create-hosted-cluster` renders differently when it is run disconnected, the
+same way `setup-hub-acm` does. It hangs off the same `disconnected_install`
+flag - set it in `vars.yaml` or pass `-e disconnected_install=true`. Connected
+runs render byte-for-byte what they always did.
+
+```bash
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass -e disconnected_install=true
+```
+
+Requires `setup_mirror_registry.yaml` to have run against this lab first - that
+is what leaves the registry's CA at
+`/etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem` and logs the
+bare-metal host's podman into the registry, which are the two inputs the
+disconnected rendering reads.
+
+What the disconnected run adds to each bundle:
+
+- A `<cluster>-user-ca-bundle` ConfigMap in the hosted cluster's own namespace,
+  holding the mirror registry CA under `ca-bundle.crt`. The HostedCluster
+  references it twice: `spec.configuration.proxy.trustedCA`, which puts the CA
+  in the hosted cluster's cluster-wide proxy trust bundle, and
+  `spec.additionalTrustBundle`, which HyperShift carries into the nodes' own
+  trust store through the ignition it generates. Both fields look for
+  `ca-bundle.crt`, so one ConfigMap serves both. The mirror registry is
+  self-signed, so without this every pull from it fails on an unknown
+  authority.
+- `spec.imageContentSources` on the HostedCluster, from
+  `hosted_cluster_image_content_sources`. A hosted cluster is its own cluster
+  with its own `registries.conf` - the hub's `ImageDigestMirrorSet` /
+  `ImageTagMirrorSet` only redirect pulls made *by the hub*, so without this
+  list the hosted cluster resolves every pullspec to its public registry.
+  `registry.redhat.io/multicluster-engine` is the mapping that matters most on
+  Agent platform: the agent and assisted-installer images the nodes run come
+  from there, so omitting it gives you a control plane that comes up while the
+  NodePool never finishes joining. The role asserts it is present
+  (`hosted_cluster_required_image_content_sources`) rather than letting that
+  fail silently hours later.
+- A pull secret reduced to the mirror registry's own credentials, read from
+  `mirror_registry_authfile`. Same reasoning as
+  `roles/setup-hub-cluster-disconnected`: vault's `pull_secret` also carries
+  live quay.io / registry.redhat.io credentials, and shipping those would give
+  the nodes a working route back to the real registries, so a pull the mirror
+  is missing could still succeed and the cluster would be disconnected only by
+  accident. Set `hosted_cluster_disconnected_pull_secret: false` to render
+  vault's secret unchanged while debugging.
+- `spec.configuration.operatorhub.disableAllDefaultSources: true`, since the
+  default catalogs resolve against `registry.redhat.io` and otherwise only show
+  up as failing CatalogSource pods. Set
+  `hosted_cluster_disable_default_catalog_sources: false` if you are mirroring
+  them.
+
+The release image stays the canonical, digest-pinned `quay.io` pullspec -
+`imageContentSources` is what redirects it to the mirror, and keeping the
+canonical name is what lets the same HostedCluster be restored onto a connected
+hub unchanged. Set `hosted_cluster_release_image_disconnected` to pin it at the
+mirror registry by tag instead.
+
+Individual clusters can opt in or out, which is what you want in a lab running
+a connected and a disconnected hub side by side:
+
+```yaml
+hosted_clusters:
+  - hcp-cluster1            # follows disconnected_install
+  - name: hcp-cluster3
+    disconnected: false     # always rendered connected
+```
+
+Review and apply the rendered bundles exactly as in the connected flow -
+`roles/create-hosted-cluster/templates/.rendered-<cluster>.yaml`. Keep
+`hosted_cluster_image_content_sources` in step with
+`acm_disconnected_registry_mirrors` (setup-hub-acm) and with what oc-mirror
+actually published; after the hub is up,
+`oc get imagedigestmirrorset,imagetagmirrorset -o yaml` is the source of truth.
+
 - Note that the hosted cluster worker nodes will go to shutoff mode while joining the nodes to the NodePool. Make sure that the vms are started from virt-manager or via virsh to complete the NodePool join process.
 ```bash
 virsh start c1_worker1

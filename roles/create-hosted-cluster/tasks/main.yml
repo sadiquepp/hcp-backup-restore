@@ -27,6 +27,10 @@
 # Depends on AgentServiceConfig and bminfra already being applied and
 # confirmed working (roles/setup-hub-acm, roles/setup-bminfra) - a
 # HostedCluster on Agent platform can't provision nodes without both.
+#
+# Disconnected runs use the same template and the same list of clusters - see
+# the block below 'Fail fast if there is nothing to render', and the
+# "Disconnected rendering" section of defaults/main.yml.
 
 - name: Normalise hosted_clusters into a list of dicts
   ansible.builtin.set_fact:
@@ -58,6 +62,40 @@
       No hosted clusters to render. Define hosted_clusters in vars.yaml
       (a list of names, or of dicts each with a 'name' key), or pass
       -e hcp_cluster_name=<name>.
+
+# Disconnected rendering hangs off the same disconnected_install flag as the
+# rest of the disconnected flow (setup_mirror_registry.yaml,
+# setup_hub_cluster_disconnected.yaml, setup-hub-acm), and a single cluster can
+# opt in or out with 'disconnected' on its hosted_clusters entry:
+#   hosted_clusters:
+#     - name: hcp-cluster3
+#       disconnected: false
+# The inputs it needs (the mirror registry's CA and credentials) are read once
+# here rather than once per cluster.
+- name: Work out which clusters are being rendered disconnected
+  ansible.builtin.set_fact:
+    hosted_cluster_disconnected_specs: >-
+      {{ hosted_cluster_specs
+         | selectattr('disconnected', 'defined') | selectattr('disconnected') | list
+         + (hosted_cluster_specs | rejectattr('disconnected', 'defined') | list
+            if disconnected_install | bool else []) }}
+
+- name: Gather the mirror registry inputs for disconnected rendering
+  ansible.builtin.include_tasks: disconnected-inputs.yml
+  when: hosted_cluster_disconnected_specs | length > 0
+
+- name: Say which clusters are being rendered disconnected
+  ansible.builtin.debug:
+    msg: >-
+      Rendering
+      {{ hosted_cluster_disconnected_specs | map(attribute='name') | join(', ') }}
+      against the mirror registry at
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }} - each gets a
+      '<name>-user-ca-bundle' ConfigMap (referenced from the HostedCluster's
+      proxy.trustedCA and additionalTrustBundle) and an imageContentSources
+      list redirecting the release payload and registry.redhat.io/multicluster-engine
+      to that registry.
+  when: hosted_cluster_disconnected_specs | length > 0
 
 # Every cluster needs a MetalLB pool: it is what the metallb.io/address-pool
 # annotation on the HostedCluster names, and - via that pool's single address
