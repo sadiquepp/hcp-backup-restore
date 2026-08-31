@@ -28,6 +28,27 @@ hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:
 hosted_cluster_cluster_cidr: 10.132.0.0/14
 hosted_cluster_service_cidr: 172.31.0.0/16
 
+# Which hub each bundle is being rendered for. This is what selects the
+# cluster's address out of hosted_cluster_metallb_pools[<name>].ip - pool NAMES
+# are the same on every hub, the ADDRESSES are not (hub 60-62, hub2 90-92,
+# hubd 64-66). It has to agree with:
+#
+#   - roles/setup-hub-acm's metallb_hub, which renders the single-address
+#     IPAddressPool the kube-apiserver Service actually draws from, and
+#   - roles/setup-dns's target_hub, which publishes that same address as the
+#     cluster's api/api-int A records.
+#
+# All three reading the same map for the same hub is what keeps the name in
+# spec.services[APIServer].loadBalancer.hostname pointing at the address MetalLB
+# will really hand out. Get them out of step and the hosted cluster comes up on
+# an address its own DNS does not resolve to.
+#
+# A disconnected cluster runs on the disconnected hub, so it defaults to 'hubd'
+# rather than to target_hub. Override per cluster with 'metallb_hub' on the
+# hosted_clusters entry.
+hosted_cluster_metallb_hub: "{{ target_hub | default('hub') }}"
+hosted_cluster_metallb_hub_disconnected: hubd
+
 # APIServer LoadBalancer hostname. Must be the name whose 'api' A record holds
 # this cluster's MetalLB address on the hub it runs on (roles/setup-dns renders
 # that zone for target_hub). The default follows the repo convention that a

@@ -41,8 +41,14 @@
     - vars.yaml
     - vault.yaml
   vars:
-    hub_kubeconfig: >-
-      {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+    ## Which hub this run talks to. The old ternary only knew hub2, so
+    ## -e target_hub=hubd silently fell back to hub1's kubeconfig and the
+    ## bundle would have been applied to the wrong cluster.
+    hub_install_folders:
+      hub: "{{ hub_install_folder }}"
+      hub2: "{{ hub2_install_folder }}"
+      hubd: "{{ hub_disconnected_install_folder }}"
+    hub_kubeconfig: "{{ hub_install_folders[target_hub | default('hub')] }}/auth/kubeconfig"
   tasks:
   - name: Fail fast if required inputs are missing
     ansible.builtin.assert:
@@ -50,10 +56,14 @@
         - (hosted_clusters | default([]) | length > 0) or hcp_cluster_name is defined
         - pull_secret is defined
         - ssh_key is defined
+        - (target_hub | default('hub')) in hub_install_folders
       fail_msg: >-
         Define hosted_clusters in vars.yaml (or pass -e hcp_cluster_name=<name>
         to render a single cluster), and make sure pull_secret/ssh_key are
-        defined in vault.yaml.
+        defined in vault.yaml. target_hub must be one of
+        {{ hub_install_folders.keys() | list | join(', ') }} - it selects both the
+        kubeconfig this run uses and the MetalLB address each hosted cluster's
+        api/api-int must resolve to.
 
   - ansible.builtin.import_role:
       name: create-hosted-cluster

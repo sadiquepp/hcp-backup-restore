@@ -102,6 +102,69 @@
       to that registry.
   when: hosted_cluster_disconnected_specs | length > 0
 
+# Which hub each cluster's APIServer VIP comes from. Pool names are identical
+# on every hub; the addresses are not, so this is what decides whether
+# hcp-cluster1 means .60 (hub), .90 (hub2) or .64 (hubd). A disconnected
+# cluster runs on the disconnected hub, so it resolves to 'hubd' even when
+# target_hub still says 'hub'.
+- name: Work out which hub each cluster's APIServer VIP comes from
+  ansible.builtin.set_fact:
+    hosted_cluster_vip_plan: >-
+      {{ hosted_cluster_vip_plan | default([]) + [ item | combine({'hub': hcp_hub}) ] }}
+  loop: "{{ hosted_cluster_specs }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    hcp_hub: >-
+      {{ item.metallb_hub | default(
+           hosted_cluster_metallb_hub_disconnected
+           if item.name in hosted_cluster_disconnected_names
+           else hosted_cluster_metallb_hub) }}
+
+# The pool existing is not enough - it has to hold an address on the hub this
+# bundle is for. Rendering a cluster whose ip map has no entry for that hub
+# gives MetalLB a pool it cannot fill, so the kube-apiserver Service sits
+# <pending> forever and the hosted cluster never gets an endpoint.
+- name: Fail fast if a hosted cluster has no MetalLB address on its hub
+  ansible.builtin.assert:
+    that:
+      - item.name not in (hosted_cluster_metallb_pools | default({}))
+        or (hosted_cluster_metallb_pools[item.name].ip | default({}))[item.hub] is defined
+    fail_msg: >-
+      Hosted cluster '{{ item.name }}' is being rendered for hub '{{ item.hub }}'
+      but hosted_cluster_metallb_pools['{{ item.name }}'].ip has no address for
+      it (it has:
+      {{ (hosted_cluster_metallb_pools[item.name].ip | default({})).keys() | list | join(', ') }}).
+      Add one in vars.yaml and re-run setup-hub-acm with -e metallb_hub={{ item.hub }}
+      so the IPAddressPool is created, and setup-dns with -e target_hub={{ item.hub }}
+      so api/api-int point at it.
+  loop: "{{ hosted_cluster_vip_plan }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ item.hub }}"
+
+# The hostname in the bundle is a NAME; the pool gives an ADDRESS. They line up
+# only if setup-dns rendered that name's zone for the same hub. Print both so
+# the operator can see the pairing instead of inferring it - this is the check
+# that catches a disconnected cluster still publishing hub1's address.
+- name: Show the APIServer name each cluster publishes and the address it must resolve to
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }} (hub {{ item.hub }}):
+      hostname {{ item.api_hostname | default('api.' ~ item.name ~ '.' ~ base_domain) }}
+      must resolve to
+      {{ (hosted_cluster_metallb_network_prefixes | default({}))[item.hub] | default(lab_network_prefix) }}.{{ hosted_cluster_metallb_pools[item.name].ip[item.hub] }}
+      (MetalLB pool {{ hosted_cluster_metallb_pools[item.name].pool }}).
+      Render that zone with:
+      ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns
+      --ask-vault-pass -e target_hub={{ item.hub }}
+      then check it with:
+      dig +short {{ item.api_hostname | default('api.' ~ item.name ~ '.' ~ base_domain) }}
+      @{{ lab_network_prefix }}.{{ ip_list.helper_server }}
+  loop: "{{ hosted_cluster_vip_plan }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.name in (hosted_cluster_metallb_pools | default({}))
+
 # Every cluster needs a MetalLB pool: it is what the metallb.io/address-pool
 # annotation on the HostedCluster names, and - via that pool's single address
 # and serviceAllocation - what keeps the cluster's kube-apiserver VIP on the

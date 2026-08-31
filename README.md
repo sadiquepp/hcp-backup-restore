@@ -363,7 +363,16 @@ What the disconnected run adds to each bundle:
   `hosted_cluster_disable_default_catalog_sources: false` if you are mirroring
   them.
 - An APIServer `loadBalancer.hostname` that has to resolve to this cluster's
-  MetalLB address **on the hub it is running on**. For a disconnected cluster
+  MetalLB address **on the hub it is running on**. Pool *names* are identical on
+  every hub; the *addresses* are not (`hub` 60-62, `hub2` 90-92, `hubd` 64-66),
+  so a cluster rendered disconnected publishes a name that must resolve to its
+  `hubd` address, not its `hub` one. The role resolves the hub per cluster
+  (`hosted_cluster_metallb_hub`, defaulting to `target_hub`, but `hubd` for any
+  cluster rendered disconnected), fails if that cluster's
+  `hosted_cluster_metallb_pools[...].ip` has no entry for that hub, and prints
+  the name/address pairing plus the `dig` command to check it. Re-render DNS for
+  the same hub or the two drift apart:
+  `setup_bm_host.yaml --tags dns -e target_hub=hubd`. For a disconnected cluster
   that is the zone `roles/setup-dns` renders with `-e target_hub=hubd`, not
   hub1's. The default (`api.<cluster-name>.<base_domain>`) is correct by
   construction under the repo convention that a hosted cluster's DNS zone is
