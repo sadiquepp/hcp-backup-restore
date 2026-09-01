@@ -11,10 +11,15 @@
 ## disconnected_install (vars.yaml, default false) wins over target_hub: with
 ## it set the playbook uses hub_disconnected_install_folder/auth/kubeconfig
 ## (the hub installed by setup_hub_cluster_disconnected.yaml), so target_hub
-## is ignored in that case. It also changes what the InfraEnv's pull-secret
-## holds - only the mirror registry's credentials, read from
-## mirror_registry_authfile rather than from vault.yaml; see
-## roles/setup-bminfra/tasks/disconnected-pull-secret.yml.
+## is ignored in that case. It also changes two things about the InfraEnv:
+##   - its pull-secret holds only the mirror registry's credentials, read from
+##     mirror_registry_authfile rather than from vault.yaml; see
+##     roles/setup-bminfra/tasks/disconnected-pull-secret.yml
+##   - it gains an ignitionConfigOverride replacing the discovery host's
+##     /etc/containers/policy.json, without which that host cannot pull the
+##     assisted-installer agent through the mirror ("A signature was required,
+##     but no signature exists") and so never registers as an Agent; see
+##     roles/setup-bminfra/tasks/disconnected-ignition-override.yml.
 
 - name: Setup bare-metal infra (namespace, pull-secret, InfraEnv, RBAC)
   hosts: localhost

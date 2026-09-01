@@ -3,6 +3,11 @@
 # Cache the discovery ISO on the bare-metal host; copy PXE artifacts to helper
 # paths used by roles/setup-tftp/templates/default.j2.
 # Requires KUBECONFIG in the task environment (set by the calling playbook).
+#
+# get_url only re-fetches a dest that already exists when it is forced, so a
+# cached ISO wins over a newly rebuilt one. tasks/ensure-ignition-override.yml
+# sets discovery_iso_force_download when it changed the InfraEnv and the ISO was
+# therefore rebuilt; nothing else needs to force a ~1G download.
 
 - name: Wait for InfraEnv discovery ISO URL
   ansible.builtin.shell: >
@@ -45,6 +50,7 @@
     url: "{{ infraenv_iso_url.stdout }}"
     dest: "{{ download_dir }}{{ discovery_iso_filename }}"
     validate_certs: false
+    force: "{{ discovery_iso_force_download | default(false) | bool }}"
     mode: '0644'
 
 - name: Download InfraEnv PXE boot artifacts
@@ -52,6 +58,7 @@
     url: "{{ item.url }}"
     dest: "{{ download_dir }}{{ item.filename }}"
     validate_certs: false
+    force: "{{ discovery_iso_force_download | default(false) | bool }}"
     mode: '0644'
   loop:
     - url: "{{ infraenv_boot_kernel_url }}"

@@ -19,6 +19,14 @@
   ansible.builtin.include_tasks: disconnected-pull-secret.yml
   when: disconnected_install | bool
 
+# The InfraEnv also needs an ignitionConfigOverride disconnected, so the
+# discovery host does not demand a Red Hat GPG signature for the agent image it
+# pulls through the mirror. Built before the manifests are rendered, so
+# templates/03-infraenv.yaml.j2 carries it.
+- name: Build the InfraEnv ignition config override (disconnected)
+  ansible.builtin.include_tasks: disconnected-ignition-override.yml
+  when: disconnected_install | bool
+
 - name: Render bminfra manifests
   template:
     src: "{{ item }}"
@@ -55,6 +63,14 @@
       rendered for a
       {{ 'disconnected' if disconnected_install | bool else 'connected' }}
       hub.
+
+# Applying the manifests above is still held in review, so the InfraEnv this
+# actually downloads from is whatever is already on the hub - which may predate
+# the ignition override. Patch it on there too, and wait for the ISO to be
+# rebuilt, rather than caching an ISO whose hosts cannot pull the agent.
+- name: Make sure the live InfraEnv carries the ignition override (disconnected)
+  ansible.builtin.include_tasks: ensure-ignition-override.yml
+  when: disconnected_install | bool
 
 - name: Download discovery ISO from InfraEnv
   ansible.builtin.include_tasks: download-discovery-iso.yml

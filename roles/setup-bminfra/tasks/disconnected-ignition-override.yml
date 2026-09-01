@@ -1,0 +1,116 @@
+---
+# Builds the InfraEnv's spec.ignitionConfigOverride for a disconnected hub, so
+# the discovery host boots with a container image policy that does not demand a
+# Red Hat GPG signature for images pulled through the mirror registry.
+#
+# Included from tasks/main.yml only when disconnected_install is true, before
+# the manifests are rendered - it sets bminfra_ignition_config_override, which
+# templates/03-infraenv.yaml.j2 reads. tasks/ensure-ignition-override.yml
+# includes this file too, to patch the same value onto an InfraEnv that already
+# exists.
+#
+# The failure it exists to prevent, on the discovery host's journal:
+#
+#   podman[3161]: Trying to pull registry.redhat.io/multicluster-engine/\
+#     assisted-installer-agent-rhel9@sha256:12fdad03...
+#   podman[3161]: Error: copying system image from manifest list: Source image
+#     rejected: A signature was required, but no signature exists
+#
+# which leaves agent.service unable to start, so the host never registers and no
+# Agent ever appears in the InfraEnv's namespace.
+#
+# Why it happens
+# --------------
+# RHCOS ships /etc/containers/policy.json with a signedBy entry for
+# registry.redhat.io and registry.access.redhat.com:
+#
+#   "registry.redhat.io": [{"type": "signedBy", "keyType": "GPGKeys",
+#     "keyPaths": ["/etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release", ...]}]
+#
+# The mirror mappings in roles/setup-hub-acm's mirror-config ConfigMap redirect
+# the *pull* to {{ mirror_registry_domain }}, but signature verification is
+# still done against the image's original name, so podman goes looking for a
+# detached signature for the registry.redhat.io name. Those signatures live in
+# Red Hat's sigstore (https://registry.redhat.io/containers/sigstore/...), which
+# a node whose NAT has been cut cannot reach - and mirror-registry/Quay does not
+# serve them either. No signature, signedBy policy, image rejected.
+#
+# Note the GPG *keys* are already on the host (that is what keyPaths points at),
+# so shipping a key with the ISO would change nothing - it is the per-image
+# signature that is missing, not the key to check it with.
+#
+# The two ways out
+# ----------------
+#   1. stop requiring a signature for those registries - what this file does,
+#      and the same edit that works by hand on the node;
+#   2. keep signedBy and give the host somewhere reachable to find the
+#      signatures: mirror Red Hat's sigstore and drop a
+#      /etc/containers/registries.d/registry.redhat.io.yaml pointing
+#      sigstore at it. Strictly better, but it needs the signatures actually
+#      mirrored - set bminfra_disconnected_relax_image_policy to false and add
+#      your own files to bminfra_ignition_extra_files if you have them.
+#
+# (1) is what the lab uses: it is scoped to the discovery host, and every image
+# that host pulls comes from the mirror registry anyway, whose CA and
+# credentials it already has.
+
+- name: Check the ignition override variables this role needs are set
+  ansible.builtin.assert:
+    that:
+      - bminfra_discovery_image_policy is defined
+      - bminfra_discovery_image_policy | length > 0
+      - bminfra_ignition_version is defined
+    fail_msg: >-
+      Building the InfraEnv ignition override needs bminfra_discovery_image_policy
+      and bminfra_ignition_version. They live in vars.yaml (and in this role's
+      defaults/main.yml) - load vars.yaml in the playbook, or drop
+      -e disconnected_install=true.
+
+# The policy document is a plain dict in vars.yaml rather than a blob of JSON
+# text so it can be overridden field by field. to_nice_json here only because
+# this file is meant to be read by a human who has sshed into the discovery host
+# to work out what it booted with.
+- name: Render /etc/containers/policy.json for the discovery host
+  ansible.builtin.set_fact:
+    bminfra_discovery_policy_json: "{{ bminfra_discovery_image_policy | to_nice_json(indent=4) }}"
+  when: bminfra_disconnected_relax_image_policy | bool
+
+- name: Describe that file as an ignition storage entry
+  ansible.builtin.set_fact:
+    bminfra_discovery_policy_file:
+      path: /etc/containers/policy.json
+      # 420 decimal is 0644. Ignition takes the mode as a number, not a string.
+      mode: 420
+      # policy.json already exists in the RHCOS live image, so without overwrite
+      # ignition fails the boot rather than replacing it.
+      overwrite: true
+      user:
+        name: root
+      contents:
+        source: "data:text/plain;base64,{{ bminfra_discovery_policy_json | b64encode }}"
+  when: bminfra_disconnected_relax_image_policy | bool
+
+- name: Assemble the InfraEnv ignition config override
+  ansible.builtin.set_fact:
+    bminfra_ignition_config_override: >-
+      {{ {'ignition': {'version': bminfra_ignition_version},
+          'storage': {'files': bminfra_ignition_files}} | to_json }}
+  vars:
+    bminfra_ignition_files: >-
+      {{ ([bminfra_discovery_policy_file] if (bminfra_disconnected_relax_image_policy | bool) else [])
+         + (bminfra_ignition_extra_files | default([])) }}
+  when: >-
+    (bminfra_disconnected_relax_image_policy | bool)
+    or ((bminfra_ignition_extra_files | default([])) | length > 0)
+
+- name: Report what the discovery host will boot with
+  ansible.builtin.debug:
+    msg: >-
+      InfraEnv ignition override writes
+      {{ (bminfra_ignition_config_override | from_json).storage.files
+         | map(attribute='path') | join(', ') }} -
+      {{ 'signature checking relaxed for '
+         ~ (bminfra_discovery_image_policy.transports.docker | default({}) | list | join(', '))
+         if (bminfra_disconnected_relax_image_policy | bool)
+         else 'image policy left as RHCOS ships it' }}.
+  when: bminfra_ignition_config_override | default('') | length > 0

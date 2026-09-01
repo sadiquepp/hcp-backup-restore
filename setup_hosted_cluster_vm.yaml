@@ -19,7 +19,10 @@
 ##
 ## Both paths run the same tasks - only the worker set, the VM folder and the
 ## sizing differ (see the "Select the worker set" task below and the
-## disconnected block in vars.yaml).
+## disconnected block in vars.yaml) - plus one step the disconnected path needs
+## on its own: the hub InfraEnv's ignitionConfigOverride, which is what lets the
+## workers pull the assisted-installer agent from the mirror registry without a
+## Red Hat signature. Without it they boot and never register as Agents.
 
 - name: Setting Up Hosted Cluster
   hosts: localhost
@@ -37,7 +40,12 @@
   tasks:
     # One set of facts drives every task below, so the connected and
     # disconnected runs differ in their inputs rather than in their steps.
+    #
+    # Tagged always because every `when: hcp_disconnected` below reads these -
+    # a --tags disconnected-nat or --tags discovery-ignition run would
+    # otherwise skip this task and fail on the undefined fact.
     - name: Select the worker set, VM folder and sizing for this run
+      tags: [always]
       ansible.builtin.set_fact:
         hcp_disconnected: "{{ disconnected_install | default(false) | bool }}"
         hcp_workers: >-
@@ -76,6 +84,22 @@
         disconnected_nat_label: "{{ (hosted_clusters_disconnected | default(['hcp-disconnected'])) | first }}"
       when: hcp_disconnected
       tags: [disconnected-nat]
+
+    # The discovery ISO this playbook boots the workers from is built by the
+    # hub's InfraEnv, not here - so the one thing that has to be right before
+    # it is downloaded is that InfraEnv's ignition. Without the override below
+    # the workers boot, fail to pull the assisted-installer agent ("A signature
+    # was required, but no signature exists") and never register, so no Agent
+    # ever shows up in the InfraEnv. See
+    # roles/setup-bminfra/tasks/disconnected-ignition-override.yml.
+    #
+    # This patches the live InfraEnv and waits for the ISO to be rebuilt, so a
+    # hub whose InfraEnv predates the override is fixed in place rather than
+    # needing setup_bminfra.yaml re-run.
+    - name: Make sure the hub InfraEnv's discovery ISO skips image signature checks
+      ansible.builtin.include_tasks: roles/setup-bminfra/tasks/ensure-ignition-override.yml
+      when: hcp_disconnected
+      tags: [discovery-ignition]
 
     - name: Download discovery ISO from hub InfraEnv
       ansible.builtin.include_tasks: roles/setup-bminfra/tasks/download-discovery-iso.yml

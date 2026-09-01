@@ -15,3 +15,43 @@ disconnected_install: false
 ## in tasks/disconnected-pull-secret.yml (a set_fact, which wins over this
 ## default) - see that file for why the vault secret is wrong there.
 bminfra_pull_secret: "{{ pull_secret }}"
+
+## InfraEnv ignition config override - see tasks/disconnected-ignition-override.yml
+## for the failure this exists to prevent ("A signature was required, but no
+## signature exists" when the discovery host pulls the assisted-installer agent
+## through the mirror registry). Empty on a connected run, so
+## templates/03-infraenv.yaml.j2 emits no ignitionConfigOverride at all.
+bminfra_ignition_config_override: ""
+
+## Ignition spec version of that override. assisted-service merges it into the
+## discovery ignition, so any 3.x it can parse works; 3.2.0 is what RHCOS 4.x
+## ships with.
+bminfra_ignition_version: "3.2.0"
+
+## Whether the override replaces /etc/containers/policy.json on the discovery
+## host with one that does not require a Red Hat GPG signature. Set false if you
+## have mirrored Red Hat's sigstore and would rather keep signature checking -
+## then point bminfra_ignition_extra_files at your own
+## /etc/containers/registries.d/ drop-in.
+bminfra_disconnected_relax_image_policy: true
+
+## The policy.json written when the above is true. Identical to what RHCOS ships
+## except that the two Red Hat registries fall back to insecureAcceptAnything,
+## because their detached signatures are not reachable from a disconnected node
+## and mirror-registry does not serve them.
+bminfra_discovery_image_policy:
+  default:
+    - type: insecureAcceptAnything
+  transports:
+    docker:
+      registry.access.redhat.com:
+        - type: insecureAcceptAnything
+      registry.redhat.io:
+        - type: insecureAcceptAnything
+    docker-daemon:
+      "":
+        - type: insecureAcceptAnything
+
+## Extra ignition storage.files entries appended to the override, in ignition's
+## own schema ({path, mode, overwrite, contents: {source: "data:..."}}).
+bminfra_ignition_extra_files: []
