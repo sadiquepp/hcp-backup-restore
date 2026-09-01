@@ -17,6 +17,13 @@ spec:
         infraenvs.agent-install.openshift.io: "{{ oadp_bminfra_namespace }}"
   cpuArchitecture: x86_64
   osImageVersion: "{{ bminfra_ocp_version }}"
+{% if bminfra_ignition_config_override | default('') | length > 0 %}
+{# Rendered through to_json so the ignition document - itself JSON - lands as
+   one correctly escaped YAML string. Built in
+   tasks/disconnected-ignition-override.yml; empty, and so omitted, on a
+   connected run. #}
+  ignitionConfigOverride: {{ bminfra_ignition_config_override | to_json }}
+{% endif %}
 status:
   agentLabelSelector:
     matchLabels:

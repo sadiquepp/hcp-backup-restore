@@ -548,6 +548,55 @@ just `--tags disconnected-nat`) if that happens. Set
 connected while still installing from the mirror - useful when checking whether
 a failure is genuinely caused by the disconnection.
 
+### Image signature policy on the discovery host
+
+RHCOS ships `/etc/containers/policy.json` with a `signedBy` entry for
+`registry.redhat.io` and `registry.access.redhat.com`. The mirror mappings in
+`roles/setup-hub-acm`'s `mirror-config` ConfigMap redirect the *pull* to the
+mirror registry, but podman still looks for the detached signature under the
+image's original `registry.redhat.io` name - in Red Hat's sigstore, which a node
+whose NAT has been cut cannot reach and which mirror-registry does not serve.
+So a disconnected worker boots the discovery ISO and dies on:
+
+```
+podman[3161]: Trying to pull registry.redhat.io/multicluster-engine/assisted-installer-agent-rhel9@sha256:12fdad03...
+podman[3161]: Error: copying system image from manifest list: Source image rejected: A signature was required, but no signature exists
+```
+
+`agent.service` never starts, so the host never registers and **no Agent ever
+appears in the InfraEnv** - which looks exactly like the VMs failing to boot.
+
+Shipping the GPG key with the ISO does not help: the keys are already on the
+host (that is what `keyPaths` points at) - it is the per-image signature that is
+missing, not the key to verify it with.
+
+The fix is the InfraEnv's `spec.ignitionConfigOverride`, which writes a
+`policy.json` that accepts those two registries unsigned - the same edit that
+works by hand after sshing into the node, applied declaratively so the run does
+not need one.
+`setup_hosted_cluster_vm.yaml` puts it on the live InfraEnv (patching an
+InfraEnv that predates it), waits for assisted-service to rebuild the ISO, and
+forces the cached copy in `download_dir` to be replaced before booting the VMs -
+so nothing boots the old ISO. `setup_bminfra.yaml` renders the same override
+into `.rendered-03-infraenv.yaml` for a fresh InfraEnv.
+
+Only the disconnected path does any of this; a connected InfraEnv is rendered
+exactly as before. Tunable in `vars.yaml`:
+
+| Variable | Default | |
+|---|---|---|
+| `bminfra_disconnected_relax_image_policy` | `true` | set `false` to keep signature checking - only useful if you have mirrored Red Hat's sigstore |
+| `bminfra_discovery_image_policy` | both Red Hat registries unsigned | the `policy.json` document itself; narrow it to one registry if you prefer |
+| `bminfra_ignition_extra_files` | `[]` | extra ignition `storage.files` entries, e.g. an `/etc/containers/registries.d/` drop-in pointing `sigstore` at a mirrored signature store |
+| `bminfra_ignition_version` | `3.2.0` | ignition spec version of the override |
+
+To re-apply just this step against an existing InfraEnv:
+
+```bash
+ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass \
+  -e disconnected_install=true --tags discovery-ignition
+```
+
 ### Building it
 
 Same order as a connected hosted cluster, with `-e disconnected_install=true`
@@ -555,7 +604,8 @@ on each step so the disconnected hub's kubeconfig and the disconnected cluster
 list are used (`disconnected_install` wins over `target_hub`):
 
 ```bash
-# 1. worker VMs (.44-.46), NAT cut first, booted off the hubd InfraEnv ISO
+# 1. worker VMs (.44-.46): NAT cut first, the hubd InfraEnv's ignition override
+#    ensured (see above), then the VMs booted off that InfraEnv's ISO
 ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass \
   -e disconnected_install=true
 

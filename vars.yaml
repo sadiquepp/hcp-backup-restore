@@ -447,6 +447,61 @@ discovery_boot_kernel_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-vml
 discovery_boot_initrd_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-initrd.img"
 discovery_boot_rootfs_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-rootfs.img"
 
+## ---------------------------------------------------------------------------
+## Discovery host ignition (disconnected only)
+##
+## setup_hosted_cluster_vm.yaml and setup_bminfra.yaml include
+## roles/setup-bminfra/tasks/*.yml by path rather than running the role, so the
+## role's defaults are not loaded for them - these have to live here.
+##
+## What they fix: RHCOS ships /etc/containers/policy.json requiring a Red Hat
+## GPG signature for registry.redhat.io and registry.access.redhat.com. The
+## mirror mappings redirect the *pull* to the mirror registry, but podman still
+## looks for the signature under the original registry.redhat.io name, in a
+## sigstore a disconnected node cannot reach and mirror-registry does not serve.
+## So the discovery host fails with
+##
+##   Error: copying system image from manifest list: Source image rejected:
+##   A signature was required, but no signature exists
+##
+## agent.service never starts, the host never registers, and no Agent ever
+## appears in the InfraEnv. The InfraEnv's ignitionConfigOverride replaces that
+## policy.json on the discovery host, which is the same edit that works by hand
+## after sshing into the node.
+##
+## See roles/setup-bminfra/tasks/disconnected-ignition-override.yml for the full
+## reasoning, including why shipping the GPG key instead would not help.
+## ---------------------------------------------------------------------------
+
+## Set false to keep RHCOS's signature checking - only useful if you have
+## mirrored Red Hat's sigstore, in which case put your own
+## /etc/containers/registries.d/ drop-in in bminfra_ignition_extra_files.
+bminfra_disconnected_relax_image_policy: true
+
+## Ignition spec version of the override. assisted-service merges it into the
+## discovery ignition, so any 3.x it can parse works.
+bminfra_ignition_version: "3.2.0"
+
+## The policy.json written to the discovery host. Same as RHCOS's own except
+## that the two Red Hat registries fall back to insecureAcceptAnything. Narrow
+## it if you only want one of them relaxed.
+bminfra_discovery_image_policy:
+  default:
+    - type: insecureAcceptAnything
+  transports:
+    docker:
+      registry.access.redhat.com:
+        - type: insecureAcceptAnything
+      registry.redhat.io:
+        - type: insecureAcceptAnything
+    docker-daemon:
+      "":
+        - type: insecureAcceptAnything
+
+## Extra ignition storage.files entries appended to the override, in ignition's
+## own schema ({path, mode, overwrite, contents: {source: "data:..."}}).
+bminfra_ignition_extra_files: []
+
 ## create-hosted-cluster: HostedCluster/NodePool/ManagedCluster bundle.
 ## One entry per hosted cluster, all rendered from the same generic
 ## template - add a cluster here, not a new template. An entry is either a
