@@ -6,13 +6,13 @@
 #     hub's bootstrap/master/worker IPs
 #   - setup_hosted_cluster_vm.yaml, when disconnected_install is true - the
 #     disconnected hosted cluster's worker IPs
-# Both need exactly the same two rules, so they live here once.
+# Both need exactly the same treatment, so it lives here once.
 #
 # Callers pass, via `vars:` on the include:
 #   disconnected_nat_enabled  - false to skip the whole thing
 #   disconnected_nat_ip_keys  - ip_list keys whose addresses get cut off
 #   disconnected_nat_label    - short name used in the iptables rule comments,
-#                               so `iptables -t nat -nL LIBVIRT_PRT` says which
+#                               so `iptables -t nat -nL LAB_NO_NAT` says which
 #                               cluster a rule belongs to
 #
 # libvirt keeps the MASQUERADE rules for its networks in the nat table's
@@ -29,82 +29,250 @@
 # hypervisor (172.16.x.0/24) is cut too - those are hosted-cluster networks,
 # not part of this cluster's disconnected environment.
 #
-# It takes two rules because the nat table cannot filter:
+# ---------------------------------------------------------------------------
+# Why the rules live in our own chains rather than inside libvirt's
+# ---------------------------------------------------------------------------
+# An earlier version inserted straight into LIBVIRT_PRT and LIBVIRT_FWO. That
+# silently stopped working, and the failure mode is worth recording.
 #
-#   1. RETURN at the top of LIBVIRT_PRT - the requested nat-table rule. It
-#      short-circuits the chain before libvirt's MASQUERADE rules, so the node's
-#      packets are never NATed. DROP and REJECT are both impossible here:
-#      iptables-nft inhibits DROP in the nat table ("The nat table is not
-#      intended for filtering") and REJECT is not supported in the postrouting
-#      hook at all (RULE_INSERT failed (Invalid argument)). Verified against
-#      iptables v1.8.10 (nf_tables) on the hypervisor.
-#   2. REJECT at the top of LIBVIRT_FWO - the filter table's forward chain for
-#      traffic *out of* a libvirt network, where rejecting is legal. Without it
-#      the un-NATed packets from (1) would still leave the box with a private
-#      source address and just black-hole upstream; with it the node gets an
-#      immediate ICMP error and fails fast instead of waiting out a timeout.
+# `virsh net-destroy default && virsh net-start default` (which
+# roles/setup-bm-host runs under its `virtnet` tag every time ip_list changes,
+# because the DHCP reservations are rendered from it) makes libvirt delete and
+# re-add *its own* rules at the head of LIBVIRT_PRT. Our rules are not libvirt's,
+# so they were not deleted - they were pushed down below the re-inserted
+# MASQUERADE and became inert. The hub silently regained internet access.
 #
-# Both live in the running ruleset only. libvirt rebuilds LIBVIRT_PRT and
-# LIBVIRT_FWO whenever libvirtd restarts or a network is stopped/started, which
-# wipes them - re-run the including role/playbook, or just its `disconnected-nat`
-# tag, if that happens.
+# Re-running the role did not repair it: ansible.builtin.iptables tests for a
+# rule with `iptables -C`, which is position-independent, so a demoted-but-
+# present rule reports `ok` and is never re-inserted.
+#
+# libvirt does not rebuild the chain *structure* on net-destroy/net-start.
+# iptablesSetupPrivateChains (src/network/network_iptables.c) only creates
+# LIBVIRT_PRT and its `POSTROUTING -j LIBVIRT_PRT` jump when they are absent,
+# and it is reached only from networkReloadFirewallRules - i.e. libvirtd start,
+# libvirtd reload, and the firewalld Reloaded/NameOwnerChanged DBus handler
+# (src/network/bridge_driver.c). net-destroy/net-start is not one of them.
+#
+# So a jump inserted into POSTROUTING *above* `-j LIBVIRT_PRT` is stable across
+# net-destroy/net-start and across a libvirtd restart. It is only lost when the
+# whole ruleset is flushed (host reboot, `iptables -F`, a firewalld reload on
+# the iptables backend) - and then our chains are gone too, so re-running this
+# rebuilds from scratch rather than finding a demoted rule it thinks is fine.
+#
+# Hence: our own LAB_NO_NAT (nat) and LAB_NO_EGRESS (filter) chains, hooked into
+# POSTROUTING and FORWARD ahead of libvirt's. That also reduces what has to be
+# kept in the right order from one rule per node to a single jump per table.
+#
+# ---------------------------------------------------------------------------
+# Why the nat rule is ACCEPT and not RETURN
+# ---------------------------------------------------------------------------
+# RETURN from a user-defined chain returns to POSTROUTING, which then falls
+# straight into `-j LIBVIRT_PRT` and MASQUERADEs the packet anyway - recreating
+# the exact bug, silently. ACCEPT terminates traversal of the whole nat table,
+# so the packet is never NATed by anything further down. (The old RETURN only
+# worked because it sat *inside* LIBVIRT_PRT with nothing after that jump in
+# POSTROUTING; it would also have broken the moment docker or a VPN was
+# installed.)
+#
+# DROP and REJECT are both impossible in the nat table: iptables-nft inhibits
+# DROP there ("The nat table is not intended for filtering") and REJECT is not
+# supported in the postrouting hook at all (RULE_INSERT failed (Invalid
+# argument)). Verified against iptables v1.8.10 (nf_tables) on the hypervisor.
+# That is why the nat side cannot do the blocking on its own, and why there is
+# a second rule:
+#
+# REJECT in LAB_NO_EGRESS (filter/FORWARD) is where the traffic actually dies.
+# Without it the un-NATed packets would still leave the box with a private
+# source address and just black-hole upstream; with it the node gets an
+# immediate ICMP error and fails fast instead of waiting out a timeout.
+#
+# Everything here lives in the running ruleset only - nothing is persisted to
+# disk. The final assertion below reads the ruleset back and fails the play
+# unless every node IP is genuinely matched ahead of any MASQUERADE, because
+# both regressions so far looked like a clean green run.
 
-- name: Read the libvirt chains this has to insert into
-  ansible.builtin.command: "iptables -t {{ item.table }} -n -L {{ item.chain }}"
-  loop:
-    - { table: nat, chain: LIBVIRT_PRT }
-    - { table: filter, chain: LIBVIRT_FWO }
-  register: libvirt_chains
-  changed_when: false
-  failed_when: false
+- name: "Cut the {{ disconnected_nat_label }} nodes off from the real internet"
   when: disconnected_nat_enabled | bool
+  tags: [disconnected-nat]
+  # NOTE: these tags are on the block, not only on the `include_tasks` in the
+  # caller. A dynamic include does not propagate its own tags to the tasks it
+  # brings in for the purposes of --tags selection, so `--tags disconnected-nat`
+  # used to expand this file and then filter out every task in it - a silent
+  # no-op that reported ok=2 changed=0 skipped=0. Do not convert the callers to
+  # import_tasks to "fix" that: this file is parameterised through `vars:` on
+  # the include, which is what a dynamic include is for.
+  vars:
+    # The single jump per table whose position actually has to be defended.
+    # `ahead_of` lists the targets that would defeat us if they ran first:
+    # anything that could NAT the packet (nat) or let it through (filter).
+    disconnected_nat_hooks:
+      - table: nat
+        parent: POSTROUTING
+        chain: LAB_NO_NAT
+        ahead_of: [LIBVIRT_PRT, MASQUERADE, SNAT, NETMAP]
+      - table: filter
+        parent: FORWARD
+        chain: LAB_NO_EGRESS
+        ahead_of: [LIBVIRT_FWO, LIBVIRT_FWI, LIBVIRT_FWX, ACCEPT]
+  block:
 
-- name: Fail if libvirt has not created those chains yet
-  ansible.builtin.assert:
-    that:
-      - libvirt_chains.results | map(attribute='rc') | max == 0
-    fail_msg: >-
-      LIBVIRT_PRT (nat) and/or LIBVIRT_FWO (filter) are missing - libvirtd has
-      not set its networks up on this hypervisor yet. Start libvirtd and
-      `virsh net-start default`, then re-run.
-  when: disconnected_nat_enabled | bool
+    - name: Check libvirt has set its own chains up on this hypervisor
+      ansible.builtin.command: "iptables -t {{ item.table }} -n -L {{ item.chain }}"
+      loop:
+        - { table: nat, chain: LIBVIRT_PRT }
+        - { table: filter, chain: LIBVIRT_FWO }
+      register: libvirt_chains
+      changed_when: false
+      failed_when: false
 
-- name: "Deny NAT for the {{ disconnected_nat_label }} node IPs"
-  ansible.builtin.iptables:
-    table: nat
-    chain: LIBVIRT_PRT
-    action: insert
-    rule_num: '1'
-    source: "{{ lab_network_prefix }}.{{ ip_list[item] }}/32"
-    destination: "!{{ lab_network_prefix }}.0/24"
-    jump: RETURN
-    comment: "{{ disconnected_nat_label }} disconnected: no NAT for {{ item }}"
-    state: present
-  loop: "{{ disconnected_nat_ip_keys }}"
-  when: disconnected_nat_enabled | bool
+    - name: Fail if libvirt has not created those chains yet
+      ansible.builtin.assert:
+        that:
+          - libvirt_chains.results | map(attribute='rc') | max == 0
+        fail_msg: >-
+          LIBVIRT_PRT (nat) and/or LIBVIRT_FWO (filter) are missing - libvirtd
+          has not set its networks up on this hypervisor yet. Start libvirtd and
+          `virsh net-start default`, then re-run.
 
-- name: Reject forwarded traffic from those IPs so nothing leaks out un-NATed
-  ansible.builtin.iptables:
-    table: filter
-    chain: LIBVIRT_FWO
-    action: insert
-    rule_num: '1'
-    source: "{{ lab_network_prefix }}.{{ ip_list[item] }}/32"
-    destination: "!{{ lab_network_prefix }}.0/24"
-    jump: REJECT
-    reject_with: icmp-admin-prohibited
-    comment: "{{ disconnected_nat_label }} disconnected: no egress for {{ item }}"
-    state: present
-  loop: "{{ disconnected_nat_ip_keys }}"
-  when: disconnected_nat_enabled | bool
+    # Created once and then left alone. libvirt never touches a chain it did not
+    # create, so the rules inside these survive net-destroy/net-start intact and
+    # their order among themselves is irrelevant.
+    - name: Create our own chains if they do not exist yet
+      ansible.builtin.iptables:
+        table: "{{ item.table }}"
+        chain: "{{ item.chain }}"
+        chain_management: true
+        state: present
+      loop: "{{ disconnected_nat_hooks }}"
+      loop_control:
+        label: "{{ item.table }}/{{ item.chain }}"
 
-- name: Read the nat table back so the blocked node IPs show up in the log
-  ansible.builtin.command: iptables -t nat -n -L --line-numbers
-  register: nat_table_after_block
-  changed_when: false
-  when: disconnected_nat_enabled | bool
+    - name: Read the parent chains to see where our jumps currently sit
+      ansible.builtin.command: "iptables -t {{ item.table }} -n -L {{ item.parent }} --line-numbers"
+      loop: "{{ disconnected_nat_hooks }}"
+      loop_control:
+        label: "{{ item.table }}/{{ item.parent }}"
+      register: disconnected_nat_hook_reads
+      changed_when: false
 
-- name: Show the nat table
-  ansible.builtin.debug:
-    var: nat_table_after_block.stdout_lines
-  when: disconnected_nat_enabled | bool
+    # `iptables -C` is position-independent, so the module cannot notice a jump
+    # that is present but has been overtaken. Delete it explicitly first; the
+    # next task then re-inserts it at position 1.
+    - name: Remove our jump where something has overtaken it
+      ansible.builtin.iptables:
+        table: "{{ item.item.table }}"
+        chain: "{{ item.item.parent }}"
+        jump: "{{ item.item.chain }}"
+        state: absent
+      loop: "{{ disconnected_nat_hook_reads.results }}"
+      loop_control:
+        label: "{{ item.item.table }}/{{ item.item.parent }} -j {{ item.item.chain }}"
+      vars:
+        hook_pos: '{{ ((item.stdout_lines | select("match", "^\s*\d+\s+" ~ item.item.chain ~ "\s") | map("regex_replace", "^\s*(\d+)\s.*$", "\1") | map("int") | list) + [0]) | max }}'
+        blocker_pos: '{{ ((item.stdout_lines | select("match", "^\s*\d+\s+(" ~ (item.item.ahead_of | join("|")) ~ ")\s") | map("regex_replace", "^\s*(\d+)\s.*$", "\1") | map("int") | list) + [9999]) | min }}'
+      when:
+        - hook_pos | int > 0
+        - hook_pos | int > blocker_pos | int
+
+    # No `when:` - if the jump is already present and correctly placed this is a
+    # no-op, and if the task above just deleted it (or it was never there) it
+    # goes back in at the head of the chain.
+    - name: Hook our chains into the parent chains ahead of libvirt's
+      ansible.builtin.iptables:
+        table: "{{ item.table }}"
+        chain: "{{ item.parent }}"
+        jump: "{{ item.chain }}"
+        action: insert
+        rule_num: '1'
+        state: present
+      loop: "{{ disconnected_nat_hooks }}"
+      loop_control:
+        label: "{{ item.table }}/{{ item.parent }} -j {{ item.chain }}"
+
+    - name: "Deny NAT for the {{ disconnected_nat_label }} node IPs"
+      ansible.builtin.iptables:
+        table: nat
+        chain: LAB_NO_NAT
+        action: append
+        source: "{{ lab_network_prefix }}.{{ ip_list[item] }}/32"
+        destination: "!{{ lab_network_prefix }}.0/24"
+        jump: ACCEPT
+        comment: "{{ disconnected_nat_label }} disconnected: no NAT for {{ item }}"
+        state: present
+      loop: "{{ disconnected_nat_ip_keys }}"
+
+    - name: Reject forwarded traffic from those IPs so nothing leaks out un-NATed
+      ansible.builtin.iptables:
+        table: filter
+        chain: LAB_NO_EGRESS
+        action: append
+        source: "{{ lab_network_prefix }}.{{ ip_list[item] }}/32"
+        destination: "!{{ lab_network_prefix }}.0/24"
+        jump: REJECT
+        reject_with: icmp-admin-prohibited
+        comment: "{{ disconnected_nat_label }} disconnected: no egress for {{ item }}"
+        state: present
+      loop: "{{ disconnected_nat_ip_keys }}"
+
+    # ----------------------------------------------------------------------
+    # Prove it, rather than believing the green output above.
+    # ----------------------------------------------------------------------
+    - name: Read the finished ruleset back
+      ansible.builtin.command: "iptables -t {{ item.table }} -n -L {{ item.chain }} --line-numbers"
+      loop:
+        - { table: nat, chain: POSTROUTING }
+        - { table: nat, chain: LAB_NO_NAT }
+        - { table: filter, chain: FORWARD }
+        - { table: filter, chain: LAB_NO_EGRESS }
+      loop_control:
+        label: "{{ item.table }}/{{ item.chain }}"
+      register: disconnected_nat_verify
+      changed_when: false
+
+    - name: Prove our chains still run ahead of libvirt's
+      ansible.builtin.assert:
+        that:
+          - hook_pos | int > 0
+          - hook_pos | int < blocker_pos | int
+        fail_msg: >-
+          {{ item.table }}/{{ item.parent }} does not reach {{ item.chain }}
+          first: our jump is at position {{ hook_pos }} (0 = absent) but
+          {{ item.ahead_of | join('/') }} is already at position
+          {{ blocker_pos }}. Traffic from the {{ disconnected_nat_label }} nodes
+          is NOT blocked. Re-run this with --tags disconnected-nat to repair it.
+        success_msg: >-
+          {{ item.table }}/{{ item.parent }} reaches {{ item.chain }} at position
+          {{ hook_pos }}, ahead of {{ item.ahead_of | join('/') }}.
+      loop: "{{ disconnected_nat_hooks }}"
+      loop_control:
+        label: "{{ item.table }}/{{ item.parent }}"
+      vars:
+        parent_lines: "{{ disconnected_nat_verify.results | selectattr('item.chain', 'equalto', item.parent) | map(attribute='stdout_lines') | first }}"
+        hook_pos: '{{ ((parent_lines | select("match", "^\s*\d+\s+" ~ item.chain ~ "\s") | map("regex_replace", "^\s*(\d+)\s.*$", "\1") | map("int") | list) + [0]) | max }}'
+        blocker_pos: '{{ ((parent_lines | select("match", "^\s*\d+\s+(" ~ (item.ahead_of | join("|")) ~ ")\s") | map("regex_replace", "^\s*(\d+)\s.*$", "\1") | map("int") | list) + [9999]) | min }}'
+
+    - name: "Prove every {{ disconnected_nat_label }} node IP is actually blocked"
+      ansible.builtin.assert:
+        that:
+          - nat_hits | length > 0
+          - egress_hits | length > 0
+        fail_msg: >-
+          {{ item }} ({{ node_ip }}) is not blocked:
+          {{ (nat_hits | length > 0) | ternary('', 'no ACCEPT in nat/LAB_NO_NAT') }}
+          {{ (egress_hits | length > 0) | ternary('', 'no REJECT in filter/LAB_NO_EGRESS') }}.
+          That node can still reach the internet, so this install would not be
+          disconnected.
+        success_msg: "{{ item }} ({{ node_ip }}) is un-NATed and rejected on egress."
+      loop: "{{ disconnected_nat_ip_keys }}"
+      loop_control:
+        label: "{{ item }} ({{ lab_network_prefix }}.{{ ip_list[item] }})"
+      vars:
+        node_ip: "{{ lab_network_prefix }}.{{ ip_list[item] }}"
+        nonat_lines: "{{ disconnected_nat_verify.results | selectattr('item.chain', 'equalto', 'LAB_NO_NAT') | map(attribute='stdout_lines') | first }}"
+        noegress_lines: "{{ disconnected_nat_verify.results | selectattr('item.chain', 'equalto', 'LAB_NO_EGRESS') | map(attribute='stdout_lines') | first }}"
+        nat_hits: '{{ nonat_lines | select("match", "^\s*\d+\s+ACCEPT\s.*\s" ~ (node_ip | regex_escape) ~ "(/32)?\s") | list }}'
+        egress_hits: '{{ noegress_lines | select("match", "^\s*\d+\s+REJECT\s.*\s" ~ (node_ip | regex_escape) ~ "(/32)?\s") | list }}'
+
+    - name: Show the chains that do the blocking
+      ansible.builtin.debug:
+        msg: "{{ disconnected_nat_verify.results | map(attribute='stdout_lines') | flatten }}"

@@ -399,10 +399,12 @@ hosted_cluster_disconnected_workers:
     ip_key: c1dworker3
 
 ## Whether to cut those worker IPs off from the real internet before the VMs
-## are created - a RETURN at the top of libvirt's LIBVIRT_PRT chain (nat) so
-## their traffic is never MASQUERADEd, plus a REJECT at the top of LIBVIRT_FWO
-## (filter) so it does not leave the hypervisor un-NATed either. Identical
-## treatment to the disconnected hub's nodes; see
+## are created - an ACCEPT in our own LAB_NO_NAT chain (nat) so their traffic is
+## never MASQUERADEd, plus a REJECT in our own LAB_NO_EGRESS chain (filter) so it
+## does not leave the hypervisor un-NATed either. Both chains are hooked into
+## POSTROUTING/FORWARD ahead of libvirt's, so they survive a
+## `virsh net-destroy`/`net-start` of the default network. Identical treatment to
+## the disconnected hub's nodes; see
 ## roles/setup-hub-cluster-disconnected/tasks/block-node-nat.yml. Set false to
 ## build the cluster from the mirror while leaving the workers able to reach the
 ## internet - useful when checking whether a failure is really caused by the
@@ -451,6 +453,10 @@ agent_service_os_images:
   - openshiftVersion: "4.22"
     version: "4.22.8"
     url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+  - openshiftVersion: "4.20"
+    version: "4.20.13"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.20/4.20.13/rhcos-4.20.13-x86_64-live-iso.x86_64.iso"
     cpuArchitecture: "x86_64"
 
 ## setup-hub-acm, disconnected. With disconnected_install true (below, or
@@ -550,7 +556,7 @@ hosted_clusters_disconnected:
 ## hcp-cluster1. release image should correspond to an entry in
 ## agent_service_os_images.
 hosted_cluster_clusterset: default
-hosted_cluster_channel: "fast-{{ ocp_major_version }}"
+hosted_cluster_channel: "stable-{{ ocp_major_version }}"
 
 ## Release payload for the hosted clusters, addressed by VERSION rather than by
 ## a hard-coded digest - one number to bump instead of a sha256 nobody can read.

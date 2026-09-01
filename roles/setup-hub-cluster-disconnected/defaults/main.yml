@@ -1,12 +1,20 @@
 ---
 # defaults file for setup-hub-cluster-disconnected
 
-# Whether to cut this cluster's nodes off from the real internet: a RETURN at the
-# top of libvirt's LIBVIRT_PRT chain (nat) so their traffic is never MASQUERADEd,
-# plus a REJECT at the top of LIBVIRT_FWO (filter) so it does not leave the
-# hypervisor un-NATed either. See tasks/block-node-nat.yml, which is where those
-# rules live (shared with the disconnected hosted cluster in
-# setup_hosted_cluster_vm.yaml).
+# Whether to cut this cluster's nodes off from the real internet: an ACCEPT in
+# our own LAB_NO_NAT chain (nat) so their traffic is never MASQUERADEd, plus a
+# REJECT in our own LAB_NO_EGRESS chain (filter) so it does not leave the
+# hypervisor un-NATed either.
+#
+# Both chains are ours, hooked into POSTROUTING and FORWARD ahead of libvirt's
+# own jumps. That is what makes them survive a `virsh net-destroy`/`net-start`
+# of the default network, which roles/setup-bm-host does under its `virtnet` tag
+# whenever ip_list changes: libvirt re-inserts its own rules at the head of
+# LIBVIRT_PRT, which used to push rules placed *inside* that chain below the
+# MASQUERADE and silently switch the internet back on. See
+# tasks/block-node-nat.yml, which is where those rules live (shared with the
+# disconnected hosted cluster in setup_hosted_cluster_vm.yaml) and which now
+# asserts at the end that the blocking is really in force.
 # Set to false to install from the mirror registry while leaving the nodes able
 # to reach the internet - useful when debugging whether a failure is genuinely
 # caused by the disconnection.
