@@ -1,2 +1,26 @@
 ---
-# defaults file for setup_dns
+# defaults file for setup-dns
+
+# Which hub each hosted cluster's api/api-int records point at.
+#
+# A hosted cluster's api/api-int is its kube-apiserver VIP, handed out by
+# MetalLB on whichever hub currently runs its control plane, so this has to
+# agree with the hub roles/setup-hub-acm rendered that cluster's IPAddressPool
+# for and with roles/create-hosted-cluster's hosted_cluster_metallb_hub. All
+# three read hosted_cluster_metallb_pools, so agreeing on the hub is the whole
+# of keeping them in step.
+#
+# Resolved per cluster rather than per run, because connected and disconnected
+# clusters do not live on the same hub:
+#
+#   connected     target_hub, falling back to 'hub' when the cluster has no
+#                 address there. That fallback is what makes
+#                 '-e target_hub=hubd' safe: the connected clusters do not run
+#                 on the disconnected hub, so their records simply stay put
+#                 instead of failing the whole DNS render.
+#   disconnected  'hubd', except under '-e target_hub=hub2', which is the DR
+#                 cutover - then they follow the rest onto the DR hub.
+#
+# Set target_hub (vars.yaml, or -e) rather than these.
+setup_dns_hub_connected: "{{ target_hub | default('hub') }}"
+setup_dns_hub_disconnected: hubd

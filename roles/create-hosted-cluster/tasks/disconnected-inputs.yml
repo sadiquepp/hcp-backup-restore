@@ -1,0 +1,75 @@
+---
+# Inputs the disconnected rendering of hosted-cluster.yaml.j2 needs, gathered
+# once per run rather than once per hosted cluster.
+#
+# Two things come off the baremetal host here:
+#
+#   1. the mirror registry's self-signed CA, which becomes the per-cluster
+#      <name>-user-ca-bundle ConfigMap the HostedCluster references from both
+#      spec.configuration.proxy.trustedCA and spec.additionalTrustBundle;
+#   2. the mirror registry's credentials, which become the hosted cluster's
+#      pull secret in place of vault's pull_secret.
+#
+# Both files are put there by roles/setup-mirror-registry-trust
+# (setup_mirror_registry.yaml), so that has to have run against this lab first.
+#
+# Included from tasks/main.yml only when something in this run is disconnected.
+
+- name: Check the disconnected variables this role needs are set
+  ansible.builtin.assert:
+    that:
+      - mirror_registry_domain is defined
+      - mirror_registry_port is defined
+      - mirror_registry_authfile is defined
+    fail_msg: >-
+      Rendering a disconnected hosted cluster needs the mirror registry
+      variables from vars.yaml (mirror_registry_domain, mirror_registry_port,
+      mirror_registry_authfile). Load vars.yaml in the playbook, or drop
+      -e disconnected_install=true.
+
+# The mappings are what make the hosted cluster's nodes pull from the mirror at
+# all, so a list that has been overridden into something unusable is caught
+# here rather than three hours later as a NodePool that never joins. See
+# hosted_cluster_required_image_content_sources in defaults/main.yml for why
+# multicluster-engine in particular is on that list.
+- name: Check every required image content source is mapped
+  ansible.builtin.assert:
+    that:
+      - item in (hosted_cluster_image_content_sources | map(attribute='source') | list)
+    fail_msg: >-
+      hosted_cluster_image_content_sources has no mapping for '{{ item }}'.
+      A disconnected hosted cluster cannot come up without it - on Agent
+      platform registry.redhat.io/multicluster-engine is where the agent and
+      assisted-installer images its nodes need live, and
+      quay.io/openshift-release-dev/ocp-release is the release payload itself.
+      Add it back to hosted_cluster_image_content_sources in vars.yaml (mirror
+      it to "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/<repo>"),
+      or drop it from hosted_cluster_required_image_content_sources if you
+      genuinely do not need it.
+  loop: "{{ hosted_cluster_required_image_content_sources }}"
+
+- name: Check the mirror registry CA is present on the baremetal host
+  ansible.builtin.stat:
+    path: "{{ hosted_cluster_mirror_ca_path }}"
+  register: hcp_mirror_ca_status
+
+- ansible.builtin.assert:
+    that:
+      - hcp_mirror_ca_status.stat.exists
+    fail_msg: >-
+      {{ hosted_cluster_mirror_ca_path }} not found - run
+      setup_mirror_registry.yaml first (roles/setup-mirror-registry-trust is
+      what fetches the registry's CA back onto this host).
+
+- name: Read the mirror registry CA
+  ansible.builtin.slurp:
+    src: "{{ hosted_cluster_mirror_ca_path }}"
+  register: hcp_mirror_ca_b64
+
+- name: Store the mirror registry CA as a fact
+  ansible.builtin.set_fact:
+    hosted_cluster_mirror_ca_cert: "{{ hcp_mirror_ca_b64.content | b64decode }}"
+
+- name: Build the disconnected pull secret
+  ansible.builtin.include_tasks: disconnected-pull-secret.yml
+  when: hosted_cluster_disconnected_pull_secret | bool

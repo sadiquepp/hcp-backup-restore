@@ -29,7 +29,7 @@ ip_list:
   c1worker1: 41
   c1worker2: 42
   c1worker3: 43
-  # Disconnected hosted cluster (hosted_domain_disconnected below) - the
+  # Disconnected hosted clusters (hosted_clusters_disconnected below) - the
   # worker VMs setup_hosted_cluster_vm.yaml creates when
   # disconnected_install is true. Its own addresses and its own ingress VIP
   # so it can sit alongside hcp-cluster1 rather than replacing it, and so
@@ -49,6 +49,29 @@ ip_list:
   c3worker3: 56
   c3lb: 58
   c2vbmc: 71
+
+  # Disconnected hosted clusters (hosted_clusters_disconnected) - worker VMs
+  # and the *.apps ingress VIP each one gets on the helper's haproxy. Separate
+  # addresses from the connected c1/c2/c3 sets, so both kinds run at once.
+  #
+  # c1dworker*/c1dlb match the octets the disconnected-cluster-vms work already
+  # uses, so the two do not fight over addresses. The rest are picked from what
+  # is free, deliberately avoiding 60-69 and 90-99 where the hosted clusters'
+  # MetalLB pool addresses live (hosted_cluster_metallb_pools) - .63 in
+  # particular is left alone because it is already spoken for elsewhere.
+  # Remaining free octets after these: 40, 47, 50, 57, 64-66, 70, 87, 88.
+  c1dworker1: 44
+  c1dworker2: 45
+  c1dworker3: 46
+  c1dlb: 48
+  c2dworker1: 28
+  c2dworker2: 29
+  c2dworker3: 37
+  c2dlb: 38
+  c3dworker1: 96
+  c3dworker2: 97
+  c3dworker3: 98
+  c3dlb: 99
 
   # Hub2 - replacement management/hub cluster used for the OADP
   # backup/restore-to-new-hub DR flow. Kept on its own IP block so it
@@ -167,11 +190,22 @@ hosted_domain3: hcp-cluster3.mylab.com
 ## hosted_domain does for hcp-cluster1. Giving it its own zone is what keeps
 ## api/api-int (and *.apps) for the disconnected cluster distinct from
 ## hcp-cluster1's, so both can be up at once.
+## LEGACY, like hosted_domain/2/3 above: nothing renders from it any more. Every
+## hosted cluster zone is derived as <cluster-name>.<base_domain> from
+## hosted_clusters + hosted_clusters_disconnected, which is what lets all three
+## '-d' clusters have zones without a template per cluster. Kept only for older
+## playbooks that still reference it.
 hosted_domain_disconnected: hcp-cluster1-d.mylab.com
 
 
 
 ##  Variables required by Setup-Hub-Cluster Role 
+## QUOTED deliberately. Unquoted, YAML parses 4.21 as a float - harmless for
+## .21, but 4.20 becomes 4.2, so every version string built from it
+## ("{{ ocp_major_version }}.{{ ocp_minor_version }}") would silently render
+## 4.2.33 instead of 4.20.33. Everything downstream (release pullspecs, the
+## RHCOS download urls, the operator index tag, the openshift-install path)
+## interpolates this into a string, so keep the quotes.
 ocp_major_version: "4.21"
 ocp_minor_version: 15 
 coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
@@ -232,6 +266,14 @@ hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 ## At DR cutover the hosted cluster comes back on the hub2 address and DNS is
 ## re-rendered to match - see the MetalLB section of the README.
 ##
+## A cluster only carries an address for the hubs it can actually run on.
+## The connected three have 'hub' and 'hub2' (primary and DR) but deliberately
+## no 'hubd': hubd is the disconnected hub and the connected clusters never run
+## there. That matters beyond documentation - roles/setup-hub-acm renders one
+## IPAddressPool per entry in this map for the hub it is configuring, so a
+## stray 'hubd' address here would put pools on the disconnected hub for
+## clusters that will never ask for them.
+##
 ## Each value is a last octet, combined with the network prefix for that hub
 ## (hosted_cluster_metallb_network_prefixes below, defaulting to
 ## lab_network_prefix). It must stay clear of every ip_list octet on that hub's
@@ -243,29 +285,44 @@ hosted_cluster_metallb_pools:
     ip:
       hub: 60
       hub2: 90
-      hubd: 64
   hcp-cluster2:
     pool: hcp-cluster2-api-pool
     ip:
       hub: 61
       hub2: 91
-      hubd: 65
   hcp-cluster3:
     pool: hcp-cluster3-api-pool
     ip:
       hub: 62
       hub2: 92
-      hubd: 66
-  # The disconnected hosted cluster. It is only ever created on hubd (that is
-  # what disconnected_install selects), but it gets an address on every hub for
-  # the same reason the others do: the pool name travels with the HostedCluster,
-  # so an OADP restore onto another hub finds a pool waiting for it there.
+
+  ## Disconnected hosted clusters. Separate clusters from hcp-cluster1/2/3 -
+  ## their own names, namespaces, pools and DNS zones - so a connected and a
+  ## disconnected hosted cluster can be up on this lab at the same time.
+  ##
+  ## Deliberately NO 'hub' address: hub1 is the connected hub and a '-d'
+  ## cluster has no business running there. roles/create-hosted-cluster fails
+  ## with an explicit message if one is ever rendered for a hub it has no
+  ## address on, which is what keeps the reservation real rather than just
+  ## documented. 'hub2' is kept because the DR hub is a legitimate restore
+  ## target - the bundle pins the canonical quay.io release digest, so a
+  ## disconnected hosted cluster restores onto a connected hub unchanged.
+  ## Add a 'hub' entry here if you ever do want one on hub1.
   hcp-cluster1-d:
     pool: hcp-cluster1-d-api-pool
     ip:
-      hub: 63
       hub2: 93
       hubd: 67
+  hcp-cluster2-d:
+    pool: hcp-cluster2-d-api-pool
+    ip:
+      hub2: 94
+      hubd: 68
+  hcp-cluster3-d:
+    pool: hcp-cluster3-d-api-pool
+    ip:
+      hub2: 95
+      hubd: 69
 
 ## Network the pool addresses sit on, per hub. Anything not listed here uses
 ## lab_network_prefix, which is why this is empty by default - in this lab all
@@ -311,7 +368,7 @@ hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
 ## It deliberately mirrors hcp-cluster1 rather than replacing it:
 ##   - its own worker VMs      (hosted_cluster_disconnected_workers, .44-.46)
 ##   - its own ingress VIP     (ip_list.c1dlb, .48) and haproxy frontends
-##   - its own DNS zone        (hosted_domain_disconnected) so api/api-int and
+##   - its own DNS zone        (<name>.<base_domain>) so api/api-int and
 ##                              *.apps are distinct from hcp-cluster1's
 ##   - its own MetalLB pool    (hosted_cluster_metallb_pools['hcp-cluster1-d'])
 ## so both can be up on the lab at the same time.
@@ -468,19 +525,52 @@ discovery_boot_rootfs_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-roo
 ## hosted_cluster_metallb_pools above - that is what gives the cluster its
 ## own single-address MetalLB pool and the metallb.io/address-pool annotation
 ## on its HostedCluster.
-## With disconnected_install true this list is not used at all -
-## hosted_clusters_disconnected is rendered instead. See that block above.
+## CONNECTED hosted clusters. These names are reserved for connected runs -
+## a disconnected run never renders them.
 hosted_clusters:
   - hcp-cluster1
   - hcp-cluster2
   - hcp-cluster3
 
+## DISCONNECTED hosted clusters, rendered instead of the list above when
+## disconnected_install is true. Same shape (a bare name, or a dict with 'name'
+## plus per-cluster overrides), and the same hosted_cluster_* defaults apply.
+##
+## These are their own clusters, not hcp-cluster1/2/3 rendered differently:
+## their own namespace, MetalLB pool (hubd 67-69 above), DNS zone and worker
+## VMs. The role refuses to run if a name appears in both lists, since it would
+## collide on all three. The '-d' suffix is just the convention - what matters
+## is that the sets are disjoint and each name here has a pool entry with a
+## 'hubd' address and a matching DNS zone whose leading label is the name.
+##
+## NOTE: roles/setup-dns needs a forward zone per name here (the way
+## hosted_domain/2/3 exist for the connected three), rendered with
+## -e target_hub=hubd so api/api-int carry the hubd address. Without it the
+## HostedCluster publishes a name nothing resolves.
+hosted_clusters_disconnected:
+  - hcp-cluster1-d
+  - hcp-cluster2-d
+  - hcp-cluster3-d
+
 ## Defaults for every entry above that doesn't override them; they match
 ## hcp-cluster1. release image should correspond to an entry in
 ## agent_service_os_images.
 hosted_cluster_clusterset: default
-hosted_cluster_channel: stable-4.21
-hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:05e69ed54453e3d306b136f52493073073b207f57d0562fe1c8a555bde61aa49"
+hosted_cluster_channel: "stable-{{ ocp_major_version }}"
+
+## Release payload for the hosted clusters, addressed by VERSION rather than by
+## a hard-coded digest - one number to bump instead of a sha256 nobody can read.
+## Defaults to the same version the rest of the lab is built from
+## (ocp_major_version.ocp_minor_version), which is also what oc-mirror mirrored
+## (mirror_ocp_version), so the connected and disconnected payloads are the same
+## release by construction.
+##
+## Override hosted_cluster_release_version alone to run the hosted clusters on a
+## different release from the hubs - it must be a version that actually exists
+## in the mirror registry for a disconnected run.
+hosted_cluster_release_version: "{{ ocp_major_version }}.{{ ocp_minor_version }}"
+hosted_cluster_release_arch: x86_64
+hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release:{{ hosted_cluster_release_version }}-{{ hosted_cluster_release_arch }}"
 hosted_cluster_cluster_cidr: 10.132.0.0/14
 hosted_cluster_service_cidr: 172.31.0.0/16
 hosted_cluster_availability_policy: HighlyAvailable
@@ -490,6 +580,108 @@ hosted_cluster_addon_application_manager: true
 hosted_cluster_addon_policy_controller: true
 hosted_cluster_addon_search_collector: true
 hosted_cluster_addon_cert_policy_controller: true
+
+## create-hosted-cluster, disconnected. With disconnected_install true (below,
+## or -e disconnected_install=true) the role renders each bundle with three
+## extra things, none of which appear in a connected run:
+##
+##   - a '<cluster>-user-ca-bundle' ConfigMap in the hosted cluster's namespace
+##     carrying the mirror registry CA under 'ca-bundle.crt', referenced from
+##     the HostedCluster's spec.configuration.proxy.trustedCA (the hosted
+##     cluster's proxy trust bundle) and spec.additionalTrustBundle (which
+##     HyperShift carries into the nodes' own trust store);
+##   - spec.imageContentSources redirecting the release payload and
+##     registry.redhat.io/multicluster-engine to the mirror registry - the
+##     hosted cluster is its own cluster and does not inherit the hub's
+##     ImageDigestMirrorSet/ImageTagMirrorSet;
+##   - a pull secret reduced to the mirror registry's own credentials, so the
+##     nodes have no working route back to quay.io/registry.redhat.io.
+##
+## The defaults derive everything from the mirror_registry_* values further
+## down, so normally nothing here needs setting. Uncomment to override:
+##
+## Per-cluster overrides work the same as for connected clusters - a bare name,
+## or a dict with 'name' plus any hosted_cluster_* key minus the prefix:
+# hosted_clusters_disconnected:
+#   - hcp-cluster1-d
+#   - name: hcp-cluster3-d
+#     nodepool_replicas: 3
+#
+## The mirror map written to HostedCluster.spec.imageContentSources. Should
+## agree with acm_disconnected_registry_mirrors above and with the hub's own
+## IDMS/ITMS. registry.redhat.io/multicluster-engine has to stay in it - see
+## hosted_cluster_required_image_content_sources in the role defaults.
+# hosted_cluster_image_content_sources:
+#   - source: quay.io/openshift-release-dev/ocp-release
+#     mirrors:
+#       - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}"
+#   - source: registry.redhat.io/multicluster-engine
+#     mirrors:
+#       - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/multicluster-engine"
+#
+## The disconnected release image now points at the mirror registry directly
+## (see the role defaults). To send it back to the canonical quay.io pullspec
+## and rely on redirection instead:
+# hosted_cluster_release_image_disconnected: "{{ hosted_cluster_release_image }}"
+#
+## Render vault's full pull_secret rather than reducing it to the mirror
+## registry - useful when checking whether a failure is really the
+## disconnection.
+# hosted_cluster_disconnected_pull_secret: false
+#
+## Leave the hosted cluster's default OperatorHub catalogs enabled.
+# hosted_cluster_disable_default_catalog_sources: false
+#
+## APIServer LoadBalancer hostname. Must resolve to this cluster's MetalLB
+## address on the hub it is running on - for a disconnected cluster that is the
+## zone roles/setup-dns renders with -e target_hub=hubd. The default,
+## api.<cluster-name>.<base_domain>, is already right when the cluster is named
+## after its own DNS zone (the hcp-cluster1-d pattern). Set this only when it
+## is not - e.g. rendering plain 'hcp-cluster1' disconnected, whose zone points
+## at hub1:
+# hosted_clusters:
+#   - name: hcp-cluster1
+#     api_hostname: api.hcp-cluster1-d.mylab.com
+
+## ip_list keys for each hosted cluster's worker VMs and its *.apps VIP on the
+## helper's haproxy. Keyed by HostedCluster name, so it lines up with
+## hosted_cluster_metallb_pools and with the cluster's DNS zone (whose leading
+## label is the cluster name).
+##
+## Consumed by:
+##   - roles/setup-dns    - worker A records, the *.apps wildcard and the PTRs
+##   - roles/setup-bm-host - the libvirt network's DHCP host FQDNs
+##
+## Only keys that actually exist in ip_list are rendered. That is what lets the
+## '-d' clusters have valid zones (api/api-int, which is what the HostedCluster
+## publishes) before their worker VMs exist - add the octets to ip_list and the
+## worker and *.apps records appear on the next run, with no template change.
+hosted_cluster_node_keys:
+  hcp-cluster1:
+    workers: [c1worker1, c1worker2, c1worker3]
+    apps_lb: c1lb
+  hcp-cluster2:
+    workers: [c2worker1, c2worker2, c2worker3]
+    apps_lb: c2lb
+  hcp-cluster3:
+    workers: [c3worker1, c3worker2, c3worker3]
+    apps_lb: c3lb
+  hcp-cluster1-d:
+    workers: [c1dworker1, c1dworker2, c1dworker3]
+    apps_lb: c1dlb
+  hcp-cluster2-d:
+    workers: [c2dworker1, c2dworker2, c2dworker3]
+    apps_lb: c2dlb
+  hcp-cluster3-d:
+    workers: [c3dworker1, c3dworker2, c3dworker3]
+    apps_lb: c3dlb
+
+## LEGACY: hosted_domain / hosted_domain2 / hosted_domain3 above are the same
+## information as hosted_clusters, written twice. Nothing renders from them any
+## more - every hosted cluster zone is now derived as <cluster-name>.<base_domain>
+## from hosted_clusters + hosted_clusters_disconnected, which is why the '-d'
+## clusters get zones without three more copies of the zone template. They are
+## kept only for older playbooks that still reference them.
 
 ## setup-mirror-registry-vm / setup-mirror-registry: the standalone VM
 ## used to simulate a disconnected install (see setup_mirror_registry.yaml).

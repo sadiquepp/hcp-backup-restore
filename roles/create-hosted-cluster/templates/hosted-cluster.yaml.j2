@@ -58,7 +58,12 @@ spec:
     servicePublishingStrategy:
       type: LoadBalancer
       loadBalancer:
-        hostname: api.{{ hcp.name }}.{{ base_domain }}
+{# The name whose 'api' A record carries this cluster's MetalLB address on the
+   hub it is running on - roles/setup-dns renders that zone for target_hub. The
+   default keeps the repo convention that a hosted cluster's zone is named after
+   the cluster; override with 'api_hostname' on the hosted_clusters entry, or
+   hosted_cluster_api_hostname in vars.yaml, if they ever differ. #}
+        hostname: {{ hcp.api_hostname | default(hosted_cluster_api_hostname) }}
   - service: OAuthServer
     servicePublishingStrategy:
       type: Route
