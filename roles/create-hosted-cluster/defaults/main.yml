@@ -187,21 +187,28 @@ hosted_cluster_required_image_content_sources:
 ## Release image for a disconnected hosted cluster: the mirror registry's own
 ## copy, by tag, at the same version as the connected pullspec above.
 ##
-## It points at the mirror DIRECTLY rather than at quay.io, because
-## spec.imageContentSources cannot redirect a tag. That field carries
-## ImageDigestMirrorSet semantics - mirror-by-digest-only - and the HostedCluster
-## API has no ImageTagMirrorSet equivalent, so a quay.io *tag* would not be
-## rewritten and the hosted cluster would try to reach quay.io for its payload.
-## A quay.io *digest* would be redirected, which is why the digest-pinned form
-## this replaced could safely stay canonical.
+## Note this is a preference, not a requirement. The release image is resolved
+## on the HUB - HyperShift pulls it there to extract the payload and pin every
+## component image by digest - and the hub carries oc-mirror's
+## ImageTagMirrorSet, which redirects quay.io/openshift-release-dev/ocp-release
+## by tag (acm_disconnected_registry_mirrors has it with digest_only: false, and
+## roles/setup-hub-cluster-disconnected applies ITMS as a day-2 resource). So a
+## canonical quay.io tag resolves through the mirror perfectly well.
 ##
-## This is the same shape roles/setup-hub-cluster-disconnected already pulls
-## openshift-install from, so the pullspec is known to exist in the mirror.
+## spec.imageContentSources is a separate thing: it is the hosted cluster's own
+## registries.conf, carries ImageDigestMirrorSet (mirror-by-digest-only)
+## semantics, and covers the component images - all of which are pulled by
+## digest, so digest-only is exactly right there.
 ##
-## The cost is that the pullspec names this lab's registry, so a HostedCluster
-## restored from backup onto a connected hub needs its release image swapped.
-## Set this to "{{ hosted_cluster_release_image }}" in vars.yaml to keep the
-## canonical name instead - but then pin a digest, not a tag.
+## Naming the mirror directly buys one thing: the payload pull stops depending
+## on the hub's ITMS being present and correct. It costs portability - the
+## pullspec names this lab's registry, so a HostedCluster restored onto a
+## connected hub needs its release image swapped. It is also the same shape
+## roles/setup-hub-cluster-disconnected already extracts openshift-install from,
+## so the pullspec is known to exist in the mirror.
+##
+## To keep the canonical, portable name and lean on the hub's ITMS instead:
+##   hosted_cluster_release_image_disconnected: "{{ hosted_cluster_release_image }}"
 hosted_cluster_release_image_disconnected: "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository | default('openshift/release-images') }}:{{ hosted_cluster_release_version }}-{{ hosted_cluster_release_arch }}"
 
 ## spec.configuration.operatorhub.disableAllDefaultSources on the HostedCluster.

@@ -61,11 +61,15 @@ spec:
   channel: "{{ hcp.channel | default(hosted_cluster_channel) }}"
   release:
 {# DISCONNECTED: the mirror registry's own copy of the release payload, by tag,
-   at hosted_cluster_release_version. It names the mirror DIRECTLY rather than
-   quay.io because spec.imageContentSources below cannot redirect a tag - that
-   field carries ImageDigestMirrorSet (mirror-by-digest-only) semantics and the
-   HostedCluster API has no ImageTagMirrorSet equivalent. Everything the payload
-   references is pulled by digest, so imageContentSources still covers all of it.
+   at hosted_cluster_release_version.
+
+   A canonical quay.io tag would work too - the release image is resolved on the
+   HUB, which carries oc-mirror's ImageTagMirrorSet for
+   quay.io/openshift-release-dev/ocp-release. Naming the mirror directly just
+   drops that dependency, at the cost of baking this lab's registry into the
+   spec. imageContentSources below is a different layer: it is the hosted
+   cluster's own registries.conf, is digest-only, and covers the component
+   images - which are all pulled by digest anyway.
    See hosted_cluster_release_image_disconnected in defaults/main.yml. #}
     image: "{{ hcp.release_image | default(hosted_cluster_release_image_disconnected) }}"
   pullSecret:

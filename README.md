@@ -401,17 +401,25 @@ Disconnected renders the **mirror registry's own copy** at the same version,
 pullspec `setup-hub-cluster-disconnected` already extracts `openshift-install`
 from, so it is known to exist there.
 
-It names the mirror directly rather than relying on redirection because
-`spec.imageContentSources` **cannot redirect a tag**: that field carries
-`ImageDigestMirrorSet` (mirror-by-digest-only) semantics and the HostedCluster
-API has no `ImageTagMirrorSet` equivalent. A quay.io *digest* would be
-redirected; a quay.io *tag* would not, and the cluster would try to reach
-quay.io for its payload. Everything the payload then references is pulled by
-digest, so `imageContentSources` covers the rest. The trade-off is that the
-pullspec names this lab's registry, so a HostedCluster restored onto a
-connected hub needs its release image swapped - set
-`hosted_cluster_release_image_disconnected` back to the canonical name (pinning
-a digest, not a tag) if you would rather keep it portable.
+That is a preference, not a requirement. The release image is resolved **on the
+hub** - HyperShift pulls it there to extract the payload and pin every component
+image by digest - and the hub carries oc-mirror's `ImageTagMirrorSet`, which
+redirects `quay.io/openshift-release-dev/ocp-release` by tag
+(`acm_disconnected_registry_mirrors` lists it with `digest_only: false`, and
+`setup-hub-cluster-disconnected` applies ITMS as a day-2 resource). So the
+canonical quay.io tag resolves through the mirror perfectly well.
+
+`spec.imageContentSources` is a different layer: it is the hosted cluster's own
+`registries.conf`, carries `ImageDigestMirrorSet` (mirror-by-digest-only)
+semantics, and covers the component images - which are pulled by digest anyway,
+so digest-only is exactly right there.
+
+Naming the mirror directly buys one thing: the payload pull stops depending on
+the hub's ITMS being present and correct. It costs portability, since the
+pullspec names this lab's registry, so a HostedCluster restored onto a connected
+hub needs its release image swapped. Set
+`hosted_cluster_release_image_disconnected: "{{ hosted_cluster_release_image }}"`
+to keep the canonical name and lean on the hub's ITMS instead.
 
 Connected and disconnected clusters are **two separate lists of separate
 clusters**, which is what lets a connected and a disconnected hosted cluster be
