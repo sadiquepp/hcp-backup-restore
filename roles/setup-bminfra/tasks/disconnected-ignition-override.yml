@@ -54,63 +54,76 @@
 # that host pulls comes from the mirror registry anyway, whose CA and
 # credentials it already has.
 
-- name: Check the ignition override variables this role needs are set
-  ansible.builtin.assert:
-    that:
-      - bminfra_discovery_image_policy is defined
-      - bminfra_discovery_image_policy | length > 0
-      - bminfra_ignition_version is defined
-    fail_msg: >-
-      Building the InfraEnv ignition override needs bminfra_discovery_image_policy
-      and bminfra_ignition_version. They live in vars.yaml (and in this role's
-      defaults/main.yml) - load vars.yaml in the playbook, or drop
-      -e disconnected_install=true.
+#
+# WHY THE BLOCK BELOW: ensure-ignition-override.yml includes this file from
+# inside its own 'discovery-ignition' block, so this include inherits that tag -
+# and a dynamic include does not pass tags on to the file it pulls in. Without a
+# tag of its own the same silent no-op reappears one level deeper: the override
+# is never built, so the patch task above has nothing to apply.
+# The role's own tasks/main.yml also includes this file, untagged, which is
+# unaffected.
 
-# The policy document is a plain dict in vars.yaml rather than a blob of JSON
-# text so it can be overridden field by field. to_nice_json here only because
-# this file is meant to be read by a human who has sshed into the discovery host
-# to work out what it booted with.
-- name: Render /etc/containers/policy.json for the discovery host
-  ansible.builtin.set_fact:
-    bminfra_discovery_policy_json: "{{ bminfra_discovery_image_policy | to_nice_json(indent=4) }}"
-  when: bminfra_disconnected_relax_image_policy | bool
+- name: Build the InfraEnv discovery-ISO ignition override
+  tags: [discovery-ignition]
+  block:
 
-- name: Describe that file as an ignition storage entry
-  ansible.builtin.set_fact:
-    bminfra_discovery_policy_file:
-      path: /etc/containers/policy.json
-      # 420 decimal is 0644. Ignition takes the mode as a number, not a string.
-      mode: 420
-      # policy.json already exists in the RHCOS live image, so without overwrite
-      # ignition fails the boot rather than replacing it.
-      overwrite: true
-      user:
-        name: root
-      contents:
-        source: "data:text/plain;base64,{{ bminfra_discovery_policy_json | b64encode }}"
-  when: bminfra_disconnected_relax_image_policy | bool
+    - name: Check the ignition override variables this role needs are set
+      ansible.builtin.assert:
+        that:
+          - bminfra_discovery_image_policy is defined
+          - bminfra_discovery_image_policy | length > 0
+          - bminfra_ignition_version is defined
+        fail_msg: >-
+          Building the InfraEnv ignition override needs bminfra_discovery_image_policy
+          and bminfra_ignition_version. They live in vars.yaml (and in this role's
+          defaults/main.yml) - load vars.yaml in the playbook, or drop
+          -e disconnected_install=true.
 
-- name: Assemble the InfraEnv ignition config override
-  ansible.builtin.set_fact:
-    bminfra_ignition_config_override: >-
-      {{ {'ignition': {'version': bminfra_ignition_version},
-          'storage': {'files': bminfra_ignition_files}} | to_json }}
-  vars:
-    bminfra_ignition_files: >-
-      {{ ([bminfra_discovery_policy_file] if (bminfra_disconnected_relax_image_policy | bool) else [])
-         + (bminfra_ignition_extra_files | default([])) }}
-  when: >-
-    (bminfra_disconnected_relax_image_policy | bool)
-    or ((bminfra_ignition_extra_files | default([])) | length > 0)
+    # The policy document is a plain dict in vars.yaml rather than a blob of JSON
+    # text so it can be overridden field by field. to_nice_json here only because
+    # this file is meant to be read by a human who has sshed into the discovery host
+    # to work out what it booted with.
+    - name: Render /etc/containers/policy.json for the discovery host
+      ansible.builtin.set_fact:
+        bminfra_discovery_policy_json: "{{ bminfra_discovery_image_policy | to_nice_json(indent=4) }}"
+      when: bminfra_disconnected_relax_image_policy | bool
 
-- name: Report what the discovery host will boot with
-  ansible.builtin.debug:
-    msg: >-
-      InfraEnv ignition override writes
-      {{ (bminfra_ignition_config_override | from_json).storage.files
-         | map(attribute='path') | join(', ') }} -
-      {{ 'signature checking relaxed for '
-         ~ (bminfra_discovery_image_policy.transports.docker | default({}) | list | join(', '))
-         if (bminfra_disconnected_relax_image_policy | bool)
-         else 'image policy left as RHCOS ships it' }}.
-  when: bminfra_ignition_config_override | default('') | length > 0
+    - name: Describe that file as an ignition storage entry
+      ansible.builtin.set_fact:
+        bminfra_discovery_policy_file:
+          path: /etc/containers/policy.json
+          # 420 decimal is 0644. Ignition takes the mode as a number, not a string.
+          mode: 420
+          # policy.json already exists in the RHCOS live image, so without overwrite
+          # ignition fails the boot rather than replacing it.
+          overwrite: true
+          user:
+            name: root
+          contents:
+            source: "data:text/plain;base64,{{ bminfra_discovery_policy_json | b64encode }}"
+      when: bminfra_disconnected_relax_image_policy | bool
+
+    - name: Assemble the InfraEnv ignition config override
+      ansible.builtin.set_fact:
+        bminfra_ignition_config_override: >-
+          {{ {'ignition': {'version': bminfra_ignition_version},
+              'storage': {'files': bminfra_ignition_files}} | to_json }}
+      vars:
+        bminfra_ignition_files: >-
+          {{ ([bminfra_discovery_policy_file] if (bminfra_disconnected_relax_image_policy | bool) else [])
+             + (bminfra_ignition_extra_files | default([])) }}
+      when: >-
+        (bminfra_disconnected_relax_image_policy | bool)
+        or ((bminfra_ignition_extra_files | default([])) | length > 0)
+
+    - name: Report what the discovery host will boot with
+      ansible.builtin.debug:
+        msg: >-
+          InfraEnv ignition override writes
+          {{ (bminfra_ignition_config_override | from_json).storage.files
+             | map(attribute='path') | join(', ') }} -
+          {{ 'signature checking relaxed for '
+             ~ (bminfra_discovery_image_policy.transports.docker | default({}) | list | join(', '))
+             if (bminfra_disconnected_relax_image_policy | bool)
+             else 'image policy left as RHCOS ships it' }}.
+      when: bminfra_ignition_config_override | default('') | length > 0
