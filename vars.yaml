@@ -172,7 +172,7 @@ hosted_domain_disconnected: hcp-cluster1-d.mylab.com
 
 
 ##  Variables required by Setup-Hub-Cluster Role 
-ocp_major_version: 4.21
+ocp_major_version: "4.21"
 ocp_minor_version: 15 
 coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
 download_dir: /var/lib/libvirt/images/
@@ -397,6 +397,10 @@ agent_service_os_images:
     version: "4.22.8"
     url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
     cpuArchitecture: "x86_64"
+  - openshiftVersion: "4.20"
+    version: "4.20.13"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.20/4.20.13/rhcos-4.20.13-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
 
 ## setup-hub-acm, disconnected. With disconnected_install true (below, or
 ## -e disconnected_install=true) the role renders a different
@@ -475,7 +479,7 @@ hosted_clusters:
 ## hcp-cluster1. release image should correspond to an entry in
 ## agent_service_os_images.
 hosted_cluster_clusterset: default
-hosted_cluster_channel: fast-4.21
+hosted_cluster_channel: stable-4.21
 hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:05e69ed54453e3d306b136f52493073073b207f57d0562fe1c8a555bde61aa49"
 hosted_cluster_cluster_cidr: 10.132.0.0/14
 hosted_cluster_service_cidr: 172.31.0.0/16
