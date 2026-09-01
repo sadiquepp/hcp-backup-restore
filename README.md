@@ -389,11 +389,29 @@ keeps its disconnected `AgentServiceConfig` separate. `tasks/main.yml` picks
 between them per cluster. They share the NodePool / ManagedCluster /
 KlusterletAddonConfig tail, so a change to one usually belongs in both.
 
-The release image stays the canonical, digest-pinned `quay.io` pullspec -
-`imageContentSources` is what redirects it to the mirror, and keeping the
-canonical name is what lets the same HostedCluster be restored onto a connected
-hub unchanged. Set `hosted_cluster_release_image_disconnected` to pin it at the
-mirror registry by tag instead.
+The release payload is addressed **by version**, not by a hard-coded digest:
+`hosted_cluster_release_version` defaults to `<ocp_major_version>.<ocp_minor_version>`,
+so the hosted clusters run the same release the rest of the lab is built from
+and there is one number to bump. Both `HostedCluster.spec.release.image` and
+`NodePool.spec.release.image` come from it.
+
+Connected renders `quay.io/openshift-release-dev/ocp-release:<version>-x86_64`.
+Disconnected renders the **mirror registry's own copy** at the same version,
+`<registry>:<port>/<mirror_release_repository>:<version>-x86_64` - the same
+pullspec `setup-hub-cluster-disconnected` already extracts `openshift-install`
+from, so it is known to exist there.
+
+It names the mirror directly rather than relying on redirection because
+`spec.imageContentSources` **cannot redirect a tag**: that field carries
+`ImageDigestMirrorSet` (mirror-by-digest-only) semantics and the HostedCluster
+API has no `ImageTagMirrorSet` equivalent. A quay.io *digest* would be
+redirected; a quay.io *tag* would not, and the cluster would try to reach
+quay.io for its payload. Everything the payload then references is pulled by
+digest, so `imageContentSources` covers the rest. The trade-off is that the
+pullspec names this lab's registry, so a HostedCluster restored onto a
+connected hub needs its release image swapped - set
+`hosted_cluster_release_image_disconnected` back to the canonical name (pinning
+a digest, not a tag) if you would rather keep it portable.
 
 Connected and disconnected clusters are **two separate lists of separate
 clusters**, which is what lets a connected and a disconnected hosted cluster be

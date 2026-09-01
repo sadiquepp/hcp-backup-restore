@@ -178,7 +178,13 @@ hosted_domain3: hcp-cluster3.mylab.com
 
 
 ##  Variables required by Setup-Hub-Cluster Role 
-ocp_major_version: 4.21
+## QUOTED deliberately. Unquoted, YAML parses 4.21 as a float - harmless for
+## .21, but 4.20 becomes 4.2, so every version string built from it
+## ("{{ ocp_major_version }}.{{ ocp_minor_version }}") would silently render
+## 4.2.33 instead of 4.20.33. Everything downstream (release pullspecs, the
+## RHCOS download urls, the operator index tag, the openshift-install path)
+## interpolates this into a string, so keep the quotes.
+ocp_major_version: "4.21"
 ocp_minor_version: 15 
 coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
 download_dir: /var/lib/libvirt/images/
@@ -459,8 +465,21 @@ hosted_clusters_disconnected:
 ## hcp-cluster1. release image should correspond to an entry in
 ## agent_service_os_images.
 hosted_cluster_clusterset: default
-hosted_cluster_channel: fast-4.21
-hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:05e69ed54453e3d306b136f52493073073b207f57d0562fe1c8a555bde61aa49"
+hosted_cluster_channel: "fast-{{ ocp_major_version }}"
+
+## Release payload for the hosted clusters, addressed by VERSION rather than by
+## a hard-coded digest - one number to bump instead of a sha256 nobody can read.
+## Defaults to the same version the rest of the lab is built from
+## (ocp_major_version.ocp_minor_version), which is also what oc-mirror mirrored
+## (mirror_ocp_version), so the connected and disconnected payloads are the same
+## release by construction.
+##
+## Override hosted_cluster_release_version alone to run the hosted clusters on a
+## different release from the hubs - it must be a version that actually exists
+## in the mirror registry for a disconnected run.
+hosted_cluster_release_version: "{{ ocp_major_version }}.{{ ocp_minor_version }}"
+hosted_cluster_release_arch: x86_64
+hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release:{{ hosted_cluster_release_version }}-{{ hosted_cluster_release_arch }}"
 hosted_cluster_cluster_cidr: 10.132.0.0/14
 hosted_cluster_service_cidr: 172.31.0.0/16
 hosted_cluster_availability_policy: HighlyAvailable
@@ -509,9 +528,10 @@ hosted_cluster_addon_cert_policy_controller: true
 #     mirrors:
 #       - "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/multicluster-engine"
 #
-## Pin the release image at the mirror registry by tag instead of leaving the
-## canonical quay.io digest for imageContentSources to redirect.
-# hosted_cluster_release_image_disconnected: "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}:{{ mirror_ocp_version }}-x86_64"
+## The disconnected release image now points at the mirror registry directly
+## (see the role defaults). To send it back to the canonical quay.io pullspec
+## and rely on redirection instead:
+# hosted_cluster_release_image_disconnected: "{{ hosted_cluster_release_image }}"
 #
 ## Render vault's full pull_secret rather than reducing it to the mirror
 ## registry - useful when checking whether a failure is really the

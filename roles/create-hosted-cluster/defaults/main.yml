@@ -18,11 +18,15 @@ hosted_clusters: []
 hosted_clusters_disconnected: []
 
 hosted_cluster_clusterset: default
-hosted_cluster_channel: fast-4.21
-# Keep in sync with roles/setup-hub-acm's agent_service_os_images list -
-# this must correspond to one of those openshiftVersion entries or the
-# release image and the available discovery ISOs will be mismatched.
-hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release@sha256:05e69ed54453e3d306b136f52493073073b207f57d0562fe1c8a555bde61aa49"
+hosted_cluster_channel: "fast-{{ ocp_major_version | default('4.21') }}"
+
+# Release payload addressed by version rather than by digest. Keep the version
+# in step with roles/setup-hub-acm's agent_service_os_images list - it must
+# correspond to one of those openshiftVersion entries or the release image and
+# the available discovery ISOs will be mismatched.
+hosted_cluster_release_version: "{{ ocp_major_version | default('4.21') }}.{{ ocp_minor_version | default(15) }}"
+hosted_cluster_release_arch: x86_64
+hosted_cluster_release_image: "quay.io/openshift-release-dev/ocp-release:{{ hosted_cluster_release_version }}-{{ hosted_cluster_release_arch }}"
 
 # clusterNetwork/serviceNetwork CIDRs. Internal to each hosted cluster's
 # own OVN-Kubernetes data plane, so concurrent hosted clusters on the same
@@ -180,14 +184,25 @@ hosted_cluster_required_image_content_sources:
   - registry.redhat.io/multicluster-engine
   - quay.io/openshift-release-dev/ocp-release
 
-## Release image for a disconnected hosted cluster. Defaults to the same
-## digest-pinned quay.io pullspec a connected run uses, which is correct:
-## imageContentSources above redirects it to the mirror, and keeping the
-## canonical pullspec is what lets the same HostedCluster be restored onto a
-## connected hub unchanged. Point this at the mirror registry directly
-## (e.g. "<registry>:<port>/openshift/release-images:4.21.15-x86_64") only if
-## you deliberately want the hosted cluster pinned to the mirror by tag.
-hosted_cluster_release_image_disconnected: "{{ hosted_cluster_release_image }}"
+## Release image for a disconnected hosted cluster: the mirror registry's own
+## copy, by tag, at the same version as the connected pullspec above.
+##
+## It points at the mirror DIRECTLY rather than at quay.io, because
+## spec.imageContentSources cannot redirect a tag. That field carries
+## ImageDigestMirrorSet semantics - mirror-by-digest-only - and the HostedCluster
+## API has no ImageTagMirrorSet equivalent, so a quay.io *tag* would not be
+## rewritten and the hosted cluster would try to reach quay.io for its payload.
+## A quay.io *digest* would be redirected, which is why the digest-pinned form
+## this replaced could safely stay canonical.
+##
+## This is the same shape roles/setup-hub-cluster-disconnected already pulls
+## openshift-install from, so the pullspec is known to exist in the mirror.
+##
+## The cost is that the pullspec names this lab's registry, so a HostedCluster
+## restored from backup onto a connected hub needs its release image swapped.
+## Set this to "{{ hosted_cluster_release_image }}" in vars.yaml to keep the
+## canonical name instead - but then pin a digest, not a tag.
+hosted_cluster_release_image_disconnected: "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository | default('openshift/release-images') }}:{{ hosted_cluster_release_version }}-{{ hosted_cluster_release_arch }}"
 
 ## spec.configuration.operatorhub.disableAllDefaultSources on the HostedCluster.
 ## The default catalogs point at registry.redhat.io, which a disconnected

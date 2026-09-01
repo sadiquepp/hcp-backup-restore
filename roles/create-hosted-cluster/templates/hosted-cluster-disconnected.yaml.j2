@@ -60,11 +60,13 @@ metadata:
 spec:
   channel: "{{ hcp.channel | default(hosted_cluster_channel) }}"
   release:
-{# DISCONNECTED: still the canonical, digest-pinned quay.io pullspec by default -
-   the imageContentSources below are what redirect it to the mirror, and keeping
-   the canonical name is what lets this same HostedCluster be restored onto a
-   connected hub unchanged. Override hosted_cluster_release_image_disconnected
-   to pin it at the mirror registry directly. #}
+{# DISCONNECTED: the mirror registry's own copy of the release payload, by tag,
+   at hosted_cluster_release_version. It names the mirror DIRECTLY rather than
+   quay.io because spec.imageContentSources below cannot redirect a tag - that
+   field carries ImageDigestMirrorSet (mirror-by-digest-only) semantics and the
+   HostedCluster API has no ImageTagMirrorSet equivalent. Everything the payload
+   references is pulled by digest, so imageContentSources still covers all of it.
+   See hosted_cluster_release_image_disconnected in defaults/main.yml. #}
     image: "{{ hcp.release_image | default(hosted_cluster_release_image_disconnected) }}"
   pullSecret:
     name: pullsecret-cluster-{{ hcp.name }}
