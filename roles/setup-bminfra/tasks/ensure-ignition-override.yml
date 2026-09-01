@@ -20,101 +20,114 @@
 # download-discovery-iso.yml replace the cached ISO instead of booting the stale
 # one already on disk.
 
-- name: Build the ignition config override for this InfraEnv
-  ansible.builtin.include_tasks: disconnected-ignition-override.yml
+#
+# WHY THE BLOCK BELOW: setup_hosted_cluster_vm.yaml tags its include of this
+# file with 'discovery-ignition'. A dynamic include_tasks does NOT pass its tags
+# down to the tasks it brings in - inheritance covers import_tasks, roles and
+# blocks, not dynamic includes. Untagged, every task here was filtered out of a
+# `--tags discovery-ignition` run: the include expanded, nothing inside it ran,
+# and the recap read ok=3 changed=0 skipped=0, which looks like success.
+# Keep the block if you restructure this file.
 
-- name: Read the InfraEnv's current ignition config override
-  ansible.builtin.command: >
-    oc get infraenv {{ oadp_bminfra_namespace }} -n {{ oadp_bminfra_namespace }}
-    -o jsonpath={.spec.ignitionConfigOverride}
-  register: bminfra_live_override
-  changed_when: false
-  failed_when: false
+- name: Build and apply the InfraEnv discovery-ISO ignition override
+  tags: [discovery-ignition]
+  block:
 
-- name: Fail if the InfraEnv is not there yet
-  ansible.builtin.assert:
-    that:
-      - bminfra_live_override.rc == 0
-    fail_msg: >-
-      InfraEnv {{ oadp_bminfra_namespace }} not found in namespace
-      {{ oadp_bminfra_namespace }} on this hub - run setup_bminfra.yaml
-      (with -e disconnected_install=true) and apply its rendered manifests
-      first. The discovery ISO comes from that InfraEnv.
+    - name: Build the ignition config override for this InfraEnv
+      ansible.builtin.include_tasks: disconnected-ignition-override.yml
 
-# An InfraEnv that already has an override is not necessarily one of ours, and
-# the field holds a single document, so writing over it would silently drop
-# whatever it was doing. Our files are appended to its storage.files instead,
-# and any file path it already writes is left to it - same reasoning as the
-# additionalTrustedCA merge in roles/setup-hub-acm.
-- name: Work out what the InfraEnv should end up with
-  ansible.builtin.set_fact:
-    bminfra_override_desired: >-
-      {{ bminfra_override_ours | to_json
-         if (bminfra_override_live | length == 0)
-         else (bminfra_override_live
-               | combine({'storage': (bminfra_override_live.storage | default({}))
-                          | combine({'files': bminfra_override_live_files + bminfra_override_new_files})})
-               | to_json) }}
-  vars:
-    bminfra_override_live: >-
-      {{ (bminfra_live_override.stdout | trim | from_json)
-         if (bminfra_live_override.stdout | trim | length > 0) else {} }}
-    bminfra_override_live_files: "{{ bminfra_override_live.storage.files | default([]) }}"
-    bminfra_override_ours: "{{ bminfra_ignition_config_override | from_json }}"
-    bminfra_override_new_files: >-
-      {{ bminfra_override_ours.storage.files
-         | rejectattr('path', 'in', bminfra_override_live_files | map(attribute='path') | list)
-         | list }}
-  when: bminfra_ignition_config_override | default('') | length > 0
+    - name: Read the InfraEnv's current ignition config override
+      ansible.builtin.command: >
+        oc get infraenv {{ oadp_bminfra_namespace }} -n {{ oadp_bminfra_namespace }}
+        -o jsonpath={.spec.ignitionConfigOverride}
+      register: bminfra_live_override
+      changed_when: false
+      failed_when: false
 
-# The ISO is rebuilt asynchronously when the spec changes, and .status.createdTime
-# is the field that moves when it is. Read it before the patch so the wait below
-# has something to compare against.
-- name: Note when the current discovery ISO was built
-  ansible.builtin.command: >
-    oc get infraenv {{ oadp_bminfra_namespace }} -n {{ oadp_bminfra_namespace }}
-    -o jsonpath={.status.createdTime}
-  register: bminfra_iso_created_before
-  changed_when: false
+    - name: Fail if the InfraEnv is not there yet
+      ansible.builtin.assert:
+        that:
+          - bminfra_live_override.rc == 0
+        fail_msg: >-
+          InfraEnv {{ oadp_bminfra_namespace }} not found in namespace
+          {{ oadp_bminfra_namespace }} on this hub - run setup_bminfra.yaml
+          (with -e disconnected_install=true) and apply its rendered manifests
+          first. The discovery ISO comes from that InfraEnv.
 
-- name: Patch the ignition config override onto the InfraEnv
-  ansible.builtin.shell: >
-    oc patch infraenv {{ oadp_bminfra_namespace }} -n {{ oadp_bminfra_namespace }}
-    --type merge
-    -p {{ {'spec': {'ignitionConfigOverride': bminfra_override_desired}} | to_json | quote }}
-  register: bminfra_override_patch
-  changed_when: "'(no change)' not in bminfra_override_patch.stdout"
-  when:
-    - bminfra_ignition_config_override | default('') | length > 0
-    - bminfra_override_desired | trim != bminfra_live_override.stdout | trim
+    # An InfraEnv that already has an override is not necessarily one of ours, and
+    # the field holds a single document, so writing over it would silently drop
+    # whatever it was doing. Our files are appended to its storage.files instead,
+    # and any file path it already writes is left to it - same reasoning as the
+    # additionalTrustedCA merge in roles/setup-hub-acm.
+    - name: Work out what the InfraEnv should end up with
+      ansible.builtin.set_fact:
+        bminfra_override_desired: >-
+          {{ bminfra_override_ours | to_json
+             if (bminfra_override_live | length == 0)
+             else (bminfra_override_live
+                   | combine({'storage': (bminfra_override_live.storage | default({}))
+                              | combine({'files': bminfra_override_live_files + bminfra_override_new_files})})
+                   | to_json) }}
+      vars:
+        bminfra_override_live: >-
+          {{ (bminfra_live_override.stdout | trim | from_json)
+             if (bminfra_live_override.stdout | trim | length > 0) else {} }}
+        bminfra_override_live_files: "{{ bminfra_override_live.storage.files | default([]) }}"
+        bminfra_override_ours: "{{ bminfra_ignition_config_override | from_json }}"
+        bminfra_override_new_files: >-
+          {{ bminfra_override_ours.storage.files
+             | rejectattr('path', 'in', bminfra_override_live_files | map(attribute='path') | list)
+             | list }}
+      when: bminfra_ignition_config_override | default('') | length > 0
 
-# Without this the next task downloads the ISO built from the *old* spec, boots
-# it, and the workers fail exactly as before - the new ISO is the whole point of
-# the patch, so wait for it rather than racing it.
-- name: Wait for assisted-service to rebuild the discovery ISO
-  ansible.builtin.command: >
-    oc get infraenv {{ oadp_bminfra_namespace }} -n {{ oadp_bminfra_namespace }}
-    -o jsonpath={.status.createdTime}
-  register: bminfra_iso_created_after
-  until: >-
-    bminfra_iso_created_after.stdout | trim | length > 0
-    and bminfra_iso_created_after.stdout != bminfra_iso_created_before.stdout
-  retries: 40
-  delay: 15
-  changed_when: false
-  when: bminfra_override_patch.changed | default(false)
+    # The ISO is rebuilt asynchronously when the spec changes, and .status.createdTime
+    # is the field that moves when it is. Read it before the patch so the wait below
+    # has something to compare against.
+    - name: Note when the current discovery ISO was built
+      ansible.builtin.command: >
+        oc get infraenv {{ oadp_bminfra_namespace }} -n {{ oadp_bminfra_namespace }}
+        -o jsonpath={.status.createdTime}
+      register: bminfra_iso_created_before
+      changed_when: false
 
-# download-discovery-iso.yml's get_url would otherwise keep the copy already in
-# download_dir, since get_url only re-fetches an existing dest when forced.
-- name: Force the cached discovery ISO and PXE artifacts to be replaced
-  ansible.builtin.set_fact:
-    discovery_iso_force_download: true
-  when: bminfra_override_patch.changed | default(false)
+    - name: Patch the ignition config override onto the InfraEnv
+      ansible.builtin.shell: >
+        oc patch infraenv {{ oadp_bminfra_namespace }} -n {{ oadp_bminfra_namespace }}
+        --type merge
+        -p {{ {'spec': {'ignitionConfigOverride': bminfra_override_desired}} | to_json | quote }}
+      register: bminfra_override_patch
+      changed_when: "'(no change)' not in bminfra_override_patch.stdout"
+      when:
+        - bminfra_ignition_config_override | default('') | length > 0
+        - bminfra_override_desired | trim != bminfra_live_override.stdout | trim
 
-- name: Report the InfraEnv's ignition override state
-  ansible.builtin.debug:
-    msg: >-
-      {{ 'Patched InfraEnv ' ~ oadp_bminfra_namespace ~ ', new discovery ISO built at '
-         ~ (bminfra_iso_created_after.stdout | default('')) ~ ' - it will be re-downloaded.'
-         if (bminfra_override_patch.changed | default(false))
-         else 'InfraEnv ' ~ oadp_bminfra_namespace ~ ' already carried the right ignition override - discovery ISO untouched.' }}
+    # Without this the next task downloads the ISO built from the *old* spec, boots
+    # it, and the workers fail exactly as before - the new ISO is the whole point of
+    # the patch, so wait for it rather than racing it.
+    - name: Wait for assisted-service to rebuild the discovery ISO
+      ansible.builtin.command: >
+        oc get infraenv {{ oadp_bminfra_namespace }} -n {{ oadp_bminfra_namespace }}
+        -o jsonpath={.status.createdTime}
+      register: bminfra_iso_created_after
+      until: >-
+        bminfra_iso_created_after.stdout | trim | length > 0
+        and bminfra_iso_created_after.stdout != bminfra_iso_created_before.stdout
+      retries: 40
+      delay: 15
+      changed_when: false
+      when: bminfra_override_patch.changed | default(false)
+
+    # download-discovery-iso.yml's get_url would otherwise keep the copy already in
+    # download_dir, since get_url only re-fetches an existing dest when forced.
+    - name: Force the cached discovery ISO and PXE artifacts to be replaced
+      ansible.builtin.set_fact:
+        discovery_iso_force_download: true
+      when: bminfra_override_patch.changed | default(false)
+
+    - name: Report the InfraEnv's ignition override state
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Patched InfraEnv ' ~ oadp_bminfra_namespace ~ ', new discovery ISO built at '
+             ~ (bminfra_iso_created_after.stdout | default('')) ~ ' - it will be re-downloaded.'
+             if (bminfra_override_patch.changed | default(false))
+             else 'InfraEnv ' ~ oadp_bminfra_namespace ~ ' already carried the right ignition override - discovery ISO untouched.' }}
