@@ -29,16 +29,6 @@ ip_list:
   c1worker1: 41
   c1worker2: 42
   c1worker3: 43
-  # Disconnected hosted clusters (hosted_clusters_disconnected below) - the
-  # worker VMs setup_hosted_cluster_vm.yaml creates when
-  # disconnected_install is true. Its own addresses and its own ingress VIP
-  # so it can sit alongside hcp-cluster1 rather than replacing it, and so
-  # only these three IPs get their NAT cut (see
-  # hosted_cluster_disconnected_workers further down).
-  c1dworker1: 44
-  c1dworker2: 45
-  c1dworker3: 46
-  c1dlb: 48
   c1lb: 49
   c2worker1: 51
   c2worker2: 52
@@ -53,6 +43,8 @@ ip_list:
   # Disconnected hosted clusters (hosted_clusters_disconnected) - worker VMs
   # and the *.apps ingress VIP each one gets on the helper's haproxy. Separate
   # addresses from the connected c1/c2/c3 sets, so both kinds run at once.
+  # These are also the only addresses whose NAT is cut when
+  # hosted_cluster_disconnected_block_node_nat is true.
   #
   # c1dworker*/c1dlb match the octets the disconnected-cluster-vms work already
   # uses, so the two do not fight over addresses. The rest are picked from what
@@ -378,10 +370,11 @@ hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
 ## target_hub in setup_bminfra.yaml - a disconnected run renders the
 ## disconnected bundle onto hubd and nothing else. Every name here needs an
 ## entry in hosted_cluster_metallb_pools above, exactly like hosted_clusters.
+##
+## The list itself lives with hosted_clusters further down (see
+## 'DISCONNECTED hosted clusters') - it is defined once, there. Only the VM
+## sizing and worker definitions for the disconnected run live here.
 ## ---------------------------------------------------------------------------
-hosted_clusters_disconnected:
-  - hcp-cluster1-d
-
 hosted_cluster_disconnected_cpu: 4
 hosted_cluster_disconnected_memory: 8512
 hosted_cluster_disconnected_vm_folder: /var/lib/libvirt/images/hosted_cluster_disconnected
