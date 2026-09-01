@@ -148,6 +148,12 @@
   loop_control:
     label: "{{ item.name }}"
 
+# Deployed unconditionally, exactly like the hub_disconnected_domain zone
+# above: the zone costs nothing when the disconnected hosted cluster has not
+# been built, and having it always present means `--tags dns` never has to be
+# re-run with -e disconnected_install=true just to make its names resolve.
+# What target_hub it is rendered with still matters - see the template.
+
 - name: Start Named Service
   service:
     name: named

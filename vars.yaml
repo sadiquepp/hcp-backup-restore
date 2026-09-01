@@ -29,6 +29,16 @@ ip_list:
   c1worker1: 41
   c1worker2: 42
   c1worker3: 43
+  # Disconnected hosted clusters (hosted_clusters_disconnected below) - the
+  # worker VMs setup_hosted_cluster_vm.yaml creates when
+  # disconnected_install is true. Its own addresses and its own ingress VIP
+  # so it can sit alongside hcp-cluster1 rather than replacing it, and so
+  # only these three IPs get their NAT cut (see
+  # hosted_cluster_disconnected_workers further down).
+  c1dworker1: 44
+  c1dworker2: 45
+  c1dworker3: 46
+  c1dlb: 48
   c1lb: 49
   c2worker1: 51
   c2worker2: 52
@@ -174,6 +184,18 @@ hub_disconnected_domain: hubd.mylab.com
 hosted_domain: hcp-cluster1.mylab.com
 hosted_domain2: hcp-cluster2.mylab.com
 hosted_domain3: hcp-cluster3.mylab.com
+## Subdomain for the disconnected hosted cluster. Its leading label is the
+## HostedCluster name in hosted_clusters_disconnected below - that is what ties
+## this zone to the cluster's hosted_cluster_metallb_pools entry, exactly as
+## hosted_domain does for hcp-cluster1. Giving it its own zone is what keeps
+## api/api-int (and *.apps) for the disconnected cluster distinct from
+## hcp-cluster1's, so both can be up at once.
+## LEGACY, like hosted_domain/2/3 above: nothing renders from it any more. Every
+## hosted cluster zone is derived as <cluster-name>.<base_domain> from
+## hosted_clusters + hosted_clusters_disconnected, which is what lets all three
+## '-d' clusters have zones without a template per cluster. Kept only for older
+## playbooks that still reference it.
+hosted_domain_disconnected: hcp-cluster1-d.mylab.com
 
 
 
@@ -318,11 +340,74 @@ hosted_cluster_cpu: 4
 hosted_cluster_memory: 8512
 hosted_cluster_vm_folder: /var/lib/libvirt/images/hosted_cluster
 
+## The worker VMs setup_hosted_cluster_vm.yaml creates for hcp-cluster1.
+## 'name' is the libvirt domain name (and the qcow2 basename); 'ip_key' is
+## the ip_list key that gives the VM its address, via the MAC scheme
+## 52:54:00:e2:54:<last octet> the libvirt network reserves it under.
+hosted_cluster_workers:
+  - name: c1_worker1
+    ip_key: c1worker1
+  - name: c1_worker2
+    ip_key: c1worker2
+  - name: c1_worker3
+    ip_key: c1worker3
+
 
 ## Variables for Hosted Cluster1
 hosted_cluster2_cpu: 4
 hosted_cluster2_memory: 8512
 hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
+
+## ---------------------------------------------------------------------------
+## Disconnected hosted cluster - the hosted cluster whose worker VMs have no
+## route to the real internet, so it can only ever pull from the local mirror
+## registry. Everything here is used only when disconnected_install is true
+## (see the bottom of this file, or -e disconnected_install=true); a connected
+## run never touches any of it.
+##
+## It deliberately mirrors hcp-cluster1 rather than replacing it:
+##   - its own worker VMs      (hosted_cluster_disconnected_workers, .44-.46)
+##   - its own ingress VIP     (ip_list.c1dlb, .48) and haproxy frontends
+##   - its own DNS zone        (<name>.<base_domain>) so api/api-int and
+##                              *.apps are distinct from hcp-cluster1's
+##   - its own MetalLB pool    (hosted_cluster_metallb_pools['hcp-cluster1-d'])
+## so both can be up on the lab at the same time.
+##
+## With disconnected_install true these clusters REPLACE hosted_clusters in
+## roles/create-hosted-cluster, the same way disconnected_install wins over
+## target_hub in setup_bminfra.yaml - a disconnected run renders the
+## disconnected bundle onto hubd and nothing else. Every name here needs an
+## entry in hosted_cluster_metallb_pools above, exactly like hosted_clusters.
+## ---------------------------------------------------------------------------
+hosted_clusters_disconnected:
+  - hcp-cluster1-d
+
+hosted_cluster_disconnected_cpu: 4
+hosted_cluster_disconnected_memory: 8512
+hosted_cluster_disconnected_vm_folder: /var/lib/libvirt/images/hosted_cluster_disconnected
+
+## Same shape as hosted_cluster_workers above. The names are what keeps these
+## VMs distinct from hcp-cluster1's c1_worker* domains on the same hypervisor,
+## and the ip_keys are the addresses whose NAT is cut (see
+## hosted_cluster_disconnected_block_node_nat).
+hosted_cluster_disconnected_workers:
+  - name: c1-d-worker1
+    ip_key: c1dworker1
+  - name: c1-d-worker2
+    ip_key: c1dworker2
+  - name: c1-d-worker3
+    ip_key: c1dworker3
+
+## Whether to cut those worker IPs off from the real internet before the VMs
+## are created - a RETURN at the top of libvirt's LIBVIRT_PRT chain (nat) so
+## their traffic is never MASQUERADEd, plus a REJECT at the top of LIBVIRT_FWO
+## (filter) so it does not leave the hypervisor un-NATed either. Identical
+## treatment to the disconnected hub's nodes; see
+## roles/setup-hub-cluster-disconnected/tasks/block-node-nat.yml. Set false to
+## build the cluster from the mirror while leaving the workers able to reach the
+## internet - useful when checking whether a failure is really caused by the
+## disconnection.
+hosted_cluster_disconnected_block_node_nat: true
 
 ## Variables required by the OADP backup/restore flow
 ## (roles/setup-oadp, oadp/templates/*, setup_oadp.yaml,

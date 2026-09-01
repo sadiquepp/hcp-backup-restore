@@ -10,6 +10,15 @@
 # roles/setup-hub-cluster's install-config.yaml.j2 - stored once in
 # vault.yaml, reused here rather than duplicated.
 
+# The InfraEnv's pull-secret is the one manifest that cannot be rendered the
+# same way on both kinds of hub: disconnected, the discovery agent pulls
+# through the mirror registry and needs that registry's credentials, not the
+# vault's Red Hat ones. Connected runs skip this and render exactly what they
+# always did (defaults/main.yml keeps bminfra_pull_secret as pull_secret).
+- name: Reduce the InfraEnv pull-secret to the mirror registry (disconnected)
+  ansible.builtin.include_tasks: disconnected-pull-secret.yml
+  when: disconnected_install | bool
+
 - name: Render bminfra manifests
   template:
     src: "{{ item }}"
@@ -42,7 +51,10 @@
       {{ role_path }}/templates/.rendered-*.yaml then re-enable the
       'Apply bminfra manifests' task in roles/setup-bminfra/tasks/main.yml
       (after roles/setup-hub-acm's AgentServiceConfig apply is re-enabled
-      and confirmed working - InfraEnv depends on it).
+      and confirmed working - InfraEnv depends on it). The pull-secret is
+      rendered for a
+      {{ 'disconnected' if disconnected_install | bool else 'connected' }}
+      hub.
 
 - name: Download discovery ISO from InfraEnv
   ansible.builtin.include_tasks: download-discovery-iso.yml

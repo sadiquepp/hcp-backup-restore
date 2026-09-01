@@ -35,6 +35,24 @@
   delay: "{{ mcp_rollout_delay | default(30) }}"
   changed_when: false
 
+# The API server comes back before it is steady - the masters reboot one at a
+# time, and the last one to rejoin can still be catching up when the poll above
+# first sees every pool Updated. An `oc wait` issued into that window is
+# answered with the same
+#
+#   Error from server (Timeout): the server was unable to return a response in
+#   the time allotted, but may still be processing the request
+#   (get machineconfigpools.machineconfiguration.openshift.io)
+#
+# and fails the play over a cluster that is in fact healthy - `oc get mcp` a
+# few minutes later shows every pool Updated=True, Degraded=False. So give the
+# API server time to settle before asking it anything else. Set
+# mcp_settle_delay to 0 to skip the wait.
+- name: Let the API server settle after the MachineConfigPool rollout
+  ansible.builtin.pause:
+    seconds: "{{ mcp_settle_delay | default(300) }}"
+  when: (mcp_settle_delay | default(300) | int) > 0
+
 # By now the API is back and the pools have settled, so this one can be a
 # plain wait - it is reporting the end state, not watching a rollout.
 - name: Fail if any MachineConfigPool ended up degraded

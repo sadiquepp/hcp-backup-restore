@@ -4,7 +4,9 @@
 # Whether to cut this cluster's nodes off from the real internet: a RETURN at the
 # top of libvirt's LIBVIRT_PRT chain (nat) so their traffic is never MASQUERADEd,
 # plus a REJECT at the top of LIBVIRT_FWO (filter) so it does not leave the
-# hypervisor un-NATed either. See the block at the top of tasks/main.yml.
+# hypervisor un-NATed either. See tasks/block-node-nat.yml, which is where those
+# rules live (shared with the disconnected hosted cluster in
+# setup_hosted_cluster_vm.yaml).
 # Set to false to install from the mirror registry while leaving the nodes able
 # to reach the internet - useful when debugging whether a failure is genuinely
 # caused by the disconnection.

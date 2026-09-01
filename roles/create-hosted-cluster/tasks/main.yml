@@ -30,6 +30,15 @@
 # Passing -e hcp_cluster_name=<name> still works: it renders just that
 # one cluster, out of whichever list this run is using.
 #
+# With disconnected_install true (vars.yaml, or -e disconnected_install=true)
+# hosted_clusters_disconnected is rendered INSTEAD of hosted_clusters, the same
+# way disconnected_install wins over target_hub in setup_bminfra.yaml. A
+# disconnected run is its own environment on the disconnected hub: the connected
+# clusters' worker VMs are not cut off from the internet and their control
+# planes belong on hub1/hub2, so rendering them here as well would be wrong.
+# Nothing else about the bundle changes - same template, same per-cluster
+# override keys - which is why there is no second template and no second role.
+#
 # This is the most consequential apply in the whole chain (it's what
 # actually starts node provisioning), so - matching how AgentServiceConfig
 # and bminfra are handled - apply starts out commented pending manual
@@ -120,9 +129,11 @@
       - hosted_cluster_specs | default([]) | length > 0
       - hosted_cluster_specs | rejectattr('name', 'defined') | list | length == 0
     fail_msg: >-
-      No hosted clusters to render. Define hosted_clusters in vars.yaml
-      (a list of names, or of dicts each with a 'name' key), or pass
-      -e hcp_cluster_name=<name>.
+      No hosted clusters to render. Define
+      {{ (disconnected_install | default(false) | bool)
+         | ternary('hosted_clusters_disconnected', 'hosted_clusters') }}
+      in vars.yaml (a list of names, or of dicts each with a 'name' key), or
+      pass -e hcp_cluster_name=<name>.
 
 # Everything in this run is disconnected, or nothing is - the list chosen above
 # decides it. The inputs the disconnected bundle needs (the mirror registry's CA

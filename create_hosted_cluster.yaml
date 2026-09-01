@@ -56,15 +56,34 @@
       hub: "{{ hub_install_folder }}"
       hub2: "{{ hub2_install_folder }}"
       hubd: "{{ hub_disconnected_install_folder }}"
-    hub_kubeconfig: "{{ hub_install_folders[target_hub | default('hub')] }}/auth/kubeconfig"
+    ## Which hub this run talks to. A disconnected run goes to the disconnected
+    ## hub without needing -e target_hub=hubd, since that is the only hub the
+    ## disconnected clusters exist on - same rule roles/setup-dns applies when
+    ## it decides which hub's address to publish for them. -e target_hub=hub2
+    ## still wins, because that is the DR cutover and it moves both kinds of
+    ## cluster onto the DR hub.
+    hub_selected: >-
+      {{ 'hubd'
+         if (disconnected_install | default(false) | bool)
+            and (target_hub | default('hub')) != 'hub2'
+         else (target_hub | default('hub')) }}
+    hub_kubeconfig: "{{ hub_install_folders[hub_selected] }}/auth/kubeconfig"
   tasks:
+  # Which list has to be non-empty depends on disconnected_install, because
+  # that is what the role picks between. The role makes the same selection
+  # itself (as hosted_clusters_selected) - this only fails earlier, with a
+  # message naming the variable the operator actually has to edit.
   - name: Fail fast if required inputs are missing
     ansible.builtin.assert:
       that:
-        - (hosted_clusters | default([]) | length > 0) or hcp_cluster_name is defined
+        - >-
+          ((hosted_clusters_disconnected | default([])
+            if (disconnected_install | default(false) | bool)
+            else hosted_clusters | default([])) | length > 0)
+          or hcp_cluster_name is defined
         - pull_secret is defined
         - ssh_key is defined
-        - (target_hub | default('hub')) in hub_install_folders
+        - hub_selected in hub_install_folders
       fail_msg: >-
         Define hosted_clusters in vars.yaml (or pass -e hcp_cluster_name=<name>
         to render a single cluster), and make sure pull_secret/ssh_key are
