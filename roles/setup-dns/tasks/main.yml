@@ -72,50 +72,87 @@
   notify:
     -  Restart_Named
 
-- name: Deploy "{{ hosted_domain }}" zonefile
+# Every hosted cluster gets a zone, connected and disconnected alike, in one
+# unconditional pass - the helper serves all of them at once and never needs
+# rebuilding to switch between the two. The zones are derived from the cluster
+# lists rather than from hosted_domain/2/3, which is what stopped the '-d'
+# clusters silently having no zone at all.
+#
+# An entry in either list is a bare name or a dict with 'name'.
+- name: Work out the hosted cluster names
+  ansible.builtin.set_fact:
+    dns_connected_clusters: >-
+      {{ (hosted_clusters | default([]) | select('mapping') | map(attribute='name') | list)
+         + (hosted_clusters | default([]) | reject('mapping') | list) }}
+    dns_disconnected_clusters: >-
+      {{ (hosted_clusters_disconnected | default([]) | select('mapping') | map(attribute='name') | list)
+         + (hosted_clusters_disconnected | default([]) | reject('mapping') | list) }}
+
+# Which hub each cluster's api/api-int points at - see setup_dns_hub_* in
+# defaults/main.yml for why it is resolved per cluster and not per run.
+- name: Plan the connected hosted cluster zones
+  ansible.builtin.set_fact:
+    hosted_cluster_zone_plan: >-
+      {{ hosted_cluster_zone_plan | default([]) + [{
+           'name': item,
+           'hub': setup_dns_hub_connected
+                  if (hosted_cluster_metallb_pools[item].ip | default({}))[setup_dns_hub_connected] is defined
+                  else 'hub' }] }}
+  loop: "{{ dns_connected_clusters }}"
+  when: item in (hosted_cluster_metallb_pools | default({}))
+
+- name: Plan the disconnected hosted cluster zones
+  ansible.builtin.set_fact:
+    hosted_cluster_zone_plan: >-
+      {{ hosted_cluster_zone_plan | default([]) + [{
+           'name': item,
+           'hub': 'hub2' if (target_hub | default('hub')) == 'hub2'
+                  else setup_dns_hub_disconnected }] }}
+  loop: "{{ dns_disconnected_clusters }}"
+  when: item in (hosted_cluster_metallb_pools | default({}))
+
+- name: Fail fast if a hosted cluster has no MetalLB pool entry
+  ansible.builtin.assert:
+    that:
+      - item in (hosted_cluster_metallb_pools | default({}))
+    fail_msg: >-
+      Hosted cluster '{{ item }}' has no entry in hosted_cluster_metallb_pools
+      (vars.yaml), so its zone has no address to publish as api/api-int. Add
+      one - a disconnected cluster needs a 'hubd' address, a connected one a
+      'hub' address - and re-run setup-hub-acm so the matching IPAddressPool
+      exists too.
+  loop: "{{ dns_connected_clusters + dns_disconnected_clusters }}"
+
+- name: Deploy the hosted cluster forward zonefiles
   template:
-    src: hosted_domain.j2
-    dest: "/var/named/{{ hosted_domain }}.db"
+    src: hosted_cluster_zone.j2
+    dest: "/var/named/{{ item.name }}.{{ base_domain }}.db"
     owner: root
     group: named
     mode: u=rw,g=r,o=r
-  notify:
-    -  Restart_Named
-    
-- name: Deploy "{{ hosted_domain2 }}" zonefile
-  template:
-    src: hosted_domain2.j2
-    dest: "/var/named/{{ hosted_domain2 }}.db"
-    owner: root
-    group: named
-    mode: u=rw,g=r,o=r
+  loop: "{{ hosted_cluster_zone_plan | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}.{{ base_domain }} -> {{ item.hub }}"
+  vars:
+    zone: "{{ item }}"
   notify:
     -  Restart_Named
 
-- name: Deploy "{{ hosted_domain3 }}" zonefile
-  template:
-    src: hosted_domain3.j2
-    dest: "/var/named/{{ hosted_domain3 }}.db"
-    owner: root
-    group: named
-    mode: u=rw,g=r,o=r
-  notify:
-    -  Restart_Named
+- name: Show which address each hosted cluster zone publishes
+  ansible.builtin.debug:
+    msg: >-
+      api.{{ item.name }}.{{ base_domain }} ->
+      {{ (hosted_cluster_metallb_network_prefixes | default({}))[item.hub] | default(lab_network_prefix) }}.{{ hosted_cluster_metallb_pools[item.name].ip[item.hub] }}
+      (hub {{ item.hub }}, MetalLB pool {{ hosted_cluster_metallb_pools[item.name].pool }})
+  loop: "{{ hosted_cluster_zone_plan | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
 
 # Deployed unconditionally, exactly like the hub_disconnected_domain zone
 # above: the zone costs nothing when the disconnected hosted cluster has not
 # been built, and having it always present means `--tags dns` never has to be
 # re-run with -e disconnected_install=true just to make its names resolve.
 # What target_hub it is rendered with still matters - see the template.
-- name: Deploy "{{ hosted_domain_disconnected }}" zonefile
-  template:
-    src: hosted_domain_disconnected.j2
-    dest: "/var/named/{{ hosted_domain_disconnected }}.db"
-    owner: root
-    group: named
-    mode: u=rw,g=r,o=r
-  notify:
-    -  Restart_Named
 
 - name: Start Named Service
   service:

@@ -21,17 +21,26 @@
 ##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
 ##     -e hcp_cluster_name=hcp-cluster2
 ##
-## Disconnected:
+## Disconnected: pass the same disconnected_install flag the rest of the
+## disconnected flow uses (or set it in vars.yaml) and the same role renders
+## each bundle against the mirror registry instead - a '<cluster>-user-ca-bundle'
+## ConfigMap wired into the HostedCluster's proxy.trustedCA and
+## additionalTrustBundle, a spec.imageContentSources map that includes the
+## registry.redhat.io/multicluster-engine redirection the Agent platform needs,
+## and a pull secret holding only the mirror registry's credentials:
 ##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
 ##     -e disconnected_install=true
-## renders vars.yaml's hosted_clusters_disconnected list INSTEAD of
-## hosted_clusters, against the hub installed by
-## setup_hub_cluster_disconnected.yaml - so disconnected_install wins over
-## target_hub here exactly as it does in setup_bminfra.yaml. The bundle itself
-## is the same generic template: a disconnected hosted cluster differs only in
-## its name (and therefore its own DNS zone, api/api-int and MetalLB pool), in
-## the worker VMs setup_hosted_cluster_vm.yaml builds for it (also gated on
-## disconnected_install), and in those workers having no route off the lab.
+## Requires setup_mirror_registry.yaml to have run (that is what puts the
+## registry CA and a podman login on this host).
+##
+## A disconnected run renders hosted_clusters_disconnected (hcp-cluster1-d,
+## hcp-cluster2-d, hcp-cluster3-d), NOT hosted_clusters - those names are
+## reserved for connected clusters. The two are separate clusters with their
+## own namespaces, MetalLB pools (hubd 67-69) and DNS zones, so both kinds can
+## be up on this lab at once. Pair it with -e target_hub=hubd so the run uses
+## the disconnected hub's kubeconfig:
+##   ansible-playbook create_hosted_cluster.yaml --ask-vault-pass \
+##     -e disconnected_install=true -e target_hub=hubd
 
 - name: Create Hosted Cluster
   hosts: localhost
@@ -40,11 +49,25 @@
     - vars.yaml
     - vault.yaml
   vars:
-    hub_install_folder_selected: >-
-      {{ hub_disconnected_install_folder
+    ## Which hub this run talks to. The old ternary only knew hub2, so
+    ## -e target_hub=hubd silently fell back to hub1's kubeconfig and the
+    ## bundle would have been applied to the wrong cluster.
+    hub_install_folders:
+      hub: "{{ hub_install_folder }}"
+      hub2: "{{ hub2_install_folder }}"
+      hubd: "{{ hub_disconnected_install_folder }}"
+    ## Which hub this run talks to. A disconnected run goes to the disconnected
+    ## hub without needing -e target_hub=hubd, since that is the only hub the
+    ## disconnected clusters exist on - same rule roles/setup-dns applies when
+    ## it decides which hub's address to publish for them. -e target_hub=hub2
+    ## still wins, because that is the DR cutover and it moves both kinds of
+    ## cluster onto the DR hub.
+    hub_selected: >-
+      {{ 'hubd'
          if (disconnected_install | default(false) | bool)
-         else ((target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder)) }}
-    hub_kubeconfig: "{{ hub_install_folder_selected }}/auth/kubeconfig"
+            and (target_hub | default('hub')) != 'hub2'
+         else (target_hub | default('hub')) }}
+    hub_kubeconfig: "{{ hub_install_folders[hub_selected] }}/auth/kubeconfig"
   tasks:
   # Which list has to be non-empty depends on disconnected_install, because
   # that is what the role picks between. The role makes the same selection
@@ -60,11 +83,14 @@
           or hcp_cluster_name is defined
         - pull_secret is defined
         - ssh_key is defined
+        - hub_selected in hub_install_folders
       fail_msg: >-
-        Define {{ (disconnected_install | default(false) | bool)
-                  | ternary('hosted_clusters_disconnected', 'hosted_clusters') }}
-        in vars.yaml (or pass -e hcp_cluster_name=<name> to render a single
-        cluster), and make sure pull_secret/ssh_key are defined in vault.yaml.
+        Define hosted_clusters in vars.yaml (or pass -e hcp_cluster_name=<name>
+        to render a single cluster), and make sure pull_secret/ssh_key are
+        defined in vault.yaml. target_hub must be one of
+        {{ hub_install_folders.keys() | list | join(', ') }} - it selects both the
+        kubeconfig this run uses and the MetalLB address each hosted cluster's
+        api/api-int must resolve to.
 
   - ansible.builtin.import_role:
       name: create-hosted-cluster

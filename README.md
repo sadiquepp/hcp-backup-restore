@@ -304,7 +304,7 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
 
 - Create a Hosted Cluster from the Web UI using the discovered nodes.
 
-  - List the hosted clusters you want in `hosted_clusters` in `vars.yaml`, then render them all by invoking the create-hosted-cluster role. One generic template covers every cluster; an entry is a bare name, or a dict with `name` plus any per-cluster override. Concurrent hosted clusters on the same hub can share `cluster_cidr`/`service_cidr` - each is its own OVN-Kubernetes cluster and those CIDRs never leave its data plane.
+  - List the hosted clusters you want in `hosted_clusters` in `vars.yaml`, then render them all by invoking the create-hosted-cluster role. One template covers every connected cluster (a second one covers disconnected clusters - see below); an entry is a bare name, or a dict with `name` plus any per-cluster override. Concurrent hosted clusters on the same hub can share `cluster_cidr`/`service_cidr` - each is its own OVN-Kubernetes cluster and those CIDRs never leave its data plane.
   ```yaml
   hosted_clusters:
     - hcp-cluster1
@@ -327,6 +327,198 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
   ```bash
   oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml
   ```
+### Create a Hosted Cluster (Disconnected Deployment)
+
+`create-hosted-cluster` renders differently when it is run disconnected, the
+same way `setup-hub-acm` does. It hangs off the same `disconnected_install`
+flag - set it in `vars.yaml` or pass `-e disconnected_install=true`. Connected
+runs render byte-for-byte what they always did.
+
+```bash
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass -e disconnected_install=true
+```
+
+Requires `setup_mirror_registry.yaml` to have run against this lab first - that
+is what leaves the registry's CA at
+`/etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem` and logs the
+bare-metal host's podman into the registry, which are the two inputs the
+disconnected rendering reads.
+
+What the disconnected run adds to each bundle:
+
+- A `<cluster>-user-ca-bundle` ConfigMap in the hosted cluster's own namespace,
+  holding the mirror registry CA under `ca-bundle.crt`. The HostedCluster
+  references it twice: `spec.configuration.proxy.trustedCA`, which puts the CA
+  in the hosted cluster's cluster-wide proxy trust bundle, and
+  `spec.additionalTrustBundle`, which HyperShift carries into the nodes' own
+  trust store through the ignition it generates. Both fields look for
+  `ca-bundle.crt`, so one ConfigMap serves both. The mirror registry is
+  self-signed, so without this every pull from it fails on an unknown
+  authority.
+- `spec.imageContentSources` on the HostedCluster, from
+  `hosted_cluster_image_content_sources`. A hosted cluster is its own cluster
+  with its own `registries.conf` - the hub's `ImageDigestMirrorSet` /
+  `ImageTagMirrorSet` only redirect pulls made *by the hub*, so without this
+  list the hosted cluster resolves every pullspec to its public registry.
+  `registry.redhat.io/multicluster-engine` is the mapping that matters most on
+  Agent platform: the agent and assisted-installer images the nodes run come
+  from there, so omitting it gives you a control plane that comes up while the
+  NodePool never finishes joining. The role asserts it is present
+  (`hosted_cluster_required_image_content_sources`) rather than letting that
+  fail silently hours later.
+- A pull secret reduced to the mirror registry's own credentials, read from
+  `mirror_registry_authfile`. Same reasoning as
+  `roles/setup-hub-cluster-disconnected`: vault's `pull_secret` also carries
+  live quay.io / registry.redhat.io credentials, and shipping those would give
+  the nodes a working route back to the real registries, so a pull the mirror
+  is missing could still succeed and the cluster would be disconnected only by
+  accident. Set `hosted_cluster_disconnected_pull_secret: false` to render
+  vault's secret unchanged while debugging.
+- `spec.configuration.operatorhub.disableAllDefaultSources: true`, since the
+  default catalogs resolve against `registry.redhat.io` and otherwise only show
+  up as failing CatalogSource pods. Set
+  `hosted_cluster_disable_default_catalog_sources: false` if you are mirroring
+  them.
+- An APIServer `loadBalancer.hostname` that has to resolve to this cluster's
+  MetalLB address **on the hub it is running on**. Pool *names* are identical on
+  every hub; the *addresses* are not (`hub` 60-62, `hub2` 90-92, `hubd` 64-66),
+  so a cluster rendered disconnected publishes a name that must resolve to its
+  `hubd` address, not its `hub` one. The role resolves the hub per cluster
+  (`hosted_cluster_metallb_hub`, defaulting to `target_hub`, but `hubd` for any
+  cluster rendered disconnected), fails if that cluster's
+  `hosted_cluster_metallb_pools[...].ip` has no entry for that hub, and prints
+  the name/address pairing plus the `dig` command to check it. Re-render DNS for
+  the same hub or the two drift apart:
+  `setup_bm_host.yaml --tags dns -e target_hub=hubd`. For a disconnected cluster
+  that is the zone `roles/setup-dns` renders with `-e target_hub=hubd`, not
+  hub1's. The default (`api.<cluster-name>.<base_domain>`) is correct by
+  construction under the repo convention that a hosted cluster's DNS zone is
+  named after the cluster - a cluster named `hcp-cluster1-d` gets
+  `api.hcp-cluster1-d.mylab.com`. If you render a cluster disconnected under a
+  name whose zone points at another hub - e.g. plain `hcp-cluster1` with
+  `-e disconnected_install=true` - set `api_hostname` on its `hosted_clusters`
+  entry, or `hosted_cluster_api_hostname` in `vars.yaml`.
+
+The connected and disconnected renderings are **two separate templates**
+(`templates/hosted-cluster.yaml.j2` and
+`templates/hosted-cluster-disconnected.yaml.j2`), the same way `setup-hub-acm`
+keeps its disconnected `AgentServiceConfig` separate. `tasks/main.yml` picks
+between them per cluster. They share the NodePool / ManagedCluster /
+KlusterletAddonConfig tail, so a change to one usually belongs in both.
+
+The release payload is addressed **by version**, not by a hard-coded digest:
+`hosted_cluster_release_version` defaults to `<ocp_major_version>.<ocp_minor_version>`,
+so the hosted clusters run the same release the rest of the lab is built from
+and there is one number to bump. Both `HostedCluster.spec.release.image` and
+`NodePool.spec.release.image` come from it.
+
+Connected renders `quay.io/openshift-release-dev/ocp-release:<version>-x86_64`.
+Disconnected renders the **mirror registry's own copy** at the same version,
+`<registry>:<port>/<mirror_release_repository>:<version>-x86_64` - the same
+pullspec `setup-hub-cluster-disconnected` already extracts `openshift-install`
+from, so it is known to exist there.
+
+That is a preference, not a requirement. The release image is resolved **on the
+hub** - HyperShift pulls it there to extract the payload and pin every component
+image by digest - and the hub carries oc-mirror's `ImageTagMirrorSet`, which
+redirects `quay.io/openshift-release-dev/ocp-release` by tag
+(`acm_disconnected_registry_mirrors` lists it with `digest_only: false`, and
+`setup-hub-cluster-disconnected` applies ITMS as a day-2 resource). So the
+canonical quay.io tag resolves through the mirror perfectly well.
+
+`spec.imageContentSources` is a different layer: it is the hosted cluster's own
+`registries.conf`, carries `ImageDigestMirrorSet` (mirror-by-digest-only)
+semantics, and covers the component images - which are pulled by digest anyway,
+so digest-only is exactly right there.
+
+Naming the mirror directly buys one thing: the payload pull stops depending on
+the hub's ITMS being present and correct. It costs portability, since the
+pullspec names this lab's registry, so a HostedCluster restored onto a connected
+hub needs its release image swapped. Set
+`hosted_cluster_release_image_disconnected: "{{ hosted_cluster_release_image }}"`
+to keep the canonical name and lean on the hub's ITMS instead.
+
+Connected and disconnected clusters are **two separate lists of separate
+clusters**, which is what lets a connected and a disconnected hosted cluster be
+up on this lab at the same time:
+
+```yaml
+## connected - these names are reserved for connected runs
+hosted_clusters:
+  - hcp-cluster1
+  - hcp-cluster2
+  - hcp-cluster3
+
+## disconnected - rendered instead of the above when disconnected_install=true
+hosted_clusters_disconnected:
+  - hcp-cluster1-d
+  - hcp-cluster2-d
+  - hcp-cluster3-d
+```
+
+A `-d` cluster is a cluster in its own right: its own namespace, its own
+MetalLB pool (`hubd` .67-.69), its own DNS zone and its own worker VMs. It is
+not `hcp-cluster1` rendered differently, and the role refuses to run if a name
+appears in both lists, since the two would collide on all three. Note the
+connected clusters carry **no `hubd` address** - they never run on the
+disconnected hub, and a stray entry would make `setup-hub-acm` create pools
+there for clusters that will never ask for them.
+
+Run a disconnected render against the disconnected hub's kubeconfig:
+
+```bash
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass \
+  -e disconnected_install=true -e target_hub=hubd
+```
+
+`setup_bm_host.yaml` renders the helper for **both** kinds in one
+unconditional pass - there is no `disconnected_install` switch anywhere in
+`setup-bm-host` / `setup-dns` / `setup-lb` / `setup-tftp`, so the helper never
+needs rebuilding to move between connected and disconnected. That pass now
+covers the `-d` clusters:
+
+- a forward zone per hosted cluster, connected and disconnected, derived from
+  the two cluster lists (`<cluster-name>.<base_domain>`) instead of the old
+  `hosted_domain`/`2`/`3` variables. One shared template replaces the three
+  copy-pasted ones, which is why adding the `-d` clusters needed no new
+  template.
+- a matching `zone` stanza in `named.conf` and PTRs in the reverse zone, driven
+  from the same lists so a zone file and its stanza can never disagree.
+- a `<forwarder>` in the libvirt `default` network per zone, so those names
+  resolve from the VMs on `virbr0` and not just from the helper.
+
+Which hub each zone's `api`/`api-int` points at is resolved **per cluster**:
+connected clusters follow `target_hub`, disconnected ones use `hubd`, and both
+move to `hub2` under `-e target_hub=hub2` for a DR cutover. `-e target_hub=hubd`
+leaves the connected clusters on their `hub` addresses rather than failing,
+since they do not run there.
+
+`*.apps` is wired for the `-d` clusters too. `setup-lb` binds one ingress VIP
+per hosted cluster as a secondary address on the helper and renders an haproxy
+frontend/backend pair per cluster on :80 and :443, all derived from
+`hosted_cluster_node_keys` rather than hand-listed - the `-d` clusters had no
+ingress path before simply because that list was maintained by hand:
+
+| cluster | `*.apps` VIP | worker backends |
+|---|---|---|
+| hcp-cluster1 / 2 / 3 | .49 / .59 / .58 | .41-.43 / .51-.53 / .54-.56 |
+| hcp-cluster1-d | .48 | .44-.46 |
+| hcp-cluster2-d | .38 | .28, .29, .37 |
+| hcp-cluster3-d | .99 | .96-.98 |
+
+Worker, PTR, DHCP and `*.apps` records are all rendered only for `ip_list` keys
+that exist, so a cluster whose VMs have not been built yet still gets a valid
+zone carrying the `api`/`api-int` records its HostedCluster publishes, and an
+haproxy section appears only once it has both a VIP and at least one worker -
+never a frontend with no backend.
+
+Review and apply the rendered bundles exactly as in the connected flow -
+`roles/create-hosted-cluster/templates/.rendered-<cluster>.yaml`. Keep
+`hosted_cluster_image_content_sources` in step with
+`acm_disconnected_registry_mirrors` (setup-hub-acm) and with what oc-mirror
+actually published; after the hub is up,
+`oc get imagedigestmirrorset,imagetagmirrorset -o yaml` is the source of truth.
+
 - Note that the hosted cluster worker nodes will go to shutoff mode while joining the nodes to the NodePool. Make sure that the vms are started from virt-manager or via virsh to complete the NodePool join process.
 ```bash
 virsh start c1_worker1

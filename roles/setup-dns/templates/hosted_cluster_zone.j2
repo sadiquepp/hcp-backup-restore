@@ -1,0 +1,53 @@
+{# Forward zone for ONE hosted cluster, rendered once per entry in
+   hosted_clusters + hosted_clusters_disconnected. Replaces the old
+   hosted_domain.j2 / hosted_domain2.j2 / hosted_domain3.j2, which were three
+   copies of this file and the reason the '-d' clusters had no zones at all.
+
+   'zone' is {name, hub} from the plan roles/setup-dns/tasks/main.yml builds.
+   The zone's own name is <cluster-name>.<base_domain>, so the leading label is
+   the HostedCluster name - which is how this zone and
+   hosted_cluster_metallb_pools stay keyed together with no second source of
+   truth.
+
+   api/api-int are the cluster's kube-apiserver VIP, handed out by MetalLB on
+   whichever hub runs its control plane. Both the address and the network it
+   sits on come from hosted_cluster_metallb_pools for zone.hub - the same map
+   and the same hub selector roles/setup-hub-acm renders that cluster's
+   single-address IPAddressPool from, and roles/create-hosted-cluster checks
+   the HostedCluster's loadBalancer hostname against.
+
+   zone.hub is what moves these records at DR cutover: re-run
+     ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+       --ask-vault-pass -e target_hub=hub2
+   and every cluster's api/api-int follows its control plane onto the DR hub.
+
+   Worker and *.apps records are rendered only for ip_list keys that exist
+   (see hosted_cluster_node_keys in vars.yaml), so a cluster whose VMs have not
+   been built yet still gets a valid zone carrying the api/api-int records the
+   HostedCluster actually publishes. -#}
+{% set pool = hosted_cluster_metallb_pools[zone.name] -%}
+{% set metallb_prefix = (hosted_cluster_metallb_network_prefixes | default({}))[zone.hub] | default(lab_network_prefix) -%}
+{% set node_keys = (hosted_cluster_node_keys | default({}))[zone.name] | default({}) -%}
+$TTL 1D
+@	IN SOA	helper.{{ hub_domain }}. root.{{ hub_domain }}. (
+					0	; serial
+					1D	; refresh
+					1H	; retry
+					1W	; expire
+					3H )	; minimum
+		NS	helper.{{ hub_domain }}.
+{% for key in node_keys.workers | default([]) %}
+{% if key in ip_list %}
+{# Both spellings: 'workerN' is what this zone has always published, and the
+   ip_list key ('c1worker1') is the name the DHCP reservation and the PTR in
+   named-reverse.hub.j2 use - without an A record it would be a PTR pointing at
+   a name that does not resolve. #}
+worker{{ loop.index }}		A	{{ lab_network_prefix }}.{{ ip_list[key] }}
+{{ key }}		A	{{ lab_network_prefix }}.{{ ip_list[key] }}
+{% endif %}
+{% endfor %}
+api		A	{{ metallb_prefix }}.{{ pool.ip[zone.hub] }}
+api-int		A	{{ metallb_prefix }}.{{ pool.ip[zone.hub] }}
+{% if (node_keys.apps_lb | default('')) in ip_list %}
+*.apps		A	{{ lab_network_prefix }}.{{ ip_list[node_keys.apps_lb] }}
+{% endif %}

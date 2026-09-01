@@ -31,18 +31,21 @@ $TTL    600
 {{ ip_list.hubd_worker1 }} 		IN PTR 		worker1.{{ hub_disconnected_domain }}.
 {{ ip_list.hubd_worker2 }} 		IN PTR 		worker2.{{ hub_disconnected_domain }}.
 {{ ip_list.hubd_worker3 }} 		IN PTR 		worker3.{{ hub_disconnected_domain }}.
-{{ ip_list.c1worker1 }} 		IN PTR 		c1worker1.{{ hosted_domain }}.
-{{ ip_list.c1worker2 }} 		IN PTR 		c1worker2.{{ hosted_domain }}.
-{{ ip_list.c1worker3 }} 		IN PTR 		c1worker3.{{ hosted_domain }}.
-{{ ip_list.c1dworker1 }} 		IN PTR 		c1dworker1.{{ hosted_domain_disconnected }}.
-{{ ip_list.c1dworker2 }} 		IN PTR 		c1dworker2.{{ hosted_domain_disconnected }}.
-{{ ip_list.c1dworker3 }} 		IN PTR 		c1dworker3.{{ hosted_domain_disconnected }}.
-{{ ip_list.c2worker1 }} 		IN PTR 		c2worker1.{{ hosted_domain2 }}.
-{{ ip_list.c2worker2 }} 		IN PTR 		c2worker2.{{ hosted_domain2 }}.
-{{ ip_list.c2worker3 }} 		IN PTR 		c2worker3.{{ hosted_domain2 }}.
-{{ ip_list.c3worker1 }} 		IN PTR 		c3worker1.{{ hosted_domain3 }}.
-{{ ip_list.c3worker2 }} 		IN PTR 		c3worker2.{{ hosted_domain3 }}.
-{{ ip_list.c3worker3 }} 		IN PTR 		c3worker3.{{ hosted_domain3 }}.
+{# Hosted cluster worker PTRs for every cluster in either list, rendered only
+   for ip_list keys that exist - so the '-d' clusters pick theirs up as soon as
+   their worker octets are added, with no edit here. The name each PTR points
+   at is the ip_list key, which is also the DHCP reservation's FQDN and now has
+   a matching A record in the cluster's forward zone. #}
+{% for name in (hosted_clusters | default([]) | select('mapping') | map(attribute='name') | list)
+                + (hosted_clusters | default([]) | reject('mapping') | list)
+                + (hosted_clusters_disconnected | default([]) | select('mapping') | map(attribute='name') | list)
+                + (hosted_clusters_disconnected | default([]) | reject('mapping') | list) %}
+{% for key in ((hosted_cluster_node_keys | default({}))[name] | default({})).workers | default([]) %}
+{% if key in ip_list %}
+{{ ip_list[key] }} 		IN PTR 		{{ key }}.{{ name }}.{{ base_domain }}.
+{% endif %}
+{% endfor %}
+{% endfor %}
 {{ ip_list.ceph1 }} 		IN PTR 		ceph1.{{ hub_domain }}.
 {{ ip_list.ceph2 }} 		IN PTR 		ceph2.{{ hub_domain }}.
 {{ ip_list.ceph3 }} 		IN PTR 		ceph3.{{ hub_domain }}.

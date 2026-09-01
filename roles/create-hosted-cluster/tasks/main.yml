@@ -2,9 +2,20 @@
 # Tasks file for create-hosted-cluster
 #
 # Renders the HostedCluster/Secrets/NodePool/ManagedCluster/
-# KlusterletAddonConfig bundle once per entry in hosted_clusters (see
-# vars.yaml). One generic template drives all of them - to add another
-# hosted cluster, add a name to that list, not a new template.
+# KlusterletAddonConfig bundle once per entry in the cluster list for this run.
+#
+# There are TWO lists, and they must not overlap:
+#
+#   hosted_clusters               connected clusters   - hcp-cluster1/2/3
+#   hosted_clusters_disconnected  disconnected ones    - hcp-cluster1-d/2-d/3-d
+#
+# disconnected_install picks which one a run renders, and with it which
+# template: hosted-cluster.yaml.j2 or hosted-cluster-disconnected.yaml.j2. A
+# disconnected cluster is a cluster in its own right - its own name, namespace,
+# DNS zone and MetalLB address on hubd - not a connected one rendered
+# differently, so the two sets never share a name. That is what lets a
+# connected and a disconnected hosted cluster be up on this lab at the same
+# time.
 #
 # Each entry is either a bare name:
 #   hosted_clusters:
@@ -17,7 +28,7 @@
 #       nodepool_replicas: 3
 #
 # Passing -e hcp_cluster_name=<name> still works: it renders just that
-# one cluster (using its hosted_clusters entry if it has one).
+# one cluster, out of whichever list this run is using.
 #
 # With disconnected_install true (vars.yaml, or -e disconnected_install=true)
 # hosted_clusters_disconnected is rendered INSTEAD of hosted_clusters, the same
@@ -36,20 +47,67 @@
 # Depends on AgentServiceConfig and bminfra already being applied and
 # confirmed working (roles/setup-hub-acm, roles/setup-bminfra) - a
 # HostedCluster on Agent platform can't provision nodes without both.
+#
+# See the "Disconnected rendering" section of defaults/main.yml for what the
+# disconnected bundle adds.
 
-- name: Select the cluster list this run renders
+# The two lists are separate sets of clusters, not two views of one set. A name
+# in both would mean one HostedCluster that is somehow connected and
+# disconnected at once - it would collide on namespace, MetalLB pool and DNS
+# zone - so refuse to render anything rather than pick one.
+# An entry is a bare name or a dict with 'name', so flatten both shapes to
+# plain names before comparing them.
+- name: Work out the cluster names in each list
   ansible.builtin.set_fact:
-    hosted_clusters_selected: >-
-      {{ hosted_clusters_disconnected | default([])
-         if (disconnected_install | default(false) | bool)
-         else hosted_clusters | default([]) }}
+    hosted_cluster_connected_names_all: >-
+      {{ (hosted_clusters | default([]) | select('mapping') | map(attribute='name') | list)
+         + (hosted_clusters | default([]) | reject('mapping') | list) }}
+    hosted_cluster_disconnected_names_all: >-
+      {{ (hosted_clusters_disconnected | default([]) | select('mapping') | map(attribute='name') | list)
+         + (hosted_clusters_disconnected | default([]) | reject('mapping') | list) }}
 
-- name: Normalise the selected cluster list into a list of dicts
+- name: Fail fast if a cluster name appears in both lists
+  ansible.builtin.assert:
+    that:
+      - hosted_cluster_connected_names_all
+        | intersect(hosted_cluster_disconnected_names_all) | length == 0
+    fail_msg: >-
+      {{ hosted_cluster_connected_names_all
+         | intersect(hosted_cluster_disconnected_names_all) | join(', ') }}
+      appears in both hosted_clusters and hosted_clusters_disconnected. Those
+      are separate clusters, not one cluster rendered two ways - they would
+      collide on namespace, MetalLB pool and DNS zone. Give the disconnected one
+      its own name (the convention is a '-d' suffix: hcp-cluster1 connected,
+      hcp-cluster1-d disconnected), its own entry in
+      hosted_cluster_metallb_pools with a 'hubd' address, and its own DNS zone.
+
+- name: Choose the cluster list for this run
+  ansible.builtin.set_fact:
+    hosted_cluster_source: >-
+      {{ (hosted_clusters_disconnected | default([]))
+         if disconnected_install | bool
+         else (hosted_clusters | default([])) }}
+    hosted_cluster_run_disconnected: "{{ disconnected_install | bool }}"
+
+- name: Fail fast if a disconnected run has no disconnected clusters
+  ansible.builtin.assert:
+    that:
+      - hosted_cluster_source | length > 0 or hcp_cluster_name is defined
+    fail_msg: >-
+      disconnected_install is true but hosted_clusters_disconnected is empty.
+      Disconnected clusters are their own clusters with their own names - list
+      them in vars.yaml (the convention is a '-d' suffix, e.g. hcp-cluster1-d),
+      give each an entry in hosted_cluster_metallb_pools with a 'hubd' address,
+      and a matching DNS zone. hosted_clusters is for connected clusters only
+      and is deliberately not reused here.
+  when: hosted_cluster_run_disconnected | bool
+
+- name: Normalise the chosen list into a list of dicts
   ansible.builtin.set_fact:
     hosted_cluster_specs: >-
       {{ hosted_cluster_specs | default([])
          + [ (item is mapping) | ternary(item, {'name': item}) ] }}
-  loop: "{{ hosted_clusters_selected }}"
+  loop: "{{ hosted_cluster_source }}"
   loop_control:
     label: "{{ (item is mapping) | ternary(item.name | default('<unnamed>'), item) }}"
 
@@ -77,6 +135,97 @@
       in vars.yaml (a list of names, or of dicts each with a 'name' key), or
       pass -e hcp_cluster_name=<name>.
 
+# Everything in this run is disconnected, or nothing is - the list chosen above
+# decides it. The inputs the disconnected bundle needs (the mirror registry's CA
+# and credentials) are read once here rather than once per cluster.
+- name: Note which clusters render disconnected
+  ansible.builtin.set_fact:
+    hosted_cluster_disconnected_specs: >-
+      {{ hosted_cluster_specs if hosted_cluster_run_disconnected | bool else [] }}
+    hosted_cluster_disconnected_names: >-
+      {{ (hosted_cluster_specs | map(attribute='name') | list)
+         if hosted_cluster_run_disconnected | bool else [] }}
+
+- name: Gather the mirror registry inputs for disconnected rendering
+  ansible.builtin.include_tasks: disconnected-inputs.yml
+  when: hosted_cluster_disconnected_specs | length > 0
+
+- name: Say which clusters are being rendered disconnected
+  ansible.builtin.debug:
+    msg: >-
+      Rendering
+      {{ hosted_cluster_disconnected_specs | map(attribute='name') | join(', ') }}
+      against the mirror registry at
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }} - each gets a
+      '<name>-user-ca-bundle' ConfigMap (referenced from the HostedCluster's
+      proxy.trustedCA and additionalTrustBundle) and an imageContentSources
+      list redirecting the release payload and registry.redhat.io/multicluster-engine
+      to that registry.
+  when: hosted_cluster_disconnected_specs | length > 0
+
+# Which hub each cluster's APIServer VIP comes from. Pool names are identical
+# on every hub; the addresses are not, so this is what decides whether
+# hcp-cluster1 means .60 (hub), .90 (hub2) or .64 (hubd). A disconnected
+# cluster runs on the disconnected hub, so it resolves to 'hubd' even when
+# target_hub still says 'hub'.
+- name: Work out which hub each cluster's APIServer VIP comes from
+  ansible.builtin.set_fact:
+    hosted_cluster_vip_plan: >-
+      {{ hosted_cluster_vip_plan | default([]) + [ item | combine({'hub': hcp_hub}) ] }}
+  loop: "{{ hosted_cluster_specs }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    hcp_hub: >-
+      {{ item.metallb_hub | default(
+           hosted_cluster_metallb_hub_disconnected
+           if item.name in hosted_cluster_disconnected_names
+           else hosted_cluster_metallb_hub) }}
+
+# The pool existing is not enough - it has to hold an address on the hub this
+# bundle is for. Rendering a cluster whose ip map has no entry for that hub
+# gives MetalLB a pool it cannot fill, so the kube-apiserver Service sits
+# <pending> forever and the hosted cluster never gets an endpoint.
+- name: Fail fast if a hosted cluster has no MetalLB address on its hub
+  ansible.builtin.assert:
+    that:
+      - item.name not in (hosted_cluster_metallb_pools | default({}))
+        or (hosted_cluster_metallb_pools[item.name].ip | default({}))[item.hub] is defined
+    fail_msg: >-
+      Hosted cluster '{{ item.name }}' is being rendered for hub '{{ item.hub }}'
+      but hosted_cluster_metallb_pools['{{ item.name }}'].ip has no address for
+      it (it has:
+      {{ (hosted_cluster_metallb_pools[item.name].ip | default({})).keys() | list | join(', ') }}).
+      Add one in vars.yaml and re-run setup-hub-acm with -e metallb_hub={{ item.hub }}
+      so the IPAddressPool is created, and setup-dns with -e target_hub={{ item.hub }}
+      so api/api-int point at it.
+  loop: "{{ hosted_cluster_vip_plan }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ item.hub }}"
+
+# The hostname in the bundle is a NAME; the pool gives an ADDRESS. They line up
+# only if setup-dns rendered that name's zone for the same hub. Print both so
+# the operator can see the pairing instead of inferring it - this is the check
+# that catches a disconnected cluster still publishing hub1's address.
+- name: Show the APIServer name each cluster publishes and the address it must resolve to
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }} (hub {{ item.hub }}):
+      hostname {{ item.api_hostname | default('api.' ~ item.name ~ '.' ~ base_domain) }}
+      must resolve to
+      {{ (hosted_cluster_metallb_network_prefixes | default({}))[item.hub] | default(lab_network_prefix) }}.{{ hosted_cluster_metallb_pools[item.name].ip[item.hub] }}
+      (MetalLB pool {{ hosted_cluster_metallb_pools[item.name].pool }}).
+      Render that zone with:
+      ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns
+      --ask-vault-pass -e target_hub={{ item.hub }}
+      then check it with:
+      dig +short {{ item.api_hostname | default('api.' ~ item.name ~ '.' ~ base_domain) }}
+      @{{ lab_network_prefix }}.{{ ip_list.helper_server }}
+  loop: "{{ hosted_cluster_vip_plan }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.name in (hosted_cluster_metallb_pools | default({}))
+
 # Every cluster needs a MetalLB pool: it is what the metallb.io/address-pool
 # annotation on the HostedCluster names, and - via that pool's single address
 # and serviceAllocation - what keeps the cluster's kube-apiserver VIP on the
@@ -100,13 +249,21 @@
   loop_control:
     label: "{{ item.name }}"
 
+# Connected and disconnected are two separate templates rather than one with
+# conditionals, matching how roles/setup-hub-acm keeps its disconnected
+# AgentServiceConfig separate. They share the NodePool/ManagedCluster/
+# KlusterletAddonConfig tail - change one, check the other.
 - name: Render hosted cluster bundles
   ansible.builtin.template:
-    src: hosted-cluster.yaml.j2
+    src: >-
+      {{ (hcp.name in hosted_cluster_disconnected_names)
+         | ternary('hosted-cluster-disconnected.yaml.j2', 'hosted-cluster.yaml.j2') }}
     dest: "{{ role_path }}/templates/.rendered-{{ hcp.name }}.yaml"
   loop: "{{ hosted_cluster_specs }}"
   loop_control:
-    label: "{{ hcp.name }}"
+    label: >-
+      {{ hcp.name }}
+      ({{ (hcp.name in hosted_cluster_disconnected_names) | ternary('disconnected', 'connected') }})
   vars:
     hcp: "{{ item }}"
 
