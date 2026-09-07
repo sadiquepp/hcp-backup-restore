@@ -27,8 +27,36 @@ spec:
   includedNamespaces:
     - hello-openshift-oadp-csi
 
+  # NOT "*". The hypershift OADP plugin registers a BackupItemAction whose
+  # AppliesTo() is an empty selector - it runs on *every item of every
+  # backup* - and its only guard is pkg/common.ShouldEndPluginExecution,
+  # which decides "this is a hypershift backup, do not skip" when the
+  # Backup's includedResources contains "*" (or anything matching
+  # hostedcluster / hostedcontrolplane / nodepool). It then fails every
+  # item with "error getting HCP namespace: no HostedControlPlane found",
+  # because this namespace is not a hosted control plane.
+  #
+  # That is not just noise: Velero's executeActions returns on the first
+  # action error, so the CSI snapshot action - which is another action in
+  # the same loop - never runs for the PVC. The result is a backup with
+  # no VolumeSnapshot and no DataUpload at all, which looks like a broken
+  # storage setup and is not.
+  #
+  # An explicit list that mentions none of those keywords makes the
+  # plugin's guard return true, so it no-ops and leaves this backup alone.
+  # (The HCP templates in templates/ deliberately DO name hostedcluster
+  # and friends - there the plugin is exactly what you want.)
   includedResources:
-    - "*"
+    - persistentvolumeclaims
+    - persistentvolumes
+    - pods
+    - deployments
+    - replicasets
+    - services
+    - routes
+    - secrets
+    - configmaps
+    - serviceaccounts
 
   snapshotVolumes: true
   snapshotMoveData: true

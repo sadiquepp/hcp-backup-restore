@@ -324,30 +324,79 @@ the bucket: `backuprepositories.velero.io` indexes what is under it, and
 rearranging the folder structure means recreating the DPA, backups and
 restores.
 
-#### If the backup ends `PartiallyFailed` with thousands of errors
+#### `no HostedControlPlane found` errors, and why they stop CSI working
 
-Check what the errors actually are before assuming the snapshot failed:
+Errors like
 
-```bash
-velero backup logs hello-openshift-oadp-csi-backup -n openshift-adp | grep -i error | head
-oc get datauploads -n openshift-adp -l velero.io/backup-name=hello-openshift-oadp-csi-backup
+```
+error executing custom action (groupResource=persistentvolumes, ...):
+  rpc error: code = Unknown desc = error getting HCP namespace: no HostedControlPlane found
 ```
 
-Errors reading `error executing custom action (groupResource=appliedmanifestworks...)`
-/ `no HostedControlPlane found` are not about your volume. They come from
-`includeClusterResources: true` on the Backup, which does not mean "the
-cluster-scoped objects this namespace needs" - it means **every**
-cluster-scoped object in the cluster. On an ACM hub that is thousands of
-`AppliedManifestWork` objects, and the hypershift plugin's custom action
-errors on each one that is not a hosted control plane. The item count
-gives it away: a one-pod namespace backing up 4000+ items is backing up
-the whole cluster.
+on a backup of an ordinary namespace come from the hypershift OADP
+plugin, and they are not the harmless noise they look like.
 
-The manifests here leave the field unset, which is what you want - Velero
-then includes only the cluster-scoped resources associated with the
-namespace's own objects, above all the PV behind the PVC. If you hit this
-on a Backup of your own, drop the field and re-run. A `Completed` phase
-and a `DataUpload` in phase `Completed` are what a good run looks like.
+The plugin's `AppliesTo()` is an **empty ResourceSelector**, which in
+Velero means it runs on every item of every backup. Its only guard is
+`pkg/common.ShouldEndPluginExecution`, which skips the plugin unless the
+Backup looks like an HCP backup - and the test for that is the Backup's
+`includedResources`:
+
+```go
+for _, resource := range backup.Spec.IncludedResources {
+    if resource == "*" ||
+        strings.Contains(resource, "hostedcluster") ||
+        strings.Contains(resource, "hostedcontrolplane") ||
+        strings.Contains(resource, "nodepool") {
+        return false, nil   // not skipped: run on every item
+    }
+}
+return true, nil            // skipped
+```
+
+So `includedResources: ["*"]` on a backup of a namespace that is not a
+hosted control plane makes the plugin claim the backup and then fail on
+every item.
+
+**Why that breaks CSI snapshots.** Velero's `executeActions`
+(`pkg/backup/item_backupper.go`) returns on the first action error:
+
+```go
+updatedItem, ..., err := action.Execute(obj, ib.backupRequest.Backup)
+if err != nil {
+    return nil, itemFiles, errors.Wrapf(err, "error executing custom action (...)")
+}
+```
+
+The CSI snapshot is just another action in that same loop, keyed on
+PVCs. When the hypershift action fails on the PVC first, Velero bails out
+and the CSI action never runs - so there is **no VolumeSnapshot and no
+DataUpload at all**, and no `csiSnapshot` entry in the skipped-PV summary
+either, because that entry is only written inside the branch it never
+reached. It looks exactly like a broken storage setup, and is not.
+
+The fix is an explicit `includedResources` list naming none of those
+keywords, which is what the manifests here now use. The HCP templates in
+`templates/` deliberately do name `hostedcluster`, `hostedcontrolplane`
+and `nodepool` - there the plugin is the whole point, the namespace
+really is a hosted control plane, and it resolves cleanly.
+
+#### If the backup reports thousands of items
+
+A one-pod namespace backing up 4000+ items is backing up the whole
+cluster - `includeClusterResources: true` does not mean "the
+cluster-scoped objects this namespace needs", it means **every**
+cluster-scoped object there is. On an ACM hub that is thousands of
+`AppliedManifestWork`s. Leave the field unset (as these manifests do) and
+Velero includes only what is associated with the namespace's own
+objects - above all the PV behind the PVC.
+
+A good run is a `Completed` phase with a `DataUpload` in phase
+`Completed`:
+
+```bash
+oc get datauploads -n openshift-adp -l velero.io/backup-name=hello-openshift-oadp-csi-backup
+```
 
 To restore it (on the DR hub, or after deleting the namespace here):
 
