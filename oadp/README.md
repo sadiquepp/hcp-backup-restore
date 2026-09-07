@@ -15,8 +15,9 @@ AWS credentials/a bucket that don't exist at first hub bring-up.
 
 `hello-openshift*.yaml` are left as-is - a small, self-contained
 smoke-test app + Backup/Restore pair to sanity-check OADP itself before
-you run it against a real hosted cluster. The `*-csi-*` copies of those
-do the same thing through CSI snapshots (see below).
+you run it against a real hosted cluster. They use the `fs` method; there
+is no CSI equivalent, for a reason worth reading before debugging a CSI
+backup - see [Why there is no CSI smoke test](#why-there-is-no-csi-smoke-test).
 
 Control-plane volumes can be captured two ways, selected by
 `oadp_backup_method` - see [Backup methods: fs vs csi](#backup-methods-fs-vs-csi).
@@ -188,102 +189,90 @@ oc apply -f oadp/hello-openshift-oadp-backup.yaml
 oc get Backup -n hello-openshift-oadp-backup -o yaml
 ```
 
-### The same smoke test through CSI snapshots
+### Why there is no CSI smoke test
 
-`hello-openshift-oadp-csi*.yaml` are the CSI copies of the three files
-above: same app, its own namespace, and a PVC on
-`ocs-external-storagecluster-ceph-rbd` instead of `lvms-vg1`. Run this
-before an HCP backup with `oadp_backup_method=csi` - it exercises the
-same code path in about a minute instead of an hour.
+There is deliberately no CSI equivalent of the hello-openshift smoke test
+above. On any hub this repo builds it cannot work, and the reason is
+worth knowing before you debug a CSI backup of your own.
 
-**First make sure the hub is prepared for CSI backups**, or Velero will
-skip the volume and produce no `DataUpload` at all:
+The DPA loads the `hypershift` plugin on every hub. That plugin's
+`AppliesTo()` is an **empty ResourceSelector**, which in Velero means its
+BackupItemAction runs against every item of every backup - PVs,
+ServiceAccounts, Events, everything. Whenever the item's namespace is not
+a hosted control plane it fails:
 
-```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
-oc get volumesnapshotclass -L velero.io/csi-volumesnapshot-class
+```
+error executing custom action (groupResource=persistentvolumes, ...):
+  rpc error: code = Unknown desc = error getting HCP namespace: no HostedControlPlane found
 ```
 
-Exactly one class for your CSI driver must show `true` in that column.
-Applying the manifests below without this step is the most common way to
-get a backup that reports `Completed` (or `PartiallyFailed`) while
-having snapshotted nothing.
+Upstream's `pkg/common.ShouldEndPluginExecution` is supposed to skip the
+plugin for backups that do not look like HCP backups (it tests whether
+`includedResources` contains `*`, `hostedcluster`, `hostedcontrolplane`
+or `nodepool`), but the plugin build shipped with OADP 1.5 here errors
+regardless - an explicit resource list naming none of those keywords
+makes no difference.
 
-```bash
-oc apply -f oadp/hello-openshift-oadp-csi.yaml
-POD=`oc get pod -n hello-openshift-oadp-csi -o jsonpath='{.items[0].metadata.name}'`
-oc exec -it $POD -n hello-openshift-oadp-csi -- sh -c 'echo "Hello, CSI!" > /var/data/hello.txt'
+**Why that kills CSI specifically.** In
+`pkg/backup/item_backupper.go`, Velero collects pod volumes for
+file-system backup *before* calling `executeActions`, but the CSI
+snapshot is an action *inside* it - and `executeActions` returns on the
+first action error:
 
-oc apply -f oadp/hello-openshift-oadp-csi-backup.yaml
+```go
+updatedItem, ..., err := action.Execute(obj, ib.backupRequest.Backup)
+if err != nil {
+    return nil, itemFiles, errors.Wrapf(err, "error executing custom action (...)")
+}
 ```
 
-Unlike the fs backup, the transfer is visible as a `DataUpload`, and
-the Backup sits in `WaitingForPluginOperations` until it finishes:
+So on a non-HCP namespace:
+
+| | outcome |
+| --- | --- |
+| `fs` | works - the PodVolumeBackup was already set up before the failing action, so data is backed up and the Backup merely reports `PartiallyFailed` |
+| `csi` | never runs - the hypershift action fails on the PVC first, so no VolumeSnapshot and no DataUpload are ever created |
+
+That is why the fs smoke test above is useful despite its error count,
+and why a CSI one would only ever look like broken storage.
+
+**Validate the CSI method on the real thing instead.** In a hosted
+control plane's namespace the plugin resolves the HCP, returns success,
+and the CSI action runs normally:
 
 ```bash
+ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+  -e hcp_cluster_name=hcp-cluster1 -e oadp_backup_method=csi
 oc get datauploads -n openshift-adp -w
-oc get backup hello-openshift-oadp-csi-backup -n openshift-adp -o jsonpath='{.status.phase}{"\n"}'
 ```
 
-Re-running it needs the old backup gone first - Velero acts on a Backup
-once, so re-applying the same manifest over an existing object does
-nothing. Delete it **through Velero**, not with `oc delete`:
-
-```bash
-alias velero='oc -n openshift-adp exec deployment/velero -c velero -it -- ./velero'
-velero backup delete hello-openshift-oadp-csi-backup --confirm
-oc apply -f oadp/hello-openshift-oadp-csi-backup.yaml
-```
-
-`oc delete backup` removes only the Kubernetes object; the backup's data
-stays in the bucket, and the next run of the same name fails with
-`backup already exists in object storage`. `velero backup delete` files
-a `DeleteBackupRequest` that removes both. See
-[Recovering from `backup already exists in object storage`](#recovering-from-backup-already-exists-in-object-storage)
-if you already hit this.
+A `DataUpload` reaching phase `Completed` is the proof that CSI snapshot
+plus data mover works; the Backup's own phase is the weaker signal.
 
 #### If no `DataUpload` is created at all
 
 `oc get datauploads -n openshift-adp` returning nothing means Velero
-never attempted the volume - the backup did not fail at snapshotting, it
-declined to snapshot. Work down this list:
+never attempted the volume. Check, in this order:
 
 ```bash
-# 1. Is a snapshot class labelled for Velero? (the usual answer)
+# 1. a snapshot class labelled for Velero, for this PVC's driver?
 oc get volumesnapshotclass -L velero.io/csi-volumesnapshot-class
 
-# 2. Did the PVC actually bind, and to a CSI driver?
-oc get pvc -n hello-openshift-oadp-csi
-oc get pv -o custom-columns=NAME:.metadata.name,SC:.spec.storageClassName,DRIVER:.spec.csi.driver \
-  | grep -i ceph
+# 2. did the PVC bind to a CSI driver?
+oc get pvc -n <namespace>
+oc get pv <pv-name> -o jsonpath='{.spec.storageClassName}{"  driver="}{.spec.csi.driver}{"\n"}'
 
-# 3. What did Velero decide about the PVC?
-velero backup logs hello-openshift-oadp-csi-backup -n openshift-adp \
-  | grep -iE 'persistentvolumeclaim|volumesnapshot|snapshotclass|skip'
+# 3. is CSI enabled in this Velero?
+oc get deployment velero -n openshift-adp \
+  -o jsonpath='{.spec.template.spec.containers[0].args}{"\n"}'   # expect --features=EnableCSI
 
-# 4. Were any VolumeSnapshots created?
-oc get volumesnapshot -A
-
-# 5. Is the csi plugin actually loaded, and the node-agent running?
-oc get dpa dpa-instance -n openshift-adp -o jsonpath='{.spec.configuration.velero.defaultPlugins}{"\n"}'
-oc get pods -n openshift-adp -l name=node-agent
+# 4. did an item action fail before the CSI one got to run?
+velero backup logs <backup-name> -n openshift-adp | grep 'level=error' | head -3
 ```
 
-Most often it is (1): no class carries
-`velero.io/csi-volumesnapshot-class=true`, Velero finds no snapshot class
-for the PVC's driver, and silently moves on. Fix it and re-run:
-
-```bash
-oc label volumesnapshotclass ocs-external-storagecluster-rbdplugin-snapclass \
-  velero.io/csi-volumesnapshot-class=true --overwrite
-velero backup delete hello-openshift-oadp-csi-backup --confirm
-oc apply -f oadp/hello-openshift-oadp-csi-backup.yaml
-```
-
-If (2) shows the PVC `Pending`, or bound to `lvms-vg1` rather than the
-Ceph class, there is nothing snapshottable in the namespace - check the
-`storageClassName` in `hello-openshift-oadp-csi.yaml` matches a class
-`oc get sc` actually lists on this hub.
+(1)-(3) are the prerequisites. (4) is the case described above: a
+`no HostedControlPlane found` error on the PVC means the CSI action was
+never reached, and the storage configuration is not at fault.
 
 #### Recovering from `backup already exists in object storage`
 
@@ -302,110 +291,37 @@ Velero re-syncs backups from the bucket about once a minute, so the
 object comes back on its own; then delete it properly:
 
 ```bash
-oc get backup -n openshift-adp | grep hello-openshift-oadp-csi   # wait for it to reappear
-velero backup delete hello-openshift-oadp-csi-backup --confirm
-oc get deletebackuprequests -n openshift-adp                     # processed, then gone
+alias velero='oc -n openshift-adp exec deployment/velero -c velero -it -- ./velero'
+oc get backup -n openshift-adp | grep <backup-name>   # wait for it to reappear
+velero backup delete <backup-name> --confirm
+oc get deletebackuprequests -n openshift-adp          # processed, then gone
 ```
 
-Delete the failed Backup object too (it is a separate object from the
-synced one) before re-applying the manifest.
-
-If it will not come back, remove that one backup's directory from S3
-by hand - `oadp_bucket_name` and `oadp_backup_prefix` in `vars.yaml` give
+If it will not come back, remove that one backup's directory from S3 by
+hand - `oadp_bucket_name` and `oadp_backup_prefix` in `vars.yaml` give
 the path:
 
 ```bash
 aws s3 ls s3://<oadp_bucket_name>/<oadp_backup_prefix>/backups/
-aws s3 rm s3://<oadp_bucket_name>/<oadp_backup_prefix>/backups/hello-openshift-oadp-csi-backup/ --recursive
+aws s3 rm s3://<oadp_bucket_name>/<oadp_backup_prefix>/backups/<backup-name>/ --recursive
 ```
 
-Delete only that one directory. Do not clear the prefix or reorganise
-the bucket: `backuprepositories.velero.io` indexes what is under it, and
+Delete only that one directory. Do not clear the prefix or reorganise the
+bucket: `backuprepositories.velero.io` indexes what is under it, and
 rearranging the folder structure means recreating the DPA, backups and
 restores.
 
-#### `no HostedControlPlane found` errors, and why they stop CSI working
+#### If a backup reports thousands of items
 
-Errors like
-
-```
-error executing custom action (groupResource=persistentvolumes, ...):
-  rpc error: code = Unknown desc = error getting HCP namespace: no HostedControlPlane found
-```
-
-on a backup of an ordinary namespace come from the hypershift OADP
-plugin, and they are not the harmless noise they look like.
-
-The plugin's `AppliesTo()` is an **empty ResourceSelector**, which in
-Velero means it runs on every item of every backup. Its only guard is
-`pkg/common.ShouldEndPluginExecution`, which skips the plugin unless the
-Backup looks like an HCP backup - and the test for that is the Backup's
-`includedResources`:
-
-```go
-for _, resource := range backup.Spec.IncludedResources {
-    if resource == "*" ||
-        strings.Contains(resource, "hostedcluster") ||
-        strings.Contains(resource, "hostedcontrolplane") ||
-        strings.Contains(resource, "nodepool") {
-        return false, nil   // not skipped: run on every item
-    }
-}
-return true, nil            // skipped
-```
-
-So `includedResources: ["*"]` on a backup of a namespace that is not a
-hosted control plane makes the plugin claim the backup and then fail on
-every item.
-
-**Why that breaks CSI snapshots.** Velero's `executeActions`
-(`pkg/backup/item_backupper.go`) returns on the first action error:
-
-```go
-updatedItem, ..., err := action.Execute(obj, ib.backupRequest.Backup)
-if err != nil {
-    return nil, itemFiles, errors.Wrapf(err, "error executing custom action (...)")
-}
-```
-
-The CSI snapshot is just another action in that same loop, keyed on
-PVCs. When the hypershift action fails on the PVC first, Velero bails out
-and the CSI action never runs - so there is **no VolumeSnapshot and no
-DataUpload at all**, and no `csiSnapshot` entry in the skipped-PV summary
-either, because that entry is only written inside the branch it never
-reached. It looks exactly like a broken storage setup, and is not.
-
-The fix is an explicit `includedResources` list naming none of those
-keywords, which is what the manifests here now use. The HCP templates in
-`templates/` deliberately do name `hostedcluster`, `hostedcontrolplane`
-and `nodepool` - there the plugin is the whole point, the namespace
-really is a hosted control plane, and it resolves cleanly.
-
-#### If the backup reports thousands of items
-
-A one-pod namespace backing up 4000+ items is backing up the whole
-cluster - `includeClusterResources: true` does not mean "the
+A one-namespace backup collecting 4000+ items is backing up the whole
+cluster: `includeClusterResources: true` does not mean "the
 cluster-scoped objects this namespace needs", it means **every**
 cluster-scoped object there is. On an ACM hub that is thousands of
-`AppliedManifestWork`s. Leave the field unset (as these manifests do) and
-Velero includes only what is associated with the namespace's own
-objects - above all the PV behind the PVC.
+`AppliedManifestWork`s, each one erroring through the hypershift plugin.
+Leave the field unset and Velero includes only what is associated with
+the namespace's own objects - above all the PV behind the PVC.
 
-A good run is a `Completed` phase with a `DataUpload` in phase
-`Completed`:
 
-```bash
-oc get datauploads -n openshift-adp -l velero.io/backup-name=hello-openshift-oadp-csi-backup
-```
-
-To restore it (on the DR hub, or after deleting the namespace here):
-
-```bash
-oc apply -f oadp/hello-openshift-oadp-csi-restore.yaml
-oc get datadownloads -n openshift-adp -w
-POD=`oc get pod -n hello-openshift-oadp-csi -o jsonpath='{.items[0].metadata.name}'`
-oc exec -it $POD -n hello-openshift-oadp-csi -- sh -c 'cat /var/data/hello.txt'
-```
 ### Backup a hosted cluster using OADP.
 
 ```bash

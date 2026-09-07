@@ -1390,9 +1390,12 @@ Templates live in `oadp/templates/` (backup/restore manifests) and `roles/setup-
 | `fs`   | `backup-hcp-cluster.yaml.j2` | `restore-hcp-cluster.yaml.j2` | `<cluster>-backup` / `<cluster>-restore` |
 | `csi`  | `backup-hcp-cluster-csi.yaml.j2` | `restore-hcp-cluster-csi.yaml.j2` | `<cluster>-backup-csi` / `<cluster>-restore-csi` |
 
-The same split applies to the hello-openshift smoke test:
-`oadp/hello-openshift-oadp*.yaml` for `fs`, `oadp/hello-openshift-oadp-csi*.yaml`
-for `csi`.
+There is no CSI copy of the hello-openshift smoke test. The hypershift plugin
+the DPA loads runs against every item of every backup and errors on any
+namespace that is not a hosted control plane, which aborts Velero's action
+chain before the CSI snapshot action runs - fs backup survives that, CSI cannot.
+Validate the `csi` method on a real hosted cluster instead; `oadp/README.md`
+explains the mechanism.
 
 For the full IAM policy, smoke-test manifests, and per-hub setup details, see `[oadp/README.md](oadp/README.md)`.
 
