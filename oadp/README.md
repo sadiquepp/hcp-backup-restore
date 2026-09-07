@@ -225,14 +225,22 @@ oc get datauploads -n openshift-adp -w
 oc get backup hello-openshift-oadp-csi-backup -n openshift-adp -o jsonpath='{.status.phase}{"\n"}'
 ```
 
-Re-running it needs the old Backup object gone first - Velero acts on a
-Backup once, so re-applying the same manifest over an existing object
-does nothing:
+Re-running it needs the old backup gone first - Velero acts on a Backup
+once, so re-applying the same manifest over an existing object does
+nothing. Delete it **through Velero**, not with `oc delete`:
 
 ```bash
-oc delete backup hello-openshift-oadp-csi-backup -n openshift-adp
+alias velero='oc -n openshift-adp exec deployment/velero -c velero -it -- ./velero'
+velero backup delete hello-openshift-oadp-csi-backup --confirm
 oc apply -f oadp/hello-openshift-oadp-csi-backup.yaml
 ```
+
+`oc delete backup` removes only the Kubernetes object; the backup's data
+stays in the bucket, and the next run of the same name fails with
+`backup already exists in object storage`. `velero backup delete` files
+a `DeleteBackupRequest` that removes both. See
+[Recovering from `backup already exists in object storage`](#recovering-from-backup-already-exists-in-object-storage)
+if you already hit this.
 
 #### If no `DataUpload` is created at all
 
@@ -268,7 +276,7 @@ for the PVC's driver, and silently moves on. Fix it and re-run:
 ```bash
 oc label volumesnapshotclass ocs-external-storagecluster-rbdplugin-snapclass \
   velero.io/csi-volumesnapshot-class=true --overwrite
-oc delete backup hello-openshift-oadp-csi-backup -n openshift-adp
+velero backup delete hello-openshift-oadp-csi-backup --confirm
 oc apply -f oadp/hello-openshift-oadp-csi-backup.yaml
 ```
 
@@ -276,6 +284,45 @@ If (2) shows the PVC `Pending`, or bound to `lvms-vg1` rather than the
 Ceph class, there is nothing snapshottable in the namespace - check the
 `storageClassName` in `hello-openshift-oadp-csi.yaml` matches a class
 `oc get sc` actually lists on this hub.
+
+#### Recovering from `backup already exists in object storage`
+
+A Backup that fails immediately with
+
+```yaml
+  failureReason: backup already exists in object storage
+  phase: Failed
+```
+
+means the name is still taken in the bucket. It happens after
+`oc delete backup`, which deletes the Kubernetes object and leaves the
+data behind - Velero refuses to overwrite an existing backup directory.
+
+Velero re-syncs backups from the bucket about once a minute, so the
+object comes back on its own; then delete it properly:
+
+```bash
+oc get backup -n openshift-adp | grep hello-openshift-oadp-csi   # wait for it to reappear
+velero backup delete hello-openshift-oadp-csi-backup --confirm
+oc get deletebackuprequests -n openshift-adp                     # processed, then gone
+```
+
+Delete the failed Backup object too (it is a separate object from the
+synced one) before re-applying the manifest.
+
+If it will not come back, remove that one backup's directory from S3
+by hand - `oadp_bucket_name` and `oadp_backup_prefix` in `vars.yaml` give
+the path:
+
+```bash
+aws s3 ls s3://<oadp_bucket_name>/<oadp_backup_prefix>/backups/
+aws s3 rm s3://<oadp_bucket_name>/<oadp_backup_prefix>/backups/hello-openshift-oadp-csi-backup/ --recursive
+```
+
+Delete only that one directory. Do not clear the prefix or reorganise
+the bucket: `backuprepositories.velero.io` indexes what is under it, and
+rearranging the folder structure means recreating the DPA, backups and
+restores.
 
 #### If the backup ends `PartiallyFailed` with thousands of errors
 
