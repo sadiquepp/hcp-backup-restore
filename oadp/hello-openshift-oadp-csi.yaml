@@ -1,0 +1,90 @@
+# ── Sample app for the CSI snapshot smoke test ────────────────────────────────
+# Same app as hello-openshift-oadp.yaml, but its PVC is provisioned from the
+# Ceph/ODF external StorageClass so the backup below can exercise a real CSI
+# VolumeSnapshot. Its own namespace, so it can sit alongside the LVM/fs copy
+# and the two methods can be compared on one hub.
+#
+# Prove CSI snapshots work here before running an HCP backup with
+# oadp_backup_method=csi - it is the same code path, minus an hour of etcd.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hello-openshift-oadp-csi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hello-openshift-oadp-csi-pvc
+  namespace: hello-openshift-oadp-csi
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # Must be a CSI StorageClass with a VolumeSnapshotClass - this is the
+  # name ODF gives the external RBD class (ceph_odf_storagecluster_name
+  # in vars.yaml). lvms-vg1 will NOT work here: no VolumeSnapshotClass.
+  storageClassName: ocs-external-storagecluster-ceph-rbd
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-openshift-oadp-csi
+  namespace: hello-openshift-oadp-csi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-openshift-oadp-csi
+  template:
+    metadata:
+      labels:
+        app: hello-openshift-oadp-csi
+    spec:
+      containers:
+        - name: hello-openshift-oadp-csi
+          image: quay.io/openshift/origin-hello-openshift
+          ports:
+            - containerPort: 8888
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /var/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hello-openshift-oadp-csi-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-openshift-oadp-csi
+  namespace: hello-openshift-oadp-csi
+spec:
+  selector:
+    app: hello-openshift-oadp-csi
+  ports:
+    - port: 8888
+      targetPort: 8888
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: hello-openshift-oadp-csi
+  namespace: hello-openshift-oadp-csi
+spec:
+  to:
+    kind: Service
+    name: hello-openshift-oadp-csi
+  port:
+    targetPort: 8888
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

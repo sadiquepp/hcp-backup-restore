@@ -15,7 +15,11 @@ AWS credentials/a bucket that don't exist at first hub bring-up.
 
 `hello-openshift*.yaml` are left as-is - a small, self-contained
 smoke-test app + Backup/Restore pair to sanity-check OADP itself before
-you run it against a real hosted cluster.
+you run it against a real hosted cluster. The `*-csi-*` copies of those
+do the same thing through CSI snapshots (see below).
+
+Control-plane volumes can be captured two ways, selected by
+`oadp_backup_method` - see [Backup methods: fs vs csi](#backup-methods-fs-vs-csi).
 
 ## One-time AWS setup (per bucket, not per hub)
 
@@ -85,6 +89,53 @@ oadp_aws_secret_access_key: '...'
 This bucket and IAM user are reused by both hub1 and hub2 - you only do
 this section once per lab, not once per hub.
 
+## Backup methods: fs vs csi
+
+The hosted control plane's state lives in etcd, on a PVC in the
+HyperShift control-plane namespace. How Velero captures that PVC is the
+one real choice in this flow, and `oadp_backup_method` in `vars.yaml`
+makes it:
+
+| | `fs` (default) | `csi` |
+| --- | --- | --- |
+| Velero fields | `defaultVolumesToFsBackup: true` | `snapshotVolumes: true`, `snapshotMoveData: true`, `datamover: velero` |
+| How the data moves | node-agent mounts the volume and streams the files to S3 with Kopia | CSI driver snapshots the volume; the data mover copies the snapshot to S3 |
+| Consistency | file-by-file while etcd keeps writing | point-in-time, taken atomically by the storage layer |
+| Works on | any StorageClass, CSI or not - including LVM Storage (`lvms-vg1`) | only a CSI StorageClass with a VolumeSnapshotClass - here, Ceph via ODF external mode |
+| Templates | `templates/backup-hcp-cluster.yaml.j2`, `templates/restore-hcp-cluster.yaml.j2` | `templates/backup-hcp-cluster-csi.yaml.j2`, `templates/restore-hcp-cluster-csi.yaml.j2` |
+| Object names | `<cluster>-backup` / `<cluster>-restore` | `<cluster>-backup-csi` / `<cluster>-restore-csi` |
+
+Both write to the same bucket, prefix and `DataProtectionApplication`;
+the two methods differ only in the Backup/Restore CRs. The names differ
+so both can be demonstrated against one bucket without colliding, and
+the `fs` names are unchanged from before this option existed.
+
+Demonstrating `csi` is the reason the Ceph cluster exists in this lab:
+LVM Storage ships no VolumeSnapshotClass, so it can only ever do `fs`.
+See [Ceph 9 Storage for Hub PVs](../README.md#ceph-9-storage-for-hub-pvs-odf-external-mode)
+for building the cluster and attaching it with `setup_ceph_odf.yaml`.
+
+### What `csi` needs
+
+- The hub's PVs come from a CSI driver with snapshot support. On this
+  lab that means `use_lvm_storage: false` plus `setup_ceph.yaml` and
+  `setup_ceph_odf.yaml`, which leave the hub with
+  `ocs-external-storagecluster-ceph-rbd` as the default StorageClass.
+- A `VolumeSnapshotClass` for that driver labelled
+  `velero.io/csi-volumesnapshot-class=true`. Velero has no field for
+  naming one - it looks the class up by that label, per driver, and if
+  no class carries it **the volume is skipped and the Backup still
+  reports `Completed`**. `setup_oadp.yaml` applies the label when run
+  with `-e oadp_backup_method=csi`; `backup_hosted_cluster.yaml`
+  refuses to run a csi backup if nothing carries it.
+- The `csi` plugin and the node-agent in the DPA. Both are already
+  there (`roles/setup-oadp/templates/dpa.yaml.j2`) - the data mover
+  reuses the same node-agent the `fs` method uses, so no DPA change is
+  needed to switch methods.
+
+Everything else - the bucket, the credentials, the resource list, the
+DR cutover - is identical.
+
 ## Primary Hub
 ### Configure OADP (credentials + DPA)
 The operator is already there (installed during hub bring-up). This
@@ -94,9 +145,19 @@ step just points it at your bucket:
 ansible-playbook setup_oadp.yaml --ask-vault-pass
 ```
 
+For CSI snapshot backups, add the method so the role also labels the
+VolumeSnapshotClass Velero needs (it fails with a clear message if ODF
+has not created one yet):
+
+```bash
+ansible-playbook setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
+```
+
 Idempotent - re-running against the same hub just reconciles the
 secret/DPA. Both hubs point at the same bucket/prefix, so hub2's Velero
-can see backups hub1 created.
+can see backups hub1 created. Run it on the DR hub with the same
+`oadp_backup_method` you backed up with, so the snapshot class is
+labelled there too before the restore.
 
 ### Deploy a hello-openshift application with a PVC to Hub Cluster and backup it using OADP.
 This will be helpful to verify that the backup and restore process is working before running it against a hosted cluster.
@@ -126,6 +187,39 @@ oc apply -f oadp/hello-openshift-oadp-backup.yaml
 ```bash
 oc get Backup -n hello-openshift-oadp-backup -o yaml
 ```
+
+### The same smoke test through CSI snapshots
+
+`hello-openshift-oadp-csi*.yaml` are the CSI copies of the three files
+above: same app, its own namespace, and a PVC on
+`ocs-external-storagecluster-ceph-rbd` instead of `lvms-vg1`. Run this
+before an HCP backup with `oadp_backup_method=csi` - it exercises the
+same code path in about a minute instead of an hour.
+
+```bash
+oc apply -f oadp/hello-openshift-oadp-csi.yaml
+POD=`oc get pod -n hello-openshift-oadp-csi -o jsonpath='{.items[0].metadata.name}'`
+oc exec -it $POD -n hello-openshift-oadp-csi -- sh -c 'echo "Hello, CSI!" > /var/data/hello.txt'
+
+oc apply -f oadp/hello-openshift-oadp-csi-backup.yaml
+```
+
+Unlike the fs backup, the transfer is visible as a `DataUpload`, and
+the Backup sits in `WaitingForPluginOperations` until it finishes:
+
+```bash
+oc get datauploads -n openshift-adp -w
+oc get backup hello-openshift-oadp-csi-backup -n openshift-adp -o jsonpath='{.status.phase}{"\n"}'
+```
+
+To restore it (on the DR hub, or after deleting the namespace here):
+
+```bash
+oc apply -f oadp/hello-openshift-oadp-csi-restore.yaml
+oc get datadownloads -n openshift-adp -w
+POD=`oc get pod -n hello-openshift-oadp-csi -o jsonpath='{.items[0].metadata.name}'`
+oc exec -it $POD -n hello-openshift-oadp-csi -- sh -c 'cat /var/data/hello.txt'
+```
 ### Backup a hosted cluster using OADP.
 
 ```bash
@@ -137,6 +231,22 @@ ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
 used to derive both the hosting namespace and the HyperShift
 control-plane namespace (`<name>-<name>`). Works unchanged for
 `hcp-cluster2` or any future hosted cluster.
+
+To take the same backup through CSI snapshots instead (Backup named
+`hcp-cluster1-backup-csi`):
+
+```bash
+ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+  -e hcp_cluster_name=hcp-cluster1 -e oadp_backup_method=csi
+```
+
+The playbook checks a labelled VolumeSnapshotClass exists before it
+applies anything, then reports the `DataUpload` objects alongside the
+final phase. Watch the volume transfer while it runs:
+
+```bash
+oc get datauploads -n openshift-adp -w
+```
 
 - Get the status of the backup and wait till it finishes before proceeding to the next step.
 ```bash
@@ -192,4 +302,21 @@ oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
 
 ```bash
 ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+```
+
+Pass the same `oadp_backup_method` the backup was taken with - it picks
+both the Restore template and the name of the Backup to restore from,
+and the playbook stops with a clear message if that Backup is not
+visible on this hub yet:
+
+```bash
+ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
+  -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2 -e oadp_backup_method=csi
+```
+
+On a csi restore the volume data comes back through `DataDownload`
+objects, which is where to look if the Restore seems to stall:
+
+```bash
+oc get datadownloads -n openshift-adp -w
 ```

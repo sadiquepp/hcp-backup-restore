@@ -1,0 +1,44 @@
+# ── Backup (CSI VolumeSnapshot + data mover) ──────────────────────────────────
+# CSI counterpart to hello-openshift-oadp-backup.yaml, which uses Kopia
+# file-system backup instead. Same app, same bucket - only the volume
+# handling differs.
+#
+# The four fields that switch the method:
+#   snapshotVolumes: true            take a CSI VolumeSnapshot of the PVC
+#   snapshotMoveData: true           copy the snapshot's data to S3...
+#   datamover: "velero"              ...with Velero's built-in data mover
+#   defaultVolumesToFsBackup: false  do not walk the filesystem instead
+#
+# Requires a VolumeSnapshotClass for the PVC's CSI driver labelled
+# velero.io/csi-volumesnapshot-class=true. setup_oadp.yaml applies that
+# label when run with -e oadp_backup_method=csi; without it Velero
+# silently skips the volume and still reports Completed.
+#
+# Watch the transfer with:
+#   oc get datauploads -n openshift-adp -w
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: hello-openshift-oadp-csi-backup
+  namespace: openshift-adp
+  labels:
+    velero.io/storage-location: default
+spec:
+  includedNamespaces:
+    - hello-openshift-oadp-csi
+
+  includedResources:
+    - "*"
+
+  snapshotVolumes: true
+  snapshotMoveData: true
+  datamover: "velero"
+  defaultVolumesToFsBackup: false
+
+  storageLocation: default
+  ttl: 720h
+
+  excludedNamespaces:
+    - openshift-adp
+
+  includeClusterResources: true

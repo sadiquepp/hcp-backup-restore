@@ -6,6 +6,17 @@
 ## Usage:
 ##   ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
 ##     -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+##
+## oadp_backup_method must match the method the backup was taken with
+## (vars.yaml, default 'fs'), because it selects both the Restore
+## template and the name of the Backup being restored:
+##
+##   fs   restore-hcp-cluster.yaml.j2     <- "<cluster>-backup"
+##   csi  restore-hcp-cluster-csi.yaml.j2 <- "<cluster>-backup-csi"
+##
+##   ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
+##     -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2 \
+##     -e oadp_backup_method=csi
 
 - name: Restore Hosted Cluster Control Plane
   hosts: localhost
@@ -16,25 +27,64 @@
   vars:
     hub_kubeconfig: >-
       {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+    ## Must resolve to the same names backup_hosted_cluster.yaml used.
+    oadp_backup_name: >-
+      {{ hcp_cluster_name }}-backup{{ '-csi' if oadp_backup_method == 'csi' else '' }}
+    oadp_restore_name: >-
+      {{ hcp_cluster_name }}-restore{{ '-csi' if oadp_backup_method == 'csi' else '' }}
+    oadp_restore_template: >-
+      restore-hcp-cluster{{ '-csi' if oadp_backup_method == 'csi' else '' }}.yaml.j2
   tasks:
   - ansible.builtin.assert:
       that:
         - hcp_cluster_name is defined
       fail_msg: "Pass -e hcp_cluster_name=<name> (e.g. hcp-cluster1)"
 
+  - name: Fail fast on an unknown backup method
+    ansible.builtin.assert:
+      that:
+        - oadp_backup_method in ['fs', 'csi']
+      fail_msg: >-
+        oadp_backup_method must be 'fs' or 'csi' (and must match the
+        method the backup was taken with), not
+        '{{ oadp_backup_method }}'. See vars.yaml.
+
+  ## A Restore naming a Backup this hub cannot see fails with a terse
+  ## "backup not found"; checking first says which name was expected.
+  - name: Check the Backup being restored is visible on this hub
+    shell: >
+      oc get backup "{{ oadp_backup_name | trim }}" -n openshift-adp
+      -o jsonpath='{.status.phase}'
+    register: source_backup
+    changed_when: false
+    failed_when: false
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  - name: Fail with a clear message if it is missing
+    ansible.builtin.fail:
+      msg: >-
+        Backup '{{ oadp_backup_name | trim }}' is not present in
+        openshift-adp on this hub. Velero syncs backups from the
+        BackupStorageLocation, so run setup_oadp.yaml against this hub
+        and give it a minute, and check oadp_backup_method
+        ('{{ oadp_backup_method }}') matches the method the backup was
+        taken with - the csi method names its backup '<cluster>-backup-csi'.
+    when: source_backup.stdout | default('') | trim == ''
+
   - name: Render Restore manifest
     template:
-      src: oadp/templates/restore-hcp-cluster.yaml.j2
-      dest: "/tmp/{{ hcp_cluster_name }}-restore.yaml"
+      src: "oadp/templates/{{ oadp_restore_template | trim }}"
+      dest: "/tmp/{{ oadp_restore_name | trim }}.yaml"
 
   - name: Apply Restore
-    shell: "oc apply -f /tmp/{{ hcp_cluster_name }}-restore.yaml"
+    shell: "oc apply -f /tmp/{{ oadp_restore_name | trim }}.yaml"
     environment:
       KUBECONFIG: "{{ hub_kubeconfig }}"
 
   - name: Wait for Restore to complete (checked every 15s, up to 30 min)
     shell: >
-      oc get restore.velero.io "{{ hcp_cluster_name }}-restore" -n openshift-adp
+      oc get restore.velero.io "{{ oadp_restore_name | trim }}" -n openshift-adp
       -o jsonpath='{.status.phase}'
     register: restore_phase
     until: restore_phase.stdout in ['Completed', 'PartiallyFailed', 'Failed']
@@ -43,6 +93,25 @@
     environment:
       KUBECONFIG: "{{ hub_kubeconfig }}"
 
+  ## Counterpart to the backup's DataUploads - this is where the volume
+  ## data actually comes back from S3 on a csi restore.
+  - name: Show the DataDownloads the data mover created
+    shell: >
+      oc get datadownloads.velero.io -n openshift-adp
+      -l velero.io/restore-name="{{ oadp_restore_name | trim }}"
+      --no-headers 2>/dev/null || true
+    register: restore_datadownloads
+    changed_when: false
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+    when: oadp_backup_method == 'csi'
+
   - name: Report Restore status
     debug:
-      msg: "Restore {{ hcp_cluster_name }}-restore finished with phase: {{ restore_phase.stdout }}"
+      msg: >-
+        Restore {{ oadp_restore_name | trim }}
+        ({{ oadp_backup_method }} method, from
+        {{ oadp_backup_name | trim }}) finished with phase:
+        {{ restore_phase.stdout }}
+        {{ ('| DataDownloads: ' + (restore_datadownloads.stdout_lines | default([]) | join(' ; ')))
+           if oadp_backup_method == 'csi' else '' }}

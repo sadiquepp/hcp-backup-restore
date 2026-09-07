@@ -10,6 +10,11 @@
 # the cloud-credentials secret and the DataProtectionApplication CR.
 # Idempotent - safe to re-run against hub1 or hub2 with the same
 # S3 bucket/prefix so it can see the existing backups.
+#
+# When oadp_backup_method=csi it additionally prepares the hub for CSI
+# VolumeSnapshot backups (see csi-snapshot-class.yml). The DPA itself
+# needs nothing extra: the csi plugin and the kopia node-agent it
+# already enables are what the data mover uses either way.
 
 - name: Wait for the OADP operator CRDs to be established
   shell: |
@@ -54,6 +59,12 @@
 - name: Report BackupStorageLocation status
   debug:
     msg: "BackupStorageLocation phase: {{ bsl_phase.stdout | default('unknown') }} (re-run this role if it is not 'Available')"
+
+- name: Prepare the CSI VolumeSnapshotClass for Velero
+  ansible.builtin.include_tasks: csi-snapshot-class.yml
+  when: oadp_backup_method | default('fs') == 'csi'
+  tags:
+    - oadp-csi
 
 - name: Clean up rendered scratch files
   ansible.builtin.file:

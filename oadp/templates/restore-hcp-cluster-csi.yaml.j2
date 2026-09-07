@@ -1,0 +1,34 @@
+## Restore counterpart to backup-hcp-cluster-csi.yaml.j2. Rendered by
+## restore_hosted_cluster.yaml when oadp_backup_method=csi.
+##
+## The Restore CR itself is provider- and method-agnostic: restorePVs
+## true is what drives the recovery either way. What changes is what
+## Velero does underneath - for a data-mover backup it creates a
+## DataDownload per volume, provisions a fresh PVC from the CSI
+## StorageClass and streams the snapshot data back from S3 into it,
+## rather than replaying files from a Kopia repository.
+##
+## Watch `oc get datadownloads -n openshift-adp` while this runs; the
+## Restore stays in "WaitingForPluginOperations" until they complete.
+##
+## As with the fs variant, the control-plane namespace must be free of
+## the objects being restored (HostedCluster, NodePools and their PVCs
+## deleted) - existingResourcePolicy: update cannot rewrite immutable
+## fields on a live object. Do not delete the InfraEnv: the reprovisioned
+## nodes need it to fetch the discovery ISO.
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: "{{ oadp_restore_name }}"
+  namespace: openshift-adp
+spec:
+  backupName: "{{ oadp_backup_name }}"
+  restorePVs: true
+  existingResourcePolicy: update
+  excludedResources:
+    - nodes
+    - events
+    - events.events.k8s.io
+    - backups.velero.io
+    - restores.velero.io
+    - resticrepositories.velero.io
