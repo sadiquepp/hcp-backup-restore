@@ -27,6 +27,32 @@
   ansible.builtin.include_tasks: disconnected-ignition-override.yml
   when: disconnected_install | bool
 
+# The InfraEnv pull-secret is base64 in the Secret, so nothing catches a
+# malformed document until the API server decodes it:
+#
+#   The Secret "pullsecret-bminfra" is invalid: data[.dockerconfigjson]:
+#   Invalid value: "<secret contents redacted>": invalid character '\''
+#   looking for beginning of object key string
+#
+# Those single quotes are Python's: str({'auths': ...}), not JSON. defaults/main.yml
+# is where that is kept from happening (and why the filters on bminfra_pull_secret
+# are not decoration); this is the guard that would have caught it here, in the
+# play, naming the variable - rather than at oc apply with the contents redacted.
+# It doubles as the check on a truncated or placeholder secret.
+- name: Check the InfraEnv pull-secret is a dockerconfigjson document
+  ansible.builtin.assert:
+    that:
+      - bminfra_pull_secret | length > 0
+      - bminfra_pull_secret | first == '{'
+      - bminfra_auths_key in bminfra_pull_secret
+    fail_msg: >-
+      The InfraEnv pull-secret is not a JSON document with an "auths" object.
+      Connected runs render vault.yaml's pull_secret verbatim - it must be the
+      whole secret from console.redhat.com. Disconnected runs build it from
+      {{ mirror_registry_authfile | default('mirror_registry_authfile') }}.
+  vars:
+    bminfra_auths_key: '"auths"'
+
 - name: Render bminfra manifests
   template:
     src: "{{ item }}"
