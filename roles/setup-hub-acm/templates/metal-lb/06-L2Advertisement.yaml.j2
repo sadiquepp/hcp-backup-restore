@@ -1,8 +1,11 @@
 {# One L2Advertisement per pool, so each hosted cluster's address is
    advertised independently and can be withdrawn without touching the others.
    Pool names are hub-independent, so this template is too - only the address
-   inside each pool changes from hub to hub. #}
-{% for hcp_name, hcp_pool in hosted_cluster_metallb_pools | dictsort %}
+   inside each pool changes from hub to hub. It iterates the same
+   metallb_hub_pools as 05-ip-pool.yaml.j2 so an L2Advertisement is only ever
+   created for a pool that exists on this hub; advertising a pool this hub
+   does not have would leave MetalLB with a dangling ipAddressPools reference. #}
+{% for hcp_name, hcp_pool in metallb_hub_pools | dictsort %}
 ---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
