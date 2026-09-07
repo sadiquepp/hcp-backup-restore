@@ -14,7 +14,34 @@ disconnected_install: false
 ## disconnected runs overwrite this with the mirror registry's own credentials
 ## in tasks/disconnected-pull-secret.yml (a set_fact, which wins over this
 ## default) - see that file for why the vault secret is wrong there.
-bminfra_pull_secret: "{{ pull_secret }}"
+##
+## The filters are load-bearing, not decoration - a bare "{{ pull_secret }}"
+## here is what produced this at oc apply time:
+##
+##   The Secret "pullsecret-bminfra" is invalid: data[.dockerconfigjson]:
+##   Invalid value: "<secret contents redacted>": invalid character '\''
+##   looking for beginning of object key string
+##
+## Ansible converts a template's result back into a Python object when the whole
+## thing looks like one (safe_eval on anything starting with `{`), so vault.yaml's
+## pull_secret - a correctly quoted JSON *string* - came back out of this one
+## variable hop as a dict:
+##
+##   pull_secret type:         AnsibleUnicode
+##   bminfra_pull_secret type: dict
+##
+## and `| b64encode` in the template then encoded str(dict), single quotes and
+## all. `string` is one of Ansible's STRING_TYPE_FILTERS: ending the template
+## with one suppresses that conversion, so the vault's own bytes survive intact.
+## The to_json branch covers a vault.yaml that spells the secret as a YAML
+## mapping rather than a quoted string - JSON is valid YAML, so both spellings
+## are things people paste in, and str(dict) is not JSON for either of them.
+##
+## Roles that use pull_secret directly (create-hosted-cluster's
+## hosted-cluster.yaml.j2, setup-hub-cluster's install-config) never hit this -
+## it takes the extra variable hop to trigger it. tasks/disconnected-pull-secret.yml
+## is safe for the same reason: its template ends in `| to_json`.
+bminfra_pull_secret: "{{ (pull_secret | to_json) if (pull_secret is mapping) else (pull_secret | string) }}"
 
 ## InfraEnv ignition config override - see tasks/disconnected-ignition-override.yml
 ## for the failure this exists to prevent ("A signature was required, but no
