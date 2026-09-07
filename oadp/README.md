@@ -196,6 +196,19 @@ above: same app, its own namespace, and a PVC on
 before an HCP backup with `oadp_backup_method=csi` - it exercises the
 same code path in about a minute instead of an hour.
 
+**First make sure the hub is prepared for CSI backups**, or Velero will
+skip the volume and produce no `DataUpload` at all:
+
+```bash
+ansible-playbook setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
+oc get volumesnapshotclass -L velero.io/csi-volumesnapshot-class
+```
+
+Exactly one class for your CSI driver must show `true` in that column.
+Applying the manifests below without this step is the most common way to
+get a backup that reports `Completed` (or `PartiallyFailed`) while
+having snapshotted nothing.
+
 ```bash
 oc apply -f oadp/hello-openshift-oadp-csi.yaml
 POD=`oc get pod -n hello-openshift-oadp-csi -o jsonpath='{.items[0].metadata.name}'`
@@ -220,6 +233,49 @@ does nothing:
 oc delete backup hello-openshift-oadp-csi-backup -n openshift-adp
 oc apply -f oadp/hello-openshift-oadp-csi-backup.yaml
 ```
+
+#### If no `DataUpload` is created at all
+
+`oc get datauploads -n openshift-adp` returning nothing means Velero
+never attempted the volume - the backup did not fail at snapshotting, it
+declined to snapshot. Work down this list:
+
+```bash
+# 1. Is a snapshot class labelled for Velero? (the usual answer)
+oc get volumesnapshotclass -L velero.io/csi-volumesnapshot-class
+
+# 2. Did the PVC actually bind, and to a CSI driver?
+oc get pvc -n hello-openshift-oadp-csi
+oc get pv -o custom-columns=NAME:.metadata.name,SC:.spec.storageClassName,DRIVER:.spec.csi.driver \
+  | grep -i ceph
+
+# 3. What did Velero decide about the PVC?
+velero backup logs hello-openshift-oadp-csi-backup -n openshift-adp \
+  | grep -iE 'persistentvolumeclaim|volumesnapshot|snapshotclass|skip'
+
+# 4. Were any VolumeSnapshots created?
+oc get volumesnapshot -A
+
+# 5. Is the csi plugin actually loaded, and the node-agent running?
+oc get dpa dpa-instance -n openshift-adp -o jsonpath='{.spec.configuration.velero.defaultPlugins}{"\n"}'
+oc get pods -n openshift-adp -l name=node-agent
+```
+
+Most often it is (1): no class carries
+`velero.io/csi-volumesnapshot-class=true`, Velero finds no snapshot class
+for the PVC's driver, and silently moves on. Fix it and re-run:
+
+```bash
+oc label volumesnapshotclass ocs-external-storagecluster-rbdplugin-snapclass \
+  velero.io/csi-volumesnapshot-class=true --overwrite
+oc delete backup hello-openshift-oadp-csi-backup -n openshift-adp
+oc apply -f oadp/hello-openshift-oadp-csi-backup.yaml
+```
+
+If (2) shows the PVC `Pending`, or bound to `lvms-vg1` rather than the
+Ceph class, there is nothing snapshottable in the namespace - check the
+`storageClassName` in `hello-openshift-oadp-csi.yaml` matches a class
+`oc get sc` actually lists on this hub.
 
 #### If the backup ends `PartiallyFailed` with thousands of errors
 
