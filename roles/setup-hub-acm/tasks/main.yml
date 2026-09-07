@@ -84,23 +84,71 @@
   when: use_lvm_storage == true
 
 # Pool names are hub-independent but their addresses are not: hub2 is the DR
-# hub on its own segment, so each hosted cluster carries one address per hub.
-# Checked here so a hub with no address for a cluster is an obvious message
-# rather than an undefined-key error inside the template.
-- name: Fail fast if a hosted cluster has no MetalLB address for this hub
+# hub on its own segment and hubd the disconnected one, so each hosted cluster
+# carries one address per hub - and only for the hubs it can actually run on.
+# The connected clusters deliberately have no 'hubd' address and the '-d'
+# clusters no 'hub' address (see the comments above
+# hosted_cluster_metallb_pools in vars.yaml), so "every cluster on every hub"
+# was never true and asserting it here failed every connected run on the '-d'
+# clusters and every disconnected run on the connected three.
+#
+# So the hub renders pools for the clusters that carry an address for IT and
+# leaves the rest alone - the same per-cluster resolution roles/setup-dns
+# (hosted_cluster_zone_plan) and roles/create-hosted-cluster
+# (hosted_cluster_vip_plan) already do. Skipping is the right outcome and not
+# a silent one: a cluster genuinely missing an address on the hub it will run
+# on still fails, in roles/create-hosted-cluster, which knows which clusters
+# that hub is actually getting - this role does not.
+- name: Fail fast if a hosted cluster's MetalLB pool entry is incomplete
   ansible.builtin.assert:
     that:
-      - metallb_hub in item.value.ip
+      - item.value.pool is defined
+      - item.value.ip is defined
+      - item.value.ip | length > 0
     fail_msg: >-
-      Hosted cluster '{{ item.key }}' has no '{{ metallb_hub }}' address in
-      hosted_cluster_metallb_pools (vars.yaml). Add one, e.g.
-      "ip: {hub: 60, hub2: 90}", so this hub can hand the cluster an address
-      that is routable on its own segment - then re-run the dns tag of
-      setup_bm_host.yaml with -e target_hub={{ metallb_hub }} so api/api-int
-      match.
-  loop: "{{ hosted_cluster_metallb_pools | dict2items }}"
+      Hosted cluster '{{ item.key }}' has an incomplete entry in
+      hosted_cluster_metallb_pools (vars.yaml). It needs a 'pool' name and a
+      non-empty 'ip' map of <hub>: <last octet>, one entry per hub the cluster
+      can run on, e.g. "pool: {{ item.key }}-api-pool" with
+      "ip: {hub: 60, hub2: 90}".
+  loop: "{{ hosted_cluster_metallb_pools | default({}) | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
+
+- name: Select the hosted clusters that have a MetalLB address on this hub
+  ansible.builtin.set_fact:
+    metallb_hub_pools: >-
+      {{ hosted_cluster_metallb_pools | default({}) | dict2items
+         | selectattr('value.ip', 'contains', metallb_hub)
+         | items2dict }}
+
+# An empty selection is the one case that is still an error: it means
+# metallb_hub names a hub nothing in the map knows about (a typo, or a new hub
+# whose addresses were never added), and the hub would come up with no
+# IPAddressPool at all rather than with the subset it should have.
+- name: Fail fast if no hosted cluster has a MetalLB address for this hub
+  ansible.builtin.assert:
+    that:
+      - metallb_hub_pools | length > 0
+    fail_msg: >-
+      No cluster in hosted_cluster_metallb_pools (vars.yaml) carries a
+      '{{ metallb_hub }}' address, so this hub would get no IPAddressPool at
+      all. metallb_hub is set by the hub playbook - hub
+      (setup_hub_cluster.yaml), hub2 (setup_hub_cluster2.yaml) or hubd
+      (setup_hub_cluster_disconnected.yaml). Hubs named in that map:
+      {{ hosted_cluster_metallb_pools | default({}) | dict2items
+         | map(attribute='value.ip') | map('list') | flatten
+         | unique | sort | join(', ') }}.
+
+- name: Show which hosted clusters get a MetalLB pool on this hub
+  ansible.builtin.debug:
+    msg: >-
+      metallb_hub={{ metallb_hub }} renders pools for:
+      {{ metallb_hub_pools | list | sort | join(', ') }}
+      | not on this hub (no '{{ metallb_hub }}' address, nothing rendered):
+      {{ (hosted_cluster_metallb_pools | default({}) | list
+          | difference(metallb_hub_pools | list) | sort | join(', '))
+         | default('none', true) }}
 
 - name: Render MetalLB IPAddressPools (one single-address pool per hosted cluster)
   template:

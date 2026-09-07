@@ -1,10 +1,18 @@
 {# One single-address IPAddressPool per hosted cluster, rendered from
-   hosted_cluster_metallb_pools (vars.yaml) for the hub named by metallb_hub.
+   metallb_hub_pools - the subset of hosted_cluster_metallb_pools (vars.yaml)
+   that carries an address for the hub named by metallb_hub, worked out in
+   tasks/main.yml.
 
    Pool names are the same on every hub; the address they hold is not. hub2 is
    the DR hub on its own network segment, where hub1's addresses are not
    routable, so each cluster's entry carries one address per hub and this
    picks the one for the hub being configured.
+
+   A cluster only carries an address for the hubs it can actually run on, so
+   iterating the filtered map (rather than the whole one) is also what keeps a
+   hub from rendering a pool for a cluster that will never run on it - the
+   connected clusters have no 'hubd' address and the '-d' clusters no 'hub'
+   address.
 
    Each pool is bound - via serviceAllocation - to that hosted cluster's
    control-plane namespace, so the only Service that can ever be given the
@@ -20,7 +28,7 @@
    these control-plane namespaces will therefore stay <pending> until you
    give it a pool of its own. #}
 {% set metallb_prefix = (hosted_cluster_metallb_network_prefixes | default({}))[metallb_hub] | default(lab_network_prefix) %}
-{% for hcp_name, hcp_pool in hosted_cluster_metallb_pools | dictsort %}
+{% for hcp_name, hcp_pool in metallb_hub_pools | dictsort %}
 ---
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool

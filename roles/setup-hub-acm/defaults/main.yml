@@ -16,16 +16,25 @@ metallb_hub: hub
 ## 'ip' is a per-hub last octet combined with the network prefix for that hub,
 ## and 'control_plane_namespace' may be set per cluster if a HostedCluster is
 ## ever created somewhere other than a namespace matching its own name.
+##
+## A cluster carries an address only for the hubs it can actually run on, and
+## this fallback follows vars.yaml in that: the connected three get 'hub' and
+## 'hub2' and deliberately no 'hubd', because they never run on the
+## disconnected hub. Handing them one here would make this role render pools
+## on hubd for clusters that will never ask for them - exactly what
+## vars.yaml's own comment warns against. The role skips a cluster with no
+## address for the hub it is configuring (see metallb_hub_pools in
+## tasks/main.yml), so a missing key is the reservation, not an omission.
 hosted_cluster_metallb_pools:
   hcp-cluster1:
     pool: hcp-cluster1-api-pool
-    ip: {hub: 60, hub2: 90, hubd: 64}
+    ip: {hub: 60, hub2: 90}
   hcp-cluster2:
     pool: hcp-cluster2-api-pool
-    ip: {hub: 61, hub2: 91, hubd: 65}
+    ip: {hub: 61, hub2: 91}
   hcp-cluster3:
     pool: hcp-cluster3-api-pool
-    ip: {hub: 62, hub2: 92, hubd: 66}
+    ip: {hub: 62, hub2: 92}
 
 ## Per-hub network prefix for the addresses above; anything not listed falls
 ## back to lab_network_prefix. Override in vars.yaml for a hub on its own
