@@ -41,4 +41,17 @@ spec:
   excludedNamespaces:
     - openshift-adp
 
-  includeClusterResources: true
+  # NOT includeClusterResources: true. That does not mean "the cluster-scoped
+  # objects this namespace needs" - it means every cluster-scoped object in
+  # the cluster, so on an ACM hub it drags in thousands of AppliedManifestWork,
+  # ClusterRole and CRD objects that have nothing to do with this app. The
+  # hypershift Velero plugin then runs its custom action against each
+  # AppliedManifestWork, fails with "error getting HCP namespace: no
+  # HostedControlPlane found", and the backup ends PartiallyFailed with
+  # thousands of errors - while the one volume you actually wanted may well
+  # have been snapshotted fine.
+  #
+  # Leaving the field unset is what we want: Velero then includes only the
+  # cluster-scoped resources associated with what is in the namespace - above
+  # all the PV bound to this PVC, which is the object the CSI snapshot is
+  # taken from.

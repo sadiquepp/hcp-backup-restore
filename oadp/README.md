@@ -212,6 +212,40 @@ oc get datauploads -n openshift-adp -w
 oc get backup hello-openshift-oadp-csi-backup -n openshift-adp -o jsonpath='{.status.phase}{"\n"}'
 ```
 
+Re-running it needs the old Backup object gone first - Velero acts on a
+Backup once, so re-applying the same manifest over an existing object
+does nothing:
+
+```bash
+oc delete backup hello-openshift-oadp-csi-backup -n openshift-adp
+oc apply -f oadp/hello-openshift-oadp-csi-backup.yaml
+```
+
+#### If the backup ends `PartiallyFailed` with thousands of errors
+
+Check what the errors actually are before assuming the snapshot failed:
+
+```bash
+velero backup logs hello-openshift-oadp-csi-backup -n openshift-adp | grep -i error | head
+oc get datauploads -n openshift-adp -l velero.io/backup-name=hello-openshift-oadp-csi-backup
+```
+
+Errors reading `error executing custom action (groupResource=appliedmanifestworks...)`
+/ `no HostedControlPlane found` are not about your volume. They come from
+`includeClusterResources: true` on the Backup, which does not mean "the
+cluster-scoped objects this namespace needs" - it means **every**
+cluster-scoped object in the cluster. On an ACM hub that is thousands of
+`AppliedManifestWork` objects, and the hypershift plugin's custom action
+errors on each one that is not a hosted control plane. The item count
+gives it away: a one-pod namespace backing up 4000+ items is backing up
+the whole cluster.
+
+The manifests here leave the field unset, which is what you want - Velero
+then includes only the cluster-scoped resources associated with the
+namespace's own objects, above all the PV behind the PVC. If you hit this
+on a Backup of your own, drop the field and re-run. A `Completed` phase
+and a `DataUpload` in phase `Completed` are what a good run looks like.
+
 To restore it (on the DR hub, or after deleting the namespace here):
 
 ```bash
