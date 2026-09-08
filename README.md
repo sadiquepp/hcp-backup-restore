@@ -372,6 +372,24 @@ ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass -e disco
   hub's own `install-config.yaml` does, and for the same reason: nothing in a
   disconnected lab should hold a working credential back to the real registries.
 
+  A note on the pull-secret, if you hit this on a connected hub:
+
+```
+The Secret "pullsecret-bminfra" is invalid: data[.dockerconfigjson]: Invalid value:
+"<secret contents redacted>": invalid character '\'' looking for beginning of object key string
+```
+
+  Those are Python's quotes, from `str(dict)` - and vault.yaml is not the
+  problem. Ansible converts a template's result back into an object when the
+  whole thing looks like one, so a properly quoted JSON *string* in vault.yaml
+  came back out of the role's `bminfra_pull_secret: "{{ pull_secret }}"` hop as a
+  dict, which `b64encode` then encoded as its repr. The default now ends in a
+  `string`/`to_json` filter (`STRING_TYPE_FILTERS`, which suppresses that
+  conversion), so either spelling of `pull_secret` - quoted string or YAML
+  mapping - renders as JSON, and the role asserts the document has an `auths`
+  object before rendering. Nothing to change in vault.yaml. Roles that use
+  `pull_secret` directly never hit this; it takes the extra variable hop.
+
 - Then apply the rendered yaml files to the ACM cluster.
 
 ```bash

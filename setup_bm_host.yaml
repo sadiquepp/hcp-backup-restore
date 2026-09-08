@@ -11,6 +11,15 @@
         dest: "{{ playbook_dir }}/inventory/hosts"
         mode: '0644'
 
+    # Ansible parsed the inventory before this play started, so the file just
+    # rendered is not the one in memory - the delegate_to tasks below would use
+    # the previous contents, and on a first run against a changed ip_list that
+    # means the helper without its ansible_ssh_private_key_file. Re-read it.
+    # Unconditional on purpose: refresh_inventory does not honour `when`
+    # (Ansible warns and runs it anyway), and re-reading a file is cheap.
+    - name: Re-read the inventory that was just rendered
+      ansible.builtin.meta: refresh_inventory
+
     - name: Fail fast if org_id/activation_key are missing from vault.yaml
       ansible.builtin.assert:
         that:

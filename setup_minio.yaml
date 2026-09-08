@@ -13,7 +13,7 @@
 ## org_id / activation_key defined in vault.yaml (see roles/setup-rhsm).
 ##
 ## Usage:
-##   ansible-playbook setup_minio.yaml --ask-vault-pass
+##   ansible-playbook -i inventory/hosts setup_minio.yaml --ask-vault-pass
 
 - name: Setup MinIO VM
   hosts: localhost

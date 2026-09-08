@@ -32,8 +32,8 @@
 ## present on the mirror-registry VM).
 ##
 ## Usage:
-##   ansible-playbook setup_hub_cluster_disconnected.yaml --ask-vault-pass
-##   ansible-playbook setup_hub_cluster_disconnected.yaml --ask-vault-pass --tags acm
+##   ansible-playbook -i inventory/hosts setup_hub_cluster_disconnected.yaml --ask-vault-pass
+##   ansible-playbook -i inventory/hosts setup_hub_cluster_disconnected.yaml --ask-vault-pass --tags acm
 
 - name: Setting Up Hub Cluster (disconnected)
   hosts: localhost

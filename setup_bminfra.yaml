@@ -4,9 +4,9 @@
 ## against hub2 if you need to re-create the InfraEnv there.
 ##
 ## Usage:
-##   ansible-playbook setup_bminfra.yaml --ask-vault-pass                    # targets hub1 (default)
-##   ansible-playbook setup_bminfra.yaml --ask-vault-pass -e target_hub=hub2 # targets hub2
-##   ansible-playbook setup_bminfra.yaml --ask-vault-pass -e disconnected_install=true # targets the disconnected hub
+##   ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass                    # targets hub1 (default)
+##   ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass -e target_hub=hub2 # targets hub2
+##   ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass -e disconnected_install=true # targets the disconnected hub
 ##
 ## disconnected_install (vars.yaml, default false) wins over target_hub: with
 ## it set the playbook uses hub_disconnected_install_folder/auth/kubeconfig

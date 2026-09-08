@@ -5,8 +5,8 @@
 ## the old hub can still be inspected, or powered back on, if needed.
 ##
 ## Usage:
-##   ansible-playbook shutdown_hub_cluster.yaml
-##   ansible-playbook shutdown_hub_cluster.yaml -e force_shutdown=true   # hard power-off instead of graceful
+##   ansible-playbook -i inventory/hosts shutdown_hub_cluster.yaml
+##   ansible-playbook -i inventory/hosts shutdown_hub_cluster.yaml -e force_shutdown=true   # hard power-off instead of graceful
 
 - name: Shutdown Hub1 Management Cluster
   hosts: localhost

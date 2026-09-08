@@ -28,9 +28,9 @@
 ##       -e ceph_odf_target_kubeconfig=/path/to/some/other/kubeconfig
 ##
 ## Usage:
-##   ansible-playbook setup_ceph_odf.yaml --ask-vault-pass
-##   ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
-##   ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e ceph_odf_target_kubeconfig=/path/to/kubeconfig
+##   ansible-playbook -i inventory/hosts setup_ceph_odf.yaml --ask-vault-pass
+##   ansible-playbook -i inventory/hosts setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
+##   ansible-playbook -i inventory/hosts setup_ceph_odf.yaml --ask-vault-pass -e ceph_odf_target_kubeconfig=/path/to/kubeconfig
 
 - name: Install ODF and extract the version-matched exporter script
   hosts: localhost

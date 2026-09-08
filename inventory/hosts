@@ -1,8 +1,15 @@
+# Rendered from vars.yaml (lab_network_prefix + ip_list) by setup_bm_host.yaml.
 [local]
 
 
 [helper]
 192.168.122.21 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[mirror_registry]
+192.168.122.22 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[minio]
+192.168.122.23 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 
 [hub_masters]
 master1.hub.mylab.com ansible_ssh_host=192.168.122.31 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
@@ -13,3 +20,25 @@ master3.hub.mylab.com ansible_ssh_host=192.168.122.33 ansible_ssh_private_key_fi
 worker1.hub.mylab.com ansible_ssh_host=192.168.122.34 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
 worker2.hub.mylab.com ansible_ssh_host=192.168.122.35 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
 worker3.hub.mylab.com ansible_ssh_host=192.168.122.36 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+
+[hubd_masters]
+master1.hubd.mylab.com ansible_ssh_host=192.168.122.73 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+master2.hubd.mylab.com ansible_ssh_host=192.168.122.74 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+master3.hubd.mylab.com ansible_ssh_host=192.168.122.75 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+
+[hubd_workers]
+worker1.hubd.mylab.com ansible_ssh_host=192.168.122.76 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+worker2.hubd.mylab.com ansible_ssh_host=192.168.122.77 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+worker3.hubd.mylab.com ansible_ssh_host=192.168.122.78 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no' ansible_user=core
+
+[ceph]
+192.168.122.24 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+192.168.122.25 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+192.168.122.26 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[ceph_admin]
+192.168.122.27 ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[ceph_nodes:children]
+ceph
+ceph_admin

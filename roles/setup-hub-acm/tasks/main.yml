@@ -84,23 +84,121 @@
   when: use_lvm_storage == true
 
 # Pool names are hub-independent but their addresses are not: hub2 is the DR
-# hub on its own segment, so each hosted cluster carries one address per hub.
-# Checked here so a hub with no address for a cluster is an obvious message
-# rather than an undefined-key error inside the template.
-- name: Fail fast if a hosted cluster has no MetalLB address for this hub
+# hub on its own segment and hubd the disconnected one, so each hosted cluster
+# carries one address per hub - and only for the hubs it can actually run on.
+# The connected clusters deliberately have no 'hubd' address and the '-d'
+# clusters no 'hub' address (see the comments above
+# hosted_cluster_metallb_pools in vars.yaml), so "every cluster on every hub"
+# was never true and asserting it here failed every connected run on the '-d'
+# clusters and every disconnected run on the connected three.
+#
+# So the hub renders pools for the clusters that carry an address for IT and
+# are part of this run's install mode (see the next block), and leaves the rest
+# alone - the same per-cluster resolution roles/setup-dns
+# (hosted_cluster_zone_plan) and roles/create-hosted-cluster
+# (hosted_cluster_vip_plan) already do. Skipping is the right outcome and not
+# a silent one: a cluster genuinely missing an address on the hub it will run
+# on still fails, in roles/create-hosted-cluster, which knows which clusters
+# that hub is actually getting - this role does not.
+- name: Fail fast if a hosted cluster's MetalLB pool entry is incomplete
   ansible.builtin.assert:
     that:
-      - metallb_hub in item.value.ip
+      - item.value.pool is defined
+      - item.value.ip is defined
+      - item.value.ip | length > 0
     fail_msg: >-
-      Hosted cluster '{{ item.key }}' has no '{{ metallb_hub }}' address in
-      hosted_cluster_metallb_pools (vars.yaml). Add one, e.g.
-      "ip: {hub: 60, hub2: 90}", so this hub can hand the cluster an address
-      that is routable on its own segment - then re-run the dns tag of
-      setup_bm_host.yaml with -e target_hub={{ metallb_hub }} so api/api-int
-      match.
-  loop: "{{ hosted_cluster_metallb_pools | dict2items }}"
+      Hosted cluster '{{ item.key }}' has an incomplete entry in
+      hosted_cluster_metallb_pools (vars.yaml). It needs a 'pool' name and a
+      non-empty 'ip' map of <hub>: <last octet>, one entry per hub the cluster
+      can run on, e.g. "pool: {{ item.key }}-api-pool" with
+      "ip: {hub: 60, hub2: 90}".
+  loop: "{{ hosted_cluster_metallb_pools | default({}) | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
+
+# Carrying an address for this hub is necessary but not sufficient. A hub can
+# hold addresses for both the connected clusters and the '-d' ones - hub2 does,
+# because it is the DR hub for both - and rendering that union would give a
+# connected hub2 six pools, three of them for disconnected clusters it is not
+# hosting. So the second half of the selection is the install mode, decided by
+# the same disconnected_install switch the rest of the repo already runs on:
+# true means this run is about hosted_clusters_disconnected, false about
+# hosted_clusters. That is the identical choice roles/create-hosted-cluster
+# makes (hosted_cluster_source), which is what keeps the pools a hub carries
+# and the HostedClusters actually rendered onto it the same set.
+#
+# The addresses for the other mode are not lost, they are still the
+# reservation vars.yaml says they are - re-running this role's 'acm' tag with
+# the other value of disconnected_install renders them. That re-run is the step
+# before restoring a '-d' hosted cluster onto hub2.
+#
+# An entry in either list is a bare name or a dict with 'name', so flatten both
+# shapes the way create-hosted-cluster and setup-dns do. Both lists empty (the
+# role used standalone, without vars.yaml) means "no opinion" rather than
+# "nothing": it falls back to every cluster in the map, so the selection is
+# then by hub alone, exactly as it was before.
+- name: Work out which hosted clusters this run is for
+  ansible.builtin.set_fact:
+    metallb_run_cluster_names: >-
+      {{ ((metallb_run_cluster_source | select('mapping') | map(attribute='name') | list)
+          + (metallb_run_cluster_source | reject('mapping') | list))
+         or (hosted_cluster_metallb_pools | default({}) | list) }}
+  vars:
+    metallb_run_cluster_source: >-
+      {{ (hosted_clusters_disconnected | default([]))
+         if disconnected_install | bool
+         else (hosted_clusters | default([])) }}
+
+- name: Select the hosted clusters that have a MetalLB address on this hub
+  ansible.builtin.set_fact:
+    metallb_hub_pools: >-
+      {{ hosted_cluster_metallb_pools | default({}) | dict2items
+         | selectattr('value.ip', 'contains', metallb_hub)
+         | selectattr('key', 'in', metallb_run_cluster_names)
+         | items2dict }}
+
+# An empty selection is the one case that is still an error: the hub would come
+# up with no IPAddressPool at all rather than with the subset it should have.
+# Two things can cause it now - metallb_hub naming a hub nothing in the map
+# knows about (a typo, or a new hub whose addresses were never added), or
+# disconnected_install set the wrong way round for this hub - so the message
+# prints both halves of the selection and lets the reader see which one is
+# empty.
+- name: Fail fast if no hosted cluster in this run has a MetalLB address for this hub
+  ansible.builtin.assert:
+    that:
+      - metallb_hub_pools | length > 0
+    fail_msg: >-
+      No cluster in this run carries a '{{ metallb_hub }}' address, so this hub
+      would get no IPAddressPool at all.
+      disconnected_install={{ disconnected_install | bool }}, so this run is for
+      {{ (disconnected_install | bool)
+         | ternary('hosted_clusters_disconnected', 'hosted_clusters') }}:
+      {{ metallb_run_cluster_names | sort | join(', ') | default('none', true) }}.
+      Clusters carrying a '{{ metallb_hub }}' address in
+      hosted_cluster_metallb_pools (vars.yaml):
+      {{ hosted_cluster_metallb_pools | default({}) | dict2items
+         | selectattr('value.ip', 'contains', metallb_hub)
+         | map(attribute='key') | sort | join(', ') | default('none', true) }}.
+      metallb_hub is set by the hub playbook - hub (setup_hub_cluster.yaml),
+      hub2 (setup_hub_cluster2.yaml) or hubd
+      (setup_hub_cluster_disconnected.yaml). Hubs named in that map:
+      {{ hosted_cluster_metallb_pools | default({}) | dict2items
+         | map(attribute='value.ip') | map('list') | flatten
+         | unique | sort | join(', ') }}.
+
+- name: Show which hosted clusters get a MetalLB pool on this hub
+  ansible.builtin.debug:
+    msg: >-
+      metallb_hub={{ metallb_hub }}
+      disconnected_install={{ disconnected_install | bool }}
+      renders pools for:
+      {{ metallb_hub_pools | list | sort | join(', ') }}
+      | not rendered here (no '{{ metallb_hub }}' address, or not in this
+      install mode):
+      {{ (hosted_cluster_metallb_pools | default({}) | list
+          | difference(metallb_hub_pools | list) | sort | join(', '))
+         | default('none', true) }}
 
 - name: Render MetalLB IPAddressPools (one single-address pool per hosted cluster)
   template:
@@ -134,6 +232,56 @@
   shell: |
     oc apply -f "{{ role_path }}/files/.rendered-05-ip-pool.yaml"
     oc apply -f "{{ role_path }}/files/.rendered-06-l2advertisement.yaml"
+
+# `oc apply` never prunes, so a hub built before the install mode narrowed this
+# selection keeps whatever it was given then - a hub2 built when both sets were
+# rendered still shows six pools after a connected re-run, which is exactly the
+# state this is here to clear. Only pools named in hosted_cluster_metallb_pools
+# and carrying an address for THIS hub are ever considered: anything else on
+# the hub is somebody else's and is left alone.
+#
+# A pool whose address a Service currently holds is never deleted, whatever
+# mode this run is. Nothing stops a connected hosted cluster and a restored
+# '-d' one from being up on hub2 at the same time, and deleting the pool under
+# a live kube-apiserver Service would strip its VIP - so an in-use pool is
+# reported and skipped, and the run carries on.
+- name: Select the other install mode's pools this hub still carries
+  ansible.builtin.set_fact:
+    metallb_other_mode_pools: >-
+      {{ hosted_cluster_metallb_pools | default({}) | dict2items
+         | selectattr('value.ip', 'contains', metallb_hub)
+         | rejectattr('key', 'in', metallb_run_cluster_names)
+         | items2dict }}
+
+- name: Remove the other install mode's pools, unless a Service is using one
+  shell: |
+    pool="{{ item.value.pool }}"
+    addr="{{ (hosted_cluster_metallb_network_prefixes | default({}))[metallb_hub] | default(lab_network_prefix) }}.{{ item.value.ip[metallb_hub] }}"
+    if ! oc get ipaddresspool "$pool" -n metallb-system >/dev/null 2>&1; then
+      echo "absent: $pool"
+      exit 0
+    fi
+    if oc get svc -A -o jsonpath='{range .items[*]}{.status.loadBalancer.ingress[*].ip}{"\n"}{end}' \
+        | grep -Fxq "$addr"; then
+      echo "in use ($addr assigned to a Service), kept: $pool"
+      exit 0
+    fi
+    oc delete l2advertisement "{{ item.value.pool }}-l2" -n metallb-system --ignore-not-found
+    oc delete ipaddresspool "$pool" -n metallb-system --ignore-not-found
+    echo "deleted: $pool"
+  register: metallb_other_mode_cleanup
+  changed_when: "'deleted: ' in metallb_other_mode_cleanup.stdout"
+  loop: "{{ metallb_other_mode_pools | dict2items }}"
+  loop_control:
+    label: "{{ item.value.pool }}"
+  when: metallb_prune_other_mode_pools | bool
+
+- name: Show what the cleanup did
+  ansible.builtin.debug:
+    msg: "{{ metallb_other_mode_cleanup.results | map(attribute='stdout') | list }}"
+  when:
+    - metallb_prune_other_mode_pools | bool
+    - metallb_other_mode_pools | length > 0
 
 - name: Clean up rendered scratch files
   ansible.builtin.file:

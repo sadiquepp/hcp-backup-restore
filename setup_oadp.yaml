@@ -7,8 +7,8 @@
 ## same S3 bucket/prefix and restore from it.
 ##
 ## Usage:
-##   ansible-playbook setup_oadp.yaml --ask-vault-pass                       # targets hub1 (default)
-##   ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2    # targets hub2
+##   ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass                       # targets hub1 (default)
+##   ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass -e target_hub=hub2    # targets hub2
 
 - name: Configure OADP on a hub cluster
   hosts: localhost

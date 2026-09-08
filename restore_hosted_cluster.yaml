@@ -4,7 +4,7 @@
 ## already been run against the same S3 bucket/prefix the backup used.
 ##
 ## Usage:
-##   ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
+##   ansible-playbook -i inventory/hosts restore_hosted_cluster.yaml --ask-vault-pass \
 ##     -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
 ##
 ## oadp_backup_method must match the method the backup was taken with

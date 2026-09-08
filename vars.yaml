@@ -266,6 +266,18 @@ hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 ## stray 'hubd' address here would put pools on the disconnected hub for
 ## clusters that will never ask for them.
 ##
+## Carrying the hub's address is necessary but not sufficient: the cluster must
+## also be part of the run's install mode. roles/setup-hub-acm renders
+## hosted_clusters_disconnected when disconnected_install is true and
+## hosted_clusters when it is false - the same choice roles/create-hosted-cluster
+## makes - and only their intersection with this map gets a pool. That is what
+## keeps hub2 to three pools: it is the only hub holding addresses for both
+## sets (DR target for both), so a connected hub2 run renders 90/91/92 and a
+## disconnected_install=true hub2 run renders 93/94/95, never all six. The
+## addresses for the other mode stay reserved here; re-run the 'acm' tag with
+## the other value of disconnected_install to render them, which is the step
+## before restoring a cluster of that mode onto hub2.
+##
 ## Each value is a last octet, combined with the network prefix for that hub
 ## (hosted_cluster_metallb_network_prefixes below, defaulting to
 ## lab_network_prefix). It must stay clear of every ip_list octet on that hub's
@@ -300,6 +312,13 @@ hosted_cluster_metallb_pools:
   ## target - the bundle pins the canonical quay.io release digest, so a
   ## disconnected hosted cluster restores onto a connected hub unchanged.
   ## Add a 'hub' entry here if you ever do want one on hub1.
+  ##
+  ## These hub2 addresses are a reservation, not something an ordinary hub2
+  ## build renders: setup_hub_cluster2.yaml without disconnected_install
+  ## renders only the connected three (see the install-mode note above), so
+  ## `oc get IPAddressPool -n metallb-system` on a connected hub2 shows three
+  ## pools. Re-run its 'acm' tag with -e disconnected_install=true to create
+  ## these three before restoring a '-d' cluster there.
   hcp-cluster1-d:
     pool: hcp-cluster1-d-api-pool
     ip:
