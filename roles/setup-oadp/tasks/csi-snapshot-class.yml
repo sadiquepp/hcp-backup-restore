@@ -89,5 +89,5 @@
       CSI backups on this hub will snapshot through
       '{{ oadp_csi_snapshot_class }}' (driver {{ oadp_csi_driver }}).
       Volume data is moved to the BackupStorageLocation by the
-      node-agent - watch 'oc get datauploads -n openshift-adp' during a
+      node-agent - watch 'oc get datauploads.velero.io -n openshift-adp' during a
       backup.

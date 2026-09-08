@@ -97,7 +97,7 @@
 
   - name: Wait for Backup to complete (checked every 30s, up to 60 min)
     shell: >
-      oc get backup "{{ oadp_backup_name | trim }}" -n openshift-adp
+      oc get backup.velero.io "{{ oadp_backup_name | trim }}" -n openshift-adp
       -o jsonpath='{.status.phase}'
     register: backup_phase
     until: backup_phase.stdout in ['Completed', 'PartiallyFailed', 'Failed']

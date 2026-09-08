@@ -51,9 +51,15 @@
 
   ## A Restore naming a Backup this hub cannot see fails with a terse
   ## "backup not found"; checking first says which name was expected.
+  ##
+  ## backup.velero.io, never a bare "backup": OpenShift ships
+  ## backups.config.openshift.io (the etcd backup CR) and kubectl
+  ## resolves the ambiguous short name to that one, so `oc get backup`
+  ## silently looks in the wrong CRD and reports every Velero backup as
+  ## missing. Same for restore.velero.io below.
   - name: Check the Backup being restored is visible on this hub
     shell: >
-      oc get backup "{{ oadp_backup_name | trim }}" -n openshift-adp
+      oc get backup.velero.io "{{ oadp_backup_name | trim }}" -n openshift-adp
       -o jsonpath='{.status.phase}'
     register: source_backup
     changed_when: false

@@ -186,7 +186,7 @@ oc apply -f oadp/hello-openshift-oadp-backup.yaml
 ```
 - Check the backup status periodically until it shows as completed.
 ```bash
-oc get Backup -n hello-openshift-oadp-backup -o yaml
+oc get backup.velero.io -n openshift-adp hello-openshift-oadp-backup -o yaml
 ```
 
 ### Why there is no CSI smoke test
@@ -243,7 +243,7 @@ and the CSI action runs normally:
 ```bash
 ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1 -e oadp_backup_method=csi
-oc get datauploads -n openshift-adp -w
+oc get datauploads.velero.io -n openshift-adp -w
 ```
 
 A `DataUpload` reaching phase `Completed` is the proof that CSI snapshot
@@ -251,7 +251,7 @@ plus data mover works; the Backup's own phase is the weaker signal.
 
 #### If no `DataUpload` is created at all
 
-`oc get datauploads -n openshift-adp` returning nothing means Velero
+`oc get datauploads.velero.io -n openshift-adp` returning nothing means Velero
 never attempted the volume. Check, in this order:
 
 ```bash
@@ -274,6 +274,23 @@ velero backup logs <backup-name> -n openshift-adp | grep 'level=error' | head -3
 `no HostedControlPlane found` error on the PVC means the CSI action was
 never reached, and the storage configuration is not at fault.
 
+#### `oc get backup` shows nothing, `oc get backup.velero.io` does
+
+Always qualify the group. OpenShift ships
+`backups.config.openshift.io` (the cluster's own etcd backup CR), so the
+short name `backup` is ambiguous and kubectl resolves it to that one -
+`oc get backup` lists an empty, unrelated resource and gives no hint that
+it looked in the wrong place.
+
+```bash
+oc get backup -n openshift-adp              # wrong CRD, looks empty
+oc get backup.velero.io -n openshift-adp    # what you meant
+oc api-resources | grep -i backup           # shows both, and their groups
+```
+
+The same care applies to `restore.velero.io`, `datauploads.velero.io` and
+`datadownloads.velero.io`. Everything in this repo qualifies them.
+
 #### Recovering from `backup already exists in object storage`
 
 A Backup that fails immediately with
@@ -292,7 +309,7 @@ object comes back on its own; then delete it properly:
 
 ```bash
 alias velero='oc -n openshift-adp exec deployment/velero -c velero -it -- ./velero'
-oc get backup -n openshift-adp | grep <backup-name>   # wait for it to reappear
+oc get backup.velero.io -n openshift-adp | grep <backup-name>   # wait for it to reappear
 velero backup delete <backup-name> --confirm
 oc get deletebackuprequests -n openshift-adp          # processed, then gone
 ```
@@ -347,12 +364,12 @@ applies anything, then reports the `DataUpload` objects alongside the
 final phase. Watch the volume transfer while it runs:
 
 ```bash
-oc get datauploads -n openshift-adp -w
+oc get datauploads.velero.io -n openshift-adp -w
 ```
 
 - Get the status of the backup and wait till it finishes before proceeding to the next step.
 ```bash
-oc get Backup -n openshift-adp hcp-cluster1-backup -o yaml
+oc get backup.velero.io -n openshift-adp hcp-cluster1-backup -o yaml
 ```
 It should show the backup as completed. Example output: `phase: Completed`. `itemsBackedUp:` should be equal to `totalItems`.
 ```yaml
@@ -387,7 +404,7 @@ status:
 ```
 
 ```
-$ oc get datauploads -n openshift-adp
+$ oc get datauploads.velero.io -n openshift-adp
 NAME                            STATUS      STARTED   BYTES DONE   TOTAL BYTES   STORAGE LOCATION   AGE     NODE
 hcp-cluster1-backup-csi-nnb2t   Completed   8m42s     371423568    371423568     default            9m12s   worker1
 hcp-cluster1-backup-csi-x76zq   Completed   8m35s     370738865    370738865     default            9m7s    worker3
@@ -536,5 +553,5 @@ On a csi restore the volume data comes back through `DataDownload`
 objects, which is where to look if the Restore seems to stall:
 
 ```bash
-oc get datadownloads -n openshift-adp -w
+oc get datadownloads.velero.io -n openshift-adp -w
 ```

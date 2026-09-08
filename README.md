@@ -659,7 +659,7 @@ oc apply -f oadp/hello-openshift-oadp-backup.yaml
 ```
 - Check the backup status periodically until it shows as completed.
 ```bash
-oc get Backup -n openshift-adp hello-openshift-oadp-backup -o yaml
+oc get backup.velero.io -n openshift-adp hello-openshift-oadp-backup -o yaml
 ```
 ### Backup a hosted cluster using OADP.
 
@@ -686,12 +686,12 @@ inside the Backup's own progress counters, so a csi backup sits in
 `WaitingForPluginOperations` for a while - watch it with:
 
 ```bash
-oc get datauploads -n openshift-adp -w
+oc get datauploads.velero.io -n openshift-adp -w
 ```
 
 - Get the status of the backup and wait till it finishes before proceeding to the next step.
 ```bash
-oc get Backup -n openshift-adp hcp-cluster1-backup -o yaml
+oc get backup.velero.io -n openshift-adp hcp-cluster1-backup -o yaml
 ```
 It should show the backup as completed. Example output: `phase: Completed`. `itemsBackedUp:` should be equal to `totalItems`.
 ```yaml
@@ -838,7 +838,7 @@ this hub yet:
 ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2 -e oadp_backup_method=csi
 oc get restore.velero.io -n openshift-adp hcp-cluster1-restore-csi -o yaml
-oc get datadownloads -n openshift-adp -w
+oc get datadownloads.velero.io -n openshift-adp -w
 ```
 
 ### Point DNS at the DR hub
