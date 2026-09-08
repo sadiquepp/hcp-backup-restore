@@ -147,9 +147,17 @@ oc get infraenv -n bminfra
 ```bash
 ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass
 # approve the discovered agents in the ACM/MCE web UI
+
 ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
+
+oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1.yaml
+
 oc get hostedcluster,nodepool -n hcp-cluster1
 ```
+
+`create_hosted_cluster.yaml` only renders - one
+`.rendered-<cluster>.yaml` per entry in `hosted_clusters`. Apply each one
+you want.
 
 ## 10. Workload
 
