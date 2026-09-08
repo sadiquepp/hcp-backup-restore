@@ -4,7 +4,7 @@ Connected lab, Ceph 9 / ODF external storage, CSI snapshot backup, DR cutover
 to hub2. Commands only. Explanations: [README.md](README.md) and
 [oadp/README.md](oadp/README.md).
 
-## 0. Prepare
+## 1. Prepare
 
 ```bash
 subscription-manager register
@@ -36,32 +36,87 @@ In `vars.yaml`:
 ```yaml
 use_lvm_storage: false
 oadp_backup_method: csi
-oadp_bucket_name: <your globally unique bucket>
-oadp_aws_region: <your region>
+oadp_bucket_name: <$BUCKET from step 0b>
+oadp_aws_region: <$REGION from step 0b>
 ```
 
-S3 bucket + IAM user: [oadp/README.md](oadp/README.md#one-time-aws-setup-per-bucket-not-per-hub).
+## 2. S3 bucket and IAM user (once per lab, not per hub)
 
-## 1. Bare metal host
+```bash
+export BUCKET=adp-backup-bucket-xjtvvs   # must be globally unique - pick your own
+export REGION=ap-south-1
+
+aws s3api create-bucket --bucket $BUCKET --region $REGION \
+  --create-bucket-configuration LocationConstraint=$REGION
+
+cat > adp-policy.json <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeVolumes",
+                "ec2:DescribeSnapshots",
+                "ec2:CreateTags",
+                "ec2:CreateVolume",
+                "ec2:CreateSnapshot",
+                "ec2:DeleteSnapshot"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:DeleteObject",
+                "s3:PutObject",
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"
+            ],
+            "Resource": ["arn:aws:s3:::${BUCKET}/*"]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation",
+                "s3:ListBucketMultipartUploads"
+            ],
+            "Resource": ["arn:aws:s3:::${BUCKET}"]
+        }
+    ]
+}
+EOF
+
+aws iam create-user --user-name adp-user
+aws iam put-user-policy --user-name adp-user --policy-name adp-policy --policy-document file://adp-policy.json
+aws iam create-access-key --user-name adp-user
+```
+
+Put the access key from the last command in `vault.yaml`, and `$BUCKET` /
+`$REGION` in `vars.yaml` as `oadp_bucket_name` / `oadp_aws_region`.
+
+## 3. Bare metal host
 
 ```bash
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
 ```
 
-## 2. Ceph cluster
+## 4. Ceph cluster
 
 ```bash
 ansible-playbook -i inventory/hosts setup_ceph.yaml --ask-vault-pass
 ssh root@192.168.122.27 ceph -s          # HEALTH_OK, 3 mons, 9 OSDs
 ```
 
-## 3. Hub1
+## 5. Hub1
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 ```
 
-## 4. Attach Ceph to hub1
+## 6. Attach Ceph to hub1
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
@@ -70,7 +125,7 @@ oc get storagecluster -n openshift-storage
 oc get sc                                 # ocs-external-storagecluster-ceph-rbd (default)
 ```
 
-## 5. ACM inventory
+## 7. ACM inventory
 
 ```bash
 oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
@@ -78,7 +133,7 @@ oc get pvc -n multicluster-engine         # three Bound
 ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass
 ```
 
-## 6. Hosted cluster
+## 8. Hosted cluster
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass
@@ -87,14 +142,14 @@ ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
 oc get hostedcluster,nodepool -n hcp-cluster1
 ```
 
-## 7. Workload
+## 9. Workload
 
 ```bash
 export KUBECONFIG=<hosted cluster kubeconfig>
 oc apply -f hello-openshift.yaml
 ```
 
-## 8. OADP on hub1
+## 10. OADP on hub1
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
@@ -102,7 +157,7 @@ ansible-playbook setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
 oc get volumesnapshotclass -L velero.io/csi-volumesnapshot-class
 ```
 
-## 9. Backup
+## 11. Backup
 
 ```bash
 ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
@@ -114,13 +169,13 @@ oc get datauploads.velero.io -n openshift-adp
 
 Do not continue until every `DataUpload` is `Completed`.
 
-## 10. Shut down hub1
+## 12. Shut down hub1
 
 ```bash
 ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
 ```
 
-## 11. Destroy Ceph
+## 13. Destroy Ceph
 
 ```bash
 ansible-playbook cleanup-ceph.yaml
@@ -130,20 +185,20 @@ ls /var/lib/libvirt/images/ | grep -E '^ceph|^cephadmin'
 
 Both must return nothing.
 
-## 12. Rebuild Ceph
+## 14. Rebuild Ceph
 
 ```bash
 ansible-playbook -i inventory/hosts setup_ceph.yaml --ask-vault-pass
 ssh root@192.168.122.27 ceph -s
 ```
 
-## 13. Hub2
+## 15. Hub2
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
 ```
 
-## 14. Attach Ceph to hub2
+## 16. Attach Ceph to hub2
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub2_install/auth/kubeconfig
@@ -151,14 +206,14 @@ ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
 oc get sc                                 # ocs-external-storagecluster-ceph-rbd (default)
 ```
 
-## 15. ACM on hub2
+## 17. ACM on hub2
 
 ```bash
 oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 oc get pvc -n multicluster-engine         # three Bound
 ```
 
-## 16. OADP on hub2
+## 18. OADP on hub2
 
 ```bash
 ansible-playbook setup_oadp.yaml --ask-vault-pass \
@@ -166,7 +221,7 @@ ansible-playbook setup_oadp.yaml --ask-vault-pass \
 oc get backup.velero.io -n openshift-adp  # hcp-cluster1-backup-csi appears
 ```
 
-## 17. Restore
+## 19. Restore
 
 ```bash
 ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
@@ -176,7 +231,7 @@ oc get restore.velero.io hcp-cluster1-restore-csi -n openshift-adp -o yaml
 oc get datadownloads.velero.io -n openshift-adp
 ```
 
-## 18. DNS cutover
+## 20. DNS cutover
 
 ```bash
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
@@ -198,7 +253,7 @@ sudo kill -HUP $(cat /var/run/libvirt/network/default.pid 2>/dev/null \
 
 Make it permanent: `target_hub: hub2` in `vars.yaml`.
 
-## 19. Verify
+## 21. Verify
 
 ```bash
 oc get managedcluster                                   # hub2
