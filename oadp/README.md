@@ -420,7 +420,51 @@ No `DataUpload` rows at all is the failure worth recognising - see
 ```bash
 ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
 ```
+
+### Destroy the Ceph cluster (Ceph/CSI DR demo)
+
+Only on the Ceph path, and only deliberately: **this destroys the storage
+the backup was taken from.** Take the backup and confirm its `DataUpload`s
+completed first; there is no going back to hub1's storage afterwards.
+
+With `oadp_backup_method=csi` the etcd data is no longer on Ceph - the
+snapshot was taken, copied to S3 by the data mover, and released. So the
+bucket already holds everything the restore needs, and leaving the
+original cluster running makes that impossible to show: an observer
+cannot tell whether the hosted cluster came back from object storage or
+from storage that never went away.
+
+Production puts the DR site on its own storage cluster of the same type.
+Rebuilding gets the same evidence on one bare-metal host without standing
+up a second 80G Ceph cluster.
+
+```bash
+ansible-playbook cleanup-ceph.yaml
+
+# a partial teardown leaves stale OSD disks the rebuilt cluster cannot
+# claim - you get a cluster with no OSDs. Check before rebuilding:
+virsh list --all | grep -E 'ceph[123]|cephadmin'          # expect no rows
+ls /var/lib/libvirt/images/ | grep -E '^ceph|^cephadmin'  # expect nothing
+```
+
 ## DR Hub
+### Rebuild Ceph for the DR hub (Ceph/CSI DR demo)
+
+A brand-new cluster on the same four VMs - no pool, no image and no CSI
+user survives from hub1's:
+
+```bash
+ansible-playbook -i inventory/hosts setup_ceph.yaml --ask-vault-pass
+ssh root@192.168.122.27 ceph -s     # HEALTH_OK, 3 mons, 9 OSDs
+```
+
+The StorageClass name comes from `ceph_odf_storagecluster_name`, so the
+rebuilt cluster presents `ocs-external-storagecluster-ceph-rbd` again.
+That matters: Velero restores each PVC with its original
+`spec.storageClassName`, and a DR hub with no class of that exact name
+leaves the restored PVCs `Pending` indefinitely, with nothing in the
+Restore status to explain why.
+
 ### Build DR Hub
 Once the primary hub is shutdown, you can build the DR hub.
 ```bash
@@ -431,6 +475,15 @@ Note that AgentServiceConfigs are not restored by OADP. You need to apply the re
 oc apply -f /home/images/hcp-backup-restore/roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 ```
 There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will do that automatically.
+
+On the Ceph path, build hub2 with `use_lvm_storage: false`, then attach it
+to the rebuilt Ceph cluster - this creates hub2's own ODF external
+StorageCluster and its own CSI credentials:
+
+```bash
+ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
+```
+
 ### Configure OADP on DR Hub
 
 ```bash
