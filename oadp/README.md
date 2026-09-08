@@ -276,16 +276,20 @@ never reached, and the storage configuration is not at fault.
 
 #### `oc get backup` shows nothing, `oc get backup.velero.io` does
 
-Always qualify the group. OpenShift ships
-`backups.config.openshift.io` (the cluster's own etcd backup CR), so the
-short name `backup` is ambiguous and kubectl resolves it to that one -
-`oc get backup` lists an empty, unrelated resource and gives no hint that
-it looked in the wrong place.
+Always qualify the group. More than one installed operator defines a
+`Backup` kind, so the short name is ambiguous and kubectl resolves it to
+one of the others - `oc get backup` then lists an empty, unrelated
+resource and gives no hint that it looked in the wrong place.
+
+On this lab the competing CRD arrives with ODF itself: NooBaa pulls in
+CloudNativePG, which defines `backups.postgresql.cnpg.noobaa.io`. So the
+collision appears exactly when you take the Ceph path. Ask the cluster
+what it has rather than assuming:
 
 ```bash
-oc get backup -n openshift-adp              # wrong CRD, looks empty
+oc api-resources | grep -i backup           # every group defining Backup
+oc get backup -n openshift-adp              # whichever one won, likely empty
 oc get backup.velero.io -n openshift-adp    # what you meant
-oc api-resources | grep -i backup           # shows both, and their groups
 ```
 
 The same care applies to `restore.velero.io`, `datauploads.velero.io` and
