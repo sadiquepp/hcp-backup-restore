@@ -129,8 +129,18 @@ oc get sc                                 # ocs-external-storagecluster-ceph-rbd
 ```bash
 oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 oc get pvc -n multicluster-engine         # three Bound
+
 ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass
+
+oc apply -f roles/setup-bminfra/templates/.rendered-01-namespace.yaml
+oc apply -f roles/setup-bminfra/templates/.rendered-02-pullsecret.yaml
+oc apply -f roles/setup-bminfra/templates/.rendered-03-infraenv.yaml
+oc apply -f roles/setup-bminfra/templates/.rendered-04-capi-role.yaml
+
+oc get infraenv -n bminfra
 ```
+
+`setup_bminfra.yaml` only renders those four - applying them is manual.
 
 ## 9. Hosted cluster
 
