@@ -470,19 +470,33 @@ Once the primary hub is shutdown, you can build the DR hub.
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
 ```
-Note that AgentServiceConfigs are not restored by OADP. You need to apply the rendered manifests manually before proceeding to the next step. Watch the ansible debug output for the location of the rendered manifests to apply.
-```bash
-oc apply -f /home/images/hcp-backup-restore/roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
-```
-There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will do that automatically.
 
-On the Ceph path, build hub2 with `use_lvm_storage: false`, then attach it
-to the rebuilt Ceph cluster - this creates hub2's own ODF external
-StorageCluster and its own CSI credentials:
+On the Ceph path, build hub2 with `use_lvm_storage: false` and attach it to
+the rebuilt Ceph cluster **now**, before the AgentServiceConfig below - this
+creates hub2's own ODF external StorageCluster and its own CSI credentials:
 
 ```bash
 ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
 ```
+
+The AgentServiceConfig provisions three PVCs - `databaseStorage` (10Gi),
+`filesystemStorage` (100Gi) and `imageStorage` (50Gi) - and none of them
+names a `storageClassName`, so they bind against whatever StorageClass the
+cluster marks **default**. Until that exists they sit `Pending` and
+assisted-service never starts. On the LVM path `lvms-vg1` is the default;
+on the Ceph path it is `ocs-external-storagecluster-ceph-rbd`, which is
+why `ceph_odf_rbd_default_sc` defaults to true. Check before continuing:
+
+```bash
+oc get sc      # exactly one class marked (default)
+```
+
+Note that AgentServiceConfigs are not restored by OADP. You need to apply the rendered manifests manually before proceeding to the next step. Watch the ansible debug output for the location of the rendered manifests to apply.
+```bash
+oc apply -f /home/images/hcp-backup-restore/roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
+oc get pvc -n multicluster-engine    # the three should reach Bound
+```
+There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will do that automatically.
 
 ### Configure OADP on DR Hub
 

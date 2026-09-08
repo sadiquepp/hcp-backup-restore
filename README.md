@@ -180,7 +180,9 @@ built, because `setup-hub-acm` acts on it during bring-up:
 - **LVM Storage** (default) - `use_lvm_storage: true` in `vars.yaml`. Nothing
   else to do; the sections below install it as part of the hub.
 - **Ceph 9 via ODF external mode** - set `use_lvm_storage: false`, then build
-  the Ceph cluster and attach it with the two `setup_ceph*.yaml` playbooks. See
+  the Ceph cluster and attach it with the two `setup_ceph*.yaml` playbooks,
+  before the AgentServiceConfig step - that step's PVCs need a default
+  StorageClass to exist already. See
   [Ceph 9 Storage for Hub PVs (ODF External Mode)](#ceph-9-storage-for-hub-pvs-odf-external-mode)
   for the whole flow, its OCP 4.22 requirement, and why the two should not both
   run on the same hub.
@@ -275,9 +277,19 @@ manually as below), plus `.rendered-06-registry-ca-configmap.yaml`,
 
 - Configure CIM. Apply the AgentServiceConfig to the ACM cluster. Customize the OS images using `osImages` to the ones you want to use for the hosted clusters. Review the rendendered yaml file at `roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml` and apply it to the ACM cluster.
 - Make sure that ACM and `MultClusterHub` is fully operational before proceeding to apply the `AgentServiceConfig` in the next step.
+- The hub also needs a **default StorageClass** by this point. The
+  AgentServiceConfig provisions three PVCs (`databaseStorage` 10Gi,
+  `filesystemStorage` 100Gi, `imageStorage` 50Gi) and none of them names a
+  `storageClassName`, so they bind against the default class - without one
+  they stay `Pending` and assisted-service never starts. On the LVM path
+  that class is `lvms-vg1` and hub bring-up created it. On the Ceph path
+  (`use_lvm_storage: false`) run `setup_ceph.yaml` and `setup_ceph_odf.yaml`
+  **before** this step, so `ocs-external-storagecluster-ceph-rbd` exists and
+  is the default (`ceph_odf_rbd_default_sc`). Confirm with `oc get sc`.
 
 ```bash
 oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
+oc get pvc -n multicluster-engine    # the three should reach Bound
 ```
 
 - Create Infrastructure Environment. 
@@ -761,18 +773,32 @@ Once the primary hub is shutdown, you can build the DR hub.
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
 ```
-Note that AgentServiceConfigs are not restored by OADP. You need to apply the rendered manifests manually before proceeding to the next step. Watch the ansible debug output for the location of the rendered manifests to apply.
-```bash
-oc apply -f /home/images/hcp-backup-restore/roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
-```
-There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will do that automatically.
 
-On the Ceph path, build hub2 with `use_lvm_storage: false` and then attach
-it to the rebuilt Ceph cluster before configuring OADP:
+On the Ceph path, build hub2 with `use_lvm_storage: false` and attach it to
+the rebuilt Ceph cluster **now**, before the AgentServiceConfig below:
 
 ```bash
 ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
 ```
+
+The AgentServiceConfig provisions three PVCs - `databaseStorage` (10Gi),
+`filesystemStorage` (100Gi) and `imageStorage` (50Gi) - and none of them
+names a `storageClassName`, so they bind against whatever StorageClass the
+cluster marks **default**. Until that exists they sit `Pending` and
+assisted-service never starts. On the LVM path `lvms-vg1` is the default;
+on the Ceph path it is `ocs-external-storagecluster-ceph-rbd`, which is
+why `ceph_odf_rbd_default_sc` defaults to true. Check before continuing:
+
+```bash
+oc get sc      # exactly one class marked (default)
+```
+
+Note that AgentServiceConfigs are not restored by OADP. You need to apply the rendered manifests manually before proceeding to the next step. Watch the ansible debug output for the location of the rendered manifests to apply.
+```bash
+oc apply -f /home/images/hcp-backup-restore/roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
+oc get pvc -n multicluster-engine    # the three should reach Bound
+```
+There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will do that automatically.
 
 ### Configure OADP on DR Hub
 
