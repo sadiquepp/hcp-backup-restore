@@ -559,3 +559,116 @@ objects, which is where to look if the Restore seems to stall:
 ```bash
 oc get datadownloads.velero.io -n openshift-adp -w
 ```
+
+#### What a good `csi` restore looks like
+
+The counterpart to
+[What a good `csi` run looks like](#what-a-good-csi-run-looks-like) - a
+verified restore of `hcp-cluster1` onto the DR hub, from the backup
+recorded there:
+
+```yaml
+status:
+  phase: Completed
+  progress:
+    itemsRestored: 379
+    totalItems: 379
+  restoreItemOperationsAttempted: 3
+  restoreItemOperationsCompleted: 3
+  startTimestamp: "2026-09-08T08:12:30Z"
+  completionTimestamp: "2026-09-08T08:18:11Z"
+  warnings: 1
+```
+
+```
+$ oc get datadownloads.velero.io -n openshift-adp
+NAME                             STATUS      STARTED   BYTES DONE   TOTAL BYTES   STORAGE LOCATION   AGE     NODE
+hcp-cluster1-restore-csi-76kvd   Completed   5m18s     371423568    371423568     default            5m23s   worker2
+hcp-cluster1-restore-csi-l82hx   Completed   5m18s     370678113    370678113     default            5m23s   worker1
+hcp-cluster1-restore-csi-qxxlj   Completed   5m18s     370738865    370738865     default            5m23s   worker3
+```
+
+The strongest single check is that **the byte counts match the backup's
+`DataUpload`s exactly** - 371423568, 370738865 and 370678113 in both
+tables. Same three etcd volumes, round-tripped through S3. Which worker
+each lands on differs from the backup and does not matter; the data mover
+provisions a fresh PVC wherever the pod is scheduled.
+
+Also worth noting what this proves: the Ceph cluster the backup was taken
+from had been destroyed and rebuilt in between (see
+[Destroy the Ceph cluster](../README.md#destroy-the-ceph-cluster-cephcsi-dr-demo)),
+so none of these bytes could have come from the original storage.
+
+A non-zero `warnings` count is normal and does not mean the restore
+failed - `itemsRestored == totalItems` and three completed operations are
+what matter. Warnings are usually resources that already existed on the
+target hub and were left alone. Read them rather than guessing:
+
+```bash
+alias velero='oc -n openshift-adp exec deployment/velero -c velero -it -- ./velero'
+velero restore describe hcp-cluster1-restore-csi --details
+velero restore logs hcp-cluster1-restore-csi | grep -i 'level=warning'
+```
+
+#### Restored cluster stuck in `Importing`
+
+If the restored HostedCluster reaches `Completed` but its ManagedCluster
+sits at `Available=Unknown` / `ManagedClusterLeaseUpdateStopped`, and the
+klusterlet registration agent logs
+
+```
+failed to list *v1.ManagedCluster: Unauthorized
+failed to list *v1.CertificateSigningRequest: Unauthorized
+```
+
+then the agent is presenting a ServiceAccount token minted by the
+**original** hub. `Unauthorized` is a 401 - the credential itself was
+rejected - so this is not a missing Role or ClusterRole, which would be a
+403 `Forbidden`.
+
+The path in: this repo's Backup includes `secrets` from the
+`<cluster>` namespace, and for an ACM-imported hosted cluster that is
+*also* the ManagedCluster's namespace, so `<cluster>-import` - carrying
+the bootstrap SA token - is inside backup scope. Restoring it hands the
+DR hub a token signed by the old hub's key, referencing an SA uid the DR
+hub regenerated.
+
+Confirm by decoding the token and comparing with the live ServiceAccount:
+
+```bash
+oc get secret bootstrap-hub-kubeconfig -n klusterlet-<cluster> -o jsonpath='{.data.kubeconfig}' \
+  | base64 -d | grep 'token:' | awk '{print $2}' | cut -d. -f2 \
+  | tr '_-' '/+' | base64 -d | python3 -m json.tool
+oc get sa <cluster>-bootstrap-sa -n <cluster> -o jsonpath='{.metadata.uid}{"\n"}'
+```
+
+An `iat` predating the restore, or a uid that differs from the live SA,
+is the confirmation. Fix by deleting the transplanted import secret so
+MCE regenerates it against this hub:
+
+```bash
+oc delete secret <cluster>-import -n <cluster>
+```
+
+MCE mints a new token, rebuilds the `<cluster>-hosted-klusterlet`
+ManifestWork from it, and the work agent re-applies
+`bootstrap-hub-kubeconfig`; the agent then files a CSR which auto-approves
+if `hubAcceptsClient` is already true.
+
+Deleting `bootstrap-hub-kubeconfig` directly does **not** help - it is
+owned by that ManifestWork and gets re-applied with the same stale
+content. Refresh the import secret and let MCE rebuild the chain.
+
+To stop this recurring, exclude the import secret from the backup using
+Velero's object-level opt-out, so the artifact never carries another
+hub's credentials (it is a 360-day token otherwise sitting in S3):
+
+```bash
+oc label secret <cluster>-import -n <cluster> velero.io/exclude-from-backup=true
+```
+
+This is not a deviation from the upstream guide's resource list - keep
+`sa` and `secrets` as documented. The collision exists only because the
+HostedCluster's namespace shares its name with the ManagedCluster;
+upstream's example puts the HostedCluster in `clusters`, so ACM's
+namespace falls outside the backup.
