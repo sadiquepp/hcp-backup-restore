@@ -22,6 +22,29 @@ backup - see [Why there is no CSI smoke test](#why-there-is-no-csi-smoke-test).
 Control-plane volumes can be captured two ways, selected by
 `oadp_backup_method` - see [Backup methods: fs vs csi](#backup-methods-fs-vs-csi).
 
+Commands only, end to end: [steps.md](../steps.md).
+
+## Contents
+
+- [One-time AWS setup (per bucket, not per hub)](#one-time-aws-setup-per-bucket-not-per-hub)
+- [Backup methods: fs vs csi](#backup-methods-fs-vs-csi)
+  - [What `csi` needs](#what-csi-needs)
+- [Primary Hub](#primary-hub)
+  - [Configure OADP (credentials + DPA)](#configure-oadp-credentials--dpa)
+  - [Deploy a hello-openshift application with a PVC to Hub Cluster and backup it using OADP](#deploy-a-hello-openshift-application-with-a-pvc-to-hub-cluster-and-backup-it-using-oadp)
+  - [Why there is no CSI smoke test](#why-there-is-no-csi-smoke-test)
+  - [Backup a hosted cluster using OADP](#backup-a-hosted-cluster-using-oadp)
+  - [Shutdown Primary Hub](#shutdown-primary-hub)
+  - [Destroy the Ceph cluster (Ceph/CSI DR demo)](#destroy-the-ceph-cluster-cephcsi-dr-demo)
+- [DR Hub](#dr-hub)
+  - [Rebuild Ceph for the DR hub (Ceph/CSI DR demo)](#rebuild-ceph-for-the-dr-hub-cephcsi-dr-demo)
+  - [Build DR Hub](#build-dr-hub)
+  - [Configure OADP on DR Hub](#configure-oadp-on-dr-hub)
+  - [Restore hello-openshift application with a PVC to DR Hub](#restore-hello-openshift-application-with-a-pvc-to-dr-hub)
+  - [Restore the hosted cluster to the DR Hub using OADP. This will restore the hosted cluster to the DR Hub using OADP](#restore-the-hosted-cluster-to-the-dr-hub-using-oadp-this-will-restore-the-hosted-cluster-to-the-dr-hub-using-oadp)
+  - [Point DNS at the DR hub](#point-dns-at-the-dr-hub)
+  - [Verify the hosted cluster came back](#verify-the-hosted-cluster-came-back)
+
 ## One-time AWS setup (per bucket, not per hub)
 
 ```bash
@@ -683,3 +706,65 @@ This is not a deviation from the upstream guide's resource list - keep
 HostedCluster's namespace shares its name with the ManagedCluster;
 upstream's example puts the HostedCluster in `clusters`, so ACM's
 namespace falls outside the backup.
+
+
+### Point DNS at the DR hub
+
+The DR hub is on its own network segment, so the restored hosted clusters come
+up on its MetalLB addresses (`.90`/`.91`/`.92`) rather than hub1's - the pool
+names are the same, the addresses are not. Re-render the zone files so
+`api`/`api-int` follow them:
+
+```bash
+ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+  --ask-vault-pass -e target_hub=hub2
+```
+
+Verify DNS and the restored kube-apiserver Service agree:
+
+```bash
+dig +short api.hcp-cluster1.mylab.com @192.168.122.21
+oc get svc kube-apiserver -n hcp-cluster1-hcp-cluster1 \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}{"\n"}'
+```
+
+**Then check a worker node, not just the helper.** The VMs get
+`192.168.122.1` from DHCP - libvirt's dnsmasq - which forwards the lab
+zones to the helper and caches the answers. A correct zone on the helper
+with a stale answer on the nodes is the normal state after a cutover, and
+the symptom is both hosted-cluster workers going `NotReady` while
+`oc get co` falls apart: the kubelets are still dialling the hub that
+just went away.
+
+```bash
+ssh core@192.168.122.41 'getent hosts api.hcp-cluster1.mylab.com'   # want the DR address
+```
+
+If it still shows the old address, flush dnsmasq's cache on the
+bare-metal host - this clears cached records without touching DHCP leases
+or disturbing any VM:
+
+```bash
+sudo kill -HUP $(cat /var/run/libvirt/network/default.pid 2>/dev/null \
+                 || cat /var/run/libvirt/dnsmasq/default.pid)
+```
+
+Kubelets re-resolve and rejoin within a minute or two;
+`systemctl restart kubelet` on each worker forces it.
+
+Set `target_hub: hub2` in `vars.yaml` to make the cutover permanent. See
+[MetalLB Address Pools for Hosted Clusters](../README.md#metallb-address-pools-for-hosted-clusters)
+for how the per-hub addresses are defined.
+
+### Verify the hosted cluster came back
+
+```bash
+export KUBECONFIG=<hosted cluster kubeconfig>
+oc get nodes                     # both workers Ready
+oc get co | grep -v 'True.*False.*False'
+oc get pods -A | grep -vE 'Running|Completed'
+```
+
+Nodes stay `NotReady` until DNS points at the DR hub and the kubelets
+reconnect, so do the step above first. `metrics.k8s.io` errors and
+Pending/Terminating pods are downstream of that and clear on their own.

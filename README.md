@@ -6,6 +6,62 @@ The lab runs on a single bare-metal RHEL 9 node using KVM/libvirt to simulate th
 
 High-Level-Arch
 
+In a hurry? [steps.md](steps.md) is the same end-to-end run as commands only.
+
+## Contents
+
+- [Architecture Overview](#architecture-overview)
+- [Prerequisites](#prerequisites)
+  - [Setup Bare Metal Host](#setup-bare-metal-host)
+  - [Configure OADP Pre-requisites](#configure-oadp-pre-requisites)
+  - [vars.yaml](#varsyaml)
+  - [vault.yaml (encrypted)](#vaultyaml-encrypted)
+- [End-to-End Workflow](#end-to-end-workflow)
+  - [Setup Bare Metal Host](#setup-bare-metal-host-1)
+  - [Setup Mirror Registry (If using a disconnected deployment)](#setup-mirror-registry-if-using-a-disconnected-deployment)
+  - [Choose the Hub's PV Storage](#choose-the-hubs-pv-storage)
+  - [Setup Hub Cluster (hub1 - Connected Deployment)](#setup-hub-cluster-hub1---connected-deployment)
+  - [Setup Hub Cluster (hub1 - Disconnected Deployment)](#setup-hub-cluster-hub1---disconnected-deployment)
+  - [Prepare ACM (Disconnected Deployment)](#prepare-acm-disconnected-deployment)
+  - [Prepare ACM and Inventory](#prepare-acm-and-inventory)
+  - [Create a Hosted Cluster (Disconnected Deployment)](#create-a-hosted-cluster-disconnected-deployment)
+  - [Deploy a Sample hello-openshift application to the hosted cluster](#deploy-a-sample-hello-openshift-application-to-the-hosted-cluster)
+- [Choose how the control-plane volumes are captured](#choose-how-the-control-plane-volumes-are-captured)
+- [Primary Hub](#primary-hub)
+  - [Configure OADP (credentials + DPA)](#configure-oadp-credentials--dpa)
+  - [Deploy a hello-openshift application to Hub](#deploy-a-hello-openshift-application-to-hub)
+  - [Backup a hosted cluster using OADP](#backup-a-hosted-cluster-using-oadp)
+  - [Shutdown Primary Hub](#shutdown-primary-hub)
+  - [Destroy the Ceph cluster (Ceph/CSI DR demo)](#destroy-the-ceph-cluster-cephcsi-dr-demo)
+- [DR Hub](#dr-hub)
+  - [Rebuild Ceph for the DR hub (Ceph/CSI DR demo)](#rebuild-ceph-for-the-dr-hub-cephcsi-dr-demo)
+  - [Build DR Hub](#build-dr-hub)
+  - [Configure OADP on DR Hub](#configure-oadp-on-dr-hub)
+  - [Restore hello-openshift application with a PVC to DR Hub](#restore-hello-openshift-application-with-a-pvc-to-dr-hub)
+  - [Restore the hosted cluster to the DR Hub using OADP](#restore-the-hosted-cluster-to-the-dr-hub-using-oadp)
+  - [Point DNS at the DR hub](#point-dns-at-the-dr-hub)
+- [Disconnected Hosted Cluster](#disconnected-hosted-cluster)
+  - [How the workers are cut off](#how-the-workers-are-cut-off)
+  - [Image signature policy on the discovery host](#image-signature-policy-on-the-discovery-host)
+  - [Building it](#building-it)
+- [MetalLB Address Pools for Hosted Clusters](#metallb-address-pools-for-hosted-clusters)
+  - [DR cutover](#dr-cutover)
+  - [What actually pins the address](#what-actually-pins-the-address)
+  - [Notes and constraints](#notes-and-constraints)
+  - [Verifying](#verifying)
+- [Ceph 9 Storage for Hub PVs (ODF External Mode)](#ceph-9-storage-for-hub-pvs-odf-external-mode)
+  - [What gets built](#what-gets-built)
+  - [Requirements](#requirements)
+  - [Switching the hub off LVM Storage](#switching-the-hub-off-lvm-storage)
+  - [Build the Ceph cluster](#build-the-ceph-cluster)
+  - [Attach it to OpenShift](#attach-it-to-openshift)
+  - [Verifying](#verifying-1)
+  - [Notes and constraints](#notes-and-constraints-1)
+- [Playbook Reference](#playbook-reference)
+- [Key Roles](#key-roles)
+- [OADP Details](#oadp-details)
+- [Cleanup](#cleanup)
+
 ## Architecture Overview
 
 ```
