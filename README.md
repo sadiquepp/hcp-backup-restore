@@ -573,7 +573,7 @@ The operator is already there (installed during hub bring-up). This
 step just points it at your bucket:
 
 ```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass
 ```
 
 Idempotent - re-running against the same hub just reconciles the
@@ -611,7 +611,7 @@ oc get Backup -n openshift-adp hello-openshift-oadp-backup -o yaml
 ### Backup a hosted cluster using OADP.
 
 ```bash
-ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+ansible-playbook -i inventory/hosts backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1
 ```
 
@@ -639,7 +639,7 @@ status:
 ### Shutdown Primary Hub
 
 ```bash
-ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts shutdown_hub_cluster.yaml --ask-vault-pass
 ```
 ## DR Hub
 ### Build DR Hub
@@ -655,7 +655,7 @@ There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will
 ### Configure OADP on DR Hub
 
 ```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
+ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
 ```
 ### Restore hello-openshift application with a PVC to DR Hub.
 This will validate that the restore is working before restoring the hosted cluster.
@@ -674,7 +674,7 @@ oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
 This will restore the hosted cluster to the DR Hub using OADP.
 
 ```bash
-ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+ansible-playbook -i inventory/hosts restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
 ```
 Check the status of the restore.
 ```bash
@@ -941,7 +941,7 @@ pools for them are created by re-running just the `acm` tag in disconnected
 mode, which is the step before restoring a `-d` cluster onto hub2:
 
 ```bash
-ansible-playbook setup_hub_cluster2.yaml --ask-vault-pass --tags acm \
+ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass --tags acm \
   -e disconnected_install=true
 ```
 
@@ -1055,6 +1055,21 @@ The last two must agree - that is the whole point of this layout.
 
 ## Playbook Reference
 
+Every playbook here is run with `-i inventory/hosts`. Most plays target
+`localhost`, but they reach the lab VMs through `delegate_to` - the helper, the
+mirror registry, minio, `ceph1`, `cephadmin` - and a delegated host that is not
+in the inventory gets no `ansible_ssh_private_key_file` or
+`StrictHostKeyChecking=no`, so the SSH fails or hangs on a host-key prompt.
+`setup_ceph.yaml` goes further and has a play against the `ceph_nodes` group,
+which does not exist at all without `-i`. Passing it everywhere keeps one habit
+instead of a rule about which playbook needs it.
+
+`inventory/hosts` is generated from `inventory/hosts.j2` and `vars.yaml`
+(`lab_network_prefix` + `ip_list`) by `setup_bm_host.yaml`, which re-reads it in
+the same run so its own delegated tasks use what it just wrote. The copy in git
+is the render of the defaults; if you change `lab_network_prefix` or `ip_list`,
+re-run that playbook (its first task is enough) before running anything that
+delegates.
 
 | Playbook                      | Description                                   |
 | ----------------------------- | --------------------------------------------- |
@@ -1103,12 +1118,12 @@ For the full IAM policy, smoke-test manifests, and per-hub setup details, see `[
 Remove hub1 VMs and disks (does not affect hub2 or S3 backups):
 
 ```bash
-ansible-playbook cleanup-hub.yaml
+ansible-playbook -i inventory/hosts cleanup-hub.yaml
 ```
 
 Remove everything (all VMs including helper):
 
 ```bash
-ansible-playbook cleanup.yaml
+ansible-playbook -i inventory/hosts cleanup.yaml
 ```
 

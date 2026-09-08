@@ -91,7 +91,7 @@ The operator is already there (installed during hub bring-up). This
 step just points it at your bucket:
 
 ```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass
 ```
 
 Idempotent - re-running against the same hub just reconciles the
@@ -129,7 +129,7 @@ oc get Backup -n hello-openshift-oadp-backup -o yaml
 ### Backup a hosted cluster using OADP.
 
 ```bash
-ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+ansible-playbook -i inventory/hosts backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1
 ```
 
@@ -157,7 +157,7 @@ status:
 ### Shutdown Primary Hub
 
 ```bash
-ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts shutdown_hub_cluster.yaml --ask-vault-pass
 ```
 ## DR Hub
 ### Build DR Hub
@@ -173,7 +173,7 @@ There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will
 ### Configure OADP on DR Hub
 
 ```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
+ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
 ```
 ### Restore hello-openshift application with a PVC to DR Hub.
 This will validate that the restore is working before restoring the hosted cluster.
@@ -191,5 +191,5 @@ oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
 ### Restore the hosted cluster to the DR Hub using OADP. This will restore the hosted cluster to the DR Hub using OADP.
 
 ```bash
-ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+ansible-playbook -i inventory/hosts restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
 ```
