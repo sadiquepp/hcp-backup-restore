@@ -12,7 +12,7 @@
 ## mirror_registry_password defined in vault.yaml.
 ##
 ## Usage:
-##   ansible-playbook setup_mirror_registry.yaml --ask-vault-pass
+##   ansible-playbook -i inventory/hosts setup_mirror_registry.yaml --ask-vault-pass
 
 - name: Setup Mirror Registry VM
   hosts: localhost

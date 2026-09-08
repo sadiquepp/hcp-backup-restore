@@ -5,7 +5,7 @@
 ## Modelled on cleanup-hub.yaml / cleanup-hub2.yaml.
 ##
 ## Usage:
-##   ansible-playbook cleanup-hub-disconnected.yaml
+##   ansible-playbook -i inventory/hosts cleanup-hub-disconnected.yaml
 
 - name: Cleanup
   hosts: localhost

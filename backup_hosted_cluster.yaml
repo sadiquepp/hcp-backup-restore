@@ -3,7 +3,7 @@
 ## (normally hub1, before the DR cutover).
 ##
 ## Usage:
-##   ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+##   ansible-playbook -i inventory/hosts backup_hosted_cluster.yaml --ask-vault-pass \
 ##     -e hcp_cluster_name=hcp-cluster1
 ##
 ## hcp_cluster_name must match the HostedCluster name/namespace (e.g.

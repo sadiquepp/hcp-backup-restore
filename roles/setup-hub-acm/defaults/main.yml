@@ -25,6 +25,9 @@ metallb_hub: hub
 ## vars.yaml's own comment warns against. The role skips a cluster with no
 ## address for the hub it is configuring (see metallb_hub_pools in
 ## tasks/main.yml), so a missing key is the reservation, not an omission.
+##
+## Carrying the hub's address is only half the selection - see
+## hosted_clusters / hosted_clusters_disconnected below.
 hosted_cluster_metallb_pools:
   hcp-cluster1:
     pool: hcp-cluster1-api-pool
@@ -41,6 +44,22 @@ hosted_cluster_metallb_pools:
 ## segment.
 hosted_cluster_metallb_network_prefixes: {}
 
+## The hosted clusters of each install mode - the same two lists
+## roles/create-hosted-cluster renders from, declared here because the MetalLB
+## selection reads them too. disconnected_install (below) picks one of them,
+## and only the clusters in the chosen list get a pool on the hub being
+## configured. That is what keeps a connected hub2 from carrying the '-d'
+## clusters' pools even though vars.yaml gives those clusters a hub2 address
+## for DR: the address stays reserved, and the pool is rendered by re-running
+## this role with disconnected_install=true when a '-d' cluster is actually
+## restored there.
+##
+## Empty on both sides (this role used without vars.yaml) means "no opinion":
+## the selection falls back to hub alone, as it was before. Real values come
+## from vars.yaml.
+hosted_clusters: []
+hosted_clusters_disconnected: []
+
 ## The shared pool/advertisement this role used to create, removed before the
 ## per-cluster pools are applied because its 60-63 range overlaps them and
 ## MetalLB rejects overlapping IPAddressPools. Set false if you have already
@@ -49,6 +68,15 @@ hosted_cluster_metallb_network_prefixes: {}
 metallb_remove_legacy_shared_pool: true
 metallb_legacy_pool_name: hcp-ip-pool
 metallb_legacy_l2advertisement_name: l2advertisement
+
+## Whether to delete the pools belonging to the OTHER install mode on this hub.
+## `oc apply` does not prune, so without this a hub2 built before the install
+## mode narrowed the selection keeps all six pools forever. Only pools named in
+## hosted_cluster_metallb_pools that carry an address for this hub are touched,
+## and one whose address a Service currently holds is always skipped - so a
+## connected re-run cannot pull the VIP out from under a '-d' cluster restored
+## onto the same hub. Set false to leave both modes' pools in place.
+metallb_prune_other_mode_pools: true
 
 
 ## AgentServiceConfig storage sizes and available RHCOS live-ISO
