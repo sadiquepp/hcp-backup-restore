@@ -28,7 +28,11 @@
 {% set pool = hosted_cluster_metallb_pools[zone.name] -%}
 {% set metallb_prefix = (hosted_cluster_metallb_network_prefixes | default({}))[zone.hub] | default(lab_network_prefix) -%}
 {% set node_keys = (hosted_cluster_node_keys | default({}))[zone.name] | default({}) -%}
-$TTL 1D
+{# 60s, not the 1D the other zones use: api/api-int below are the records that
+   MOVE at a DR cutover (setup_bm_host.yaml --tags dns -e target_hub=hub2), so
+   their TTL is how long the lab keeps sending traffic to the hub that just
+   went away. Everything else in this zone is static and does not care. #}
+$TTL 60
 @	IN SOA	helper.{{ hub_domain }}. root.{{ hub_domain }}. (
 					0	; serial
 					1D	; refresh

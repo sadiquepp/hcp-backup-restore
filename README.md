@@ -861,6 +861,38 @@ oc get svc kube-apiserver -n hcp-cluster1-hcp-cluster1 \
   -o jsonpath='{.status.loadBalancer.ingress[0].ip}{"\n"}'
 ```
 
+**Then check a worker node, not just the helper.** The VMs do not query the
+helper directly - they get `192.168.122.1` from DHCP, which is libvirt's
+dnsmasq, which forwards the lab zones to the helper **and caches the answers**.
+A correct zone on the helper and a stale answer on the nodes is the normal
+state for a few minutes after a cutover, and the symptom is both hosted-cluster
+workers going `NotReady` while `oc get co` falls apart - the kubelets are still
+dialling the hub that just went away.
+
+```bash
+ssh core@192.168.122.41 'getent hosts api.hcp-cluster1.mylab.com'   # want the DR address
+```
+
+If it still shows the old address, flush dnsmasq's cache on the bare-metal
+host - this clears cached records without touching DHCP leases or disturbing
+any VM:
+
+```bash
+sudo kill -HUP $(cat /var/run/libvirt/network/default.pid 2>/dev/null \
+                 || cat /var/run/libvirt/dnsmasq/default.pid)
+```
+
+Kubelets re-resolve and rejoin on their own within a minute or two;
+`systemctl restart kubelet` on each worker forces it.
+
+The hosted-cluster zones are served with `$TTL 60` and this dnsmasq is capped
+at `max-cache-ttl=60` (`roles/setup-bm-host/templates/default-network.xml.j2`),
+so a cutover propagates in about a minute. Both are recent - a lab whose
+`default` network was defined before that change still caches at the zone's
+old 1-day TTL until `setup_bm_host.yaml --tags virtnet` redefines the network,
+which drops `virbr0` and briefly interrupts every VM. The flush above is the
+zero-downtime alternative.
+
 Set `target_hub: hub2` in `vars.yaml` to make the cutover permanent. See
 [MetalLB Address Pools for Hosted Clusters](#metallb-address-pools-for-hosted-clusters)
 for how the per-hub addresses are defined.
