@@ -166,7 +166,7 @@ The operator is already there (installed during hub bring-up). This
 step just points it at your bucket:
 
 ```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass
 ```
 
 For CSI snapshot backups, add the method so the role also labels the
@@ -174,7 +174,7 @@ VolumeSnapshotClass Velero needs (it fails with a clear message if ODF
 has not created one yet):
 
 ```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
+ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
 ```
 
 Idempotent - re-running against the same hub just reconciles the
@@ -264,7 +264,7 @@ control plane's namespace the plugin resolves the HCP, returns success,
 and the CSI action runs normally:
 
 ```bash
-ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+ansible-playbook -i inventory/hosts backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1 -e oadp_backup_method=csi
 oc get datauploads.velero.io -n openshift-adp -w
 ```
@@ -369,7 +369,7 @@ the namespace's own objects - above all the PV behind the PVC.
 ### Backup a hosted cluster using OADP.
 
 ```bash
-ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+ansible-playbook -i inventory/hosts backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1
 ```
 
@@ -382,7 +382,7 @@ To take the same backup through CSI snapshots instead (Backup named
 `hcp-cluster1-backup-csi`):
 
 ```bash
-ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+ansible-playbook -i inventory/hosts backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1 -e oadp_backup_method=csi
 ```
 
@@ -462,7 +462,7 @@ No `DataUpload` rows at all is the failure worth recognising - see
 ### Shutdown Primary Hub
 
 ```bash
-ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts shutdown_hub_cluster.yaml --ask-vault-pass
 ```
 
 ### Destroy the Ceph cluster (Ceph/CSI DR demo)
@@ -483,7 +483,7 @@ Rebuilding gets the same evidence on one bare-metal host without standing
 up a second 80G Ceph cluster.
 
 ```bash
-ansible-playbook cleanup-ceph.yaml
+ansible-playbook -i inventory/hosts cleanup-ceph.yaml
 
 # a partial teardown leaves stale OSD disks the rebuilt cluster cannot
 # claim - you get a cluster with no OSDs. Check before rebuilding:
@@ -520,7 +520,7 @@ the rebuilt Ceph cluster **now**, before the AgentServiceConfig below - this
 creates hub2's own ODF external StorageCluster and its own CSI credentials:
 
 ```bash
-ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
+ansible-playbook -i inventory/hosts setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
 ```
 
 The AgentServiceConfig provisions three PVCs - `databaseStorage` (10Gi),
@@ -545,7 +545,7 @@ There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will
 ### Configure OADP on DR Hub
 
 ```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
+ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
 ```
 ### Restore hello-openshift application with a PVC to DR Hub.
 This will validate that the restore is working before restoring the hosted cluster.
@@ -563,7 +563,7 @@ oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
 ### Restore the hosted cluster to the DR Hub using OADP. This will restore the hosted cluster to the DR Hub using OADP.
 
 ```bash
-ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+ansible-playbook -i inventory/hosts restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
 ```
 
 Pass the same `oadp_backup_method` the backup was taken with - it picks
@@ -572,7 +572,7 @@ and the playbook stops with a clear message if that Backup is not
 visible on this hub yet:
 
 ```bash
-ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
+ansible-playbook -i inventory/hosts restore_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2 -e oadp_backup_method=csi
 ```
 

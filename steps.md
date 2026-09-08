@@ -119,7 +119,7 @@ ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
-ansible-playbook setup_ceph_odf.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts setup_ceph_odf.yaml --ask-vault-pass
 oc get storagecluster -n openshift-storage
 oc get sc                                 # ocs-external-storagecluster-ceph-rbd (default)
 ```
@@ -152,7 +152,7 @@ oc apply -f hello-openshift.yaml
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
-ansible-playbook setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
+ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
 oc get volumesnapshotclass -L velero.io/csi-volumesnapshot-class
 ```
 
@@ -163,7 +163,7 @@ oc label secret hcp-cluster1-import -n hcp-cluster1 \
   velero.io/exclude-from-backup=true --overwrite
 oc get secret hcp-cluster1-import -n hcp-cluster1 --show-labels
 
-ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+ansible-playbook -i inventory/hosts backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1 -e oadp_backup_method=csi
 
 oc get backup.velero.io hcp-cluster1-backup-csi -n openshift-adp -o yaml
@@ -175,13 +175,13 @@ Do not continue until every `DataUpload` is `Completed`.
 ## 13. Shut down hub1
 
 ```bash
-ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
+ansible-playbook -i inventory/hosts shutdown_hub_cluster.yaml --ask-vault-pass
 ```
 
 ## 14. Destroy Ceph
 
 ```bash
-ansible-playbook cleanup-ceph.yaml
+ansible-playbook -i inventory/hosts cleanup-ceph.yaml
 virsh list --all | grep -E 'ceph[123]|cephadmin'
 ls /var/lib/libvirt/images/ | grep -E '^ceph|^cephadmin'
 ```
@@ -205,7 +205,7 @@ ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub2_install/auth/kubeconfig
-ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
+ansible-playbook -i inventory/hosts setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
 oc get sc                                 # ocs-external-storagecluster-ceph-rbd (default)
 ```
 
@@ -219,7 +219,7 @@ oc get pvc -n multicluster-engine         # three Bound
 ## 19. OADP on hub2
 
 ```bash
-ansible-playbook setup_oadp.yaml --ask-vault-pass \
+ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass \
   -e target_hub=hub2 -e oadp_backup_method=csi
 oc get backup.velero.io -n openshift-adp  # hcp-cluster1-backup-csi appears
 ```
@@ -227,7 +227,7 @@ oc get backup.velero.io -n openshift-adp  # hcp-cluster1-backup-csi appears
 ## 20. Restore
 
 ```bash
-ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
+ansible-playbook -i inventory/hosts restore_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2 -e oadp_backup_method=csi
 
 oc get restore.velero.io hcp-cluster1-restore-csi -n openshift-adp -o yaml
@@ -272,9 +272,9 @@ oc get route -n hello-openshift
 ## Cleanup
 
 ```bash
-ansible-playbook cleanup-hub.yaml
-ansible-playbook cleanup-ceph.yaml
-ansible-playbook cleanup.yaml
+ansible-playbook -i inventory/hosts cleanup-hub.yaml
+ansible-playbook -i inventory/hosts cleanup-ceph.yaml
+ansible-playbook -i inventory/hosts cleanup.yaml
 ```
 
 ---
