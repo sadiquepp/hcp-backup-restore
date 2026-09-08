@@ -156,13 +156,21 @@ ansible-playbook setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
 oc get volumesnapshotclass -L velero.io/csi-volumesnapshot-class
 ```
 
-## 12. Backup
+## 12. Exclude ACM's import secret from the backup
 
 ```bash
 oc label secret hcp-cluster1-import -n hcp-cluster1 \
   velero.io/exclude-from-backup=true --overwrite
 oc get secret hcp-cluster1-import -n hcp-cluster1 --show-labels
+```
 
+A **label**, not an annotation. Must be set before step 13, on this hub.
+Re-check it on every run - MCE reconciles this secret. Skipping it leaves
+the restored cluster stuck in `Importing`.
+
+## 13. Backup
+
+```bash
 ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1 -e oadp_backup_method=csi
 
@@ -172,13 +180,13 @@ oc get datauploads.velero.io -n openshift-adp
 
 Do not continue until every `DataUpload` is `Completed`.
 
-## 13. Shut down hub1
+## 14. Shut down hub1
 
 ```bash
 ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
 ```
 
-## 14. Destroy Ceph
+## 15. Destroy Ceph
 
 ```bash
 ansible-playbook cleanup-ceph.yaml
@@ -188,20 +196,20 @@ ls /var/lib/libvirt/images/ | grep -E '^ceph|^cephadmin'
 
 Both must return nothing.
 
-## 15. Rebuild Ceph
+## 16. Rebuild Ceph
 
 ```bash
 ansible-playbook -i inventory/hosts setup_ceph.yaml --ask-vault-pass
 ssh root@192.168.122.27 ceph -s
 ```
 
-## 16. Hub2
+## 17. Hub2
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
 ```
 
-## 17. Attach Ceph to hub2
+## 18. Attach Ceph to hub2
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub2_install/auth/kubeconfig
@@ -209,14 +217,14 @@ ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
 oc get sc                                 # ocs-external-storagecluster-ceph-rbd (default)
 ```
 
-## 18. ACM on hub2
+## 19. ACM on hub2
 
 ```bash
 oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 oc get pvc -n multicluster-engine         # three Bound
 ```
 
-## 19. OADP on hub2
+## 20. OADP on hub2
 
 ```bash
 ansible-playbook setup_oadp.yaml --ask-vault-pass \
@@ -224,7 +232,7 @@ ansible-playbook setup_oadp.yaml --ask-vault-pass \
 oc get backup.velero.io -n openshift-adp  # hcp-cluster1-backup-csi appears
 ```
 
-## 20. Restore
+## 21. Restore
 
 ```bash
 ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
@@ -234,7 +242,7 @@ oc get restore.velero.io hcp-cluster1-restore-csi -n openshift-adp -o yaml
 oc get datadownloads.velero.io -n openshift-adp
 ```
 
-## 21. DNS cutover
+## 22. DNS cutover
 
 ```bash
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
@@ -256,7 +264,7 @@ sudo kill -HUP $(cat /var/run/libvirt/network/default.pid 2>/dev/null \
 
 Make it permanent: `target_hub: hub2` in `vars.yaml`.
 
-## 22. Verify
+## 23. Verify
 
 ```bash
 oc get managedcluster                                   # hub2
