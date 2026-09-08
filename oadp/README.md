@@ -365,6 +365,55 @@ status:
     totalItems: 363
   startTimestamp: "2026-08-17T13:52:01Z"
   version: 1
+```
+
+#### What a good `csi` run looks like
+
+A known-good run of `hcp-cluster1` on this lab, for comparison when
+something looks off:
+
+```yaml
+status:
+  backupItemOperationsAttempted: 3
+  backupItemOperationsCompleted: 3
+  completionTimestamp: "2026-09-08T03:47:54Z"
+  formatVersion: 1.1.0
+  phase: Completed
+  progress:
+    itemsBackedUp: 374
+    totalItems: 374
+  startTimestamp: "2026-09-08T03:42:30Z"
+  version: 1
+```
+
+```
+$ oc get datauploads -n openshift-adp
+NAME                            STATUS      STARTED   BYTES DONE   TOTAL BYTES   STORAGE LOCATION   AGE     NODE
+hcp-cluster1-backup-csi-nnb2t   Completed   8m42s     371423568    371423568     default            9m12s   worker1
+hcp-cluster1-backup-csi-x76zq   Completed   8m35s     370738865    370738865     default            9m7s    worker3
+hcp-cluster1-backup-csi-xdctc   Completed   8m31s     370678113    370678113     default            9m2s    worker2
+```
+
+What to check, in order of how much it tells you:
+
+- **One `DataUpload` per etcd member**, three for a standard hosted
+  control plane, each on a different worker. Their sizes should be close
+  to each other - the members hold the same data - and `BYTES DONE` must
+  equal `TOTAL BYTES`.
+- **`backupItemOperationsCompleted` equal to `...Attempted`**, and equal
+  to the number of volumes. These are the asynchronous CSI operations;
+  this is the field that says the data actually moved, where
+  `itemsBackedUp` only counts objects written to the archive.
+- **`phase: Completed`** last. It is the weakest of the three signals:
+  a backup can reach `Completed` having snapshotted nothing (if Velero
+  skipped the volumes), and can read `PartiallyFailed` while the volume
+  data is perfectly fine (if an unrelated item action errored).
+
+Roughly five minutes wall clock for ~1.1G of etcd across three members,
+against the Ceph cluster on the same bare-metal host.
+
+No `DataUpload` rows at all is the failure worth recognising - see
+[If no `DataUpload` is created at all](#if-no-dataupload-is-created-at-all).
 
 ### Shutdown Primary Hub
 
