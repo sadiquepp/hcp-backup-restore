@@ -599,16 +599,27 @@ from had been destroyed and rebuilt in between (see
 [Destroy the Ceph cluster](../README.md#destroy-the-ceph-cluster-cephcsi-dr-demo)),
 so none of these bytes could have come from the original storage.
 
-A non-zero `warnings` count is normal and does not mean the restore
-failed - `itemsRestored == totalItems` and three completed operations are
-what matter. Warnings are usually resources that already existed on the
-target hub and were left alone. Read them rather than guessing:
+A non-zero `warnings` count is normal - `itemsRestored == totalItems` and
+three completed operations are what matter. Read them rather than guessing:
 
 ```bash
 alias velero='oc -n openshift-adp exec deployment/velero -c velero -it -- ./velero'
 velero restore describe hcp-cluster1-restore-csi --details
 velero restore logs hcp-cluster1-restore-csi | grep -i 'level=warning'
 ```
+
+Two appear on every run here, both benign:
+
+- `No annotations found for <ns>/<secret>, using restore spec setting: false`
+  - Velero deciding whether to restore the object's `status` subresource.
+  An object with no annotations at all logs this at warn, one with any
+  annotation logs the same decision at debug. Secrets have no `status`,
+  and it is never counted in `status.warnings`.
+- `item not found when patching managed fields .../token-nodepool-...`
+  - Velero created the Secret, then found it gone when patching
+  `managedFields` back. HyperShift's NodePool controller rotates those
+  token secrets and had already collected the stale one. This is the
+  warning the count refers to.
 
 #### Restored cluster stuck in `Importing`
 
