@@ -30,6 +30,7 @@ In a hurry? [steps.md](steps.md) is the same end-to-end run as commands only.
 - [Primary Hub](#primary-hub)
   - [Configure OADP (credentials + DPA)](#configure-oadp-credentials--dpa)
   - [Deploy a hello-openshift application to Hub](#deploy-a-hello-openshift-application-to-hub)
+  - [Exclude ACM's import secret from the backup](#exclude-acms-import-secret-from-the-backup)
   - [Backup a hosted cluster using OADP](#backup-a-hosted-cluster-using-oadp)
   - [Shutdown Primary Hub](#shutdown-primary-hub)
   - [Destroy the Ceph cluster (Ceph/CSI DR demo)](#destroy-the-ceph-cluster-cephcsi-dr-demo)
@@ -717,6 +718,36 @@ oc apply -f oadp/hello-openshift-oadp-backup.yaml
 ```bash
 oc get backup.velero.io -n openshift-adp hello-openshift-oadp-backup -o yaml
 ```
+### Exclude ACM's import secret from the backup
+
+Do this **before** the backup, on the hub being backed up.
+
+```bash
+oc label secret hcp-cluster1-import -n hcp-cluster1 \
+  velero.io/exclude-from-backup=true --overwrite
+oc get secret hcp-cluster1-import -n hcp-cluster1 --show-labels
+```
+
+`hcp-cluster1` is the HostedCluster's namespace and *also* ACM's
+ManagedCluster namespace, so `hcp-cluster1-import` - which carries a
+bootstrap ServiceAccount token minted by this hub - is inside the
+backup's scope. Restoring it hands the DR hub a token signed by the wrong
+cluster's key, and the restored cluster hangs in `Importing` with the
+klusterlet logging `Unauthorized` until the secret is deleted by hand. It
+is also a 360-day credential that has no business sitting in S3.
+
+`velero.io/exclude-from-backup` is a **label**, not an annotation -
+`oc annotate` applies cleanly and does nothing. Velero reads it while
+collecting items, so it only has to be set at backup time; nothing is
+needed on the DR hub.
+
+MCE owns this secret and reconciles it, so check `--show-labels` before
+each backup rather than assuming the label stuck - a backup that quietly
+re-includes it looks healthy right up until the restore fails.
+
+Full write-up:
+[Restored cluster stuck in `Importing`](oadp/README.md#restored-cluster-stuck-in-importing).
+
 ### Backup a hosted cluster using OADP.
 
 ```bash

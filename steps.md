@@ -159,6 +159,10 @@ oc get volumesnapshotclass -L velero.io/csi-volumesnapshot-class
 ## 12. Backup
 
 ```bash
+oc label secret hcp-cluster1-import -n hcp-cluster1 \
+  velero.io/exclude-from-backup=true --overwrite
+oc get secret hcp-cluster1-import -n hcp-cluster1 --show-labels
+
 ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1 -e oadp_backup_method=csi
 
