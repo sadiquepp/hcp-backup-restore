@@ -399,8 +399,7 @@ What the disconnected run adds to each bundle:
   them.
 - An APIServer `loadBalancer.hostname` that has to resolve to this cluster's
   MetalLB address **on the hub it is running on**. Pool *names* are identical on
-  every hub; the *addresses* are not (connected clusters: `hub` 60-62, `hub2`
-  90-92; `-d` clusters: `hub2` 93-95, `hubd` 67-69),
+  every hub; the *addresses* are not (`hub` 60-62, `hub2` 90-92, `hubd` 64-66),
   so a cluster rendered disconnected publishes a name that must resolve to its
   `hubd` address, not its `hub` one. The role resolves the hub per cluster
   (`hosted_cluster_metallb_hub`, defaulting to `target_hub`, but `hubd` for any
@@ -573,7 +572,7 @@ The operator is already there (installed during hub bring-up). This
 step just points it at your bucket:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass
+ansible-playbook setup_oadp.yaml --ask-vault-pass
 ```
 
 Idempotent - re-running against the same hub just reconciles the
@@ -611,7 +610,7 @@ oc get Backup -n openshift-adp hello-openshift-oadp-backup -o yaml
 ### Backup a hosted cluster using OADP.
 
 ```bash
-ansible-playbook -i inventory/hosts backup_hosted_cluster.yaml --ask-vault-pass \
+ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
   -e hcp_cluster_name=hcp-cluster1
 ```
 
@@ -639,7 +638,7 @@ status:
 ### Shutdown Primary Hub
 
 ```bash
-ansible-playbook -i inventory/hosts shutdown_hub_cluster.yaml --ask-vault-pass
+ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
 ```
 ## DR Hub
 ### Build DR Hub
@@ -655,7 +654,7 @@ There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will
 ### Configure OADP on DR Hub
 
 ```bash
-ansible-playbook -i inventory/hosts setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
+ansible-playbook setup_oadp.yaml --ask-vault-pass -e target_hub=hub2
 ```
 ### Restore hello-openshift application with a PVC to DR Hub.
 This will validate that the restore is working before restoring the hosted cluster.
@@ -674,7 +673,7 @@ oc exec -it $POD -n hello-openshift-oadp -- sh -c 'cat /var/data/hello.txt'
 This will restore the hosted cluster to the DR Hub using OADP.
 
 ```bash
-ansible-playbook -i inventory/hosts restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
+ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass -e hcp_cluster_name=hcp-cluster1 -e target_hub=hub2
 ```
 Check the status of the restore.
 ```bash
@@ -862,21 +861,12 @@ The **pool name is the same on every hub**; the **address it holds is not**.
 The DR hub sits on its own network segment where hub1's addresses are not
 routable, so each cluster carries one address per hub:
 
-| Hosted cluster   | Pool                      | hub (primary)    | hub2 (DR)        | hubd (disconnected) |
-| ---------------- | ------------------------- | ---------------- | ---------------- | ------------------- |
-| `hcp-cluster1`   | `hcp-cluster1-api-pool`   | `192.168.122.60` | `192.168.122.90` | -                   |
-| `hcp-cluster2`   | `hcp-cluster2-api-pool`   | `192.168.122.61` | `192.168.122.91` | -                   |
-| `hcp-cluster3`   | `hcp-cluster3-api-pool`   | `192.168.122.62` | `192.168.122.92` | -                   |
-| `hcp-cluster1-d` | `hcp-cluster1-d-api-pool` | -                | `192.168.122.93` | `192.168.122.67`    |
-| `hcp-cluster2-d` | `hcp-cluster2-d-api-pool` | -                | `192.168.122.94` | `192.168.122.68`    |
-| `hcp-cluster3-d` | `hcp-cluster3-d-api-pool` | -                | `192.168.122.95` | `192.168.122.69`    |
-
-A `-` is a deliberate reservation, not an omission. The connected three never
-run on the disconnected hub and the `-d` clusters never run on hub1, so those
-addresses do not exist and nothing renders a pool for them. hub2 is the one hub
-in both columns: it is the DR restore target for both sets, because the
-disconnected bundle pins the canonical quay.io release digest and a `-d`
-cluster therefore restores onto a connected hub unchanged.
+| Hosted cluster | Pool                    | hub (primary)    | hub2 (DR)        | hubd (disconnected) |
+| -------------- | ----------------------- | ---------------- | ---------------- | ------------------- |
+| `hcp-cluster1` | `hcp-cluster1-api-pool` | `192.168.122.60` | `192.168.122.90` | `192.168.122.64`    |
+| `hcp-cluster2` | `hcp-cluster2-api-pool` | `192.168.122.61` | `192.168.122.91` | `192.168.122.65`    |
+| `hcp-cluster3` | `hcp-cluster3-api-pool` | `192.168.122.62` | `192.168.122.92` | `192.168.122.66`    |
+| `hcp-cluster1-d` | `hcp-cluster1-d-api-pool` | `192.168.122.63` | `192.168.122.93` | `192.168.122.67` |
 
 Keeping the pool names identical across hubs is what lets a HostedCluster's
 `metallb.io/address-pool` annotation survive an OADP restore onto the DR hub
@@ -893,25 +883,16 @@ hosted_cluster_metallb_pools:
     ip:
       hub: 60
       hub2: 90
+      hubd: 64
   hcp-cluster2:
     pool: hcp-cluster2-api-pool
-    ip: {hub: 61, hub2: 91}
+    ip: {hub: 61, hub2: 91, hubd: 65}
   hcp-cluster3:
     pool: hcp-cluster3-api-pool
-    ip: {hub: 62, hub2: 92}
-
-  hcp-cluster1-d:
-    pool: hcp-cluster1-d-api-pool
-    ip: {hub2: 93, hubd: 67}
-  hcp-cluster2-d:
-    pool: hcp-cluster2-d-api-pool
-    ip: {hub2: 94, hubd: 68}
-  hcp-cluster3-d:
-    pool: hcp-cluster3-d-api-pool
-    ip: {hub2: 95, hubd: 69}
+    ip: {hub: 62, hub2: 92, hubd: 66}
 ```
 
-Three variables select what a hub gets:
+Two variables select the hub:
 
 - **`metallb_hub`** - which hub `setup-hub-acm` is configuring. Set by
   `setup_hub_cluster.yaml` (`hub`), `setup_hub_cluster2.yaml` (`hub2`) and the
@@ -919,50 +900,11 @@ Three variables select what a hub gets:
 - **`target_hub`** - which hub is currently authoritative. Already used to pick
   the kubeconfig for the OADP playbooks; it now also selects the address
   `setup-dns` publishes as `api`/`api-int`. Defaults to `hub`.
-- **`disconnected_install`** - which *set* of hosted clusters the run is about:
-  `hosted_clusters_disconnected` when true, `hosted_clusters` when false. The
-  same switch `roles/create-hosted-cluster` already renders from, so a hub gets
-  pools for exactly the clusters that hub run would create there.
-
-Carrying the hub's address is necessary but not sufficient - the cluster must
-also be in the run's install mode. This only ever changes hub2, the one hub
-holding addresses for both sets:
-
-| Run                                            | Pools rendered                            |
-| ---------------------------------------------- | ----------------------------------------- |
-| `setup_hub_cluster.yaml`                        | `hcp-cluster1/2/3-api-pool` (.60-.62)     |
-| `setup_hub_cluster2.yaml`                       | `hcp-cluster1/2/3-api-pool` (.90-.92)     |
-| `setup_hub_cluster2.yaml -e disconnected_install=true` | `hcp-cluster{1,2,3}-d-api-pool` (.93-.95) |
-| `setup_hub_cluster_disconnected.yaml`           | `hcp-cluster{1,2,3}-d-api-pool` (.67-.69) |
-
-So `oc get IPAddressPool -n metallb-system` on a connected hub2 shows **three**
-pools, not six. The `-d` clusters' hub2 addresses stay reserved in the map; the
-pools for them are created by re-running just the `acm` tag in disconnected
-mode, which is the step before restoring a `-d` cluster onto hub2:
-
-```bash
-ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass --tags acm \
-  -e disconnected_install=true
-```
-
-`roles/setup-hub-acm` prints the split it resolved (`renders pools for: ... |
-not rendered here: ...`) on every run, so you can see which set a hub got
-without reading the map.
-
-Switching modes also cleans up after itself, since `oc apply` does not prune: a
-hub2 built when both sets were rendered would otherwise keep all six pools
-forever. The role deletes the other mode's `IPAddressPool`/`L2Advertisement`
-pairs - only ones named in `hosted_cluster_metallb_pools` that carry an address
-for this hub, never anything else on the cluster - and **skips any pool whose
-address a Service currently holds**, so a connected re-run cannot strip the VIP
-from a `-d` cluster restored onto the same hub. It reports what it did
-(`deleted:` / `in use ..., kept:` / `absent:`) per pool. Set
-`metallb_prune_other_mode_pools: false` to leave both modes' pools in place.
 
 Three things are generated from the map:
 
-1. `roles/setup-hub-acm` renders one `IPAddressPool` per cluster of this run's
-   install mode that holds a `metallb_hub` address (a single address, e.g.
+1. `roles/setup-hub-acm` renders one `IPAddressPool` per cluster holding
+   `metallb_hub`'s address for it (a single address, e.g.
    `192.168.122.60-192.168.122.60`) and one `L2Advertisement` per pool, so each
    address is advertised independently.
 2. `roles/setup-dns` points that cluster's `api` and `api-int` A records at
@@ -981,11 +923,9 @@ hosted_cluster_metallb_network_prefixes:
 
 ### DR cutover
 
-The DR hub's pools for the connected clusters are created when you build it
+The DR hub's pools are created when you build it
 (`setup_hub_cluster2.yaml` passes `metallb_hub: hub2`), so after restoring the
-hosted clusters onto hub2 the only remaining step is to move DNS. (Restoring a
-`-d` cluster there needs its pool created first - see the
-`disconnected_install` note above.)
+hosted clusters onto hub2 the only remaining step is to move DNS:
 
 ```bash
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
@@ -1025,8 +965,7 @@ oc -n hcp-cluster1-hcp-cluster1 annotate svc/kube-apiserver \
 
 - This replaces the old shared `hcp-ip-pool` (hub `60-63`, hubd `64-67`,
   hub2 `90-93`), which let any hosted cluster take any free address in the
-  range. `.63` is now free; `.67` and `.93` were taken back by the `-d`
-  clusters' own pools. `roles/setup-hub-acm` deletes the
+  range. `.63`, `.67` and `.93` are now free. `roles/setup-hub-acm` deletes the
   old pool and its `l2advertisement` before applying the new ones, since
   MetalLB rejects overlapping pools - set
   `metallb_remove_legacy_shared_pool: false` to skip that.
@@ -1055,21 +994,6 @@ The last two must agree - that is the whole point of this layout.
 
 ## Playbook Reference
 
-Every playbook here is run with `-i inventory/hosts`. Most plays target
-`localhost`, but they reach the lab VMs through `delegate_to` - the helper, the
-mirror registry, minio, `ceph1`, `cephadmin` - and a delegated host that is not
-in the inventory gets no `ansible_ssh_private_key_file` or
-`StrictHostKeyChecking=no`, so the SSH fails or hangs on a host-key prompt.
-`setup_ceph.yaml` goes further and has a play against the `ceph_nodes` group,
-which does not exist at all without `-i`. Passing it everywhere keeps one habit
-instead of a rule about which playbook needs it.
-
-`inventory/hosts` is generated from `inventory/hosts.j2` and `vars.yaml`
-(`lab_network_prefix` + `ip_list`) by `setup_bm_host.yaml`, which re-reads it in
-the same run so its own delegated tasks use what it just wrote. The copy in git
-is the render of the defaults; if you change `lab_network_prefix` or `ip_list`,
-re-run that playbook (its first task is enough) before running anything that
-delegates.
 
 | Playbook                      | Description                                   |
 | ----------------------------- | --------------------------------------------- |
@@ -1118,12 +1042,12 @@ For the full IAM policy, smoke-test manifests, and per-hub setup details, see `[
 Remove hub1 VMs and disks (does not affect hub2 or S3 backups):
 
 ```bash
-ansible-playbook -i inventory/hosts cleanup-hub.yaml
+ansible-playbook cleanup-hub.yaml
 ```
 
 Remove everything (all VMs including helper):
 
 ```bash
-ansible-playbook -i inventory/hosts cleanup.yaml
+ansible-playbook cleanup.yaml
 ```
 
