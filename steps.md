@@ -17,29 +17,6 @@ cd hcp-backup-restore
 cp rhel-9.8-x86_64-kvm.qcow2 roles/setup-bm-host/files/
 ```
 
-```bash
-ansible-vault create vault.yaml
-```
-
-```yaml
-org_id: XXXX
-activation_key: YYYYY
-pull_secret: 'ZZZZZ...'
-ssh_key:
-oadp_aws_access_key_id: 'AKIA...'
-oadp_aws_secret_access_key: '...'
-ceph_dashboard_password: '...'
-```
-
-In `vars.yaml`:
-
-```yaml
-use_lvm_storage: false
-oadp_backup_method: csi
-oadp_bucket_name: <$BUCKET from step 0b>
-oadp_aws_region: <$REGION from step 0b>
-```
-
 ## 2. S3 bucket and IAM user (once per lab, not per hub)
 
 ```bash
@@ -94,29 +71,51 @@ aws iam put-user-policy --user-name adp-user --policy-name adp-policy --policy-d
 aws iam create-access-key --user-name adp-user
 ```
 
-Put the access key from the last command in `vault.yaml`, and `$BUCKET` /
-`$REGION` in `vars.yaml` as `oadp_bucket_name` / `oadp_aws_region`.
+## 3. Credentials and lab variables
 
-## 3. Bare metal host
+```bash
+ansible-vault create vault.yaml
+```
+
+```yaml
+org_id: XXXX
+activation_key: YYYYY
+pull_secret: 'ZZZZZ...'
+ssh_key:
+oadp_aws_access_key_id: 'AKIA...'
+oadp_aws_secret_access_key: '...'
+ceph_dashboard_password: '...'
+```
+
+In `vars.yaml`:
+
+```yaml
+use_lvm_storage: false
+oadp_backup_method: csi
+oadp_bucket_name: <$BUCKET from step 2>
+oadp_aws_region: <$REGION from step 2>
+```
+
+## 4. Bare metal host
 
 ```bash
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
 ```
 
-## 4. Ceph cluster
+## 5. Ceph cluster
 
 ```bash
 ansible-playbook -i inventory/hosts setup_ceph.yaml --ask-vault-pass
 ssh root@192.168.122.27 ceph -s          # HEALTH_OK, 3 mons, 9 OSDs
 ```
 
-## 5. Hub1
+## 6. Hub1
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 ```
 
-## 6. Attach Ceph to hub1
+## 7. Attach Ceph to hub1
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
@@ -125,7 +124,7 @@ oc get storagecluster -n openshift-storage
 oc get sc                                 # ocs-external-storagecluster-ceph-rbd (default)
 ```
 
-## 7. ACM inventory
+## 8. ACM inventory
 
 ```bash
 oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
@@ -133,7 +132,7 @@ oc get pvc -n multicluster-engine         # three Bound
 ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass
 ```
 
-## 8. Hosted cluster
+## 9. Hosted cluster
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass
@@ -142,14 +141,14 @@ ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
 oc get hostedcluster,nodepool -n hcp-cluster1
 ```
 
-## 9. Workload
+## 10. Workload
 
 ```bash
 export KUBECONFIG=<hosted cluster kubeconfig>
 oc apply -f hello-openshift.yaml
 ```
 
-## 10. OADP on hub1
+## 11. OADP on hub1
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
@@ -157,7 +156,7 @@ ansible-playbook setup_oadp.yaml --ask-vault-pass -e oadp_backup_method=csi
 oc get volumesnapshotclass -L velero.io/csi-volumesnapshot-class
 ```
 
-## 11. Backup
+## 12. Backup
 
 ```bash
 ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
@@ -169,13 +168,13 @@ oc get datauploads.velero.io -n openshift-adp
 
 Do not continue until every `DataUpload` is `Completed`.
 
-## 12. Shut down hub1
+## 13. Shut down hub1
 
 ```bash
 ansible-playbook shutdown_hub_cluster.yaml --ask-vault-pass
 ```
 
-## 13. Destroy Ceph
+## 14. Destroy Ceph
 
 ```bash
 ansible-playbook cleanup-ceph.yaml
@@ -185,20 +184,20 @@ ls /var/lib/libvirt/images/ | grep -E '^ceph|^cephadmin'
 
 Both must return nothing.
 
-## 14. Rebuild Ceph
+## 15. Rebuild Ceph
 
 ```bash
 ansible-playbook -i inventory/hosts setup_ceph.yaml --ask-vault-pass
 ssh root@192.168.122.27 ceph -s
 ```
 
-## 15. Hub2
+## 16. Hub2
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
 ```
 
-## 16. Attach Ceph to hub2
+## 17. Attach Ceph to hub2
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub2_install/auth/kubeconfig
@@ -206,14 +205,14 @@ ansible-playbook setup_ceph_odf.yaml --ask-vault-pass -e target_hub=hub2
 oc get sc                                 # ocs-external-storagecluster-ceph-rbd (default)
 ```
 
-## 17. ACM on hub2
+## 18. ACM on hub2
 
 ```bash
 oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 oc get pvc -n multicluster-engine         # three Bound
 ```
 
-## 18. OADP on hub2
+## 19. OADP on hub2
 
 ```bash
 ansible-playbook setup_oadp.yaml --ask-vault-pass \
@@ -221,7 +220,7 @@ ansible-playbook setup_oadp.yaml --ask-vault-pass \
 oc get backup.velero.io -n openshift-adp  # hcp-cluster1-backup-csi appears
 ```
 
-## 19. Restore
+## 20. Restore
 
 ```bash
 ansible-playbook restore_hosted_cluster.yaml --ask-vault-pass \
@@ -231,7 +230,7 @@ oc get restore.velero.io hcp-cluster1-restore-csi -n openshift-adp -o yaml
 oc get datadownloads.velero.io -n openshift-adp
 ```
 
-## 20. DNS cutover
+## 21. DNS cutover
 
 ```bash
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
@@ -253,7 +252,7 @@ sudo kill -HUP $(cat /var/run/libvirt/network/default.pid 2>/dev/null \
 
 Make it permanent: `target_hub: hub2` in `vars.yaml`.
 
-## 21. Verify
+## 22. Verify
 
 ```bash
 oc get managedcluster                                   # hub2
