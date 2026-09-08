@@ -446,7 +446,10 @@ oadp_storage_location: default
 ##         Velero's node-agent reads the volume through a pod and
 ##         streams the files to S3. Works on ANY StorageClass, CSI or
 ##         not - this is what LVM Storage (lvms-vg1) needs, and it is
-##         what this lab did before Ceph existed. Default.
+##         what this lab did before Ceph existed. Default. It completes
+##         against a hosted control plane, but a file-by-file copy of a
+##         live etcd volume is not a point-in-time image of it, so do not
+##         rely on it for a control-plane restore - use csi for that.
 ##
 ##   csi - CSI VolumeSnapshot + Velero's built-in data mover
 ##         (snapshotVolumes: true, snapshotMoveData: true,

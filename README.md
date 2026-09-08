@@ -235,7 +235,8 @@ There are two options, and the choice has to be made **before** the hub is
 built, because `setup-hub-acm` acts on it during bring-up:
 
 - **LVM Storage** (default) - `use_lvm_storage: true` in `vars.yaml`. Nothing
-  else to do; the sections below install it as part of the hub.
+  else to do; the sections below install it as part of the hub. Good enough to
+  stand up hosted clusters and run workloads on them.
 - **Ceph 9 via ODF external mode** - set `use_lvm_storage: false`, then build
   the Ceph cluster and attach it with the two `setup_ceph*.yaml` playbooks,
   before the AgentServiceConfig step - that step's PVCs need a default
@@ -243,6 +244,15 @@ built, because `setup-hub-acm` acts on it during bring-up:
   [Ceph 9 Storage for Hub PVs (ODF External Mode)](#ceph-9-storage-for-hub-pvs-odf-external-mode)
   for the whole flow, its OCP 4.22 requirement, and why the two should not both
   run on the same hub.
+
+> **For backup and restore, pick Ceph.** Restoring a hosted control plane
+> needs a CSI VolumeSnapshot of its etcd volume, and LVM Storage provides no
+> VolumeSnapshotClass - so `oadp_backup_method=csi` is not available on it at
+> all. The `fs` method will still produce a `Completed` backup there, but a
+> file-by-file copy of a live etcd volume is not a point-in-time image of it,
+> which is the property a control-plane restore depends on. Treat LVM Storage
+> as the option for demonstrating hosted clusters, and Ceph as the one for
+> demonstrating backup and restore.
 
 ### Setup Hub Cluster (hub1 - Connected Deployment)
 
@@ -675,8 +685,10 @@ Velero captures it, and every command below takes it as an override:
 
 - **`fs`** (default) - Kopia file-system backup
   (`defaultVolumesToFsBackup: true`). Velero's node-agent mounts the
-  volume and streams the files to S3. Works on any StorageClass,
-  including LVM Storage.
+  volume and streams the files to S3. Runs on any StorageClass, LVM
+  Storage included - but see the note under
+  [Choose the Hub's PV Storage](#choose-the-hubs-pv-storage): completing is
+  not the same as being restorable for a control plane.
 - **`csi`** - CSI VolumeSnapshot plus Velero's data mover
   (`snapshotVolumes` + `snapshotMoveData` + `datamover: velero`). The
   storage layer takes a point-in-time snapshot and the data mover copies
