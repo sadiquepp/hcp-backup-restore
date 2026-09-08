@@ -390,15 +390,22 @@ The Secret "pullsecret-bminfra" is invalid: data[.dockerconfigjson]: Invalid val
   object before rendering. Nothing to change in vault.yaml. Roles that use
   `pull_secret` directly never hit this; it takes the extra variable hop.
 
-- Then apply the rendered yaml files to the ACM cluster.
+- The role applies those four itself, in order (namespace, pull-secret,
+  InfraEnv, capi-provider RBAC). It refuses to run if this hub has no
+  AgentServiceConfig, since an InfraEnv without assisted-service never
+  produces a discovery ISO - apply
+  `.rendered-05-agentserviceconfig.yaml` first, as in the step above.
+  The rendered files are left in place for inspection:
 
 ```bash
-oc apply -f roles/setup-bminfra/templates/.rendered-01-namespace.yaml
-oc apply -f roles/setup-bminfra/templates/.rendered-02-pullsecret.yaml
-oc apply -f roles/setup-bminfra/templates/.rendered-03-infraenv.yaml
-oc apply -f roles/setup-bminfra/templates/.rendered-04-capi-role.yaml
+ls roles/setup-bminfra/templates/.rendered-*.yaml
+oc get infraenv -n bminfra
 ```
-- Discovery ISO will be automatically downlaoded by this role if yaml files are applied before the configured timeout is expired. If the timeout is expired, you can download the ISO from `Add Hosts` in the ACM Web UI or the playbook to create the hosted cluster vms will download the ISO as the first step.
+
+- The discovery ISO is downloaded in the same run, after the apply, so there
+  is no longer a race against the timeout. If it does expire, download the ISO
+  from `Add Hosts` in the ACM Web UI, or let the playbook that creates the
+  hosted cluster VMs fetch it as its first step.
 
 - Download the Discovery ISO from `Add Hosts` in the ACM Web UI if needed. Only required if you are not using the playbook to automate the discovery process.
 Note: The ISO is automatically downloaded to the bare-metal host in the download dir specified in `vars.yaml`  when you automate the discovery process by running the playbook `setup_hosted_cluster_vm.yaml` or `setup_hosted_cluster2_vm.yaml` in the next step. If vms for hosted cluster is manually created, you can download the ISO from `Add Hosts` and place it in the download dir.
