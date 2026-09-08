@@ -1,7 +1,8 @@
 {# One single-address IPAddressPool per hosted cluster, rendered from
    metallb_hub_pools - the subset of hosted_cluster_metallb_pools (vars.yaml)
-   that carries an address for the hub named by metallb_hub, worked out in
-   tasks/main.yml.
+   that both carries an address for the hub named by metallb_hub AND belongs to
+   this run's install mode (hosted_clusters, or hosted_clusters_disconnected
+   when disconnected_install is true), worked out in tasks/main.yml.
 
    Pool names are the same on every hub; the address they hold is not. hub2 is
    the DR hub on its own network segment, where hub1's addresses are not
@@ -12,7 +13,10 @@
    iterating the filtered map (rather than the whole one) is also what keeps a
    hub from rendering a pool for a cluster that will never run on it - the
    connected clusters have no 'hubd' address and the '-d' clusters no 'hub'
-   address.
+   address. hub2 is the one hub that holds addresses for both sets, since it is
+   the DR target for both; there the install mode is what narrows it, so a
+   connected hub2 run renders the three connected pools and a
+   disconnected_install=true run the three '-d' ones - never all six.
 
    Each pool is bound - via serviceAllocation - to that hosted cluster's
    control-plane namespace, so the only Service that can ever be given the

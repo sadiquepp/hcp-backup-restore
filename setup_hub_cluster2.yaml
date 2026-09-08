@@ -22,6 +22,15 @@
   # re-render DNS so api/api-int follow them here:
   #   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
   #     --ask-vault-pass -e target_hub=hub2
+  #
+  # hub2 is the DR target for the disconnected '-d' clusters too, and they
+  # carry hub2 addresses (.93/.94/.95) for that. Those are NOT rendered here:
+  # the role renders the clusters of this run's install mode, so this playbook
+  # as written creates the three connected pools only. Before restoring a '-d'
+  # cluster onto this hub, create its pool by re-running just the acm tag in
+  # disconnected mode:
+  #   ansible-playbook setup_hub_cluster2.yaml --ask-vault-pass --tags acm \
+  #     -e disconnected_install=true
   - ansible.builtin.import_role:
       name: setup-hub-acm
     vars:
