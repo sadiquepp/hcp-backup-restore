@@ -12,9 +12,9 @@
 ##     -e disconnected_install=true
 ## builds hosted_cluster_disconnected_workers (c1-d-worker1..3,
 ## ip_list.c1dworker*) instead, against the hub installed by
-## setup_hub_cluster_disconnected.yaml, and cuts those three IPs off from the
-## real internet first so the cluster can only ever pull from the local mirror
-## registry. disconnected_install wins over target_hub, same as in
+## setup_hub_cluster.yaml with the same flag, and cuts those three IPs off from
+## the real internet first so the cluster can only ever pull from the local
+## mirror registry. disconnected_install wins over target_hub, same as in
 ## setup_bminfra.yaml.
 ##
 ## Both paths run the same tasks - only the worker set, the VM folder and the

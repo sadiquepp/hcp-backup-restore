@@ -1,6 +1,6 @@
 ## Tears down ONLY the disconnected hub's VMs and disks (see
-## setup_hub_cluster_disconnected.yaml). hub1 and hub2 are untouched -
-## every domain name and path below is namespaced to hubd.
+## setup_hub_cluster.yaml -e disconnected_install=true). hub1 and hub2 are
+## untouched - every domain name and path below is namespaced to hubd.
 ##
 ## Modelled on cleanup-hub.yaml / cleanup-hub2.yaml.
 ##

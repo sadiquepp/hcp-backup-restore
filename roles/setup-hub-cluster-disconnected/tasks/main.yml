@@ -347,8 +347,8 @@
 # `oc adm release extract` writes into the current working directory, hence the
 # chdir. It needs the mirror registry's CA in the system trust store and a pull
 # secret holding that registry's credentials - roles/setup-mirror-registry-trust
-# sets up both, and setup_hub_cluster_disconnected.yaml asserts the CA is there
-# before this role runs.
+# sets up both, and setup_hub_cluster.yaml asserts the CA is there before it
+# imports this role.
 - name: Extract openshift-install from the release image in the mirror registry
   ansible.builtin.shell: |
     oc adm release extract -a {{ mirror_registry_authfile }} \

@@ -4,7 +4,7 @@ bminfra_location: singapore
 bminfra_ocp_version: '4.21'
 
 ## Gates the disconnected rendering below. setup_mirror_registry.yaml and
-## setup_hub_cluster_disconnected.yaml are what make it meaningful; set it in
+## setup_hub_cluster.yaml are what make it meaningful; set it in
 ## vars.yaml or pass -e disconnected_install=true. Repeated here so the role
 ## still evaluates standalone.
 disconnected_install: false

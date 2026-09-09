@@ -3,9 +3,9 @@
 
 ## Which hub this role is configuring. Selects each hosted cluster's address
 ## out of hosted_cluster_metallb_pools below - pool names are the same on
-## every hub, the addresses are not. Set by setup_hub_cluster.yaml (hub),
-## setup_hub_cluster2.yaml (hub2) and setup_hub_cluster_disconnected.yaml
-## (hubd).
+## every hub, the addresses are not. Set by setup_hub_cluster.yaml - hub
+## normally, hubd when it runs with disconnected_install - and
+## setup_hub_cluster2.yaml (hub2).
 metallb_hub: hub
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs - one
@@ -111,15 +111,15 @@ agent_service_os_images:
 ## connected ones.
 ##
 ## Everything below assumes the mirror registry from setup_mirror_registry.yaml
-## and the hub from setup_hub_cluster_disconnected.yaml, so it reads
+## and the hub from a disconnected setup_hub_cluster.yaml run, so it reads
 ## mirror_registry_* / mirror_release_repository / ip_list from vars.yaml.
 ## ---------------------------------------------------------------------------
 
 ## The one switch the whole disconnected path hangs off - the same
-## disconnected_install setup_mirror_registry.yaml and
-## setup_hub_cluster_disconnected.yaml already gate on, not a second name for
-## it. Set it in vars.yaml or pass -e disconnected_install=true. Repeated here
-## only so the role still has a value if it is ever run without vars.yaml.
+## disconnected_install setup_mirror_registry.yaml and setup_hub_cluster.yaml
+## already gate on, not a second name for it. Set it in vars.yaml or pass
+## -e disconnected_install=true. Repeated here only so the role still has a
+## value if it is ever run without vars.yaml.
 disconnected_install: false
 
 ## The CatalogSource the operator Subscriptions resolve against.

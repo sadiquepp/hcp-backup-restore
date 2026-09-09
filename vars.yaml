@@ -80,9 +80,9 @@ ip_list:
   hub2lb: 89
 
   # Hub-disconnected - a third, fully independent hub cluster installed
-  # entirely from the local mirror registry (see
-  # setup_hub_cluster_disconnected.yaml). Deliberately given its own IP
-  # block, its own subdomain (hub_disconnected_domain) and its own
+  # entirely from the local mirror registry (setup_hub_cluster.yaml with
+  # disconnected_install set). Deliberately given its own IP block, its own
+  # subdomain (hub_disconnected_domain) and its own
   # install/VM directories so it can be built and run *alongside* hub1
   # and hub2 rather than replacing either.
   # NOTE: same MAC scheme constraint as above - two digit values (10-99).
@@ -254,7 +254,7 @@ hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 ## value passed as metallb_hub / target_hub):
 ##   hub   - primary hub   (setup_hub_cluster.yaml)
 ##   hub2  - DR hub        (setup_hub_cluster2.yaml)
-##   hubd  - disconnected hub (setup_hub_cluster_disconnected.yaml)
+##   hubd  - disconnected hub (setup_hub_cluster.yaml -e disconnected_install=true)
 ## At DR cutover the hosted cluster comes back on the hub2 address and DNS is
 ## re-rendered to match - see the MetalLB section of the README.
 ##
