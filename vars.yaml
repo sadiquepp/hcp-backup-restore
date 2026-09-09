@@ -436,6 +436,47 @@ oadp_backup_ttl: 999h0m0s
 oadp_bminfra_namespace: bminfra
 oadp_storage_location: default
 
+## How the control-plane PVs (the hosted cluster's etcd volumes) are
+## backed up. Both methods use the same S3 bucket and the same
+## DataProtectionApplication - only the Backup/Restore CRs differ, and
+## each method has its own pair of templates in oadp/templates/ so
+## either can be demonstrated without editing the other.
+##
+##   fs  - Kopia file-system backup (defaultVolumesToFsBackup: true).
+##         Velero's node-agent reads the volume through a pod and
+##         streams the files to S3. Works on ANY StorageClass, CSI or
+##         not - this is what LVM Storage (lvms-vg1) needs, and it is
+##         what this lab did before Ceph existed. Default. It completes
+##         against a hosted control plane, but a file-by-file copy of a
+##         live etcd volume is not a point-in-time image of it, so do not
+##         rely on it for a control-plane restore - use csi for that.
+##
+##   csi - CSI VolumeSnapshot + Velero's built-in data mover
+##         (snapshotVolumes: true, snapshotMoveData: true,
+##         datamover: velero). The CSI driver takes a point-in-time
+##         snapshot of the volume, the data mover copies that snapshot
+##         to S3, and the snapshot is then released. Needs a CSI driver
+##         with snapshot support and a VolumeSnapshotClass - i.e. the
+##         Ceph/ODF external StorageClass from setup_ceph_odf.yaml.
+##         LVM Storage cannot do this (no VolumeSnapshotClass), which is
+##         the reason the Ceph cluster exists in this lab.
+##
+## Override per run: -e oadp_backup_method=csi
+oadp_backup_method: fs
+
+## The VolumeSnapshotClass Velero uses when oadp_backup_method=csi.
+## setup-oadp labels it velero.io/csi-volumesnapshot-class="true" -
+## Velero picks the VolumeSnapshotClass for a PVC's CSI driver by that
+## label and fails the volume if no class carries it. This is the name
+## ODF creates for the external RBD pool (setup_ceph_odf.yaml); it is
+## derived from ceph_odf_storagecluster_name.
+oadp_csi_snapshot_class: "{{ ceph_odf_storagecluster_name }}-rbdplugin-snapclass"
+
+## The CSI driver that snapshot class belongs to. Only used to warn
+## when more than one VolumeSnapshotClass for the same driver carries
+## Velero's label, which makes Velero refuse to choose.
+oadp_csi_driver: openshift-storage.rbd.csi.ceph.com
+
 ## Which hub is currently authoritative. It selects the kubeconfig
 ## setup_oadp.yaml / backup_hosted_cluster.yaml / restore_hosted_cluster.yaml
 ## use, and the hub whose hosted_cluster_metallb_pools addresses roles/setup-dns

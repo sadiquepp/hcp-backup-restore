@@ -1,0 +1,72 @@
+## CSI VolumeSnapshot + data-mover Backup of a hosted cluster's control
+## plane. Rendered by backup_hosted_cluster.yaml when
+## oadp_backup_method=csi; the file-system (Kopia) variant lives next to
+## this one in backup-hcp-cluster.yaml.j2 and is still the default.
+##
+## The resource list is identical to the fs variant - the difference is
+## entirely in how the PVs are captured:
+##
+##   snapshotVolumes: true         ask the CSI driver for a snapshot
+##   snapshotMoveData: true        copy that snapshot's data to S3...
+##   datamover: "velero"           ...using Velero's built-in data mover
+##   defaultVolumesToFsBackup: false   do NOT walk the filesystem instead
+##
+## Velero creates a VolumeSnapshot per PVC, the node-agent's DataUpload
+## streams it to the same BackupStorageLocation the fs method uses, and
+## the snapshot is released once the upload completes. `oc get datauploads
+## -n openshift-adp` is where the actual data transfer is visible - the
+## Backup sits in "WaitingForPluginOperations" until they finish.
+##
+## Requires a CSI StorageClass with a VolumeSnapshotClass labelled
+## velero.io/csi-volumesnapshot-class=true (roles/setup-oadp does the
+## labelling; see oadp_csi_snapshot_class in vars.yaml). LVM Storage has
+## no VolumeSnapshotClass, so a hub on lvms-vg1 must use the fs method.
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: "{{ oadp_backup_name }}"
+  namespace: openshift-adp
+  labels:
+    velero.io/storage-location: "{{ oadp_storage_location }}"
+spec:
+  hooks: {}
+  includedNamespaces:
+    - "{{ hcp_cluster_name }}"
+    - "{{ hcp_cluster_name }}-{{ hcp_cluster_name }}"
+    - "{{ oadp_bminfra_namespace }}"
+  includedResources:
+    - sa
+    - role
+    - rolebinding
+    - pod
+    - pvc
+    - pv
+    - bmh
+    - configmap
+    - infraenv
+    - priorityclasses
+    - pdb
+    - agents
+    - hostedcluster
+    - nodepool
+    - secrets
+    - services
+    - deployments
+    - statefulsets
+    - hostedcontrolplane
+    - cluster
+    - agentcluster
+    - agentmachinetemplate
+    - agentmachine
+    - machinedeployment
+    - machineset
+    - machine
+    - route
+    - clusterdeployment
+  excludedResources: []
+  snapshotVolumes: true
+  snapshotMoveData: true
+  datamover: "velero"
+  defaultVolumesToFsBackup: false
+  storageLocation: "{{ oadp_storage_location }}"
+  ttl: "{{ oadp_backup_ttl }}"

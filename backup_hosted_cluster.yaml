@@ -10,6 +10,21 @@
 ## hcp-cluster1 or hcp-cluster2) - it is used to derive both the
 ## hosting namespace ("{{ hcp_cluster_name }}") and the HyperShift
 ## control-plane namespace ("{{ hcp_cluster_name }}-{{ hcp_cluster_name }}").
+##
+## oadp_backup_method (vars.yaml, default 'fs') picks how the control
+## plane's PVs are captured:
+##
+##   fs   Kopia file-system backup - works on any StorageClass,
+##        including LVM Storage. Renders backup-hcp-cluster.yaml.j2 and
+##        names the Backup "<cluster>-backup".
+##   csi  CSI VolumeSnapshot + Velero data mover - needs a CSI driver
+##        with snapshot support (the Ceph/ODF external StorageClass).
+##        Renders backup-hcp-cluster-csi.yaml.j2 and names the Backup
+##        "<cluster>-backup-csi", so both methods can be demonstrated
+##        against the same bucket without colliding.
+##
+##   ansible-playbook backup_hosted_cluster.yaml --ask-vault-pass \
+##     -e hcp_cluster_name=hcp-cluster1 -e oadp_backup_method=csi
 
 - name: Backup Hosted Cluster Control Plane
   hosts: localhost
@@ -20,25 +35,69 @@
   vars:
     hub_kubeconfig: >-
       {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+    ## '-csi' suffix only on the CSI method, so the fs Backup keeps the
+    ## name it has always had and existing backups stay addressable.
+    oadp_backup_name: >-
+      {{ hcp_cluster_name }}-backup{{ '-csi' if oadp_backup_method == 'csi' else '' }}
+    oadp_backup_template: >-
+      backup-hcp-cluster{{ '-csi' if oadp_backup_method == 'csi' else '' }}.yaml.j2
   tasks:
   - ansible.builtin.assert:
       that:
         - hcp_cluster_name is defined
       fail_msg: "Pass -e hcp_cluster_name=<name> (e.g. hcp-cluster1)"
 
+  - name: Fail fast on an unknown backup method
+    ansible.builtin.assert:
+      that:
+        - oadp_backup_method in ['fs', 'csi']
+      fail_msg: >-
+        oadp_backup_method must be 'fs' (Kopia file-system backup) or
+        'csi' (CSI VolumeSnapshot + data mover), not
+        '{{ oadp_backup_method }}'. See vars.yaml.
+
+  ## Velero picks a VolumeSnapshotClass by label, per CSI driver. If the
+  ## label is missing the Backup still reports Completed while silently
+  ## skipping the volume, so check here rather than discover it at
+  ## restore time. setup_oadp.yaml applies the label.
+  - name: Check the VolumeSnapshotClass Velero will use is labelled
+    shell: >
+      oc get volumesnapshotclass
+      -l velero.io/csi-volumesnapshot-class=true
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+    register: velero_vsc
+    changed_when: false
+    failed_when: false
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+    when: oadp_backup_method == 'csi'
+
+  - name: Fail with a clear message if no snapshot class is labelled
+    ansible.builtin.fail:
+      msg: >-
+        oadp_backup_method=csi but no VolumeSnapshotClass on this hub
+        carries velero.io/csi-volumesnapshot-class=true. Velero would
+        skip the control-plane volumes. Run
+        'ansible-playbook setup_oadp.yaml --ask-vault-pass
+        -e oadp_backup_method=csi' first (it labels
+        {{ oadp_csi_snapshot_class }}), or use oadp_backup_method=fs.
+    when:
+      - oadp_backup_method == 'csi'
+      - velero_vsc.stdout | default('') | trim == ''
+
   - name: Render Backup manifest
     template:
-      src: oadp/templates/backup-hcp-cluster.yaml.j2
-      dest: "/tmp/{{ hcp_cluster_name }}-backup.yaml"
+      src: "oadp/templates/{{ oadp_backup_template | trim }}"
+      dest: "/tmp/{{ oadp_backup_name | trim }}.yaml"
 
   - name: Apply Backup
-    shell: "oc apply -f /tmp/{{ hcp_cluster_name }}-backup.yaml"
+    shell: "oc apply -f /tmp/{{ oadp_backup_name | trim }}.yaml"
     environment:
       KUBECONFIG: "{{ hub_kubeconfig }}"
 
-  - name: Wait for Backup to complete (checked every 15s, up to 30 min)
+  - name: Wait for Backup to complete (checked every 30s, up to 60 min)
     shell: >
-      oc get backup "{{ hcp_cluster_name }}-backup" -n openshift-adp
+      oc get backup.velero.io "{{ oadp_backup_name | trim }}" -n openshift-adp
       -o jsonpath='{.status.phase}'
     register: backup_phase
     until: backup_phase.stdout in ['Completed', 'PartiallyFailed', 'Failed']
@@ -47,6 +106,26 @@
     environment:
       KUBECONFIG: "{{ hub_kubeconfig }}"
 
+  ## The data mover does the actual volume copy in DataUpload objects
+  ## outside the Backup's own progress counters - a Backup can sit in
+  ## WaitingForPluginOperations for a long time with nothing else to
+  ## look at, so surface them.
+  - name: Show the DataUploads the data mover created
+    shell: >
+      oc get datauploads.velero.io -n openshift-adp
+      -l velero.io/backup-name="{{ oadp_backup_name | trim }}"
+      --no-headers 2>/dev/null || true
+    register: backup_datauploads
+    changed_when: false
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+    when: oadp_backup_method == 'csi'
+
   - name: Report Backup status
     debug:
-      msg: "Backup {{ hcp_cluster_name }}-backup finished with phase: {{ backup_phase.stdout }}"
+      msg: >-
+        Backup {{ oadp_backup_name | trim }}
+        ({{ oadp_backup_method }} method) finished with phase:
+        {{ backup_phase.stdout }}
+        {{ ('| DataUploads: ' + (backup_datauploads.stdout_lines | default([]) | join(' ; ')))
+           if oadp_backup_method == 'csi' else '' }}

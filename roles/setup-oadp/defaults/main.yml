@@ -1,2 +1,10 @@
 ---
 # defaults file for setup-oadp
+
+# Backup method for the control-plane PVs. Normally set in vars.yaml
+# (which both setup_oadp.yaml and the backup/restore playbooks load);
+# repeated here so the role is safe to use on its own. 'fs' = Kopia
+# file-system backup, 'csi' = CSI VolumeSnapshot + Velero data mover -
+# the latter makes this role label the VolumeSnapshotClass Velero needs
+# (csi-snapshot-class.yml).
+oadp_backup_method: fs

@@ -1,4 +1,5 @@
-<network>
+{# The dnsmasq namespace is what lets us pass raw dnsmasq options below. #}
+<network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0'>
   <name>default</name>
   <uuid>467059b1-29f1-4bfc-bb9a-1b5ae26d244c</uuid>
   <forward mode='nat'>
@@ -71,4 +72,19 @@ api.{{ hub_disconnected_domain }}
      <bootp file='pxelinux.0' server='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
    </dhcp>
   </ip>
+{# This dnsmasq caches every answer it forwards to the helper, at the TTL the
+   zone advertises. That is a problem at DR cutover: a hosted cluster's
+   api/api-int A records move from one hub's MetalLB address to the other's,
+   and until the cached copy expires every VM on this network - including the
+   hosted clusters' own worker nodes - keeps resolving the old hub and its
+   kubelets go NotReady. Capping the cache here bounds that to a minute
+   regardless of what any zone advertises.
+
+   Already-cached records are not affected by a cap applied later; clear them
+   with `kill -HUP $(cat /var/run/libvirt/network/default.pid)`, which flushes
+   dnsmasq's cache without disturbing DHCP leases or the VMs. #}
+  <dnsmasq:options>
+    <dnsmasq:option value='max-cache-ttl=60'/>
+    <dnsmasq:option value='max-ttl=60'/>
+  </dnsmasq:options>
 </network>

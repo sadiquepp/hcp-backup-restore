@@ -1,0 +1,93 @@
+---
+# setup-oadp : csi-snapshot-class.yml
+#
+# Only runs when oadp_backup_method=csi (see main.yml). Prepares the
+# hub so Velero's CSI plugin can snapshot the control-plane volumes.
+#
+# Velero does not take a VolumeSnapshotClass name from the Backup CR.
+# For each PVC it looks up the PV's CSI driver, then looks for a
+# VolumeSnapshotClass for that driver carrying the label
+#   velero.io/csi-volumesnapshot-class: "true"
+# If none carries it, the volume is skipped - and the Backup still ends
+# up "Completed", which is why this is worth failing on here instead.
+# If more than one carries it for the same driver, Velero cannot choose
+# and errors on the volume, so we warn about that too.
+#
+# ODF creates the snapshot class as part of the external StorageCluster
+# (setup_ceph_odf.yaml); LVM Storage creates none at all, which is what
+# makes the Ceph cluster a prerequisite for this method.
+
+- name: Wait for the VolumeSnapshotClass CRD to be established
+  shell: |
+    oc wait --for=condition=Established \
+      crd/volumesnapshotclasses.snapshot.storage.k8s.io --timeout=120s
+  register: vsc_crd_wait
+  changed_when: false
+  failed_when: false
+
+- name: Fail if the cluster has no snapshot CRDs at all
+  ansible.builtin.fail:
+    msg: >-
+      volumesnapshotclasses.snapshot.storage.k8s.io is not present on
+      this hub, so no CSI driver here supports snapshots. Use
+      oadp_backup_method=fs, or install a CSI driver that does (this
+      lab's answer is ODF external mode - setup_ceph_odf.yaml).
+  when: vsc_crd_wait.rc != 0
+
+- name: Look for the VolumeSnapshotClass named in oadp_csi_snapshot_class
+  shell: |
+    oc get volumesnapshotclass "{{ oadp_csi_snapshot_class }}" -o name 2>/dev/null || true
+  register: vsc_present
+  changed_when: false
+
+- name: List the snapshot classes that do exist (for the failure message)
+  shell: |
+    oc get volumesnapshotclass \
+      -o jsonpath='{range .items[*]}{.metadata.name}{" ("}{.driver}{")  "}{end}' 2>/dev/null || true
+  register: vsc_all
+  changed_when: false
+  when: vsc_present.stdout | trim == ''
+
+- name: Fail with a clear message if that snapshot class is missing
+  ansible.builtin.fail:
+    msg: >-
+      VolumeSnapshotClass '{{ oadp_csi_snapshot_class }}' not found on
+      this hub. Existing classes: {{ vsc_all.stdout | default('(none)') | trim }}.
+      Either run setup_ceph_odf.yaml so ODF creates it, or set
+      oadp_csi_snapshot_class in vars.yaml to the class your CSI driver
+      provides.
+  when: vsc_present.stdout | trim == ''
+
+- name: Label it so Velero's CSI plugin will select it
+  shell: |
+    oc label volumesnapshotclass "{{ oadp_csi_snapshot_class }}" \
+      velero.io/csi-volumesnapshot-class=true --overwrite
+  register: vsc_label
+  changed_when: "'not labeled' not in vsc_label.stdout"
+
+- name: Check whether more than one class for this driver carries the label
+  shell: |
+    oc get volumesnapshotclass -l velero.io/csi-volumesnapshot-class=true \
+      -o jsonpath='{range .items[?(@.driver=="{{ oadp_csi_driver }}")]}{.metadata.name}{" "}{end}'
+  register: vsc_labelled
+  changed_when: false
+
+- name: Warn if Velero has an ambiguous choice for this driver
+  ansible.builtin.debug:
+    msg: >-
+      More than one VolumeSnapshotClass for driver
+      {{ oadp_csi_driver }} carries
+      velero.io/csi-volumesnapshot-class=true
+      ({{ vsc_labelled.stdout | trim }}). Velero cannot choose between
+      them and will error on the volume - remove the label from all but
+      {{ oadp_csi_snapshot_class }}.
+  when: vsc_labelled.stdout.split() | length > 1
+
+- name: Report the snapshot class Velero will use
+  ansible.builtin.debug:
+    msg: >-
+      CSI backups on this hub will snapshot through
+      '{{ oadp_csi_snapshot_class }}' (driver {{ oadp_csi_driver }}).
+      Volume data is moved to the BackupStorageLocation by the
+      node-agent - watch 'oc get datauploads.velero.io -n openshift-adp' during a
+      backup.

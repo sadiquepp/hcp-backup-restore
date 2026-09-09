@@ -65,35 +65,50 @@
   loop_control:
     label: "{{ item }}"
 
-# REVIEW-BEFORE-APPLY: the InfraEnv here can't do anything useful until
-# AgentServiceConfig is actually applied (see roles/setup-hub-acm), which
-# is also currently held in review mode. Rendered files are left in
-# place at the paths shown below - inspect them, then re-enable both
-# this task and roles/setup-hub-acm's AgentServiceConfig apply together
-# (order: AgentServiceConfig first, then this) once validated.
-# - name: Apply bminfra manifests
-#   shell: |
-#     oc apply -f "{{ role_path }}/templates/.rendered-01-namespace.yaml"
-#     oc apply -f "{{ role_path }}/templates/.rendered-02-pullsecret.yaml"
-#     oc apply -f "{{ role_path }}/templates/.rendered-03-infraenv.yaml"
-#     oc apply -f "{{ role_path }}/templates/.rendered-04-capi-role.yaml"
+# The InfraEnv cannot do anything useful until AgentServiceConfig exists on
+# this hub - assisted-service is what serves the discovery ISO. That apply is
+# still manual (roles/setup-hub-acm renders it and README.md/steps.md apply
+# it), so check for it here rather than creating an InfraEnv that will sit
+# there doing nothing with no indication why.
+- name: Check AgentServiceConfig exists on this hub
+  shell: |
+    oc get agentserviceconfig agent -o name 2>/dev/null || true
+  register: bminfra_asc
+  changed_when: false
 
-- name: bminfra apply is disabled pending manual review
+- name: Fail with a clear message if it is missing
+  ansible.builtin.fail:
+    msg: >-
+      No AgentServiceConfig on this hub, so an InfraEnv here would never
+      produce a discovery ISO. Apply the one roles/setup-hub-acm rendered
+      first - `oc apply -f roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml`
+      - wait for assisted-service to come up in multicluster-engine, then
+      re-run this playbook.
+  when: bminfra_asc.stdout | trim == ''
+
+# Order matters: namespace before the objects in it, and the pull-secret
+# before the InfraEnv that references it.
+- name: Apply bminfra manifests
+  shell: |
+    oc apply -f "{{ role_path }}/templates/.rendered-01-namespace.yaml"
+    oc apply -f "{{ role_path }}/templates/.rendered-02-pullsecret.yaml"
+    oc apply -f "{{ role_path }}/templates/.rendered-03-infraenv.yaml"
+    oc apply -f "{{ role_path }}/templates/.rendered-04-capi-role.yaml"
+
+- name: Report what was applied
   debug:
     msg: >-
-      Apply is commented out - review the rendered files under
-      {{ role_path }}/templates/.rendered-*.yaml then re-enable the
-      'Apply bminfra manifests' task in roles/setup-bminfra/tasks/main.yml
-      (after roles/setup-hub-acm's AgentServiceConfig apply is re-enabled
-      and confirmed working - InfraEnv depends on it). The pull-secret is
-      rendered for a
+      Applied namespace, pull-secret, InfraEnv and capi-provider RBAC to
+      {{ hub_install_folder_selected | default('this hub') }}. The
+      pull-secret is rendered for a
       {{ 'disconnected' if disconnected_install | bool else 'connected' }}
-      hub.
+      hub. Rendered files are left under
+      {{ role_path }}/templates/.rendered-*.yaml for inspection.
 
-# Applying the manifests above is still held in review, so the InfraEnv this
-# actually downloads from is whatever is already on the hub - which may predate
-# the ignition override. Patch it on there too, and wait for the ISO to be
-# rebuilt, rather than caching an ISO whose hosts cannot pull the agent.
+# The InfraEnv is applied above, but an InfraEnv that already existed on this
+# hub may predate the ignition override. Patch it on there too, and wait for
+# the ISO to be rebuilt, rather than caching an ISO whose hosts cannot pull
+# the agent.
 - name: Make sure the live InfraEnv carries the ignition override (disconnected)
   ansible.builtin.include_tasks: ensure-ignition-override.yml
   when: disconnected_install | bool
@@ -101,8 +116,10 @@
 - name: Download discovery ISO from InfraEnv
   ansible.builtin.include_tasks: download-discovery-iso.yml
 
-# Cleanup is disabled while apply is disabled, since rendered files are
-# left in place for review. Re-enable alongside the apply task.
+# Cleanup stays disabled deliberately, even though the apply above is now
+# enabled: the rendered files are the record of what went onto the hub, the
+# disconnected flow inspects .rendered-03-infraenv.yaml, and README.md points
+# at these paths. They cost nothing to keep.
 # - name: Clean up rendered scratch files
 #   ansible.builtin.file:
 #     path: "{{ role_path }}/templates/{{ item }}"
