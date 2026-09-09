@@ -68,17 +68,11 @@ address to the DR hub's, which is what brings the worker nodes back.
 
 Successful, end to end.
 
-| | Backup | Restore |
-| --- | --- | --- |
-| Phase | Completed | Completed |
-| Items | 374 / 374 | 379 / 379 |
-| CSI operations | 3 / 3 | 3 / 3 |
-| Volume transfers | 3 DataUploads, ~371 MB each | 3 DataDownloads, byte-identical |
-| Wall clock | ~5 min | ~6 min |
-
-The hosted cluster came up on the DR hub with its etcd state intact, imported
-into ACM, worker nodes Ready and workloads running — on a Ceph cluster built
-after the backup was taken.
+The backup and the restore both completed cleanly, each moving all three etcd
+volumes in about five minutes, and the restored volumes came back byte for byte
+identical to what was backed up. The hosted cluster came up on the DR hub with
+its etcd state intact, imported into ACM, worker nodes Ready and workloads
+running — on a Ceph cluster built after the backup was taken.
 
 ---
 
