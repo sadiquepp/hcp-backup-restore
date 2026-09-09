@@ -159,6 +159,23 @@ export KUBECONFIG=<hosted cluster kubeconfig>
 oc apply -f hello-openshift.yaml
 ```
 
+Online Boutique, for a workload with something to look at after the
+restore. The `no-loadgenerator` overlay drops the Locust traffic
+generator, strips the `runAsUser`/`runAsGroup`/`fsGroup` values that
+OpenShift's `restricted-v2` SCC rejects, replaces upstream's LoadBalancer
+Service with a Route, and creates its own namespace:
+
+```bash
+oc apply -k https://github.com/sadiquepp/openshift/test-workloads/online-boutique/overlays/no-loadgenerator
+
+oc get pods -n online-boutique
+oc get route frontend -n online-boutique -o jsonpath='{.spec.host}{"\n"}'
+```
+
+~1270m CPU and ~1112Mi of requests across 11 services - fits two workers
+at 4 vCPU / 8Gi. Stateless apart from `redis-cart` on `emptyDir`, so what
+survives the restore is the workload definitions, not cart contents.
+
 ## 11. OADP on hub1
 
 ```bash
@@ -285,7 +302,9 @@ export KUBECONFIG=<hosted cluster kubeconfig>
 oc get nodes                                            # Ready
 oc get co | grep -v 'True.*False.*False'
 oc get pods -A | grep -vE 'Running|Completed'
+
 oc get route -n hello-openshift
+oc get pods,route -n online-boutique
 ```
 
 ## Cleanup

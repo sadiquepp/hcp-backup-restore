@@ -668,6 +668,22 @@ Apply the hello-openshift application.
 oc apply -f hello-openshift.yaml
 ```
 
+Or Online Boutique, if you want a workload with a UI worth showing after the
+cutover. The `no-loadgenerator` overlay drops the Locust traffic generator,
+strips the `runAsUser`/`runAsGroup`/`fsGroup` values `restricted-v2` rejects,
+swaps upstream's LoadBalancer Service for a Route, and creates its own
+namespace:
+
+```bash
+oc apply -k https://github.com/sadiquepp/openshift/test-workloads/online-boutique/overlays/no-loadgenerator
+oc get route frontend -n online-boutique -o jsonpath='{.spec.host}{"\n"}'
+```
+
+It is ~1270m CPU / ~1112Mi of requests across 11 services, which fits two
+workers at 4 vCPU / 8Gi. Stateless apart from `redis-cart` on an `emptyDir`,
+so what a restore brings back is the workload definitions - the same claim
+hello-openshift makes, with a better demo.
+
 Verify that the application is accessible.
 
 ```bash
