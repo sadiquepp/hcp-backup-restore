@@ -1,8 +1,8 @@
 # HCP Backup & Restore - Steps
 
 Connected lab, Ceph 9 / ODF external storage, CSI snapshot backup, DR cutover
-to hub2. Commands only. Explanations: [README.md](README.md) and
-[oadp/README.md](oadp/README.md).
+to hub2. Commands only. What it proves: [summary.md](summary.md).
+Explanations: [README.md](README.md) and [oadp/README.md](oadp/README.md).
 
 ## 1. Prepare
 

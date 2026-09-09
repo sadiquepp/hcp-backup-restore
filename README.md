@@ -6,6 +6,7 @@ The lab runs on a single bare-metal RHEL 9 node using KVM/libvirt to simulate th
 
 High-Level-Arch
 
+What this lab proves, in one page: [summary.md](summary.md).
 In a hurry? [steps.md](steps.md) is the same end-to-end run as commands only.
 
 ## Contents
