@@ -18,11 +18,11 @@ In a hurry? [steps.md](steps.md) is the same end-to-end run as commands only.
   - [vars.yaml](#varsyaml)
   - [vault.yaml (encrypted)](#vaultyaml-encrypted)
 - [End-to-End Workflow](#end-to-end-workflow)
+  - [Choose Connected or Disconnected](#choose-connected-or-disconnected)
   - [Setup Bare Metal Host](#setup-bare-metal-host-1)
-  - [Setup Mirror Registry (If using a disconnected deployment)](#setup-mirror-registry-if-using-a-disconnected-deployment)
+  - [Setup Mirror Registry (disconnected only)](#setup-mirror-registry-disconnected-only)
   - [Choose the Hub's PV Storage](#choose-the-hubs-pv-storage)
-  - [Setup Hub Cluster (hub1 - Connected Deployment)](#setup-hub-cluster-hub1---connected-deployment)
-  - [Setup Hub Cluster (hub1 - Disconnected Deployment)](#setup-hub-cluster-hub1---disconnected-deployment)
+  - [Setup Hub Cluster](#setup-hub-cluster)
   - [Prepare ACM (Disconnected Deployment)](#prepare-acm-disconnected-deployment)
   - [Prepare ACM and Inventory](#prepare-acm-and-inventory)
   - [Create a Hosted Cluster (Disconnected Deployment)](#create-a-hosted-cluster-disconnected-deployment)
@@ -195,6 +195,11 @@ Review and adjust lab-specific values:
    (`setup_ceph.yaml`) - it is the initial password `cephadm bootstrap` sets for
    the Ceph dashboard's admin user (`ceph_dashboard_user` in `vars.yaml`).
    `setup_ceph.yaml` asserts it is present before it creates anything.
+ - `mirror_registry_password` is only needed for the disconnected flow
+   (`disconnected_install: true`) - it is the password the Quay
+   `mirror-registry` appliance is installed with, and the one every later
+   podman/oc-mirror login uses. `setup_mirror_registry.yaml` asserts it is
+   present before it creates anything.
 
 ```bash
 ansible-vault create vault.yaml
@@ -208,10 +213,45 @@ ssh_key:
 oadp_aws_access_key_id: 'AKIA...'
 oadp_aws_secret_access_key: '...'
 ceph_dashboard_password: '...'   # only for the Ceph flow
+mirror_registry_password: '...'  # only for the disconnected flow
 ```
 
 ## End-to-End Workflow
 
+
+### Choose Connected or Disconnected
+
+`disconnected_install` in `vars.yaml` is the switch for the whole lab, and it is
+the **source of truth**. Set it once, before you start:
+
+```yaml
+disconnected_install: false   # connected (default)
+disconnected_install: true    # disconnected
+```
+
+Then run the steps below in order. Every playbook in the workflow reads it, so
+the commands and their order do not change - the same flow builds either lab:
+
+| | `false` (connected) | `true` (disconnected) |
+| --- | --- | --- |
+| Mirror registry | not used | required, built first |
+| Hub built | hub1, into `hub_install_folder` | hubd, into `hub_disconnected_install_folder` |
+| Hub pulls images from | quay.io / registry.redhat.io | the mirror registry, only |
+| Hosted clusters rendered | `hosted_clusters` | `hosted_clusters_disconnected` |
+| Hosted cluster workers | `.41-.43`, internet reachable | `.44-.46`, egress cut |
+| MetalLB addresses used | `hub` (.60-.62) | `hubd` (.67-.69) |
+
+Prefer editing `vars.yaml` over passing `-e disconnected_install=...` on a
+single command. The flag decides which hub a step installs, which kubeconfig the
+next step talks to and which cluster list it renders, so a run that disagrees
+with the one before it quietly targets a hub you never built - and that usually
+surfaces several steps later. The commands in this workflow are written without
+it; the few genuine exceptions are called out where they appear.
+
+The two hubs are fully independent - their own IP block (`ip_list.hubd_*`),
+subdomain (`hub_disconnected_domain`) and VM/install directories - so a
+connected and a disconnected lab co-exist happily. Flipping the flag and running
+the flow again builds the second one without disturbing the first.
 
 ### Setup Bare Metal Host
 
@@ -221,11 +261,91 @@ Creates and configures the `helper` VM that provides DNS and HAProxy for the lab
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
 ```
 
-### Setup Mirror Registry (If using a disconnected deployment)
-If you are using a disconnected deployment, you need to setup a mirror registry to pull the images from the internet.
+### Setup Mirror Registry (disconnected only)
+
+**Skip this section entirely when `disconnected_install: false`.**
+
+With `disconnected_install: true` this is a prerequisite for everything that
+follows. Run it **after** `setup_bm_host.yaml` - it needs the helper's DNS to
+resolve `registry.<hub_domain>` - and **before** the hub is built, since the hub
+install pulls every image from it:
+
 ```bash
-ansible-playbook -i inventory/hosts setup_mirror_registry.yaml --ask-vault-pass -e disconnected_install=true
+ansible-playbook -i inventory/hosts setup_mirror_registry.yaml --ask-vault-pass
 ```
+
+The playbook refuses to run unless `disconnected_install: true`, so it is the
+one step that cannot be reached by accident from a connected lab.
+
+It builds a standalone `registry` VM (`.22`), which stays connected to the
+internet - it is the thing that holds the images - installs the Quay
+`mirror-registry` appliance on it, and fills it with `oc-mirror` v2:
+
+| Tag | Step |
+| --- | --- |
+| `mirror-vm` | creates the `registry` VM - a 500G sparse disk expanded from the RHEL9 base image with `virt-resize`, then defined and booted |
+| `rhsm` | registers it with subscription-manager (hence `org_id` / `activation_key`) |
+| `mirror` | installs `mirror-registry` (Quay + its root CA), logs podman in, renders `/root/mirror/imageset-config.yaml` and runs `oc mirror ... --v2` into the registry |
+| `mirror-trust` | copies the registry's root CA into **this** host's trust store and logs the bare-metal host's podman in, writing `mirror_registry_authfile` (`/root/.docker/config.json`) |
+
+Before running it:
+
+- `mirror_registry_password`, `org_id` and `activation_key` must be in
+  `vault.yaml` - the playbook asserts all three.
+- Review the mirror block in `vars.yaml`: `mirror_registry_disk_size` (500G,
+  sparse), `mirror_registry_memory` / `mirror_registry_vcpus`,
+  `mirror_ocp_version` (defaults to
+  `<ocp_major_version>.<ocp_minor_version>`, i.e. what the rest of the lab
+  installs) and `mirror_catalog_operator_packages`. That last list is what gets
+  mirrored beyond the release payload; it already covers the operators
+  `setup-hub-acm` installs (ACM, MCE, LVM Storage, MetalLB, OADP, cincinnati),
+  so add anything else your lab needs **before** the mirror runs rather than
+  after.
+- Mirroring the release payload plus those catalogs pulls thousands of images -
+  budget the disk and the time.
+
+The `mirror-trust` step is what the rest of the flow actually reads: the hub
+install asserts the CA is at
+`/etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem` before it starts,
+and `setup-bminfra` / `create-hosted-cluster` build their mirror-only pull
+secrets from the authfile.
+
+**If `oc-mirror` fails, do not rebuild the VM.** The registry, the tools, the
+pull secret and the ImageSetConfiguration are all in place by then, and
+oc-mirror v2 resumes from its workspace, so each attempt only pulls what is
+still missing. Finish it by hand on the VM - the playbook prints this same
+command when it fails:
+
+```bash
+ssh root@192.168.122.22
+cd /root/mirror
+oc mirror -c imageset-config.yaml --workspace file://oc-mirror-output/ \
+  docker://registry.hub.mylab.com:8443 --v2
+# logs: /root/mirror/oc-mirror-output/working-dir/logs/ and /root/mirror/.oc-mirror.log
+```
+
+Re-running the playbook's `mirror` tag will **skip** the mirror once the
+registry answers `podman login`, which is why finishing it by hand is the way
+out. When it completes, run the trust step and carry on:
+
+```bash
+ansible-playbook -i inventory/hosts setup_mirror_registry.yaml --ask-vault-pass --tags mirror-trust
+```
+
+Verify before building the hub:
+
+```bash
+# on the bare-metal host - the two things every later step reads
+ls -l /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+grep -o 'registry[^"]*:8443' /root/.docker/config.json
+
+# on the mirror-registry VM - what oc-mirror published for the hub to apply
+ssh root@192.168.122.22 'find /root/mirror/oc-mirror-output -type d -name cluster-resources'
+```
+
+That last directory holds the `ImageDigestMirrorSet` / `ImageTagMirrorSet` /
+`CatalogSource` the hub install stages and applies as day-2 resources; the hub
+install fails with a clear message if it is not there yet.
 
 ### Choose the Hub's PV Storage
 
@@ -255,7 +375,7 @@ built, because `setup-hub-acm` acts on it during bring-up:
 > as the option for demonstrating hosted clusters, and Ceph as the one for
 > demonstrating backup and restore.
 
-### Setup Hub Cluster (hub1 - Connected Deployment)
+### Setup Hub Cluster
 
 Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP
 operator. LVM-Storage is skipped when `use_lvm_storage: false`.
@@ -264,48 +384,45 @@ operator. LVM-Storage is skipped when `use_lvm_storage: false`.
 ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
 ```
 
-### Setup Hub Cluster (hubd - Disconnected Deployment)
+One playbook, both modes - which hub it builds follows `disconnected_install`
+in `vars.yaml`:
 
-The same playbook installs the disconnected hub - it is gated on
-`disconnected_install`, the same flag the rest of the disconnected flow hangs
-off (`vars.yaml`, default `false`, or `-e disconnected_install=true`):
+- **`false`** - installs `roles/setup-hub-cluster` into `hub_install_folder`.
+  This is hub1, pulling from quay.io / registry.redhat.io.
+- **`true`** - installs `roles/setup-hub-cluster-disconnected` into
+  `hub_disconnected_install_folder` instead. This is `hubd`, a **third, fully
+  independent hub** rather than a different way of building hub1: its own IP
+  block (`ip_list.hubd_*`), its own subdomain (`hub_disconnected_domain`) and
+  its own VM/install directories, so hub1, hub2 and hubd can all be up at once.
 
-```bash
-ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass -e disconnected_install=true
-```
+Everything else about a disconnected run follows from the same flag: the
+cluster is wired to pull every release and operator image solely from the local
+mirror registry, its nodes are cut off from the real internet before anything
+boots, oc-mirror's `ImageDigestMirrorSet`/`ImageTagMirrorSet`/`CatalogSource`
+are applied as day-2 resources, and `setup-hub-acm` is handed
+`metallb_hub=hubd` so each hosted cluster gets this hub's address under the pool
+names every hub shares.
 
-With the flag set the play installs `roles/setup-hub-cluster-disconnected`
-into `hub_disconnected_install_folder` instead of `roles/setup-hub-cluster`
-into `hub_install_folder`, so this is a **third, fully independent hub**
-(`hubd`) rather than a different way of building hub1 - it has its own IP block
-(`ip_list.hubd_*`), its own subdomain (`hub_disconnected_domain`) and its own
-VM/install directories, and hub1, hub2 and hubd can all be up at once. Adding
-the `hubd_*` entries to `ip_list` is what gives it DHCP reservations and DNS
-records, so re-run `setup_bm_host.yaml` (at minimum its `dns`/`lb` tags) after
-pulling those vars in, or `api`/`api-int`/`*.apps` for it won't resolve.
+Two things a disconnected run expects to be in place first:
 
-Everything else about the run follows from the flag: the cluster is wired to
-pull every release/operator image solely from the local mirror registry, its
-nodes are cut off from the real internet before anything boots, oc-mirror's
-`ImageDigestMirrorSet`/`ImageTagMirrorSet`/`CatalogSource` are applied as day-2
-resources, and `setup-hub-acm` is handed `metallb_hub=hubd` so each hosted
-cluster gets this hub's address under the pool names every hub shares. It
-requires `setup_mirror_registry.yaml` to have run first - the play fails fast
-if the mirror registry CA has not been trusted on this host.
+- `setup_mirror_registry.yaml` must have run - the play fails fast if the
+  mirror registry CA has not been trusted on this host.
+- The `hubd_*` entries in `ip_list` are what give the hub DHCP reservations and
+  DNS records, so `setup_bm_host.yaml` must have run with them present (its
+  `dns`/`lb` tags are enough) or `api`/`api-int`/`*.apps` for this cluster will
+  not resolve.
 
 ### Prepare ACM (Disconnected Deployment)
 
-`setup-hub-acm` renders differently when it is run disconnected. It hangs off
-the same `disconnected_install` flag as the rest of the disconnected flow - set
-it in `vars.yaml` or pass `-e disconnected_install=true`. Connected runs are
-unaffected.
+`setup-hub-acm` renders differently when it is run disconnected. It reads the
+same `disconnected_install` from `vars.yaml` as the rest of the flow, so with
+that set to `true` this happens as part of the step above and there is nothing
+extra to run. Connected runs are unaffected.
 
-`setup_hub_cluster.yaml` chains into the role once the cluster is up, in either
-mode, so the command in the section above already covers it. To re-run just the
-ACM part against an existing disconnected hub:
+To re-run just the ACM part against a hub that is already up:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass -e disconnected_install=true --tags acm
+ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass --tags acm
 ```
 
 What the disconnected run does on top of the connected one:
@@ -388,11 +505,13 @@ oc get pvc -n multicluster-engine    # the three should reach Bound
 
 ```bash
 ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass
-# disconnected hub:
-ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass -e disconnected_install=true
 ```
 
-  With `disconnected_install=true` the rendered pull-secret carries only the
+  The same command covers both modes: with `disconnected_install: true` it
+  targets the disconnected hub's kubeconfig instead of hub1's (the flag wins
+  over `target_hub`), and renders the InfraEnv differently.
+
+  On a disconnected run the rendered pull-secret carries only the
   mirror registry's credentials (read from `mirror_registry_authfile`, the
   authfile `setup_mirror_registry.yaml` logs podman into), not vault.yaml's
   `pull_secret`. The discovery agent resolves its image through the mirror
@@ -469,8 +588,9 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
   ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
   ```
   - Add `-e hcp_cluster_name=hcp-cluster2` to render just one of them.
-  - Add `-e disconnected_install=true` to render the **disconnected** hosted
-    clusters (`hosted_clusters_disconnected`) instead - see
+  - With `disconnected_install: true` the same command renders the
+    **disconnected** hosted clusters (`hosted_clusters_disconnected`) instead,
+    against the disconnected hub - see
     [Disconnected Hosted Cluster](#disconnected-hosted-cluster).
   - Review and apply the rendered yaml files (one `.rendered-<cluster>.yaml` per entry) to the ACM cluster.
   ```bash
@@ -479,13 +599,18 @@ Note: The ISO is automatically downloaded to the bare-metal host in the download
 ### Create a Hosted Cluster (Disconnected Deployment)
 
 `create-hosted-cluster` renders differently when it is run disconnected, the
-same way `setup-hub-acm` does. It hangs off the same `disconnected_install`
-flag - set it in `vars.yaml` or pass `-e disconnected_install=true`. Connected
+same way `setup-hub-acm` does. It reads the same `disconnected_install` from
+`vars.yaml`, so it is the same command as the connected flow - and connected
 runs render byte-for-byte what they always did.
 
 ```bash
-ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass -e disconnected_install=true
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
 ```
+
+The run also picks the hub for you: a disconnected render goes to the
+disconnected hub's kubeconfig without needing `-e target_hub=hubd`, since that
+is the only hub the `-d` clusters exist on. (`-e target_hub=hub2` still wins -
+that is the DR cutover, which moves both kinds of cluster onto the DR hub.)
 
 Requires `setup_mirror_registry.yaml` to have run against this lab first - that
 is what leaves the registry's CA at
@@ -537,17 +662,17 @@ What the disconnected run adds to each bundle:
   (`hosted_cluster_metallb_hub`, defaulting to `target_hub`, but `hubd` for any
   cluster rendered disconnected), fails if that cluster's
   `hosted_cluster_metallb_pools[...].ip` has no entry for that hub, and prints
-  the name/address pairing plus the `dig` command to check it. Re-render DNS for
-  the same hub or the two drift apart:
-  `setup_bm_host.yaml --tags dns -e target_hub=hubd`. For a disconnected cluster
-  that is the zone `roles/setup-dns` renders with `-e target_hub=hubd`, not
-  hub1's. The default (`api.<cluster-name>.<base_domain>`) is correct by
+  the name/address pairing plus the `dig` command to check it. Re-render DNS
+  after any change - `setup_bm_host.yaml --tags dns` - and the two stay in step:
+  `roles/setup-dns` resolves the hub per cluster, publishing the `hubd` address
+  for a `-d` cluster and `target_hub`'s for a connected one, so no override is
+  needed. The default (`api.<cluster-name>.<base_domain>`) is correct by
   construction under the repo convention that a hosted cluster's DNS zone is
   named after the cluster - a cluster named `hcp-cluster1-d` gets
   `api.hcp-cluster1-d.mylab.com`. If you render a cluster disconnected under a
-  name whose zone points at another hub - e.g. plain `hcp-cluster1` with
-  `-e disconnected_install=true` - set `api_hostname` on its `hosted_clusters`
-  entry, or `hosted_cluster_api_hostname` in `vars.yaml`.
+  name whose zone points at another hub - e.g. plain `hcp-cluster1` - set
+  `api_hostname` on its `hosted_clusters` entry, or
+  `hosted_cluster_api_hostname` in `vars.yaml`.
 
 The connected and disconnected renderings are **two separate templates**
 (`templates/hosted-cluster.yaml.j2` and
@@ -599,7 +724,7 @@ hosted_clusters:
   - hcp-cluster2
   - hcp-cluster3
 
-## disconnected - rendered instead of the above when disconnected_install=true
+## disconnected - rendered instead of the above when disconnected_install: true
 hosted_clusters_disconnected:
   - hcp-cluster1-d
   - hcp-cluster2-d
@@ -614,11 +739,12 @@ connected clusters carry **no `hubd` address** - they never run on the
 disconnected hub, and a stray entry would make `setup-hub-acm` create pools
 there for clusters that will never ask for them.
 
-Run a disconnected render against the disconnected hub's kubeconfig:
+A disconnected render goes to the disconnected hub's kubeconfig on its own -
+`disconnected_install` selects the hub as well as the cluster list, so this is
+the same command either way:
 
 ```bash
-ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass \
-  -e disconnected_install=true -e target_hub=hubd
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
 ```
 
 `setup_bm_host.yaml` renders the helper for **both** kinds in one
@@ -639,9 +765,9 @@ covers the `-d` clusters:
 
 Which hub each zone's `api`/`api-int` points at is resolved **per cluster**:
 connected clusters follow `target_hub`, disconnected ones use `hubd`, and both
-move to `hub2` under `-e target_hub=hub2` for a DR cutover. `-e target_hub=hubd`
-leaves the connected clusters on their `hub` addresses rather than failing,
-since they do not run there.
+move to `hub2` under `-e target_hub=hub2` for a DR cutover. So a plain
+`--tags dns` run is right for both kinds at once, and no `target_hub` override
+is needed to publish a `-d` cluster on the disconnected hub.
 
 `*.apps` is wired for the `-d` clusters too. `setup-lb` binds one ingress VIP
 per hosted cluster as a secondary address on the helper and renders an haproxy
@@ -936,6 +1062,16 @@ Once the primary hub is shutdown, you can build the DR hub.
 ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
 ```
 
+> **hub2 has no disconnected install role yet.** Unlike `setup_hub_cluster.yaml`,
+> `setup_hub_cluster2.yaml` installs a connected cluster whatever
+> `disconnected_install` says - only its day-2 `setup-hub-acm` part follows the
+> flag. So if you are running the disconnected flow with
+> `disconnected_install: true` in `vars.yaml`, build hub2 with
+> `-e disconnected_install=false` and then add the `-d` MetalLB pools as the
+> day-2 step described in
+> [MetalLB Address Pools for Hosted Clusters](#metallb-address-pools-for-hosted-clusters)
+> before restoring a `-d` cluster onto it. A disconnected hub2 is planned.
+
 On the Ceph path, build hub2 with `use_lvm_storage: false` and attach it to
 the rebuilt Ceph cluster **now**, before the AgentServiceConfig below:
 
@@ -1064,14 +1200,12 @@ for how the per-hub addresses are defined.
 
 A hosted cluster whose worker VMs have **no route off the lab network**, so it
 can only ever pull from the local mirror registry. It runs on the disconnected
-hub (`setup_hub_cluster.yaml -e disconnected_install=true`) and is
-deliberately built to sit *alongside* `hcp-cluster1` rather than replace it -
-both can be up at once.
+hub built by `setup_hub_cluster.yaml`, and is deliberately built to sit
+*alongside* `hcp-cluster1` rather than replace it - both can be up at once.
 
-Everything hangs off the same `disconnected_install` flag as the rest of the
-disconnected flow (`vars.yaml`, or `-e disconnected_install=true`). Connected
-runs are completely unaffected: the same playbooks, the same role and the same
-`hosted-cluster.yaml.j2` template are used for both.
+Everything hangs off the same `disconnected_install` in `vars.yaml` as the rest
+of the flow. Connected runs are completely unaffected: the same playbooks, the
+same role and the same `hosted-cluster.yaml.j2` template are used for both.
 
 What is distinct about it:
 
@@ -1160,36 +1294,34 @@ To re-apply just this step against an existing InfraEnv:
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass \
-  -e disconnected_install=true --tags discovery-ignition
+  --tags discovery-ignition
 ```
 
 ### Building it
 
-Same order as a connected hosted cluster, with `-e disconnected_install=true`
-on each step so the disconnected hub's kubeconfig and the disconnected cluster
-list are used (`disconnected_install` wins over `target_hub`):
+Exactly the same commands as a connected hosted cluster - with
+`disconnected_install: true` in `vars.yaml`, each step uses the disconnected
+hub's kubeconfig and the disconnected cluster list on its own (the flag wins
+over `target_hub`):
 
 ```bash
 # 1. worker VMs (.44-.46): NAT cut first, the hubd InfraEnv's ignition override
 #    ensured (see above), then the VMs booted off that InfraEnv's ISO
-ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass \
-  -e disconnected_install=true
+ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass
 
 # 2. approve the discovered agents in the ACM/MCE Web UI, then render the bundle
-ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass \
-  -e disconnected_install=true
+ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass
 
 # 3. review and apply it
 oc apply -f roles/create-hosted-cluster/templates/.rendered-hcp-cluster1-d.yaml
 ```
 
-DNS for the zone is rendered by `setup-dns` like every other zone (no flag
-needed - the zone is always present). Point its `api`/`api-int` at the
-disconnected hub with the usual `target_hub` override:
+DNS for the zone is rendered by `setup-dns` like every other zone - the zone is
+always present, and `api`/`api-int` for a `-d` cluster resolve to the
+disconnected hub without any override, so a plain `dns` run is all it takes:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass \
-  -e target_hub=hubd
+ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
 ```
 
 Verify:
@@ -1269,8 +1401,8 @@ hosted_cluster_metallb_pools:
 Three variables select what a hub gets:
 
 - **`metallb_hub`** - which hub `setup-hub-acm` is configuring. Set by
-  `setup_hub_cluster.yaml` - `hub` normally, `hubd` when it runs with
-  `disconnected_install` - and `setup_hub_cluster2.yaml` (`hub2`).
+  `setup_hub_cluster.yaml` - `hub` normally, `hubd` when `disconnected_install`
+  is true - and `setup_hub_cluster2.yaml` (`hub2`).
 - **`target_hub`** - which hub is currently authoritative. Already used to pick
   the kubeconfig for the OADP playbooks; it now also selects the address
   `setup-dns` publishes as `api`/`api-int`. Defaults to `hub`.
@@ -1280,20 +1412,25 @@ Three variables select what a hub gets:
   pools for exactly the clusters that hub run would create there.
 
 Carrying the hub's address is necessary but not sufficient - the cluster must
-also be in the run's install mode. This only ever changes hub2, the one hub
+also be in the run's install mode. This only ever matters on hub2, the one hub
 holding addresses for both sets:
 
-| Run                                            | Pools rendered                            |
-| ---------------------------------------------- | ----------------------------------------- |
-| `setup_hub_cluster.yaml`                        | `hcp-cluster1/2/3-api-pool` (.60-.62)     |
-| `setup_hub_cluster2.yaml`                       | `hcp-cluster1/2/3-api-pool` (.90-.92)     |
-| `setup_hub_cluster2.yaml -e disconnected_install=true` | `hcp-cluster{1,2,3}-d-api-pool` (.93-.95) |
-| `setup_hub_cluster.yaml -e disconnected_install=true`  | `hcp-cluster{1,2,3}-d-api-pool` (.67-.69) |
+| Run                        | `disconnected_install` | Pools rendered                            |
+| -------------------------- | ---------------------- | ----------------------------------------- |
+| `setup_hub_cluster.yaml`   | `false`                | `hcp-cluster1/2/3-api-pool` (.60-.62)     |
+| `setup_hub_cluster.yaml`   | `true`                 | `hcp-cluster{1,2,3}-d-api-pool` (.67-.69) |
+| `setup_hub_cluster2.yaml`  | `false`                | `hcp-cluster1/2/3-api-pool` (.90-.92)     |
+| `setup_hub_cluster2.yaml`  | `true`                 | `hcp-cluster{1,2,3}-d-api-pool` (.93-.95) |
 
 So `oc get IPAddressPool -n metallb-system` on a connected hub2 shows **three**
 pools, not six. The `-d` clusters' hub2 addresses stay reserved in the map; the
 pools for them are created by re-running just the `acm` tag in disconnected
-mode, which is the step before restoring a `-d` cluster onto hub2:
+mode, which is the step before restoring a `-d` cluster onto hub2.
+
+This is **the one place a `-e disconnected_install=` override is genuinely
+useful**: hub2 is the DR target for both kinds of cluster, so a hub2 you built
+connected may still need the `-d` pools, and that is a single day-2 action
+rather than a change of mode for the whole lab:
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass --tags acm \
@@ -1699,8 +1836,9 @@ delegates.
 | Playbook                      | Description                                   |
 | ----------------------------- | --------------------------------------------- |
 | `setup_bm_host.yaml`          | Prepare bare metal, create helper VM (DNS/LB) |
-| `setup_hub_cluster.yaml`      | Deploy hub1 (OCP + day-2 operators); `-e disconnected_install=true` deploys the disconnected hub (hubd) instead |
-| `setup_hub_cluster2.yaml`     | Deploy hub2 (DR replacement hub)              |
+| `setup_mirror_registry.yaml`  | Build the mirror registry VM and fill it with oc-mirror - required first when `disconnected_install: true`, refuses to run otherwise |
+| `setup_hub_cluster.yaml`      | Deploy the hub (OCP + day-2 operators): hub1, or hubd when `disconnected_install: true` |
+| `setup_hub_cluster2.yaml`     | Deploy hub2 (DR replacement hub) - connected only, see [Build DR Hub](#build-dr-hub) |
 | `setup_hosted_cluster.yaml`   | Provision hosted cluster 1                    |
 | `setup_hosted_cluster2.yaml`  | Provision hosted cluster 2                    |
 | `setup_oadp.yaml`             | Wire OADP to S3 (credentials + DPA)           |
@@ -1708,9 +1846,10 @@ delegates.
 | `restore_hosted_cluster.yaml` | Restore a hosted cluster control plane        |
 | `shutdown_hub_cluster.yaml`   | Gracefully stop hub1 VMs (preserves disks)    |
 | `cleanup-hub.yaml`            | Destroy hub1 VMs and delete disks             |
+| `cleanup-hub-disconnected.yaml` | Destroy the disconnected hub's VMs and disks (hubd only) |
 | `cleanup.yaml`                | Destroy all VMs (hub + helper)                |
-| `setup_hosted_cluster_vm.yaml` | Create a hosted cluster's worker VMs; `-e disconnected_install=true` builds the disconnected set |
-| `create_hosted_cluster.yaml`  | Render the HostedCluster/NodePool bundle; `-e disconnected_install=true` renders the disconnected clusters |
+| `setup_hosted_cluster_vm.yaml` | Create a hosted cluster's worker VMs; builds the disconnected set when `disconnected_install: true` |
+| `create_hosted_cluster.yaml`  | Render the HostedCluster/NodePool bundle; renders the disconnected clusters when `disconnected_install: true` |
 | `setup_ceph.yaml`             | Build the standalone Ceph 9 cluster (ceph1-3 + cephadmin) |
 | `setup_ceph_odf.yaml`         | Install ODF and attach that Ceph cluster to a hub in external mode |
 | `cleanup-ceph.yaml`           | Destroy the Ceph VMs and their OSD disks - also the DR demo's deliberate storage-loss step |

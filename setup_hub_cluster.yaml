@@ -63,7 +63,7 @@
     hub_kubeconfig: "{{ hub_install_folder_selected }}/auth/kubeconfig"
     ## Pool names are the same on every hub; metallb_hub picks this hub's
     ## address for each hosted cluster - hub for hub1 (.60-.62), hubd for the
-    ## disconnected hub (.64-.66). See hosted_cluster_metallb_pools in
+    ## disconnected hub (.67-.69). See hosted_cluster_metallb_pools in
     ## vars.yaml.
     metallb_hub_selected: "{{ (hub_disconnected | bool) | ternary('hubd', 'hub') }}"
   tasks:
