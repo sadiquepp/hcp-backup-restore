@@ -83,8 +83,8 @@ metallb_prune_other_mode_pools: true
 ## versions. Both hub1 and hub2 normally want the same os image list
 ## (they serve the same set of hosted-cluster OCP versions), so this
 ## lives in role defaults rather than being duplicated per hub - override
-## in vars.yaml if you ever do want it to differ per hub. Keep entries
-## here in sync with bminfra_ocp_version (roles/setup-bminfra/defaults) -
+## in vars.yaml if you ever do want it to differ per hub. One entry must
+## match bminfra_ocp_version, which vars.yaml derives from ocp_major_version -
 ## an InfraEnv's osImageVersion must match one of these openshiftVersion
 ## values or node discovery ISOs will fail to build.
 agent_service_database_storage: 10Gi

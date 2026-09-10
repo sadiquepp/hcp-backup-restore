@@ -1,6 +1,8 @@
 ---
 # defaults file for setup-bminfra
 bminfra_location: singapore
+## Standalone fallback only - vars.yaml sets this to ocp_major_version, so bump
+## that one number rather than this literal.
 bminfra_ocp_version: '4.21'
 
 ## Gates the disconnected rendering below. setup_mirror_registry.yaml and

@@ -494,7 +494,8 @@ target_hub: hub
 ## ---------------------------------------------------------------------------
 
 ## setup-hub-acm: AgentServiceConfig storage and RHCOS live-ISO catalogue.
-## Shared by hub1 and hub2. Keep openshiftVersion in sync with bminfra_ocp_version.
+## Shared by hub1 and hub2. One entry's openshiftVersion must match
+## bminfra_ocp_version (which follows ocp_major_version).
 agent_service_database_storage: 10Gi
 agent_service_filesystem_storage: 100Gi
 agent_service_image_storage: 50Gi
@@ -555,9 +556,14 @@ agent_service_os_images:
 # acm_disconnected_require_helper_space: false
 
 ## setup-bminfra: bare-metal infra namespace and InfraEnv OCP version.
-## osImageVersion must match an entry in agent_service_os_images above.
+## Follows ocp_major_version so the InfraEnv discovers hosts at the same
+## release the rest of the lab is built from - there is one number to bump.
+## It lands in InfraEnv.spec.osImageVersion, so agent_service_os_images above
+## must carry an entry whose openshiftVersion matches it (assisted-service
+## rejects a version it has no osImage for). Override here if you ever need
+## the InfraEnv on a different version than the hub.
 bminfra_location: singapore
-bminfra_ocp_version: '4.21'
+bminfra_ocp_version: "{{ ocp_major_version }}"
 discovery_iso_filename: "bminfra-discovery-{{ bminfra_ocp_version }}.iso"
 discovery_boot_kernel_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-vmlinuz"
 discovery_boot_initrd_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-initrd.img"
