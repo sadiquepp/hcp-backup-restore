@@ -30,7 +30,7 @@
       Check the interface name on this VM with `ip -4 addr` and adjust
       the awk filter above if it differs.
 
-# The three hub VIPs, plus one *.apps VIP per hosted cluster taken from
+# The four hub VIPs, plus one *.apps VIP per hosted cluster taken from
 # hosted_cluster_node_keys (vars.yaml) - the same map haproxy.cfg.j2 binds and
 # roles/setup-dns publishes as the *.apps wildcard. Derived rather than listed
 # so a hosted cluster added to either cluster list gets its VIP bound here
@@ -39,7 +39,7 @@
 - name: Work out the VIPs haproxy has to bind
   ansible.builtin.set_fact:
     lb_vip_octets: >-
-      {{ [ip_list.hublb, ip_list.hub2lb, ip_list.hubdlb]
+      {{ [ip_list.hublb, ip_list.hub2lb, ip_list.hubdlb, ip_list.hub2dlb]
          + ((hosted_cluster_node_keys | default({})).values() | list
             | map(attribute='apps_lb') | list
             | select('in', ip_list) | list

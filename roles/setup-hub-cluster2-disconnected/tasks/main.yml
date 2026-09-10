@@ -1,0 +1,811 @@
+---
+# Tasks file for setup-hub-cluster2-disconnected
+#
+# The disconnected build of the DR hub: byte-for-byte the same steps as
+# roles/setup-hub-cluster-disconnected (hubd), against hub2's own name, domain,
+# IP block and directories. Keep the two in step - a change to one almost
+# always belongs in the other.
+#
+# Same KVM/libvirt UPI install as roles/setup-hub-cluster2 (RHCOS qcow2 +
+# openshift-install create ignition-configs + virt-install bootstrap/
+# master/worker), but the resulting cluster is wired up to pull every
+# release and operator image exclusively from the local mirror registry
+# (see roles/setup-mirror-registry) instead of quay.io/registry.redhat.io.
+#
+# This host (the KVM hypervisor) keeps its normal internet access - only
+# the *cluster's* image pulls are redirected, same as agent_service_os_images
+# in vars.yaml still points at mirror.openshift.com even when
+# disconnected_install: true. So the RHCOS qcow2 and the oc CLI are still
+# staged from mirror.openshift.com exactly as roles/setup-hub-cluster2 does
+# (and oc has to come first - it's what performs the extract below).
+#
+# What differs from the connected role:
+#   - openshift-install is extracted from the release image *in the mirror
+#     registry*, so the pullspec it bakes into ignition points at the mirror.
+#     That extract is handed oc-mirror's ImageDigestMirrorSet via --idms-file,
+#     which is what lets oc resolve the installer *component* image inside the
+#     mirror instead of falling back to its original quay.io pullspec
+#   - install-config.yaml carries the mirror CA + a mirror-only pull secret
+#   - extra manifests are injected before ignition-configs are generated:
+#     ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource from oc-mirror,
+#     plus one disabling the default OperatorHub sources
+#
+# Requires roles/setup-mirror-registry-trust to have already run, so the
+# mirror registry's CA is trusted locally and its credentials are in
+# mirror_registry_authfile (see setup_mirror_registry.yaml).
+#
+# CO-EXISTENCE: this hub is fully independent of hub1 (roles/setup-hub-cluster),
+# hub2 (roles/setup-hub-cluster2) and hubd
+# (roles/setup-hub-cluster-disconnected) - all four can be up at once. Nothing
+# is shared except the host-level artifacts that are genuinely version-identical
+# (the RHCOS qcow2 in download_dir and /usr/bin/oc). Everything else is
+# namespaced to this cluster:
+#   - hub2_disconnected_install_folder / hub2_disconnected_vm_folder
+#   - hub2d_* keys in ip_list (and therefore distinct MACs + DHCP reservations)
+#   - hub2d_* libvirt domain names, disk images and /tmp/*.xml definitions
+#   - hub2_disconnected_name -> its own subdomain, hub2_disconnected_domain
+# Note the "Delete Install Directory if exists" task below only ever removes
+# hub2_disconnected_install_folder, so re-running this never disturbs
+# hub1/hub2/hubd.
+
+# ---------------------------------------------------------------------------
+# Cut this cluster's nodes off from the real internet BEFORE anything boots,
+# so a "disconnected" install cannot quietly fall back to quay.io /
+# registry.redhat.io and succeed for the wrong reason.
+#
+# The rules themselves (and why it takes two of them) are in
+# tasks/block-node-nat.yml - a copy of the file that
+# roles/setup-hub-cluster-disconnected carries (and that
+# setup_hosted_cluster_vm.yaml includes by path), so every disconnected thing in
+# this lab cuts egress exactly the same way. The
+# rules are appended per-IP and tagged with disconnected_nat_label, and the
+# LAB_NO_NAT/LAB_NO_EGRESS chains are created but never flushed, so hubd's
+# rules and this hub's coexist in them.
+# ---------------------------------------------------------------------------
+- name: Cut the disconnected hub2's nodes off from the real internet
+  ansible.builtin.include_tasks: block-node-nat.yml
+  vars:
+    disconnected_nat_enabled: "{{ hub2_disconnected_block_node_nat }}"
+    disconnected_nat_ip_keys: "{{ hub2_disconnected_node_ip_keys }}"
+    disconnected_nat_label: "{{ hub2_disconnected_name | default('hub2d') }}"
+  tags: [disconnected-nat]
+
+- name: Check existence of CoreOS Image
+  stat:
+    path: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2"
+  register: coreos_image_status
+
+- name: Get the CoreOS qemu image
+  get_url:
+    url: "https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/{{ ocp_major_version }}/{{ ocp_major_version }}.{{coreos_minor_version}}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
+    dest: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
+  when: coreos_image_status.stat.exists == false
+
+- name: Unzip CoreOS KVM Image
+  shell: |
+    gunzip {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz
+  when: coreos_image_status.stat.exists == false
+
+# Check Existence of oc
+- name: Check existence of oc cli
+  stat:
+    path: "/usr/bin/oc"
+  register: oc_status
+
+# Pinned to mirror_ocp_version rather than "latest" (which is what
+# roles/setup-hub-cluster2 uses). Here oc is load-bearing: it's what runs the
+# `oc adm release extract` below against a {{ mirror_ocp_version }} payload, and
+# a wildly skewed client can fail to read that release image. Only fetched when
+# /usr/bin/oc is absent, so this never replaces an oc another role installed.
+- name: Get the Openshift Client
+  get_url:
+    url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ mirror_ocp_version }}/openshift-client-linux.tar.gz"
+    dest: "{{ download_dir }}/openshift-client-linux.tar.gz"
+  when: oc_status.stat.exists == false
+
+- name: Unarchive OpenShift Client
+  unarchive:
+    src: "{{ download_dir }}/openshift-client-linux.tar.gz"
+    dest: "/usr/bin"
+    mode: 0755
+    remote_src: yes
+  when: oc_status.stat.exists == false
+
+- name: Create Directory for Hub Cluster VMs
+  file:
+    path: "{{ hub2_disconnected_vm_folder }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Delete Install Directory if exists
+  file:
+    path: "{{ hub2_disconnected_install_folder }}"
+    state: absent
+
+- name: Create Directory for Hub Cluster VMs
+  file:
+    path: "{{hub2_disconnected_install_folder}}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+# ---------------------------------------------------------------------------
+# Stage oc-mirror's cluster-resources manifests on the hypervisor *before* the
+# install starts, because the `oc adm release extract` below needs the
+# ImageDigestMirrorSet that is among them.
+#
+# oc-mirror v2 does not put the release payload's component images in the same
+# repository as the release image. The release image lands in
+# {{ mirror_release_repository }}, while every component it references -
+# including the installer image that --command=openshift-install actually reads
+# the binary out of - lands in <registry>/openshift/release. `oc adm release
+# extract` knows nothing about that split: its only built-in fallback is "look
+# in the same repository as the release image I was handed", which is the layout
+# `oc adm release mirror` produces, not oc-mirror v2's. So it falls back to the
+# installer's original pullspec and goes to the internet for it:
+#
+#   error: unable to read image quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:...
+#   Get "https://quay.io/v2/...": unauthorized: ...
+#
+# That fails outright on a host with no internet, and on a host with internet it
+# succeeds for the wrong reason - producing an openshift-install whose component
+# references point at quay.io, which is exactly the leak the rest of this role
+# exists to prevent.
+#
+# oc-mirror already wrote the source-to-mirror map we need, so fetch it and pass
+# it with --idms-file. The same manifests are copied into the install
+# manifests/ directory further down; this block only moves the fetch early
+# enough for oc to use it as well.
+- name: Locate the oc-mirror cluster-resources directory on the mirror-registry VM
+  ansible.builtin.shell: |
+    set -o pipefail
+    # `|| true` so a missing directory surfaces through the assert below with an
+    # explanation, rather than as a bare non-zero rc from find.
+    find /root/mirror/oc-mirror-output -type d -name cluster-resources | head -n1 || true
+  args:
+    executable: /bin/bash
+  register: cluster_resources_dir
+  changed_when: false
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+- name: Fail if oc-mirror has not produced any cluster-resources manifests yet
+  ansible.builtin.assert:
+    that:
+      - cluster_resources_dir.stdout | trim | length > 0
+    fail_msg: >-
+      No cluster-resources directory found under /root/mirror/oc-mirror-output on
+      the mirror-registry VM - run setup_mirror_registry.yaml first.
+
+- name: Archive the oc-mirror cluster-resources manifests (ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource)
+  ansible.builtin.shell: |
+    tar czf /root/mirror/hub2d-cluster-resources.tar.gz -C "{{ cluster_resources_dir.stdout | trim | dirname }}" cluster-resources
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+- name: Fetch the cluster-resources archive to the hypervisor
+  ansible.builtin.fetch:
+    src: /root/mirror/hub2d-cluster-resources.tar.gz
+    dest: "{{ hub2_disconnected_cluster_resources_archive }}"
+    flat: true
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+# Rebuilt from empty rather than unpacked over, so a manifest oc-mirror no
+# longer emits cannot survive from an earlier run and get copied into the
+# install manifests directory later.
+- name: Clear the cluster-resources staging directory on the hypervisor
+  ansible.builtin.file:
+    path: "{{ hub2_disconnected_cluster_resources_dir }}"
+    state: absent
+
+- name: Create the cluster-resources staging directory on the hypervisor
+  ansible.builtin.file:
+    path: "{{ hub2_disconnected_cluster_resources_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Unpack the cluster-resources manifests into the staging directory
+  ansible.builtin.unarchive:
+    src: "{{ hub2_disconnected_cluster_resources_archive }}"
+    dest: "{{ hub2_disconnected_cluster_resources_dir }}"
+    remote_src: true
+    extra_opts:
+      - "--strip-components=1"
+
+# oc-mirror's filename for these has moved around across releases
+# (idms-oc-mirror.yaml, imageDigestMirrorSet.yaml, release-idms-oc-mirror.yaml)
+# and it may write one combined file or split them per image type, so find them
+# by content rather than by name. Release-payload mappings are listed first
+# because `oc adm release extract` takes a single --idms-file path, so only the
+# first of them can be handed to it - and the image it has to resolve, the
+# installer, is a release-payload image. Every file found still feeds
+# imageDigestSources below.
+# Partitioned with an explicit loop rather than `grep -v` against the release
+# list, because grep exits 1 when it selects nothing - which is the ordinary case
+# of oc-mirror writing a single combined idms-oc-mirror.yaml that IS the release
+# one. Under `set -o pipefail` that non-zero status fails the task even though
+# the file list it printed was correct. Every path out of here is exit 0; an
+# empty result is the assert below's business, not a task failure.
+- name: List the ImageDigestMirrorSets oc-mirror produced, release payload first
+  ansible.builtin.shell: |
+    set -o pipefail
+    all=$(grep -rlE '^[[:space:]]*kind:[[:space:]]*ImageDigestMirrorSet' \
+            "{{ hub2_disconnected_cluster_resources_dir }}" | sort) || true
+    [ -n "$all" ] || exit 0
+    rest=
+    while IFS= read -r f; do
+      if grep -q 'openshift-release-dev' "$f"; then
+        printf '%s\n' "$f"
+      else
+        rest="${rest}${f}"$'\n'
+      fi
+    done <<< "$all"
+    printf '%s' "$rest"
+    exit 0
+  args:
+    executable: /bin/bash
+  register: hub2d_idms_files
+  changed_when: false
+
+- name: Fail if oc-mirror produced no ImageDigestMirrorSet
+  ansible.builtin.assert:
+    that:
+      - hub2d_idms_files.stdout_lines | length > 0
+    fail_msg: >-
+      No ImageDigestMirrorSet found in the oc-mirror output staged at
+      {{ hub2_disconnected_cluster_resources_dir }}. Without one, `oc adm release
+      extract` cannot map quay.io/openshift-release-dev/ocp-v4.0-art-dev to
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }} and will try to
+      pull the installer image from quay.io. Check that the ImageSetConfiguration
+      actually mirrored a platform release, then re-run
+      setup_mirror_registry.yaml.
+
+- name: Read every ImageDigestMirrorSet oc-mirror produced
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ hub2d_idms_files.stdout_lines }}"
+  register: hub2d_idms_raw
+
+# Flattened into the source/mirrors pairs that install-config.yaml's
+# imageDigestSources takes. Manifests in manifests/ only reach the *cluster* -
+# the CVO applies them, and the MCO turns the ImageDigestMirrorSet into
+# /etc/containers/registries.conf on masters and workers. The bootstrap node has
+# neither: its registries.conf comes from the bootstrap ignition, which the
+# installer builds from imageDigestSources in install-config.yaml. Without this,
+# bootkube resolves the payload's component images (etcd, kube-apiserver,
+# cluster-bootstrap...) to their original quay.io pullspecs and bootstrap fails
+# on a host that cannot reach quay.io.
+#
+# The template reads only .source and .mirrors from each entry, which drops
+# IDMS-only fields such as mirrorSourcePolicy that the installer's
+# ImageDigestSource type does not accept.
+#
+# from_yaml_all, not from_yaml: oc-mirror writes idms-oc-mirror.yaml as a
+# multi-document stream, one ImageDigestMirrorSet per '---' (release, operators,
+# additional images). from_yaml is a plain safe_load and rejects that outright -
+# "expected a single document in the stream ... but found another document" -
+# pointing at the line of the second '---'. Every document is collected and then
+# narrowed back to ImageDigestMirrorSets, so an ImageTagMirrorSet sharing the
+# file, or the empty document a trailing '---' produces, is skipped rather than
+# blowing up the expression.
+- name: Collect oc-mirror's source-to-mirror mappings for install-config.yaml
+  ansible.builtin.set_fact:
+    disconnected_image_digest_mirrors: "{{ hub2d_idms_raw.results
+      | map(attribute='content') | map('b64decode')
+      | map('from_yaml_all') | map('list') | flatten
+      | select('mapping')
+      | selectattr('kind', 'defined')
+      | selectattr('kind', 'equalto', 'ImageDigestMirrorSet')
+      | selectattr('spec', 'defined')
+      | map(attribute='spec.imageDigestMirrors') | flatten }}"
+
+# Guards against rendering a bare "imageDigestSources:" with nothing under it,
+# which YAML reads as null and which would leave the bootstrap node with no
+# mirror configuration at all - the failure this key exists to prevent, but
+# silent.
+- name: Fail if no source-to-mirror mappings could be read
+  ansible.builtin.assert:
+    that:
+      - disconnected_image_digest_mirrors | length > 0
+    fail_msg: >-
+      Found ImageDigestMirrorSet files
+      ({{ hub2d_idms_files.stdout_lines | join(', ') }}) but no
+      spec.imageDigestMirrors entries in any of them, so install-config.yaml
+      would carry an empty imageDigestSources and the bootstrap node would
+      resolve payload images to quay.io. Check the oc-mirror output on the
+      mirror-registry VM.
+
+- name: Show what the extract and install-config.yaml will use
+  ansible.builtin.debug:
+    msg:
+      - "oc adm release extract --idms-file={{ hub2d_idms_files.stdout_lines[0] }}"
+      - "imageDigestSources: {{ disconnected_image_digest_mirrors | map(attribute='source') | join(', ') }}"
+
+# The oc download above is skipped when /usr/bin/oc already exists, so the
+# client running the extract is not guaranteed to be the mirror_ocp_version one.
+# --idms-file arrived in oc 4.13 (superseding the older --icsp-file); fail with
+# something more useful than "unknown flag" if this one predates it.
+- name: Check that oc supports --idms-file
+  ansible.builtin.shell: |
+    set -o pipefail
+    oc adm release extract --help | grep -q -- --idms-file
+  args:
+    executable: /bin/bash
+  register: oc_idms_support
+  changed_when: false
+  failed_when: false
+
+- name: Fail if oc is too old to accept an ImageDigestMirrorSet
+  ansible.builtin.assert:
+    that:
+      - oc_idms_support.rc == 0
+    fail_msg: >-
+      /usr/bin/oc does not support `oc adm release extract --idms-file`, which
+      this role needs in order to resolve the installer image inside the mirror
+      registry (the flag arrived in oc 4.13). Delete /usr/bin/oc and re-run so
+      the {{ mirror_ocp_version }} client is downloaded, or upgrade it by hand.
+
+# openshift-install is pulled out of the mirror registry's own release payload
+# rather than downloaded from mirror.openshift.com. This matters beyond just
+# avoiding an internet fetch: the binary that `oc adm release extract` hands
+# back has the release image it was extracted from baked in as its default
+# pullspec, so every ignition config it renders points at
+# {{ mirror_registry_domain }} instead of quay.io - which is what actually makes
+# the installed cluster disconnected. Mirrors the "Extract Openshift Install
+# Binary from mirror registry" step in
+# openshift/cloud/self-managed/disconnected (roles/openshift_installer_prep).
+#
+# `oc adm release extract` writes into the current working directory, hence the
+# chdir. It needs the mirror registry's CA in the system trust store and a pull
+# secret holding that registry's credentials - roles/setup-mirror-registry-trust
+# sets up both, and setup_hub_cluster2.yaml asserts the CA is there before it
+# imports this role.
+- name: Extract openshift-install from the release image in the mirror registry
+  ansible.builtin.shell: |
+    oc adm release extract -a {{ mirror_registry_authfile }} \
+      --idms-file="{{ hub2d_idms_files.stdout_lines[0] }}" \
+      --command=openshift-install \
+      "{{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}:{{ mirror_ocp_version }}-x86_64"
+  args:
+    chdir: "{{ hub2_disconnected_install_folder }}"
+
+# oc-mirror writes some of its cluster resources twice, once as .json and once
+# as .yaml. The release signature ConfigMap is the one that bites: both files
+# describe the same object, and `openshift-install create ignition-configs`
+# refuses a manifests directory that defines an object twice -
+#
+#   failed to generate asset "CVO Ignore": multiple manifests for group  kind
+#   ConfigMap namespace openshift-config-managed name mirrored-release-signatures:
+#   manifests/signature-configmap.json, manifests/signature-configmap.yaml
+#
+# - so drop the .json wherever a .yaml/.yml of the same name sits beside it.
+# A .json with no YAML counterpart is left alone; removing it would silently drop
+# a resource the cluster is meant to get. Done here rather than at unpack time
+# because the --idms-file lookup above runs against the untouched output.
+- name: Drop oc-mirror's duplicate .json manifests where a .yaml exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd "{{ hub2_disconnected_cluster_resources_dir }}" || exit 1
+    for j in *.json; do
+      [ -e "$j" ] || continue
+      for y in "${j%.json}.yaml" "${j%.json}.yml"; do
+        if [ -e "$y" ]; then
+          rm -f -- "$j"
+          echo "dropped $j (same object as $y)"
+          break
+        fi
+      done
+    done
+  args:
+    executable: /bin/bash
+  register: hub2d_dropped_json
+  changed_when: hub2d_dropped_json.stdout | trim | length > 0
+
+# oc-mirror's output mixes resources the cluster needs at install time with ones
+# that belong on day 2, and the difference is not cosmetic.
+#
+# An ImageDigestMirrorSet or ImageTagMirrorSet placed in manifests/ is turned
+# into a MachineConfig by the in-cluster MCO. install-config.yaml's
+# imageDigestSources is what the *bootstrap* MCO renders from. Route the same
+# mirrors through both and the two renders have to come out byte for byte
+# identical or the MCD refuses the node on first boot:
+#
+#   Node master1 upgrade failure. bootstrap generated MC rendered-master-<a> and
+#   in-cluster generated MC rendered-master-<b> for this node do not match.
+#
+# An ImageTagMirrorSet makes that impossible on its own - install-config.yaml has
+# no imageTagSources key, so tag mirrors can only ever reach the in-cluster side.
+# Applying them after the cluster is up turns this into an ordinary MachineConfig
+# update with one rolling reboot, which is the flow oc-mirror documents.
+#
+# The release payload still resolves through the mirror during the install: the
+# installer generates its own ImageDigestMirrorSet from imageDigestSources, so
+# nothing here is needed to get the cluster up.
+#
+# A file is held back whole if any document in it carries a day-2 kind, since
+# `oc apply` and manifests/ both take whole files.
+- name: Split the oc-mirror resources into install-time and day-2 sets
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd "{{ hub2_disconnected_cluster_resources_dir }}" || exit 1
+    mkdir -p install day2
+    for f in *.yaml *.yml *.json; do
+      [ -e "$f" ] || continue
+      if grep -qE '^[[:space:]]*kind:[[:space:]]*({{ hub2_disconnected_day2_kinds | join("|") }})[[:space:]]*$' "$f"; then
+        mv -- "$f" day2/
+      else
+        mv -- "$f" install/
+      fi
+    done
+    echo "install-time: $(ls install | tr '\n' ' ')"
+    echo "day-2:        $(ls day2 | tr '\n' ' ')"
+    exit 0
+  args:
+    executable: /bin/bash
+  register: hub2d_resource_split
+  changed_when: false
+
+- name: Show how the oc-mirror resources were split
+  ansible.builtin.debug:
+    var: hub2d_resource_split.stdout_lines
+
+- name: Ensure the extracted openshift-install is executable
+  ansible.builtin.file:
+    path: "{{ hub2_disconnected_install_folder }}/openshift-install"
+    mode: '0755'
+
+- name: Get SSH Key
+  shell: cat ~/.ssh/lab_rsa.pub
+  register: ssh_out
+
+- name: Setting booleans using complex argument style
+  ansible.builtin.set_fact:
+    ssh_key: "{{ ssh_out.stdout }}"
+
+- name: Read the mirror registry CA certificate (trusted locally by setup-mirror-registry-trust)
+  ansible.builtin.slurp:
+    src: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+  register: mirror_registry_ca_cert_b64
+
+- name: Store the mirror registry CA cert as a fact
+  ansible.builtin.set_fact:
+    mirror_registry_ca_cert: "{{ mirror_registry_ca_cert_b64.content | b64decode }}"
+
+- name: Read the mirror registry pull secret (generated by setup-mirror-registry-trust)
+  ansible.builtin.slurp:
+    src: "{{ mirror_registry_authfile }}"
+  register: mirror_registry_pull_secret_b64
+  become: true
+
+# mirror_registry_authfile is /root/.docker/config.json - the host's shared
+# podman/docker config, not a file private to this lab. setup-mirror-registry-trust
+# runs `podman login --authfile` against it, so it holds the mirror registry's
+# entry *merged into* whatever the host already had for quay.io,
+# registry.redhat.io, cloud.openshift.com and friends. Two reasons not to hand
+# the whole thing to the cluster:
+#
+#   1. Those credentials would give every node a working route back to the real
+#      registries. The install could then satisfy a pull that the mirror is
+#      missing and succeed for the wrong reason - the same "disconnected only by
+#      accident" failure the LIBVIRT_PRT rules at the top of this file exist to
+#      prevent.
+#   2. Red Hat pull secrets carry "email" fields, and an apostrophe in one is
+#      enough to break the generated install-config.yaml. It used to be
+#      interpolated into a single-quoted YAML scalar, where the apostrophe closes
+#      the scalar early and the remaining JSON gets parsed as YAML structure:
+#      "failed to unmarshal install-config.yaml: error converting YAML to JSON:
+#      yaml: line 25: did not find expected key". The template now serialises
+#      this with to_json rather than pasting raw file text, so that class of
+#      breakage is gone either way, but there is still no reason to ship
+#      credentials the cluster must not use.
+- name: Work out which authfile entry belongs to the mirror registry
+  ansible.builtin.set_fact:
+    hub2d_mirror_registry_host: "{{ mirror_registry_domain }}:{{ mirror_registry_port }}"
+    hub2d_authfile_auths: "{{ (mirror_registry_pull_secret_b64.content | b64decode | from_json).auths | default({}, true) }}"
+  no_log: true
+
+- name: Fail if the host is not logged in to the mirror registry
+  ansible.builtin.assert:
+    that:
+      - hub2d_mirror_registry_host in hub2d_authfile_auths
+    fail_msg: >-
+      {{ mirror_registry_authfile }} has no credentials for
+      {{ hub2d_mirror_registry_host }} - it holds entries for
+      [{{ hub2d_authfile_auths.keys() | list | join(', ') }}].
+      roles/setup-mirror-registry-trust is what logs podman in there, so run
+      setup_mirror_registry.yaml first.
+
+- name: Reduce the pull secret to the mirror registry's own credentials
+  ansible.builtin.set_fact:
+    disconnected_pull_secret:
+      auths: "{{ {hub2d_mirror_registry_host: hub2d_authfile_auths[hub2d_mirror_registry_host]} }}"
+  no_log: true
+
+# Copy Install-Config
+- name: Copying install-config.yaml to install dir
+  template:
+    src: install-config.yaml.j2
+    dest: "{{ hub2_disconnected_install_folder }}/install-config.yaml"
+
+# Create Ignition-Files
+- name: Create Manifests
+  shell: |
+      {{ hub2_disconnected_install_folder }}/openshift-install create manifests --dir={{ hub2_disconnected_install_folder }}
+
+- name: Disable worker role on master nodes
+  lineinfile:
+    path: "{{ hub2_disconnected_install_folder }}/manifests/cluster-scheduler-02-config.yml"
+    regexp: 'mastersSchedulable'
+    line: "  mastersSchedulable: false"
+
+# Only the install-time half - in practice the mirrored release signature
+# ConfigMap, which the cluster verifies the payload against and which is not an
+# MCO input. The ImageDigestMirrorSet, ImageTagMirrorSet and CatalogSource were
+# moved aside by the split above and are applied on day 2 by
+# tasks/apply-day2-mirror-resources.yml; see the comment there for why.
+- name: Copy the mirror registry's install-time manifests into the install manifests directory
+  ansible.builtin.copy:
+    src: "{{ hub2_disconnected_cluster_resources_install_dir }}/"
+    dest: "{{ hub2_disconnected_install_folder }}/manifests/"
+    remote_src: true
+
+- name: Copy the OperatorHub default-catalog-sources suppression manifest
+  ansible.builtin.copy:
+    src: operatorhub-disable-default-sources.yaml
+    dest: "{{ hub2_disconnected_install_folder }}/manifests/operatorhub-disable-default-sources.yaml"
+    mode: '0644'
+
+# Create Ignition-Files
+- name: Create Ignition File
+  shell: |
+    {{ hub2_disconnected_install_folder }}/openshift-install create ignition-configs --dir={{ hub2_disconnected_install_folder }}
+
+- name: Set proper permission on Ignition File for qemu to access
+  file:
+    path: "{{ hub2_disconnected_install_folder }}/{{ item }}"
+    mode: '0644'
+  with_items:
+    - bootstrap.ign
+    - master.ign
+    - worker.ign
+
+- name: Create Disk Image for Bootstrap
+  shell: |
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub2_disconnected_vm_folder }}/hub2d_bootstrap.qcow2 \
+    100G
+
+- name: Defining the OCP Bootstrap nodes
+  shell: |
+    virt-install \
+    --ram 16384 \
+    --vcpus 4 \
+    --osinfo rhel9.0  \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_bootstrap.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2d_bootstrap}} \
+    --name hub2d_bootstrap \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_disconnected_install_folder }}/bootstrap.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub2d_bootstrap.xml
+
+    virsh define /tmp/hub2d_bootstrap.xml
+    sleep 10
+    virsh start hub2d_bootstrap
+
+- name: Lets wait for 300 seconds for the bootstrap to be UP and ACTIVEG.
+  ansible.builtin.wait_for:
+    timeout: 300
+
+- name: Create Disk Image for Master Nodes
+  shell: |
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub2_disconnected_vm_folder }}/hub2d_master1.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub2_disconnected_vm_folder }}/hub2d_master2.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub2_disconnected_vm_folder }}/hub2d_master3.qcow2 \
+    100G
+
+- name: Defining the Master nodes
+  shell: |
+    virt-install \
+    --ram {{ master_memory }} \
+    --vcpus {{ master_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_master1.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2d_master1}} \
+    --name hub2d_master1 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_disconnected_install_folder }}/master.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub2d_master1.xml
+
+    virt-install \
+    --ram {{ master_memory }} \
+    --vcpus {{ master_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_master2.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2d_master2}} \
+    --name hub2d_master2 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_disconnected_install_folder }}/master.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub2d_master2.xml
+
+    virt-install \
+    --ram {{ master_memory }} \
+    --vcpus {{ master_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_master3.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2d_master3}} \
+    --name hub2d_master3 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_disconnected_install_folder }}/master.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub2d_master3.xml
+
+    virsh define /tmp/hub2d_master1.xml
+    virsh define /tmp/hub2d_master2.xml
+    virsh define /tmp/hub2d_master3.xml
+    sleep 10
+    virsh start hub2d_master1
+    virsh start hub2d_master2
+    virsh start hub2d_master3
+
+- name: Lets wait for 300 seconds for the masters to be UP and RUNNING.
+  ansible.builtin.wait_for:
+    timeout: 300
+
+- name: Create Disk Image for Worker Nodes
+  shell: |
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub2_disconnected_vm_folder }}/hub2d_worker1.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub2_disconnected_vm_folder }}/hub2d_worker2.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -F qcow2 \
+    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    {{ hub2_disconnected_vm_folder }}/hub2d_worker3.qcow2 \
+    100G
+
+    qemu-img create \
+    -f qcow2 \
+    -o preallocation=metadata \
+    {{ hub2_disconnected_vm_folder }}/hub2d_storage_worker1.qcow2 \
+    500G
+
+    qemu-img create \
+    -f qcow2 \
+    -o preallocation=metadata \
+    {{ hub2_disconnected_vm_folder }}/hub2d_storage_worker2.qcow2 \
+    500G
+
+    qemu-img create \
+    -f qcow2 \
+    -o preallocation=metadata \
+    {{ hub2_disconnected_vm_folder }}/hub2d_storage_worker3.qcow2 \
+    500G
+
+- name: Defining the Worker nodes
+  shell: |
+    virt-install \
+    --ram {{ worker_memory }} \
+    --vcpus {{ worker_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_worker1.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_storage_worker1.qcow2,device=disk,bus=virtio,format=qcow2,cache=none  \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2d_worker1}} \
+    --name hub2d_worker1 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_disconnected_install_folder }}/worker.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub2d_worker1.xml
+
+    virt-install \
+    --ram {{ worker_memory }} \
+    --vcpus {{ worker_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_worker2.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_storage_worker2.qcow2,device=disk,bus=virtio,format=qcow2,cache=none  \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2d_worker2}} \
+    --name hub2d_worker2 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_disconnected_install_folder }}/worker.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub2d_worker2.xml
+
+    virt-install \
+    --ram {{ worker_memory }} \
+    --vcpus {{ worker_cpu }} \
+    --osinfo rhel9.0  \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_worker3.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+    --disk path={{ hub2_disconnected_vm_folder }}/hub2d_storage_worker3.qcow2,device=disk,bus=virtio,format=qcow2,cache=none  \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --vnc \
+    --network network:default,mac=52:54:00:e2:54:{{ip_list.hub2d_worker3}} \
+    --name hub2d_worker3 \
+    --cpu host-passthrough \
+    --qemu-commandline="-fw_cfg name=opt/com.coreos/config,file={{ hub2_disconnected_install_folder }}/worker.ign" \
+    --dry-run \
+    --print-xml > /tmp/hub2d_worker3.xml
+
+    virsh define /tmp/hub2d_worker1.xml
+    virsh define /tmp/hub2d_worker2.xml
+    virsh define /tmp/hub2d_worker3.xml
+    sleep 10
+    virsh start hub2d_worker1
+    virsh start hub2d_worker2
+    virsh start hub2d_worker3
+
+- name: Lets wait for 600 seconds for the workers to be UP and RUNNING.
+  ansible.builtin.wait_for:
+    timeout: 600
+
+- name: Approve CSRs until worker nodes are Ready
+  ansible.builtin.include_tasks: wait-for-workers-ready.yml
+  vars:
+    kubeconfig_path: "{{ hub2_disconnected_install_folder }}/auth/kubeconfig"
+    expected_worker_replicas: "{{ hub_worker_replicas }}"
+
+- name: Waiting for cluster Bootstrap to finish
+  shell: |
+    {{ hub2_disconnected_install_folder }}/openshift-install --dir={{ hub2_disconnected_install_folder }}  wait-for bootstrap-complete --log-level=info
+
+- name: Deleting Bootstrap VM
+  community.libvirt.virt:
+    name: hub2d_bootstrap
+    state: destroyed
+
+- name: Approve CSRs until worker nodes are Ready (post-bootstrap)
+  ansible.builtin.include_tasks: wait-for-workers-ready.yml
+  vars:
+    kubeconfig_path: "{{ hub2_disconnected_install_folder }}/auth/kubeconfig"
+    expected_worker_replicas: "{{ hub_worker_replicas }}"

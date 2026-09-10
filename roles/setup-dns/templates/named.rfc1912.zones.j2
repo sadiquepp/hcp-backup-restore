@@ -65,6 +65,12 @@ zone "{{ hub_disconnected_domain }}" IN {
 	file "{{hub_disconnected_domain}}.db";
 	allow-update { none; };
 };
+
+zone "{{ hub2_disconnected_domain }}" IN {
+	type master;
+	file "{{hub2_disconnected_domain}}.db";
+	allow-update { none; };
+};
 {# One zone per hosted cluster, connected and disconnected alike, derived from
    the cluster lists so a new cluster needs no edit here. The zone name is
    <cluster-name>.<base_domain>, matching the .db files tasks/main.yml writes -

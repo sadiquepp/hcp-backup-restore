@@ -1,0 +1,11 @@
+# Extra manifest injected into the install-dir before ignition-configs are
+# generated (see tasks/main.yml). Disables the default (internet-backed)
+# OperatorHub catalog sources at first boot, since only the mirrored
+# CatalogSource(s) that oc-mirror generated (also injected alongside this
+# file) are reachable from a disconnected hub.
+apiVersion: config.openshift.io/v1
+kind: OperatorHub
+metadata:
+  name: cluster
+spec:
+  disableAllDefaultSources: true

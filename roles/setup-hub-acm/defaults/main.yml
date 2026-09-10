@@ -4,8 +4,10 @@
 ## Which hub this role is configuring. Selects each hosted cluster's address
 ## out of hosted_cluster_metallb_pools below - pool names are the same on
 ## every hub, the addresses are not. Set by setup_hub_cluster.yaml - hub
-## normally, hubd when it runs with disconnected_install - and
-## setup_hub_cluster2.yaml (hub2).
+## normally, hubd when it runs with disconnected_install - and by
+## setup_hub_cluster2.yaml, which passes hub2 in BOTH modes: its disconnected
+## build (hub2d) is a different cluster but the same DR hub, so a restored
+## hosted cluster comes up on hub2's addresses either way.
 metallb_hub: hub
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs - one

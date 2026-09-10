@@ -95,6 +95,26 @@ ip_list:
   hubd_worker3: 78
   hubdlb: 79
 
+  # Hub2-disconnected - the DR hub built from the local mirror registry
+  # (setup_hub_cluster2.yaml with disconnected_install set). Same relationship
+  # to hub2 that hubd has to hub1: its own IP block, its own subdomain
+  # (hub2_disconnected_domain) and its own install/VM directories, so it is a
+  # separate cluster rather than a differently-built hub2, and all four hubs
+  # can be up at once.
+  #
+  # .10-.19 rather than another slice of the 70s/80s: those are contiguous and
+  # free, and they sit below both DHCP pools (dhcpd .100-.200 on the helper,
+  # libvirt .201-.249), so nothing dynamic can ever be handed one of them.
+  # NOTE: same MAC scheme constraint as above - two digit values (10-99).
+  hub2d_bootstrap: 10
+  hub2d_master1: 11
+  hub2d_master2: 12
+  hub2d_master3: 13
+  hub2d_worker1: 14
+  hub2d_worker2: 15
+  hub2d_worker3: 16
+  hub2dlb: 19
+
   # Mirror registry - shared connected infrastructure for disconnected-install
   # simulation (see setup_mirror_registry.yaml). Stays reachable/connected
   # even when master/worker IPs are cut off from the real internet.
@@ -173,6 +193,14 @@ hub2_domain: hub2.mylab.com
 ## <metadata.name>.<baseDomain>), and needs a matching zone in
 ## roles/setup-dns + a forwarder in roles/setup-bm-host's libvirt network.
 hub_disconnected_domain: hubd.mylab.com
+## Subdomain for the disconnected DR hub, on the same terms as
+## hub_disconnected_domain above: it is <hub2_disconnected_name>.<base_domain>,
+## because OpenShift derives a cluster's DNS from <metadata.name>.<baseDomain>
+## and every cluster in this lab shares base_domain. So it is a sibling of
+## hub2.mylab.com rather than a child of it - a zone under hub2.mylab.com would
+## mean a different baseDomain for this cluster alone. Needs a matching zone in
+## roles/setup-dns and a forwarder in roles/setup-bm-host's libvirt network.
+hub2_disconnected_domain: hub2d.mylab.com
 hosted_domain: hcp-cluster1.mylab.com
 hosted_domain2: hcp-cluster2.mylab.com
 hosted_domain3: hcp-cluster3.mylab.com
@@ -222,6 +250,16 @@ hub_disconnected_name: hubd
 hub_disconnected_vm_folder: /var/lib/libvirt/images/hubd
 hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 
+## Variables required by Setup-Hub-Cluster2-Disconnected Role - the DR hub
+## installed purely from the local mirror registry. Same treatment as the
+## hub_disconnected_* block above, one hub along: separate name, VM folder and
+## install folder from hub1/hub2/hubd so all four can co-exist, and
+## hub2_disconnected_name doubles as the leading label of
+## hub2_disconnected_domain above.
+hub2_disconnected_name: hub2d
+hub2_disconnected_vm_folder: /var/lib/libvirt/images/hub2d
+hub2_disconnected_install_folder: /var/lib/libvirt/images/hub2d_install
+
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
 ## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE
 ## address, plus one L2Advertisement per pool.
@@ -257,6 +295,13 @@ hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 ##   hubd  - disconnected hub (setup_hub_cluster.yaml -e disconnected_install=true)
 ## At DR cutover the hosted cluster comes back on the hub2 address and DNS is
 ## re-rendered to match - see the MetalLB section of the README.
+##
+## There is deliberately no 'hub2d' key. The disconnected DR hub
+## (setup_hub_cluster2.yaml with disconnected_install) is a separate cluster
+## from hub2, but it plays the same part in the topology, so it configures
+## MetalLB as metallb_hub=hub2 and a cluster restored onto it comes up on the
+## hub2 address DNS already publishes at cutover. Adding hub2d addresses here
+## would mean a second set of DR addresses that nothing resolves to.
 ##
 ## A cluster only carries an address for the hubs it can actually run on.
 ## The connected three have 'hub' and 'hub2' (primary and DR) but deliberately
