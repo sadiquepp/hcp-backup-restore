@@ -48,7 +48,7 @@
 - name: Download discovery ISO from InfraEnv
   ansible.builtin.get_url:
     url: "{{ infraenv_iso_url.stdout }}"
-    dest: "{{ download_dir }}{{ discovery_iso_filename }}"
+    dest: "{{ download_dir }}/{{ discovery_iso_filename }}"
     validate_certs: false
     force: "{{ discovery_iso_force_download | default(false) | bool }}"
     mode: '0644'
@@ -56,7 +56,7 @@
 - name: Download InfraEnv PXE boot artifacts
   ansible.builtin.get_url:
     url: "{{ item.url }}"
-    dest: "{{ download_dir }}{{ item.filename }}"
+    dest: "{{ download_dir }}/{{ item.filename }}"
     validate_certs: false
     force: "{{ discovery_iso_force_download | default(false) | bool }}"
     mode: '0644'
@@ -72,7 +72,7 @@
 
 - name: Set discovery_image_url to local ISO path
   ansible.builtin.set_fact:
-    discovery_image_url: "{{ download_dir }}{{ discovery_iso_filename }}"
+    discovery_image_url: "{{ download_dir }}/{{ discovery_iso_filename }}"
 
 - name: Ensure PXE directories exist on helper
   ansible.builtin.file:
@@ -87,7 +87,7 @@
 
 - name: Copy PXE boot artifacts to helper
   ansible.builtin.copy:
-    src: "{{ download_dir }}{{ item.src }}"
+    src: "{{ download_dir }}/{{ item.src }}"
     dest: "{{ item.dest }}"
     mode: '0644'
   loop:

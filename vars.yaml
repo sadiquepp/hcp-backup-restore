@@ -37,12 +37,9 @@ base_domain: mylab.com
 ## Where the RHCOS images, the oc/openshift-install tarballs and the discovery
 ## ISOs are staged, and the parent of every VM/install directory further down.
 ##
-## The TRAILING SLASH is load-bearing twice over: the *_vm_folder /
-## *_install_folder values append to it directly, and roles/setup-hub-acm and
-## roles/setup-bminfra spell paths as
-## "{{ download_dir }}{{ item.url | basename }}". Removing it silently
-## concatenates the next path segment onto the directory name.
-download_dir: /var/lib/libvirt/images/
+## No trailing slash - every consumer writes "{{ download_dir }}/<name>", so
+## adding one back here just produces doubled slashes in paths and log output.
+download_dir: /var/lib/libvirt/images
 
 ## RHEL 9 KVM guest image for the helper, mirror registry, MinIO and Ceph VMs -
 ## put it in download_dir before the first run. If you change it, check the
@@ -397,15 +394,15 @@ hosted_domain_disconnected: "hcp-cluster1-d.{{ base_domain }}"
 ##  Variables required by Setup-Hub-Cluster Role
 ## (ocp_major_version / ocp_minor_version / coreos_minor_version are set in the
 ## START HERE block at the top.)
-hub_vm_folder: "{{ download_dir }}hub"
-hub_install_folder: "{{ download_dir }}hub_install"
+hub_vm_folder: "{{ download_dir }}/hub"
+hub_install_folder: "{{ download_dir }}/hub_install"
 hub_name: hub
 hub2_name: hub2
 
 ## Variables required by Setup-Hub-Cluster2 Role (the replacement hub
 ## built for DR/restore testing - new name, new VMs, same base domain)
-hub2_vm_folder: "{{ download_dir }}hub2"
-hub2_install_folder: "{{ download_dir }}hub2_install"
+hub2_vm_folder: "{{ download_dir }}/hub2"
+hub2_install_folder: "{{ download_dir }}/hub2_install"
 
 ## Variables required by Setup-Hub-Cluster-Disconnected Role - the hub
 ## installed purely from the local mirror registry. Separate name, VM
@@ -413,8 +410,8 @@ hub2_install_folder: "{{ download_dir }}hub2_install"
 ## nothing here is shared, and hub_disconnected_name doubles as the
 ## leading label of hub_disconnected_domain above.
 hub_disconnected_name: hubd
-hub_disconnected_vm_folder: "{{ download_dir }}hubd"
-hub_disconnected_install_folder: "{{ download_dir }}hubd_install"
+hub_disconnected_vm_folder: "{{ download_dir }}/hubd"
+hub_disconnected_install_folder: "{{ download_dir }}/hubd_install"
 
 ## Variables required by Setup-Hub-Cluster2-Disconnected Role - the DR hub
 ## installed purely from the local mirror registry. Same treatment as the
@@ -423,8 +420,8 @@ hub_disconnected_install_folder: "{{ download_dir }}hubd_install"
 ## hub2_disconnected_name doubles as the leading label of
 ## hub2_disconnected_domain above.
 hub2_disconnected_name: hub2d
-hub2_disconnected_vm_folder: "{{ download_dir }}hub2d"
-hub2_disconnected_install_folder: "{{ download_dir }}hub2d_install"
+hub2_disconnected_vm_folder: "{{ download_dir }}/hub2d"
+hub2_disconnected_install_folder: "{{ download_dir }}/hub2d_install"
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
 ## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE
@@ -560,7 +557,7 @@ hosted_cluster_metallb_network_prefixes: {}
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4
 hosted_cluster_memory: 8512
-hosted_cluster_vm_folder: "{{ download_dir }}hosted_cluster"
+hosted_cluster_vm_folder: "{{ download_dir }}/hosted_cluster"
 
 ## The worker VMs setup_hosted_cluster_vm.yaml creates for hcp-cluster1.
 ## 'name' is the libvirt domain name (and the qcow2 basename); 'ip_key' is
@@ -578,7 +575,7 @@ hosted_cluster_workers:
 ## Variables for Hosted Cluster1
 hosted_cluster2_cpu: 4
 hosted_cluster2_memory: 8512
-hosted_cluster2_vm_folder: "{{ download_dir }}hosted_cluster2"
+hosted_cluster2_vm_folder: "{{ download_dir }}/hosted_cluster2"
 
 ## ---------------------------------------------------------------------------
 ## Disconnected hosted cluster - the hosted cluster whose worker VMs have no
@@ -607,7 +604,7 @@ hosted_cluster2_vm_folder: "{{ download_dir }}hosted_cluster2"
 ## ---------------------------------------------------------------------------
 hosted_cluster_disconnected_cpu: 4
 hosted_cluster_disconnected_memory: 8512
-hosted_cluster_disconnected_vm_folder: "{{ download_dir }}hosted_cluster_disconnected"
+hosted_cluster_disconnected_vm_folder: "{{ download_dir }}/hosted_cluster_disconnected"
 
 ## Same shape as hosted_cluster_workers above. The names are what keeps these
 ## VMs distinct from hcp-cluster1's c1_worker* domains on the same hypervisor,

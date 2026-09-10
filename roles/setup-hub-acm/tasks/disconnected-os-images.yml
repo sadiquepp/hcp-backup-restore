@@ -29,7 +29,7 @@
     - name: Download each RHCOS live ISO to the baremetal host
       ansible.builtin.get_url:
         url: "{{ item.url }}"
-        dest: "{{ download_dir }}{{ item.url | basename }}"
+        dest: "{{ download_dir }}/{{ item.url | basename }}"
         force: false
         mode: '0644'
       loop: "{{ agent_service_os_images }}"
@@ -38,7 +38,7 @@
 
     - name: Measure the downloaded ISOs
       ansible.builtin.stat:
-        path: "{{ download_dir }}{{ item.url | basename }}"
+        path: "{{ download_dir }}/{{ item.url | basename }}"
         get_checksum: false
       loop: "{{ agent_service_os_images }}"
       loop_control:
@@ -138,7 +138,7 @@
 
     - name: Push the RHCOS live ISOs to the helper's web server
       ansible.builtin.copy:
-        src: "{{ download_dir }}{{ item.url | basename }}"
+        src: "{{ download_dir }}/{{ item.url | basename }}"
         dest: "{{ acm_helper_bootp_dir }}/{{ item.url | basename }}"
         mode: '0644'
       loop: "{{ agent_service_os_images }}"
