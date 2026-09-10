@@ -147,6 +147,49 @@ agent_service_os_images:
     url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.20/4.20.13/rhcos-4.20.13-x86_64-live-iso.x86_64.iso"
     cpuArchitecture: "x86_64"
 
+## --- Bare-metal inventory --------------------------------------------------
+
+## Free-text label stamped on the InfraEnv and on every Agent that registers
+## into it (the location annotation ACM shows in Host Inventory). Cosmetic, but
+## it is what identifies this lab's hosts in the UI.
+bminfra_location: singapore
+
+## --- Disconnected labs only (ignored when disconnected_install is false) ----
+
+## Size of the mirror registry VM's disk. Sparse, but oc-mirror pulls the whole
+## release payload plus every catalog below into it, so this is the number to
+## raise if the mirror runs out of room. See the mirror registry block further
+## down for the rest of its settings.
+mirror_registry_disk_size: 500G
+
+## What oc-mirror mirrors beyond the release payload. These already cover the
+## operators setup-hub-acm installs; add anything else your lab needs BEFORE
+## the mirror runs, since re-running it after the fact means another pass over
+## the catalogs.
+mirror_catalog_operator_packages:
+  - advanced-cluster-management
+  - multicluster-engine
+  - lvms-operator
+  - metallb-operator
+  - redhat-oadp-operator
+  - cincinnati-operator
+
+## Bucket OADP targets when backing up against the local MinIO instead of real
+## AWS S3 - deliberately distinct from oadp_bucket_name, so switching between
+## the two is a visible choice. Fuller note with the MinIO block further down.
+minio_bucket_name: adp-backup-disconnected
+
+## --- Ceph path only (ignored when use_lvm_storage is true) -----------------
+
+## Sizing for the 3 all-in-one Ceph nodes. The OSD disks are raw and per node,
+## so the raw capacity is disks_per_node x disk_size x 3. The rest of the Ceph
+## settings - node names, pools, the container image, the admin node - are in
+## the Ceph block further down.
+ceph_osd_disks_per_node: 3
+ceph_osd_disk_size: 100G
+ceph_storage_memory: 24576
+ceph_storage_vcpus: 16
+
 ## ===========================================================================
 ## END of the commonly-changed settings. Everything below is lab plumbing: IP
 ## assignments, per-role defaults and values derived from the section above.
@@ -717,7 +760,6 @@ agent_service_image_storage: 50Gi
 ## must carry an entry whose openshiftVersion matches it (assisted-service
 ## rejects a version it has no osImage for). Override here if you ever need
 ## the InfraEnv on a different version than the hub.
-bminfra_location: singapore
 bminfra_ocp_version: "{{ ocp_major_version }}"
 discovery_iso_filename: "bminfra-discovery-{{ bminfra_ocp_version }}.iso"
 discovery_boot_kernel_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-vmlinuz"
@@ -954,7 +996,6 @@ hosted_cluster_node_keys:
 mirror_registry_name: registry
 mirror_registry_disk: registry_disk.qcow2
 mirror_registry_extra_disk: registry_extra_disk.qcow2
-mirror_registry_disk_size: 500G
 ## Partition inside rhel9_kvm_image to expand into all the new space -
 ## verify against your actual base image with:
 ##   virt-filesystems --long --parts --blkdevs -h -a <image>
@@ -977,6 +1018,8 @@ mirror_registry_quay_root: /registry
 mirror_ocp_channel: stable-{{ ocp_major_version }}
 mirror_ocp_version: "{{ ocp_major_version }}.{{ ocp_minor_version }}"
 mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v{{ ocp_major_version }}"
+## (mirror_catalog_operator_packages - what gets mirrored beyond the release
+## payload - is set in the START HERE block at the top.)
 ## Repository oc-mirror v2 publishes the release payload under, inside the
 ## mirror registry. roles/setup-hub-cluster-disconnected extracts
 ## openshift-install from "<registry>:<port>/<this>:<mirror_ocp_version>-x86_64",
@@ -984,13 +1027,6 @@ mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v{{ ocp_m
 ## quay.io/openshift-release-dev/ocp-release onto - if you change oc-mirror's
 ## destination layout, change this to match or the extract will 404.
 mirror_release_repository: openshift/release-images
-mirror_catalog_operator_packages:
-  - advanced-cluster-management
-  - multicluster-engine
-  - lvms-operator
-  - metallb-operator
-  - redhat-oadp-operator
-  - cincinnati-operator
 
 ## setup-minio-vm / setup-minio: local S3-compatible OADP backup target
 ## for disconnected-install simulation (see setup_minio.yaml). Also
@@ -1011,7 +1047,7 @@ minio_data_dir: /data/minio
 ## Bucket OADP will target when running against MinIO instead of real
 ## AWS S3 - kept distinct from oadp_bucket_name so switching between
 ## connected/disconnected DPA config is an explicit, visible choice.
-minio_bucket_name: adp-backup-disconnected
+## (minio_bucket_name itself is set in the START HERE block at the top.)
 
 # -----------------------------------------------------------------------
 # ADD to vars.yaml:
@@ -1052,10 +1088,8 @@ ceph_os_disk_size: 60G
 ## verify with `virt-filesystems --long --parts --blkdevs -h -a <image>`
 ## if you ever change rhel9_kvm_image.
 ceph_os_resize_partition: /dev/sda4
-ceph_osd_disks_per_node: 3
-ceph_osd_disk_size: 100G
-ceph_storage_memory: 24576
-ceph_storage_vcpus: 16
+## (ceph_osd_disks_per_node, ceph_osd_disk_size, ceph_storage_memory and
+## ceph_storage_vcpus are set in the START HERE block at the top.)
 ceph_admin_memory: 8192
 ceph_admin_vcpus: 4
 
