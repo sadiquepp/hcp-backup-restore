@@ -708,6 +708,13 @@ HostedCluster's namespace shares its name with the ManagedCluster;
 upstream's example puts the HostedCluster in `clusters`, so ACM's
 namespace falls outside the backup.
 
+The label is a workaround, not the fix - MCE reconciles the secret, so it
+has to be re-applied before every backup. Filed as
+[OCPBUGS-121709](https://redhat.atlassian.net/browse/OCPBUGS-121709);
+**that JIRA is where the current status lives**. Check it before a run: if
+it is resolved in the ACM/MCE version you are on, the exclusion is no longer
+needed.
+
 
 ### Point DNS at the DR hub
 

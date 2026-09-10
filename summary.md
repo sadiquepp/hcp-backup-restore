@@ -74,6 +74,31 @@ identical to what was backed up. The hosted cluster came up on the DR hub with
 its etcd state intact, imported into ACM, worker nodes Ready and workloads
 running — on a Ceph cluster built after the backup was taken.
 
+## Known issues
+
+**ACM's import secret has to be excluded from the backup.** A HostedCluster's
+namespace is also its ManagedCluster's namespace, so `<cluster>-import` — a
+bootstrap ServiceAccount token minted by the hub being backed up — falls inside
+the backup's scope. Restored onto the DR hub it presents a token signed by the
+wrong cluster's key, and the restored cluster hangs in `Importing` with the
+klusterlet logging `Unauthorized` until that secret is deleted by hand. It is
+also a 360-day credential that then sits in object storage.
+
+The workaround is Velero's object-level opt-out, applied on the hub being
+backed up, before every backup — MCE owns the secret and reconciles it, so the
+label does not necessarily survive:
+
+```bash
+oc label secret <cluster>-import -n <cluster> \
+  velero.io/exclude-from-backup=true --overwrite
+```
+
+Filed as
+[OCPBUGS-121709](https://redhat.atlassian.net/browse/OCPBUGS-121709) —
+**refer to that JIRA for the current status**. The workaround stands until it
+is resolved in the ACM/MCE version in use; the run described above was taken
+with it applied.
+
 ---
 
 Detailed walkthrough: [README.md](README.md) and

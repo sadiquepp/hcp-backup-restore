@@ -946,6 +946,11 @@ MCE owns this secret and reconciles it, so check `--show-labels` before
 each backup rather than assuming the label stuck - a backup that quietly
 re-includes it looks healthy right up until the restore fails.
 
+This is a workaround, not the fix. Filed as
+[OCPBUGS-121709](https://redhat.atlassian.net/browse/OCPBUGS-121709) -
+**refer to that JIRA for the current status**, and keep labelling the secret on
+every backup until it is resolved in the ACM/MCE version you are running.
+
 Full write-up:
 [Restored cluster stuck in `Importing`](oadp/README.md#restored-cluster-stuck-in-importing).
 
