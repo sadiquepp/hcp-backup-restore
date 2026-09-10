@@ -186,24 +186,27 @@ dns_packages:
   - vim
   - net-tools
 
-hub_domain: hub.mylab.com
-hub2_domain: hub2.mylab.com
+## Every domain in this file is <label>.<base_domain>, so base_domain (defined
+## further down, with the cluster names) is the single place the lab's DNS
+## suffix is written. Order does not matter - Ansible resolves these lazily.
+hub_domain: "hub.{{ base_domain }}"
+hub2_domain: "hub2.{{ base_domain }}"
 ## Subdomain for the disconnected hub. Must stay in sync with
 ## hub_disconnected_name below (OpenShift derives the cluster's DNS from
 ## <metadata.name>.<baseDomain>), and needs a matching zone in
 ## roles/setup-dns + a forwarder in roles/setup-bm-host's libvirt network.
-hub_disconnected_domain: hubd.mylab.com
+hub_disconnected_domain: "hubd.{{ base_domain }}"
 ## Subdomain for the disconnected DR hub, on the same terms as
 ## hub_disconnected_domain above: it is <hub2_disconnected_name>.<base_domain>,
 ## because OpenShift derives a cluster's DNS from <metadata.name>.<baseDomain>
 ## and every cluster in this lab shares base_domain. So it is a sibling of
-## hub2.mylab.com rather than a child of it - a zone under hub2.mylab.com would
+## hub2_domain rather than a child of it - a zone under hub2_domain would
 ## mean a different baseDomain for this cluster alone. Needs a matching zone in
 ## roles/setup-dns and a forwarder in roles/setup-bm-host's libvirt network.
-hub2_disconnected_domain: hub2d.mylab.com
-hosted_domain: hcp-cluster1.mylab.com
-hosted_domain2: hcp-cluster2.mylab.com
-hosted_domain3: hcp-cluster3.mylab.com
+hub2_disconnected_domain: "hub2d.{{ base_domain }}"
+hosted_domain: "hcp-cluster1.{{ base_domain }}"
+hosted_domain2: "hcp-cluster2.{{ base_domain }}"
+hosted_domain3: "hcp-cluster3.{{ base_domain }}"
 ## Subdomain for the disconnected hosted cluster. Its leading label is the
 ## HostedCluster name in hosted_clusters_disconnected below - that is what ties
 ## this zone to the cluster's hosted_cluster_metallb_pools entry, exactly as
@@ -215,7 +218,7 @@ hosted_domain3: hcp-cluster3.mylab.com
 ## hosted_clusters + hosted_clusters_disconnected, which is what lets all three
 ## '-d' clusters have zones without a template per cluster. Kept only for older
 ## playbooks that still reference it.
-hosted_domain_disconnected: hcp-cluster1-d.mylab.com
+hosted_domain_disconnected: "hcp-cluster1-d.{{ base_domain }}"
 
 
 
@@ -229,17 +232,29 @@ hosted_domain_disconnected: hcp-cluster1-d.mylab.com
 ocp_major_version: "4.21"
 ocp_minor_version: 15 
 coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
+## Where the RHCOS images, the oc/openshift-install tarballs and the discovery
+## ISOs are staged, and the parent of every VM/install directory below.
+##
+## The TRAILING SLASH is load-bearing twice over: the *_vm_folder /
+## *_install_folder values below append to it directly, and
+## roles/setup-hub-acm and roles/setup-bminfra spell paths as
+## "{{ download_dir }}{{ item.url | basename }}". Removing it silently
+## concatenates the next path segment onto the directory name.
 download_dir: /var/lib/libvirt/images/
-hub_vm_folder: /var/lib/libvirt/images/hub
-hub_install_folder: /var/lib/libvirt/images/hub_install
+hub_vm_folder: "{{ download_dir }}hub"
+hub_install_folder: "{{ download_dir }}hub_install"
 hub_name: hub
 hub2_name: hub2
+## The lab's DNS suffix - the one place it is written. hub_domain,
+## hub2_domain, hub_disconnected_domain, hub2_disconnected_domain and the
+## hosted-cluster zones all derive from it, and roles/setup-dns builds each
+## hosted cluster's zone as <cluster-name>.<base_domain>.
 base_domain: mylab.com
 
 ## Variables required by Setup-Hub-Cluster2 Role (the replacement hub
 ## built for DR/restore testing - new name, new VMs, same base domain)
-hub2_vm_folder: /var/lib/libvirt/images/hub2
-hub2_install_folder: /var/lib/libvirt/images/hub2_install
+hub2_vm_folder: "{{ download_dir }}hub2"
+hub2_install_folder: "{{ download_dir }}hub2_install"
 
 ## Variables required by Setup-Hub-Cluster-Disconnected Role - the hub
 ## installed purely from the local mirror registry. Separate name, VM
@@ -247,8 +262,8 @@ hub2_install_folder: /var/lib/libvirt/images/hub2_install
 ## nothing here is shared, and hub_disconnected_name doubles as the
 ## leading label of hub_disconnected_domain above.
 hub_disconnected_name: hubd
-hub_disconnected_vm_folder: /var/lib/libvirt/images/hubd
-hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
+hub_disconnected_vm_folder: "{{ download_dir }}hubd"
+hub_disconnected_install_folder: "{{ download_dir }}hubd_install"
 
 ## Variables required by Setup-Hub-Cluster2-Disconnected Role - the DR hub
 ## installed purely from the local mirror registry. Same treatment as the
@@ -257,8 +272,8 @@ hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 ## hub2_disconnected_name doubles as the leading label of
 ## hub2_disconnected_domain above.
 hub2_disconnected_name: hub2d
-hub2_disconnected_vm_folder: /var/lib/libvirt/images/hub2d
-hub2_disconnected_install_folder: /var/lib/libvirt/images/hub2d_install
+hub2_disconnected_vm_folder: "{{ download_dir }}hub2d"
+hub2_disconnected_install_folder: "{{ download_dir }}hub2d_install"
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
 ## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE
@@ -394,7 +409,7 @@ hosted_cluster_metallb_network_prefixes: {}
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4
 hosted_cluster_memory: 8512
-hosted_cluster_vm_folder: /var/lib/libvirt/images/hosted_cluster
+hosted_cluster_vm_folder: "{{ download_dir }}hosted_cluster"
 
 ## The worker VMs setup_hosted_cluster_vm.yaml creates for hcp-cluster1.
 ## 'name' is the libvirt domain name (and the qcow2 basename); 'ip_key' is
@@ -412,7 +427,7 @@ hosted_cluster_workers:
 ## Variables for Hosted Cluster1
 hosted_cluster2_cpu: 4
 hosted_cluster2_memory: 8512
-hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
+hosted_cluster2_vm_folder: "{{ download_dir }}hosted_cluster2"
 
 ## ---------------------------------------------------------------------------
 ## Disconnected hosted cluster - the hosted cluster whose worker VMs have no
@@ -441,7 +456,7 @@ hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
 ## ---------------------------------------------------------------------------
 hosted_cluster_disconnected_cpu: 4
 hosted_cluster_disconnected_memory: 8512
-hosted_cluster_disconnected_vm_folder: /var/lib/libvirt/images/hosted_cluster_disconnected
+hosted_cluster_disconnected_vm_folder: "{{ download_dir }}hosted_cluster_disconnected"
 
 ## Same shape as hosted_cluster_workers above. The names are what keeps these
 ## VMs distinct from hcp-cluster1's c1_worker* domains on the same hypervisor,
@@ -800,7 +815,7 @@ hosted_cluster_addon_cert_policy_controller: true
 ## at hub1:
 # hosted_clusters:
 #   - name: hcp-cluster1
-#     api_hostname: api.hcp-cluster1-d.mylab.com
+#     api_hostname: "api.hcp-cluster1-d.{{ base_domain }}"
 
 ## ip_list keys for each hosted cluster's worker VMs and its *.apps VIP on the
 ## helper's haproxy. Keyed by HostedCluster name, so it lines up with
