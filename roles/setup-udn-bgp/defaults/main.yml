@@ -26,3 +26,18 @@ udn_bgp_cudn_label_key: bgp
 ## every ovnkube-node pod, which on this lab's three workers takes a few
 ## minutes.
 udn_bgp_rollout_timeout: 900
+
+## Kubernetes NMState Operator - the source of the
+## NodeNetworkConfigurationPolicy API. Every NNCP this role applies (fabric
+## NIC addresses, VRF-Lite VLANs, EVPN VTEP addresses) needs it, so the role
+## installs it if it is absent.
+udn_bgp_nmstate_namespace: openshift-nmstate
+udn_bgp_nmstate_channel: stable
+
+## Catalog the NMState subscription resolves against. Follows
+## acm_catalog_source when vars.yaml sets one - which is how a disconnected
+## hub points every operator at its mirrored catalog - and otherwise uses the
+## Red Hat operator catalog. A subscription pointed at a catalog that is not
+## there does not fail; it sits in ResolutionFailed indefinitely.
+udn_bgp_catalog_source: "{{ acm_catalog_source | default('redhat-operators', true) }}"
+udn_bgp_catalog_source_namespace: "{{ acm_catalog_source_namespace | default('openshift-marketplace', true) }}"

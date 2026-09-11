@@ -41,6 +41,15 @@
   ansible.builtin.include_tasks: apply.yml
   when: udn_phase != 'preflight'
 
+# Must precede the first NodeNetworkConfigurationPolicy below. Without the
+# NMState operator, `oc apply` of an NNCP fails with "no matches for kind
+# NodeNetworkConfigurationPolicy" - and if only the operator were installed
+# without its NMState instance, the apply would succeed and nothing would
+# ever reconcile it.
+- name: Make sure the NodeNetworkConfigurationPolicy API exists
+  ansible.builtin.include_tasks: nmstate.yml
+  when: udn_phase != 'preflight'
+
 # ---------------------------------------------------------------------------
 # Fabric NIC addressing + base peering. Needed by every phase from 'default'
 # on, because every phase rides on the untagged session or is compared
