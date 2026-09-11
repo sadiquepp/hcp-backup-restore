@@ -31,6 +31,13 @@ $TTL    600
 {{ ip_list.hubd_worker1 }} 		IN PTR 		worker1.{{ hub_disconnected_domain }}.
 {{ ip_list.hubd_worker2 }} 		IN PTR 		worker2.{{ hub_disconnected_domain }}.
 {{ ip_list.hubd_worker3 }} 		IN PTR 		worker3.{{ hub_disconnected_domain }}.
+{{ ip_list.hub2d_bootstrap }} 		IN PTR 		bootstrap.{{ hub2_disconnected_domain }}.
+{{ ip_list.hub2d_master1 }} 		IN PTR 		master1.{{ hub2_disconnected_domain }}.
+{{ ip_list.hub2d_master2 }} 		IN PTR 		master2.{{ hub2_disconnected_domain }}.
+{{ ip_list.hub2d_master3 }} 		IN PTR 		master3.{{ hub2_disconnected_domain }}.
+{{ ip_list.hub2d_worker1 }} 		IN PTR 		worker1.{{ hub2_disconnected_domain }}.
+{{ ip_list.hub2d_worker2 }} 		IN PTR 		worker2.{{ hub2_disconnected_domain }}.
+{{ ip_list.hub2d_worker3 }} 		IN PTR 		worker3.{{ hub2_disconnected_domain }}.
 {# Hosted cluster worker PTRs for every cluster in either list, rendered only
    for ip_list keys that exist - so the '-d' clusters pick theirs up as soon as
    their worker octets are added, with no edit here. The name each PTR points

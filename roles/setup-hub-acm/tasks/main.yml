@@ -181,8 +181,8 @@
          | selectattr('value.ip', 'contains', metallb_hub)
          | map(attribute='key') | sort | join(', ') | default('none', true) }}.
       metallb_hub is set by the hub playbook - hub (setup_hub_cluster.yaml),
-      hub2 (setup_hub_cluster2.yaml) or hubd
-      (setup_hub_cluster_disconnected.yaml). Hubs named in that map:
+      hub2 (setup_hub_cluster2.yaml) or hubd (setup_hub_cluster.yaml with
+      disconnected_install). Hubs named in that map:
       {{ hosted_cluster_metallb_pools | default({}) | dict2items
          | map(attribute='value.ip') | map('list') | flatten
          | unique | sort | join(', ') }}.

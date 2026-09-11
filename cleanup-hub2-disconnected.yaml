@@ -1,0 +1,42 @@
+## Tears down ONLY the disconnected DR hub's VMs and disks (see
+## setup_hub_cluster2.yaml with disconnected_install set). hub1, hub2 and hubd
+## are untouched - every path below is namespaced to hub2d.
+##
+## Modelled on cleanup-hub-disconnected.yaml, which does the same for hubd.
+##
+## Usage:
+##   ansible-playbook -i inventory/hosts cleanup-hub2-disconnected.yaml
+
+- name: Cleanup
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+  tasks:
+  - name: Destroy Hub Workers
+    shell: |
+      virsh undefine hub2d_worker1 && virsh undefine hub2d_worker2 && virsh undefine hub2d_worker3
+      virsh destroy hub2d_worker1 && virsh destroy hub2d_worker2 && virsh destroy hub2d_worker3
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_worker1.qcow2
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_worker2.qcow2
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_worker3.qcow2
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_storage_worker1.qcow2
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_storage_worker2.qcow2
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_storage_worker3.qcow2
+
+  - name: Destroy Hub Masters
+    shell: |
+      virsh undefine hub2d_master1 && virsh undefine hub2d_master2 && virsh undefine hub2d_master3
+      virsh destroy hub2d_master1 && virsh destroy hub2d_master2 && virsh destroy hub2d_master3
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_master1.qcow2
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_master2.qcow2
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_master3.qcow2
+
+  - name: Destroy Hub Bootstrap
+    shell: |
+      virsh undefine hub2d_bootstrap  && virsh destroy hub2d_bootstrap
+      rm -f {{ hub2_disconnected_vm_folder }}/hub2d_bootstrap.qcow2
+
+  - name: Cleanup SSH Know Hostss
+    shell: |
+      rm -f /root/.ssh/known_hosts

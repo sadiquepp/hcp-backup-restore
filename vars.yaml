@@ -7,11 +7,190 @@
 # Optional role-default overrides are documented at the bottom of this file
 # as commented examples - uncomment and adjust as needed.
 
-# Lab L2 network (libvirt default / virbr0). ip_list values are last octets only.
+## ===========================================================================
+## START HERE - the settings most labs change
+##
+## Everything in this section is something you are likely to set before the
+## first run. Everything below it is either derived from these or is lab
+## plumbing (IP assignments, per-role defaults) you can usually leave alone.
+## Where a setting has a longer explanation further down, it says so.
+## ===========================================================================
+
+## --- Lab network and DNS ---------------------------------------------------
+
+# Lab L2 network (libvirt default / virbr0). The ip_list values further down are
+# last octets only, combined with this prefix.
 lab_network_prefix: "192.168.122"
 lab_network_netmask: "255.255.255.0"
-# Reverse zone for lab_network_prefix 192.168.122 — update if you change the prefix.
+# Reverse zone for lab_network_prefix - change it in lockstep with the prefix
+# (192.168.122 -> 122.168.192.in-addr.arpa).
 lab_network_reverse_zone: "122.168.192.in-addr.arpa"
+
+## The lab's DNS suffix - the one place it is written. hub_domain, hub2_domain,
+## hub_disconnected_domain, hub2_disconnected_domain and the hosted-cluster
+## zones all derive from it, and roles/setup-dns builds each hosted cluster's
+## zone as <cluster-name>.<base_domain>.
+base_domain: mylab.com
+
+## --- Host paths and base image ---------------------------------------------
+
+## Where the RHCOS images, the oc/openshift-install tarballs and the discovery
+## ISOs are staged, and the parent of every VM/install directory further down.
+##
+## No trailing slash - every consumer writes "{{ download_dir }}/<name>", so
+## adding one back here just produces doubled slashes in paths and log output.
+download_dir: /var/lib/libvirt/images
+
+## RHEL 9 KVM guest image for the helper, mirror registry, MinIO and Ceph VMs -
+## put it in download_dir before the first run. If you change it, check the
+## *_resize_partition values further down: they are image-specific.
+rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
+
+## --- OpenShift version -----------------------------------------------------
+
+## The one place the lab's OCP version is set: bminfra_ocp_version and
+## mirror_ocp_version both follow it.
+##
+## QUOTED deliberately. Unquoted, YAML parses 4.21 as a float - harmless for
+## .21, but 4.20 becomes 4.2, so every version string built from it
+## ("{{ ocp_major_version }}.{{ ocp_minor_version }}") would silently render
+## 4.2.33 instead of 4.20.33. Everything downstream (release pullspecs, the
+## RHCOS download urls, the operator index tag, the openshift-install path)
+## interpolates this into a string, so keep the quotes.
+ocp_major_version: "4.21"
+ocp_minor_version: 15
+coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
+
+## --- VM sizing -------------------------------------------------------------
+
+## Shared by every hub - hub1, hub2, hubd and hub2d are all built to these
+## sizes. worker_memory / worker_cpu are the ones that matter most: the hosted
+## clusters' control planes run on the hub's workers.
+helper_memory: 8192
+helper_vcpus: 4
+## Sparse, so it costs nothing until used. See the fuller note further down for
+## what fills it and how to grow an existing helper.
+helper_disk_size: 100G
+master_memory: 16384
+master_cpu: 8
+worker_memory: 49152
+worker_cpu: 32
+hub_worker_replicas: 3
+
+## --- Install mode and hub storage ------------------------------------------
+
+## Connected (false) or disconnected (true) - the switch for the whole lab, and
+## the source of truth for it. Set it once here before you start rather than
+## per-command; see "Choose Connected or Disconnected" in README.md.
+disconnected_install: false
+
+## LVM Storage (true) or Ceph 9 via ODF external mode (false) for the hub's PVs.
+## Has to be decided before the hub is built. Pick Ceph for the backup/restore
+## demo: LVM Storage ships no VolumeSnapshotClass, so oadp_backup_method=csi -
+## the only trustworthy control-plane restore - is not available on it.
+use_lvm_storage: true
+
+## --- Hosted clusters -------------------------------------------------------
+
+## Which hosted clusters get rendered: the connected list when
+## disconnected_install is false, the '-d' list when it is true. An entry is a
+## bare name or a dict with 'name' plus per-cluster overrides. Every name needs
+## a matching entry in hosted_cluster_metallb_pools further down. Fuller notes
+## are with that map and with the hosted_cluster_* defaults.
+hosted_clusters:
+  - hcp-cluster1
+  - hcp-cluster2
+  - hcp-cluster3
+hosted_clusters_disconnected:
+  - hcp-cluster1-d
+  - hcp-cluster2-d
+  - hcp-cluster3-d
+
+## Which hub is currently authoritative - 'hub' normally, 'hub2' after a DR
+## cutover. Selects the kubeconfig the OADP playbooks use and the address
+## roles/setup-dns publishes as api/api-int. Usually passed per-run instead
+## (-e target_hub=hub2); fuller note further down.
+target_hub: hub
+
+## --- Backup target (OADP) --------------------------------------------------
+
+## AWS access key id/secret go in vault.yaml as oadp_aws_access_key_id /
+## oadp_aws_secret_access_key - never here.
+oadp_aws_region: ap-south-1
+oadp_bucket_name: adp-backup-bucket-xjt   # S3 bucket names are globally unique - change this before first use
+
+## How the control-plane (etcd) volumes are captured. fs = Kopia file copy,
+## works on any StorageClass. csi = CSI snapshot + Velero's data mover, needs
+## Ceph/ODF and is the only one to rely on for a control-plane restore. Full
+## comparison further down; override per run with -e oadp_backup_method=csi.
+oadp_backup_method: fs
+
+## --- RHCOS live ISOs offered to hosted clusters ----------------------------
+
+## The AgentServiceConfig's osImages catalogue - the versions ACM/MCE will
+## offer when installing a hosted cluster. One entry's openshiftVersion must
+## match bminfra_ocp_version, which follows ocp_major_version above.
+agent_service_os_images:
+  - openshiftVersion: "4.21"
+    version: "4.21.0"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.21/4.21.0/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+  - openshiftVersion: "4.22"
+    version: "4.22.8"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+  - openshiftVersion: "4.20"
+    version: "4.20.13"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.20/4.20.13/rhcos-4.20.13-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+
+## --- Bare-metal inventory --------------------------------------------------
+
+## Free-text label stamped on the InfraEnv and on every Agent that registers
+## into it (the location annotation ACM shows in Host Inventory). Cosmetic, but
+## it is what identifies this lab's hosts in the UI.
+bminfra_location: singapore
+
+## --- Disconnected labs only (ignored when disconnected_install is false) ----
+
+## Size of the mirror registry VM's disk. Sparse, but oc-mirror pulls the whole
+## release payload plus every catalog below into it, so this is the number to
+## raise if the mirror runs out of room. See the mirror registry block further
+## down for the rest of its settings.
+mirror_registry_disk_size: 500G
+
+## What oc-mirror mirrors beyond the release payload. These already cover the
+## operators setup-hub-acm installs; add anything else your lab needs BEFORE
+## the mirror runs, since re-running it after the fact means another pass over
+## the catalogs.
+mirror_catalog_operator_packages:
+  - advanced-cluster-management
+  - multicluster-engine
+  - lvms-operator
+  - metallb-operator
+  - redhat-oadp-operator
+  - cincinnati-operator
+
+## Bucket OADP targets when backing up against the local MinIO instead of real
+## AWS S3 - deliberately distinct from oadp_bucket_name, so switching between
+## the two is a visible choice. Fuller note with the MinIO block further down.
+minio_bucket_name: adp-backup-disconnected
+
+## --- Ceph path only (ignored when use_lvm_storage is true) -----------------
+
+## Sizing for the 3 all-in-one Ceph nodes. The OSD disks are raw and per node,
+## so the raw capacity is disks_per_node x disk_size x 3. The rest of the Ceph
+## settings - node names, pools, the container image, the admin node - are in
+## the Ceph block further down.
+ceph_osd_disks_per_node: 3
+ceph_osd_disk_size: 100G
+ceph_storage_memory: 24576
+ceph_storage_vcpus: 16
+
+## ===========================================================================
+## END of the commonly-changed settings. Everything below is lab plumbing: IP
+## assignments, per-role defaults and values derived from the section above.
+## ===========================================================================
 
 # List of IP Addresses to be used on the KVM Lab.
 # Last octets below are combined with lab_network_prefix (e.g. .21 -> 192.168.122.21). Must be two digits (10-99) as last octet is used
@@ -80,9 +259,9 @@ ip_list:
   hub2lb: 89
 
   # Hub-disconnected - a third, fully independent hub cluster installed
-  # entirely from the local mirror registry (see
-  # setup_hub_cluster_disconnected.yaml). Deliberately given its own IP
-  # block, its own subdomain (hub_disconnected_domain) and its own
+  # entirely from the local mirror registry (setup_hub_cluster.yaml with
+  # disconnected_install set). Deliberately given its own IP block, its own
+  # subdomain (hub_disconnected_domain) and its own
   # install/VM directories so it can be built and run *alongside* hub1
   # and hub2 rather than replacing either.
   # NOTE: same MAC scheme constraint as above - two digit values (10-99).
@@ -94,6 +273,26 @@ ip_list:
   hubd_worker2: 77
   hubd_worker3: 78
   hubdlb: 79
+
+  # Hub2-disconnected - the DR hub built from the local mirror registry
+  # (setup_hub_cluster2.yaml with disconnected_install set). Same relationship
+  # to hub2 that hubd has to hub1: its own IP block, its own subdomain
+  # (hub2_disconnected_domain) and its own install/VM directories, so it is a
+  # separate cluster rather than a differently-built hub2, and all four hubs
+  # can be up at once.
+  #
+  # .10-.19 rather than another slice of the 70s/80s: those are contiguous and
+  # free, and they sit below both DHCP pools (dhcpd .100-.200 on the helper,
+  # libvirt .201-.249), so nothing dynamic can ever be handed one of them.
+  # NOTE: same MAC scheme constraint as above - two digit values (10-99).
+  hub2d_bootstrap: 10
+  hub2d_master1: 11
+  hub2d_master2: 12
+  hub2d_master3: 13
+  hub2d_worker1: 14
+  hub2d_worker2: 15
+  hub2d_worker3: 16
+  hub2dlb: 19
 
   # Mirror registry - shared connected infrastructure for disconnected-install
   # simulation (see setup_mirror_registry.yaml). Stays reachable/connected
@@ -119,23 +318,13 @@ helper_disk: helper_disk.qcow2
 ## roles/setup-hub-acm stages in /var/www/html/bootp for the AgentServiceConfig.
 ## An existing helper is not resized - delete its disk and re-run
 ## setup_bm_host.yaml to rebuild it at this size.
-helper_disk_size: 100G
+## (helper_disk_size itself is set in the START HERE block at the top.)
 ## Partition inside rhel9_kvm_image to expand into all the new space - verify
 ## against your actual base image with:
 ##   virt-filesystems --long --parts --blkdevs -h -a <image>
 ## if you ever change rhel9_kvm_image, since this is image-specific.
 helper_resize_partition: /dev/sda4
-helper_memory: 8192 
-helper_vcpus: 4
-master_memory: 16384
-master_cpu: 8
-worker_memory: 49152
-worker_cpu: 32
-hub_worker_replicas: 3
-
 ## Variables used by Setup BM Role 
-
-rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
 
 basic_packages: 
   - wget
@@ -166,16 +355,27 @@ dns_packages:
   - vim
   - net-tools
 
-hub_domain: hub.mylab.com
-hub2_domain: hub2.mylab.com
+## Every domain in this file is <label>.<base_domain>, so base_domain (defined
+## further down, with the cluster names) is the single place the lab's DNS
+## suffix is written. Order does not matter - Ansible resolves these lazily.
+hub_domain: "hub.{{ base_domain }}"
+hub2_domain: "hub2.{{ base_domain }}"
 ## Subdomain for the disconnected hub. Must stay in sync with
 ## hub_disconnected_name below (OpenShift derives the cluster's DNS from
 ## <metadata.name>.<baseDomain>), and needs a matching zone in
 ## roles/setup-dns + a forwarder in roles/setup-bm-host's libvirt network.
-hub_disconnected_domain: hubd.mylab.com
-hosted_domain: hcp-cluster1.mylab.com
-hosted_domain2: hcp-cluster2.mylab.com
-hosted_domain3: hcp-cluster3.mylab.com
+hub_disconnected_domain: "hubd.{{ base_domain }}"
+## Subdomain for the disconnected DR hub, on the same terms as
+## hub_disconnected_domain above: it is <hub2_disconnected_name>.<base_domain>,
+## because OpenShift derives a cluster's DNS from <metadata.name>.<baseDomain>
+## and every cluster in this lab shares base_domain. So it is a sibling of
+## hub2_domain rather than a child of it - a zone under hub2_domain would
+## mean a different baseDomain for this cluster alone. Needs a matching zone in
+## roles/setup-dns and a forwarder in roles/setup-bm-host's libvirt network.
+hub2_disconnected_domain: "hub2d.{{ base_domain }}"
+hosted_domain: "hcp-cluster1.{{ base_domain }}"
+hosted_domain2: "hcp-cluster2.{{ base_domain }}"
+hosted_domain3: "hcp-cluster3.{{ base_domain }}"
 ## Subdomain for the disconnected hosted cluster. Its leading label is the
 ## HostedCluster name in hosted_clusters_disconnected below - that is what ties
 ## this zone to the cluster's hosted_cluster_metallb_pools entry, exactly as
@@ -187,31 +387,22 @@ hosted_domain3: hcp-cluster3.mylab.com
 ## hosted_clusters + hosted_clusters_disconnected, which is what lets all three
 ## '-d' clusters have zones without a template per cluster. Kept only for older
 ## playbooks that still reference it.
-hosted_domain_disconnected: hcp-cluster1-d.mylab.com
+hosted_domain_disconnected: "hcp-cluster1-d.{{ base_domain }}"
 
 
 
-##  Variables required by Setup-Hub-Cluster Role 
-## QUOTED deliberately. Unquoted, YAML parses 4.21 as a float - harmless for
-## .21, but 4.20 becomes 4.2, so every version string built from it
-## ("{{ ocp_major_version }}.{{ ocp_minor_version }}") would silently render
-## 4.2.33 instead of 4.20.33. Everything downstream (release pullspecs, the
-## RHCOS download urls, the operator index tag, the openshift-install path)
-## interpolates this into a string, so keep the quotes.
-ocp_major_version: "4.21"
-ocp_minor_version: 15 
-coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
-download_dir: /var/lib/libvirt/images/
-hub_vm_folder: /var/lib/libvirt/images/hub
-hub_install_folder: /var/lib/libvirt/images/hub_install
+##  Variables required by Setup-Hub-Cluster Role
+## (ocp_major_version / ocp_minor_version / coreos_minor_version are set in the
+## START HERE block at the top.)
+hub_vm_folder: "{{ download_dir }}/hub"
+hub_install_folder: "{{ download_dir }}/hub_install"
 hub_name: hub
 hub2_name: hub2
-base_domain: mylab.com
 
 ## Variables required by Setup-Hub-Cluster2 Role (the replacement hub
 ## built for DR/restore testing - new name, new VMs, same base domain)
-hub2_vm_folder: /var/lib/libvirt/images/hub2
-hub2_install_folder: /var/lib/libvirt/images/hub2_install
+hub2_vm_folder: "{{ download_dir }}/hub2"
+hub2_install_folder: "{{ download_dir }}/hub2_install"
 
 ## Variables required by Setup-Hub-Cluster-Disconnected Role - the hub
 ## installed purely from the local mirror registry. Separate name, VM
@@ -219,8 +410,18 @@ hub2_install_folder: /var/lib/libvirt/images/hub2_install
 ## nothing here is shared, and hub_disconnected_name doubles as the
 ## leading label of hub_disconnected_domain above.
 hub_disconnected_name: hubd
-hub_disconnected_vm_folder: /var/lib/libvirt/images/hubd
-hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
+hub_disconnected_vm_folder: "{{ download_dir }}/hubd"
+hub_disconnected_install_folder: "{{ download_dir }}/hubd_install"
+
+## Variables required by Setup-Hub-Cluster2-Disconnected Role - the DR hub
+## installed purely from the local mirror registry. Same treatment as the
+## hub_disconnected_* block above, one hub along: separate name, VM folder and
+## install folder from hub1/hub2/hubd so all four can co-exist, and
+## hub2_disconnected_name doubles as the leading label of
+## hub2_disconnected_domain above.
+hub2_disconnected_name: hub2d
+hub2_disconnected_vm_folder: "{{ download_dir }}/hub2d"
+hub2_disconnected_install_folder: "{{ download_dir }}/hub2d_install"
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
 ## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE
@@ -254,9 +455,16 @@ hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 ## value passed as metallb_hub / target_hub):
 ##   hub   - primary hub   (setup_hub_cluster.yaml)
 ##   hub2  - DR hub        (setup_hub_cluster2.yaml)
-##   hubd  - disconnected hub (setup_hub_cluster_disconnected.yaml)
+##   hubd  - disconnected hub (setup_hub_cluster.yaml -e disconnected_install=true)
 ## At DR cutover the hosted cluster comes back on the hub2 address and DNS is
 ## re-rendered to match - see the MetalLB section of the README.
+##
+## There is deliberately no 'hub2d' key. The disconnected DR hub
+## (setup_hub_cluster2.yaml with disconnected_install) is a separate cluster
+## from hub2, but it plays the same part in the topology, so it configures
+## MetalLB as metallb_hub=hub2 and a cluster restored onto it comes up on the
+## hub2 address DNS already publishes at cutover. Adding hub2d addresses here
+## would mean a second set of DR addresses that nothing resolves to.
 ##
 ## A cluster only carries an address for the hubs it can actually run on.
 ## The connected three have 'hub' and 'hub2' (primary and DR) but deliberately
@@ -349,7 +557,7 @@ hosted_cluster_metallb_network_prefixes: {}
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4
 hosted_cluster_memory: 8512
-hosted_cluster_vm_folder: /var/lib/libvirt/images/hosted_cluster
+hosted_cluster_vm_folder: "{{ download_dir }}/hosted_cluster"
 
 ## The worker VMs setup_hosted_cluster_vm.yaml creates for hcp-cluster1.
 ## 'name' is the libvirt domain name (and the qcow2 basename); 'ip_key' is
@@ -367,7 +575,7 @@ hosted_cluster_workers:
 ## Variables for Hosted Cluster1
 hosted_cluster2_cpu: 4
 hosted_cluster2_memory: 8512
-hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
+hosted_cluster2_vm_folder: "{{ download_dir }}/hosted_cluster2"
 
 ## ---------------------------------------------------------------------------
 ## Disconnected hosted cluster - the hosted cluster whose worker VMs have no
@@ -396,7 +604,7 @@ hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
 ## ---------------------------------------------------------------------------
 hosted_cluster_disconnected_cpu: 4
 hosted_cluster_disconnected_memory: 8512
-hosted_cluster_disconnected_vm_folder: /var/lib/libvirt/images/hosted_cluster_disconnected
+hosted_cluster_disconnected_vm_folder: "{{ download_dir }}/hosted_cluster_disconnected"
 
 ## Same shape as hosted_cluster_workers above. The names are what keeps these
 ## VMs distinct from hcp-cluster1's c1_worker* domains on the same hypervisor,
@@ -429,8 +637,7 @@ hosted_cluster_disconnected_block_node_nat: true
 ##
 ## AWS access key id/secret go in vault.yaml as
 ## oadp_aws_access_key_id / oadp_aws_secret_access_key - never here.
-oadp_aws_region: ap-south-1
-oadp_bucket_name: adp-backup-bucket-xjt   # S3 bucket names are globally unique - change this before first use
+## (oadp_aws_region / oadp_bucket_name are set in the START HERE block.)
 oadp_backup_prefix: hcp-backup
 oadp_backup_ttl: 999h0m0s
 oadp_bminfra_namespace: bminfra
@@ -462,7 +669,7 @@ oadp_storage_location: default
 ##         the reason the Ceph cluster exists in this lab.
 ##
 ## Override per run: -e oadp_backup_method=csi
-oadp_backup_method: fs
+## (oadp_backup_method itself is set in the START HERE block at the top.)
 
 ## The VolumeSnapshotClass Velero uses when oadp_backup_method=csi.
 ## setup-oadp labels it velero.io/csi-volumesnapshot-class="true" -
@@ -484,7 +691,7 @@ oadp_csi_driver: openshift-storage.rbd.csi.ceph.com
 ## you've cut over (see oadp/README.md), and re-run the dns tag of
 ## setup_bm_host.yaml with the same override so DNS follows the hosted
 ## clusters to the DR hub.
-target_hub: hub
+## (target_hub itself is set in the START HERE block at the top.)
 
 ## ---------------------------------------------------------------------------
 ## Role-default overrides (wired via vars_files in playbooks)
@@ -493,24 +700,13 @@ target_hub: hub
 ## Per-playbook role vars still win over vars.yaml when both set the same name.
 ## ---------------------------------------------------------------------------
 
-## setup-hub-acm: AgentServiceConfig storage and RHCOS live-ISO catalogue.
-## Shared by hub1 and hub2. Keep openshiftVersion in sync with bminfra_ocp_version.
+## setup-hub-acm: AgentServiceConfig storage. The RHCOS live-ISO catalogue that
+## goes with it, agent_service_os_images, is set in the START HERE block at the
+## top - one of its openshiftVersion entries must match bminfra_ocp_version
+## (which follows ocp_major_version).
 agent_service_database_storage: 10Gi
 agent_service_filesystem_storage: 100Gi
 agent_service_image_storage: 50Gi
-agent_service_os_images:
-  - openshiftVersion: "4.21"
-    version: "4.21.0"
-    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.21/4.21.0/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
-    cpuArchitecture: "x86_64"
-  - openshiftVersion: "4.22"
-    version: "4.22.8"
-    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
-    cpuArchitecture: "x86_64"
-  - openshiftVersion: "4.20"
-    version: "4.20.13"
-    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.20/4.20.13/rhcos-4.20.13-x86_64-live-iso.x86_64.iso"
-    cpuArchitecture: "x86_64"
 
 ## setup-hub-acm, disconnected. With disconnected_install true (below, or
 ## -e disconnected_install=true) the role renders a different
@@ -555,9 +751,13 @@ agent_service_os_images:
 # acm_disconnected_require_helper_space: false
 
 ## setup-bminfra: bare-metal infra namespace and InfraEnv OCP version.
-## osImageVersion must match an entry in agent_service_os_images above.
-bminfra_location: singapore
-bminfra_ocp_version: '4.21'
+## Follows ocp_major_version so the InfraEnv discovers hosts at the same
+## release the rest of the lab is built from - there is one number to bump.
+## It lands in InfraEnv.spec.osImageVersion, so agent_service_os_images above
+## must carry an entry whose openshiftVersion matches it (assisted-service
+## rejects a version it has no osImage for). Override here if you ever need
+## the InfraEnv on a different version than the hub.
+bminfra_ocp_version: "{{ ocp_major_version }}"
 discovery_iso_filename: "bminfra-discovery-{{ bminfra_ocp_version }}.iso"
 discovery_boot_kernel_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-vmlinuz"
 discovery_boot_initrd_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-initrd.img"
@@ -634,11 +834,8 @@ bminfra_ignition_extra_files: []
 ## own single-address MetalLB pool and the metallb.io/address-pool annotation
 ## on its HostedCluster.
 ## CONNECTED hosted clusters. These names are reserved for connected runs -
-## a disconnected run never renders them.
-hosted_clusters:
-  - hcp-cluster1
-  - hcp-cluster2
-  - hcp-cluster3
+## a disconnected run never renders them. The list itself is in the START HERE
+## block at the top, with hosted_clusters_disconnected beside it.
 
 ## DISCONNECTED hosted clusters, rendered instead of the list above when
 ## disconnected_install is true. Same shape (a bare name, or a dict with 'name'
@@ -655,10 +852,7 @@ hosted_clusters:
 ## hosted_domain/2/3 exist for the connected three), rendered with
 ## -e target_hub=hubd so api/api-int carry the hubd address. Without it the
 ## HostedCluster publishes a name nothing resolves.
-hosted_clusters_disconnected:
-  - hcp-cluster1-d
-  - hcp-cluster2-d
-  - hcp-cluster3-d
+## The list itself is in the START HERE block at the top.
 
 ## Defaults for every entry above that doesn't override them; they match
 ## hcp-cluster1. release image should correspond to an entry in
@@ -749,7 +943,7 @@ hosted_cluster_addon_cert_policy_controller: true
 ## at hub1:
 # hosted_clusters:
 #   - name: hcp-cluster1
-#     api_hostname: api.hcp-cluster1-d.mylab.com
+#     api_hostname: "api.hcp-cluster1-d.{{ base_domain }}"
 
 ## ip_list keys for each hosted cluster's worker VMs and its *.apps VIP on the
 ## helper's haproxy. Keyed by HostedCluster name, so it lines up with
@@ -794,12 +988,11 @@ hosted_cluster_node_keys:
 ## setup-mirror-registry-vm / setup-mirror-registry: the standalone VM
 ## used to simulate a disconnected install (see setup_mirror_registry.yaml).
 ## disconnected_install gates whether any of this is used at all - default
-## false so connected installs are completely unaffected.
-disconnected_install: false
+## false so connected installs are completely unaffected. It is set in the
+## START HERE block at the top.
 mirror_registry_name: registry
 mirror_registry_disk: registry_disk.qcow2
 mirror_registry_extra_disk: registry_extra_disk.qcow2
-mirror_registry_disk_size: 500G
 ## Partition inside rhel9_kvm_image to expand into all the new space -
 ## verify against your actual base image with:
 ##   virt-filesystems --long --parts --blkdevs -h -a <image>
@@ -822,6 +1015,8 @@ mirror_registry_quay_root: /registry
 mirror_ocp_channel: stable-{{ ocp_major_version }}
 mirror_ocp_version: "{{ ocp_major_version }}.{{ ocp_minor_version }}"
 mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v{{ ocp_major_version }}"
+## (mirror_catalog_operator_packages - what gets mirrored beyond the release
+## payload - is set in the START HERE block at the top.)
 ## Repository oc-mirror v2 publishes the release payload under, inside the
 ## mirror registry. roles/setup-hub-cluster-disconnected extracts
 ## openshift-install from "<registry>:<port>/<this>:<mirror_ocp_version>-x86_64",
@@ -829,13 +1024,6 @@ mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v{{ ocp_m
 ## quay.io/openshift-release-dev/ocp-release onto - if you change oc-mirror's
 ## destination layout, change this to match or the extract will 404.
 mirror_release_repository: openshift/release-images
-mirror_catalog_operator_packages:
-  - advanced-cluster-management
-  - multicluster-engine
-  - lvms-operator
-  - metallb-operator
-  - redhat-oadp-operator
-  - cincinnati-operator
 
 ## setup-minio-vm / setup-minio: local S3-compatible OADP backup target
 ## for disconnected-install simulation (see setup_minio.yaml). Also
@@ -856,7 +1044,7 @@ minio_data_dir: /data/minio
 ## Bucket OADP will target when running against MinIO instead of real
 ## AWS S3 - kept distinct from oadp_bucket_name so switching between
 ## connected/disconnected DPA config is an explicit, visible choice.
-minio_bucket_name: adp-backup-disconnected
+## (minio_bucket_name itself is set in the START HERE block at the top.)
 
 # -----------------------------------------------------------------------
 # ADD to vars.yaml:
@@ -897,10 +1085,8 @@ ceph_os_disk_size: 60G
 ## verify with `virt-filesystems --long --parts --blkdevs -h -a <image>`
 ## if you ever change rhel9_kvm_image.
 ceph_os_resize_partition: /dev/sda4
-ceph_osd_disks_per_node: 3
-ceph_osd_disk_size: 100G
-ceph_storage_memory: 24576
-ceph_storage_vcpus: 16
+## (ceph_osd_disks_per_node, ceph_osd_disk_size, ceph_storage_memory and
+## ceph_storage_vcpus are set in the START HERE block at the top.)
 ceph_admin_memory: 8192
 ceph_admin_vcpus: 4
 
@@ -952,4 +1138,3 @@ ceph_odf_exporter_local_path: "{{ playbook_dir }}/ceph-odf/ceph-external-cluster
 ## Where the exported JSON (contains cluster credentials!) lands
 ## locally - see .gitignore, never commit this.
 ceph_odf_export_dir: "{{ playbook_dir }}/ceph-odf"
-use_lvm_storage: true

@@ -24,6 +24,7 @@
 {% endfor %}
     <forwarder domain='{{ hub2_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
     <forwarder domain='{{ hub_disconnected_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+    <forwarder domain='{{ hub2_disconnected_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
     <forwarder domain='{{ lab_network_reverse_zone }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
   </dns>
   <ip address='{{ lab_network_prefix }}.1' netmask='{{ lab_network_netmask }}'>
@@ -48,6 +49,10 @@ bootstrap.{{ hub_domain }}
 bootstrap.{{ hub2_domain }}
 {%- elif key.startswith('hub2_') -%}
 {{ key | regex_replace('^hub2_', '') }}.{{ hub2_domain }}
+{%- elif key == 'hub2d_bootstrap' -%}
+bootstrap.{{ hub2_disconnected_domain }}
+{%- elif key.startswith('hub2d_') -%}
+{{ key | regex_replace('^hub2d_', '') }}.{{ hub2_disconnected_domain }}
 {%- elif key == 'hubd_bootstrap' -%}
 bootstrap.{{ hub_disconnected_domain }}
 {%- elif key.startswith('hubd_') -%}
@@ -62,6 +67,8 @@ api.{{ hub_domain }}
 api.{{ hub2_domain }}
 {%- elif key == 'hubdlb' -%}
 api.{{ hub_disconnected_domain }}
+{%- elif key == 'hub2dlb' -%}
+api.{{ hub2_disconnected_domain }}
 {%- else -%}
 {{ key }}.{{ hub_domain }}
 {%- endif -%}

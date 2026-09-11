@@ -72,6 +72,16 @@
   notify:
     -  Restart_Named
 
+- name: Deploy "{{ hub2_disconnected_domain }}" - Forward zonefile
+  template:
+    src: hub2_disconnected_domain.j2
+    dest: "/var/named/{{ hub2_disconnected_domain }}.db"
+    owner: root
+    group: named
+    mode: u=rw,g=r,o=r
+  notify:
+    -  Restart_Named
+
 # Every hosted cluster gets a zone, connected and disconnected alike, in one
 # unconditional pass - the helper serves all of them at once and never needs
 # rebuilding to switch between the two. The zones are derived from the cluster

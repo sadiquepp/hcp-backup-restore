@@ -1,10 +1,12 @@
 ---
 # defaults file for setup-bminfra
 bminfra_location: singapore
+## Standalone fallback only - vars.yaml sets this to ocp_major_version, so bump
+## that one number rather than this literal.
 bminfra_ocp_version: '4.21'
 
 ## Gates the disconnected rendering below. setup_mirror_registry.yaml and
-## setup_hub_cluster_disconnected.yaml are what make it meaningful; set it in
+## setup_hub_cluster.yaml are what make it meaningful; set it in
 ## vars.yaml or pass -e disconnected_install=true. Repeated here so the role
 ## still evaluates standalone.
 disconnected_install: false

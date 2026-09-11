@@ -196,6 +196,9 @@ A **label**, not an annotation. Must be set before step 13, on this hub.
 Re-check it on every run - MCE reconciles this secret. Skipping it leaves
 the restored cluster stuck in `Importing`.
 
+Workaround for [OCPBUGS-121709](https://redhat.atlassian.net/browse/OCPBUGS-121709) -
+check that JIRA for the current status.
+
 ## 13. Backup
 
 ```bash
