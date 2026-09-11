@@ -1,0 +1,33 @@
+{#
+  Phase 2: advertise UDN pod subnets into the DEFAULT VRF.
+
+  targetVRF 'default' leaks each selected UDN's routes into the node's
+  default VRF, where the existing untagged BGP session picks them up. No
+  VLANs, no per-tenant VRFs, no NMState - which is exactly why this phase is
+  worth doing before VRF-Lite: it isolates "does UDN-over-BGP work" from
+  "does my VLAN and VRF plumbing work".
+
+  The cost of the simplicity is real and should be stated: leaking a UDN into
+  the default VRF gives up the UDN's isolation at the node boundary. Anything
+  else in that VRF can now reach these pods. OVN-Kubernetes will refuse to
+  leak two UDNs whose subnets overlap, which is why phase 2 uses the
+  non-overlapping udn_subnet_shared values.
+#}
+apiVersion: k8s.ovn.org/v1
+kind: RouteAdvertisements
+metadata:
+  name: udn-shared-vrf
+spec:
+  targetVRF: default
+  networkSelectors:
+    - networkSelectionType: ClusterUserDefinedNetworks
+      clusterUserDefinedNetworkSelector:
+        networkSelector:
+          matchLabels:
+            {{ udn_bgp_cudn_label_key }}: "enabled"
+  nodeSelector: {}
+  frrConfigurationSelector:
+    matchLabels:
+      {{ udn_bgp_frr_label_key }}: fabric-default
+  advertisements:
+    - PodNetwork

@@ -1,0 +1,50 @@
+{#
+  Per-VRF BGP peering for VRF-Lite.
+
+  One router stanza per tenant, each bound to that tenant's VRF and peering
+  with the border leaf over that tenant's VLAN. This is the CR the admin
+  writes; OVN-Kubernetes generates the additive one carrying the actual
+  prefixes once the RouteAdvertisements CR with targetVRF 'auto' selects it.
+
+  The VRF names here are the ones discovered on the nodes, which are the UDN
+  names - blue and red. FRR-K8s passes them straight through to FRR's
+  'router bgp <asn> vrf <name>', so they have to match the kernel devices
+  exactly.
+
+  Note there is no router stanza for the default VRF in this file. Phase 3
+  peering is entirely inside the tenant VRFs; the untagged default-VRF
+  session from phase 1 keeps running alongside it, from its own
+  FRRConfiguration, and carries the cluster default pod network only.
+#}
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: fabric-peering-vrflite
+  namespace: {{ udn_bgp_frrk8s_namespace }}
+  labels:
+    {{ udn_bgp_frr_label_key }}: fabric-vrflite
+spec:
+  bgp:
+    routers:
+{% for t in udn_bgp_tenants %}
+      - asn: {{ clab_cluster_asn }}
+        vrf: {{ t.name }}
+        neighbors:
+          - address: {{ t.vrf_prefix }}.{{ clab_fabric_router_octet }}
+            asn: {{ clab_leaf1_asn }}
+            holdTime: 9s
+            keepaliveTime: 3s
+            port: 179
+            toReceive:
+              allowed:
+                {# Accept the tenant's external prefix from the leaf. 'all'
+                   is safe inside a tenant VRF in a way it would not be in
+                   the default VRF: the only thing that can inject here is
+                   the leaf's {{ t.name }} VRF, which originates exactly
+                   {{ t.external_prefix }}. #}
+                mode: all
+            toAdvertise:
+              allowed:
+                mode: filtered
+{% endfor %}
+  nodeSelector: {}

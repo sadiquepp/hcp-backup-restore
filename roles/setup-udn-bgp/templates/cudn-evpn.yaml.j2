@@ -1,0 +1,51 @@
+{#
+  The tenant CUDN with EVPN as its transport.
+
+  Two things change relative to the phase-3 CUDN, and only two:
+
+    transport: EVPN       - east/west pod traffic for this network stops
+                            using Geneve and uses VXLAN instead, with the
+                            EVPN control plane distributing reachability.
+                            The UDN's addressing, isolation and role are
+                            unchanged.
+
+    evpnConfiguration     - which VTEP to use, and the VNI/route-target for
+                            each VRF type.
+
+  Layer3 topology takes ipVRF only - macVRF is for Layer2 networks, where the
+  L2 segment itself is stretched across the fabric. A Layer2 tenant here
+  would be the configuration to use if the goal were VM migration across the
+  cluster boundary with the MAC and IP preserved; Layer3 is the right shape
+  for routed tenant segmentation, which is what this lab's tenants are.
+
+  routeTarget is set explicitly rather than left to default to
+  <ASN>:<VNI>, because the fabric side has to match and an explicit value on
+  both sides is one less thing to derive when a route is not appearing where
+  it should. Two UDNs sharing a route target of the same VRF type would leak
+  routes between tenants - which is exactly what this lab is trying to prove
+  does not happen, so the values are distinct per tenant.
+#}
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: {{ tenant.name }}
+  labels:
+    {{ udn_bgp_cudn_label_key }}: "enabled"
+    udn-lab-phase: evpn
+spec:
+  namespaceSelector:
+    matchLabels:
+      udn-tenant: {{ tenant.name }}
+  network:
+    topology: Layer3
+    layer3:
+      role: Primary
+      subnets:
+        - cidr: {{ tenant.udn_subnet }}
+          hostSubnet: {{ tenant.udn_host_subnet }}
+  transport: EVPN
+  evpnConfiguration:
+    vtep: evpn-vtep
+    ipVRF:
+      vni: {{ tenant.evpn_ip_vni }}
+      routeTarget: "{{ clab_spine_asn }}:{{ tenant.evpn_ip_vni }}"

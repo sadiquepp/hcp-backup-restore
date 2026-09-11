@@ -59,6 +59,17 @@ In a hurry? [steps.md](steps.md) is the same end-to-end run as commands only.
   - [Attach it to OpenShift](#attach-it-to-openshift)
   - [Verifying](#verifying-1)
   - [Notes and constraints](#notes-and-constraints-1)
+- [UDN over BGP, VRF-Lite and EVPN (containerlab fabric)](#udn-over-bgp-vrf-lite-and-evpn-containerlab-fabric)
+  - [Can this be simulated on this lab? Yes - here is the honest shape of it](#can-this-be-simulated-on-this-lab-yes---here-is-the-honest-shape-of-it)
+  - [The one idea to drop first: you do not move a UDN's default gateway](#the-one-idea-to-drop-first-you-do-not-move-a-udns-default-gateway)
+  - [Topology](#topology)
+  - [Containerlab in a VM, or on the bare-metal host?](#containerlab-in-a-vm-or-on-the-bare-metal-host)
+  - [What it costs the existing lab](#what-it-costs-the-existing-lab)
+  - [Constraints worth knowing before you start](#constraints-worth-knowing-before-you-start)
+  - [Building it](#building-it-1)
+  - [Verifying each phase](#verifying-each-phase)
+  - [EVPN on a 4.21 cluster](#evpn-on-a-421-cluster)
+  - [Troubleshooting](#troubleshooting)
 - [Playbook Reference](#playbook-reference)
 - [Key Roles](#key-roles)
 - [OADP Details](#oadp-details)
@@ -1657,6 +1668,315 @@ not a Ceph or credentials problem.
   re-runs the exporter against the same Ceph cluster, so both hubs end up
   consuming the same pool. That is fine for a lab; it is not isolation.
 
+## UDN over BGP, VRF-Lite and EVPN (containerlab fabric)
+
+Built by `setup_udn_bgp_lab.yaml` (roles `setup-clab-fabric` and
+`setup-udn-bgp`). Entirely additive: nothing in the hub, hosted-cluster, OADP
+or Ceph flows reads any of it, and none of those flows change whether or not
+you ever run it.
+
+### Can this be simulated on this lab? Yes - here is the honest shape of it
+
+Yes, on the bare-metal host, using containerlab as the provider network. The
+OpenShift nodes are already KVM guests on a libvirt bridge, and containerlab
+attaches container interfaces to an existing Linux bridge as a first-class
+feature (its `bridge` kind). Put both on the same bridge and an FRR container
+is layer-2 adjacent to an OpenShift node. From there it is ordinary BGP -
+there is nothing to fake.
+
+What is and is not testable on this lab, stated up front:
+
+| Phase | Testable here | Needs |
+| --- | --- | --- |
+| BGP, default pod network | Yes | 4.19+ |
+| BGP + primary UDN, shared VRF | Yes | 4.19+ |
+| BGP + UDN with **VRF-Lite** | Yes | 4.19+, **local gateway mode** |
+| **EVPN**, cluster nodes as VTEPs | Only on 4.22+ | 4.22 cluster (this lab is 4.21) |
+| **EVPN** fabric with VRF-Lite handoff | Yes, on 4.21 | nothing extra |
+
+EVPN for cluster user-defined networks is GA in OpenShift 4.22. `vars.yaml`
+pins `ocp_major_version: "4.21"`, so the cluster-side EVPN phase refuses to
+run and says so rather than producing schema errors. The fabric half still
+builds, and the VRF-Lite-to-EVPN handoff described
+[below](#evpn-on-a-421-cluster) is a real production design, not a
+consolation prize.
+
+### The one idea to drop first: you do not move a UDN's default gateway
+
+The natural mental model - "point each UDN's default gateway at the
+containerlab router" - is worth discarding early, because there is no setting
+that does it and designing around it leads somewhere unpleasant.
+
+A pod on a primary UDN always has the OVN gateway router **on its own node**
+as its default gateway. That is structural: OVN-Kubernetes owns the pod's
+first hop, and it is how the UDN's isolation, its per-node subnet allocation
+and its east/west path all work. Nothing external can take that over.
+
+What BGP actually changes is one layer further out - the **node's** routing
+table and the **absence of SNAT**:
+
+- The cluster advertises pod and UDN subnets to the fabric
+  (`RouteAdvertisements`), so the fabric has a route back to real pod
+  addresses.
+- The fabric advertises its prefixes to the cluster, and FRR-K8s installs
+  them in the node's kernel routing table, so the node knows to send that
+  traffic out the fabric NIC.
+- Because the fabric can now route back to the pod, pod egress to those
+  prefixes **stops being SNATed to the node IP**. Packets arrive at the
+  router with the real pod IP as the source. That is the single most
+  legible proof the whole thing is working.
+
+The pod's gateway never moves. Which is exactly why this is safe to run
+against a cluster that is already doing other work: no node's default route
+changes, and the only prefixes that go out the fabric are ones a BGP peer
+explicitly advertised.
+
+### Topology
+
+```
+  virbr0  192.168.122.0/24  NAT       <-- the existing lab, untouched
+    helper .21   hub masters .31-.33   hub workers .34-.36
+    hosted-cluster workers, MetalLB VIPs, mirror registry, MinIO, Ceph ...
+    clab VM .40  (management/ssh only)
+
+  virbr1  no address on the host, MTU 9000, no NAT, no DHCP, no DNS
+    |                                    <-- NEW. Pure L2, the "provider network"
+    +-- hub_worker1 second NIC   192.168.140.34   (+ VLAN 110 .141.34, VLAN 120 .142.34)
+    +-- hub_worker2 second NIC   192.168.140.35   (+ VLANs)
+    +-- hub_worker3 second NIC   192.168.140.36   (+ VLANs)
+    +-- clab VM second NIC -> in-guest bridge br-fabric
+          |
+          +-- containerlab: leaf1 (FRR)  192.168.140.1
+                            + VRF blue on VLAN 110  192.168.141.1
+                            + VRF red  on VLAN 120  192.168.142.1
+                            blue-ext 10.210.10.10   red-ext 10.211.10.10
+```
+
+Every fabric address ends in the octet the node already owns on virbr0 -
+worker1 is `.34` on `192.168.140`, `192.168.141` and `192.168.142` alike - so
+there is one number per node to remember and no new collision surface.
+
+The VLANs are how VRF-Lite is done: one L3 link per VRF between the node and
+the provider edge. A plain Linux bridge (`vlan_filtering=0`, which is the
+default) forwards 802.1Q frames untouched, so virbr1 carries the tagged
+traffic without OVS or any special configuration.
+
+### Containerlab in a VM, or on the bare-metal host?
+
+Both work and `setup_udn_bgp_lab.yaml` builds either. `clab_deploy_mode`
+defaults to `vm`.
+
+**`vm` (default).** A dedicated RHEL9 guest with two NICs; its fabric NIC is
+enslaved to an in-guest bridge that containerlab attaches FRR nodes to. The
+reason to prefer this is narrow and real: **containerlab needs Docker, and
+Docker rewrites the host's iptables** - it sets the `FORWARD` policy to
+`DROP`, adds its own chains, and loads `br_netfilter`, which makes bridged
+frames traverse `FORWARD` too. On a hypervisor that is also running your
+entire HCP lab behind libvirt NAT, that is a real risk to take on for a side
+project. In a VM it is somebody else's problem.
+
+**`host`.** Containerlab runs on the bare-metal host and attaches directly to
+virbr1. One less hop, and `tcpdump`/`ip netns`/`containerlab inspect` all
+live where you already run Ansible - noticeably easier to debug. Containerlab
+inserts `FORWARD ACCEPT` rules for any bridge its topology references, which
+handles the specific Docker problem above; the fabric network is also created
+with `<forward mode='open'/>` so libvirt adds no rules of its own to fight
+with.
+
+Pick `host` if you want the easiest debugging and are comfortable with Docker
+on the hypervisor. Stay on `vm` otherwise.
+
+### What it costs the existing lab
+
+- Each node VM in `clab_fabric_nodes` gains **one extra NIC**. Hot-plugged on
+  a running VM, no reboot, no rebuild.
+- A new libvirt network (`virbr1`). No NAT, no DHCP, no DNS, no address on
+  the host - it cannot route anywhere and cannot perturb virbr0.
+- One extra VM (`clab`, `.40`) in `vm` mode: 4 vCPU / 8G.
+- On the cluster: `Network.operator.openshift.io/cluster` is patched to
+  enable FRR and route advertisements, which **restarts every ovnkube-node
+  pod**. That is a few minutes of rolling pod-egress disruption on this lab's
+  three workers. The API, the hosted clusters' control planes and MetalLB are
+  unaffected. Enabling local gateway mode is a second such rollout.
+
+What does *not* change: every address on virbr0, DNS, the DHCP reservations,
+MetalLB's L2 pools, and every node's default route. The leaf's BGP policy
+explicitly refuses to advertise or accept `192.168.122.0/24` in either
+direction, so no BGP-learned route can shadow the lab's management network.
+
+### Constraints worth knowing before you start
+
+**Do this on hub1, not on a hosted cluster.** Every phase patches
+`Network.operator.openshift.io/cluster` and applies `NodeNetworkConfiguration`
+policies. hub1 is a plain standalone cluster where that is straightforward.
+A HyperShift hosted cluster's OVN-Kubernetes is configured through its
+`HostedCluster`/`NodePool` and reconciled from the management cluster, so
+patching the guest's Network CR directly is at best fragile. Prove the
+mechanism on hub1 first; extending it to a hosted cluster afterwards is a
+separate piece of work, not a variable change. `clab_fabric_nodes` therefore
+defaults to hub1's three workers.
+
+**VRF-Lite and EVPN require local gateway mode** (`routingViaHost: true`).
+This is an OVN-Kubernetes restriction, not a lab one - VRF-Lite is not
+implemented in shared gateway mode, and the CRs are accepted and quietly do
+nothing. `udn_bgp_set_local_gateway` (default `true`) makes the switch; it is
+a separate patch from the enablement one precisely because it is a second
+full rollout and changes how all pod egress leaves the node.
+
+**MetalLB is already on this cluster** for the hosted clusters' API VIPs, in
+**L2 mode**, so it is not competing for BGP sessions. MetalLB also ships an
+FRR-K8s; the Cluster Network Operator deploys its own into
+`openshift-frr-k8s`, and that is the one this lab uses. If you later move a
+MetalLB pool to BGP mode, point it at the CNO's instance rather than letting
+the MetalLB operator stand up a second one. The pre-flight phase lists every
+FRR-K8s daemonset it finds so you can see the situation before enabling
+anything.
+
+**`FRRConfiguration` goes in `openshift-frr-k8s`, not `metallb-system`.**
+Upstream OVN-Kubernetes examples use `metallb-system` because upstream
+installs FRR-K8s via MetalLB. On OpenShift the CNO owns it. An
+`FRRConfiguration` in the wrong namespace is accepted and silently never
+read, which is a tedious hour to lose.
+
+**Overlapping UDN subnets only work with VRF-Lite.** With
+`targetVRF: default` both tenants' routes land in one VRF, and
+OVN-Kubernetes rejects overlapping subnets with an error on the
+`RouteAdvertisements` status. The tenant definitions carry two subnets for
+this reason: `udn_subnet_shared` (unique, used by the `shared` phase) and
+`udn_subnet` (**deliberately identical between blue and red**, used by
+`vrflite`). Proving two UDNs can carry the same addresses in isolation is
+most of the point of VRF-Lite.
+
+**MTU.** The fabric is 9000 end to end - bridge, taps, node NICs, VLAN
+subinterfaces and FRR containers. At 1500 the BGP sessions come up fine and
+then large flows black-hole, because the fabric is carrying Geneve or VXLAN
+wrapped around pod traffic that is already encapsulated.
+
+### Building it
+
+Phases are cumulative and are meant to be run in order. Each one removes an
+entire class of explanation for a failure in the next - that ordering is the
+main thing this playbook is for.
+
+```bash
+# 0. The fabric. No cluster changes at all.
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric
+
+# Report what the cluster can do. Changes nothing.
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags preflight
+
+# 1. Advertise the cluster DEFAULT pod network. No UDN involved -
+#    if this does not work, UDN is not the reason.
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
+
+# 2. Primary UDNs advertised into the default VRF (targetVRF: default).
+#    Adds UDN. Still no VLANs, no VRFs, no NMState.
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags shared
+
+# 3. VRF-Lite: per-tenant VRFs and VLANs (targetVRF: auto).
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags vrflite
+
+# 4. EVPN. 4.22+ on the cluster side; see below for 4.21.
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric -e clab_topology=evpn
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags evpn
+```
+
+Run containerlab on the bare-metal host instead: `-e clab_deploy_mode=host`.
+
+Every manifest is rendered to `udn-bgp/` before it is applied, so you can
+read and diff exactly what was sent, and re-apply by hand with `oc apply -f`.
+
+The VRF-Lite phase does something worth understanding rather than trusting.
+OVN-Kubernetes creates a Linux VRF per UDN on each node and enslaves its own
+management port (`ovn-k8s-mpN`) to it. VRF-Lite needs a VLAN subinterface
+added to *that same VRF*. But NMState treats a VRF's port list as
+declarative - a policy declaring the VRF with only the VLAN in `port:` would
+**remove `ovn-k8s-mpN` and take the tenant's pods off the network**. So the
+role reads the live VRF layout off each node first (`vrflite-discover.yml`),
+and templates the policy with the discovered port list and route-table id
+restated in full. Never hand-write one of these from the example; render it.
+
+That discovery needs the tenant's VRF to exist, and OVN-Kubernetes only
+creates it on a node that has something on that network - which is why the
+test workload is a DaemonSet, and why the CUDNs and workloads are applied
+before the discovery runs.
+
+### Verifying each phase
+
+The playbook prints control-plane state and then the data-plane commands to
+run by hand (they need a pod name). The ones that matter:
+
+```bash
+# Accepted? A RouteAdvertisements is accepted long before it works.
+oc get routeadvertisements -o wide
+oc get routeadvertisements <name> -o jsonpath='{.status.conditions}' | jq
+
+# The objects OVN-Kubernetes GENERATED from it carry the actual prefixes.
+# If these are absent, nothing took effect regardless of the status above.
+oc get frrconfiguration -n openshift-frr-k8s
+
+# The leaf's view.
+docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp summary' -c 'show bgp ipv4 unicast'
+docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp vrf blue ipv4 unicast'
+
+# Pod address comes from the UDN, not the cluster network.
+oc -n udn-blue exec <pod> -- ip -br addr show eth0
+
+# Egress is NOT SNATed - the leaf sees the real pod IP. This is the proof.
+docker exec clab-udnbgp-leaf1 tcpdump -ni any icmp
+oc -n udn-blue exec <pod> -- ping -c3 10.210.10.10
+
+# Tenant isolation. This one MUST FAIL (VRF-Lite phase):
+oc -n udn-blue exec <pod> -- ping -c3 -W2 10.211.10.10
+# blue and red carry the SAME pod subnet and their external networks are one
+# hop away on the same physical link. If this succeeds, the VRFs are leaking.
+
+# Routes learned over BGP, not statically pointed anywhere:
+oc debug node/worker1.hub.mylab.com -- chroot /host ip route show proto bgp
+oc debug node/worker1.hub.mylab.com -- chroot /host ip route show vrf blue
+
+# And the thing this lab is careful NOT to have changed:
+oc debug node/worker1.hub.mylab.com -- chroot /host ip route show default
+# expect: default via 192.168.122.1
+```
+
+### EVPN on a 4.21 cluster
+
+`-e clab_topology=evpn` builds a three-node fabric - `leaf1` (border),
+`spine` (EVPN route reflector), `leaf2` (far end) - with VXLAN between the
+leaves and the tenant external endpoints moved behind `leaf2`, so traffic
+genuinely crosses the overlay instead of being configured and never used.
+
+On 4.22+ the OpenShift nodes are themselves VTEPs: the `VTEP` CR allocates
+each node a tunnel endpoint and the CUDN carries `transport: EVPN` with an
+`ipVRF` VNI and route target.
+
+On 4.21 they are not, and the cluster hands its tenants to the fabric with
+ordinary VRF-Lite while `leaf1` maps each VRF to an EVPN VNI (`advertise ipv4
+unicast` under `address-family l2vpn evpn`). Traffic from a blue pod is
+encapsulated on `leaf1`, decapsulated on `leaf2`, and delivered in the blue
+VRF. **This is a normal production design** - plenty of real clusters hand
+off to an EVPN fabric at a border leaf rather than running VTEPs on the
+nodes - and it exercises the VNI and route-target mapping you will need
+either way. What it does not exercise is node-level VTEPs and stretched
+Layer 2 segments; for those, move the cluster to 4.22 (`vars.yaml` already
+carries a 4.22 entry in `agent_service_config_os_images`).
+
+### Troubleshooting
+
+| Symptom | Cause |
+| --- | --- |
+| BGP session never establishes | Fabric NIC not addressed (check `oc get nncp`), or MTU mismatch, or the node has no fabric NIC at all |
+| Session up, `RouteAdvertisements` Accepted, no `route-advertisements-*` FRRConfiguration | `frrConfigurationSelector` matched zero or more than one FRRConfiguration |
+| `RouteAdvertisements` not Accepted | Overlapping UDN subnets leaked into one VRF (`targetVRF: default`), or two CRs selecting the same network |
+| Everything green, pods still SNATed | The advertisement did not reach the node - check the generated FRRConfiguration, not the CR |
+| VRF-Lite configured, no isolation | Cluster is in shared gateway mode. VRF-Lite needs `routingViaHost: true` |
+| Tenant pods lose the network after an NNCP | A VRF policy was applied without the discovered `ovn-k8s-mpN` port restated. Re-render, do not hand-write |
+| Small pings work, real traffic does not | MTU. Check the bridge, the taps, the node NIC, the VLAN subinterface and the FRR containers are all 9000 |
+| Fabric dies as soon as Docker is installed | `br_netfilter` + Docker's `FORWARD DROP`. `iptables -I FORWARD 1 -i virbr1 -o virbr1 -j ACCEPT` |
+| `FRRConfiguration` applied and ignored | Wrong namespace. It belongs in `openshift-frr-k8s` on OpenShift |
+| VRF-Lite discovery fails with "missing a tenant VRF" | Either no tenant pod is running on that node yet (the VRF is created on demand), or OVN-Kubernetes names the VRF something other than the CUDN name in your release - the task above the failure lists what is actually there |
+
 ## Playbook Reference
 
 Every playbook here is run with `-i inventory/hosts`. Most plays target
@@ -1693,6 +2013,7 @@ delegates.
 | `setup_ceph.yaml`             | Build the standalone Ceph 9 cluster (ceph1-3 + cephadmin) |
 | `setup_ceph_odf.yaml`         | Install ODF and attach that Ceph cluster to a hub in external mode |
 | `cleanup-ceph.yaml`           | Destroy the Ceph VMs and their OSD disks - also the DR demo's deliberate storage-loss step |
+| `setup_udn_bgp_lab.yaml`      | Build the containerlab BGP/EVPN provider fabric and wire a cluster into it. Phase-tagged: `--tags fabric\|preflight\|default\|shared\|vrflite\|evpn` |
 
 
 
@@ -1709,6 +2030,8 @@ delegates.
 | `setup-ceph-cluster` | Runs `cephadm bootstrap` on ceph1, expands the cluster onto ceph2/ceph3 + cephadmin, places mon/mgr/osd daemons, and enables msgr2 |
 | `setup-ceph-odf-export` | Creates the RBD pool (+ optional CephFS) and runs the version-matched exporter on cephadmin to produce the connection JSON |
 | `setup-ceph-odf-consumer` | Installs the ODF operator and extracts its exporter script (stage `install`), then creates the external-cluster secret and `StorageCluster` (stage `create`) |
+| `setup-clab-fabric` | Creates the isolated fabric bridge (virbr1), adds a second NIC to each OCP node VM, optionally builds the containerlab VM, and deploys the FRR topology (single border leaf, or leaf/spine/leaf for EVPN) |
+| `setup-udn-bgp` | The cluster half: enables FRR + route advertisements, addresses the fabric NICs via NMState, creates the tenant CUDNs and workloads, and applies the phase's `FRRConfiguration`/`RouteAdvertisements`. Discovers each node's live UDN VRF before writing any VRF-Lite policy |
 
 
 

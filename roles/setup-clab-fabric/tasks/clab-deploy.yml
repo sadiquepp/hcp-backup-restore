@@ -1,0 +1,89 @@
+---
+# Phase 0e - render the topology and bring the fabric up.
+#
+# Runs wherever clab_deploy_mode put things. clab_bridge_for_topology is the
+# one value that differs between the two modes, and it is resolved once here
+# rather than being branched on inside the templates.
+
+- name: Decide which bridge the topology attaches to
+  ansible.builtin.set_fact:
+    clab_bridge_for_topology: >-
+      {{ clab_guest_bridge if clab_deploy_mode == 'vm' else clab_fabric_bridge }}
+
+- name: Create the lab directory
+  ansible.builtin.file:
+    path: "{{ clab_lab_dir }}/leaf1"
+    state: directory
+    mode: '0755'
+
+- name: Create the spine/leaf2 config directories (EVPN topology only)
+  ansible.builtin.file:
+    path: "{{ clab_lab_dir }}/{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - spine
+    - leaf2
+  when: clab_topology == 'evpn'
+
+- name: Render the FRR daemons file for each router
+  ansible.builtin.template:
+    src: daemons.j2
+    dest: "{{ clab_lab_dir }}/{{ item }}/daemons"
+    mode: '0644'
+  loop: "{{ ['leaf1'] + (['spine', 'leaf2'] if clab_topology == 'evpn' else []) }}"
+
+- name: Render the border leaf's FRR configuration
+  ansible.builtin.template:
+    src: "leaf1-frr{{ '-evpn' if clab_topology == 'evpn' else '' }}.conf.j2"
+    dest: "{{ clab_lab_dir }}/leaf1/frr.conf"
+    mode: '0644'
+
+- name: Render the spine and leaf2 FRR configurations (EVPN topology only)
+  ansible.builtin.template:
+    src: "{{ item }}-frr.conf.j2"
+    dest: "{{ clab_lab_dir }}/{{ item }}/frr.conf"
+    mode: '0644'
+  loop:
+    - spine
+    - leaf2
+  when: clab_topology == 'evpn'
+
+- name: Render the containerlab topology
+  ansible.builtin.template:
+    src: "udnbgp{{ '-evpn' if clab_topology == 'evpn' else '' }}.clab.yml.j2"
+    dest: "{{ clab_lab_dir }}/{{ clab_lab_name }}.clab.yml"
+    mode: '0644'
+
+# containerlab is destructive about a lab of the same name that is already
+# running, and 'deploy --reconfigure' is the documented way to redeploy
+# cleanly. Without it a second run fails on existing containers rather than
+# picking up an edited topology, which is the usual reason a config change
+# appears not to have taken.
+- name: Deploy the containerlab fabric
+  ansible.builtin.command:
+    cmd: "containerlab deploy --reconfigure --topo {{ clab_lab_name }}.clab.yml"
+    chdir: "{{ clab_lab_dir }}"
+  register: clab_deploy
+
+- name: Show the deployed fabric
+  ansible.builtin.debug:
+    msg: "{{ clab_deploy.stdout_lines }}"
+
+- name: Wait for the border leaf's BGP daemon to be answering
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-leaf1 vtysh -c 'show bgp summary'"
+  register: clab_bgp_summary
+  retries: 12
+  delay: 5
+  until: clab_bgp_summary.rc == 0
+  changed_when: false
+
+- name: Show the border leaf's BGP summary
+  ansible.builtin.debug:
+    msg: >-
+      {{ clab_bgp_summary.stdout_lines }}
+
+      Sessions are expected to be DOWN at this point - the cluster side does
+      not exist yet. What this proves is that leaf1 is up, its VRFs were
+      created and FRR parsed its configuration.

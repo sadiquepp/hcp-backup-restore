@@ -1,0 +1,22 @@
+{#
+  VTEP addresses for EVPN.
+
+  OVN-Kubernetes allocates each node a VXLAN tunnel endpoint address out of
+  these CIDRs and puts it on a dummy interface. The fabric learns those
+  addresses as the next hops for every EVPN route, so the block has to be
+  routable from the fabric - which it is, because the nodes advertise it over
+  the existing default-VRF session to leaf1.
+
+  Deliberately a block that exists nowhere else in this lab: not
+  {{ lab_network_prefix }}.0/24, not {{ clab_fabric_prefix }}.0/24, not any
+  tenant prefix. A VTEP address that collides with a real one produces
+  tunnels that form and then carry traffic to the wrong place.
+#}
+apiVersion: k8s.ovn.org/v1
+kind: VTEP
+metadata:
+  name: evpn-vtep
+spec:
+  cidrs:
+    - 100.64.0.0/24
+  mode: managed

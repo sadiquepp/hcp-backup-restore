@@ -1,0 +1,72 @@
+{#
+  Far-end leaf.
+
+  Holds the tenants' external networks and is the other end of every VXLAN
+  tunnel. It never talks to the cluster - its whole job is to prove the
+  overlay carries traffic: a pod on the blue UDN reaching
+  {{ udn_bgp_tenants[0].external_host }} gets encapsulated on leaf1,
+  decapsulated here, and delivered inside the blue VRF.
+
+  Per-tenant route targets are the only thing keeping blue and red apart
+  here. They are distinct values, so a route exported by blue on leaf1 is
+  imported only into blue on leaf2. Giving two tenants the same route target
+  is how you leak them into each other - worth knowing precisely because it
+  is a one-character mistake.
+#}
+frr version 10.2
+frr defaults datacenter
+hostname leaf2
+log stdout
+service integrated-vtysh-config
+!
+{% for t in udn_bgp_tenants %}
+vrf {{ t.name }}
+ vni {{ t.evpn_ip_vni }}
+exit-vrf
+!
+{% endfor %}
+router bgp {{ clab_leaf2_asn }}
+ bgp router-id 10.0.0.2
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+ neighbor 10.1.0.5 remote-as {{ clab_spine_asn }}
+ neighbor 10.1.0.5 description spine-underlay
+ neighbor 10.0.0.254 remote-as {{ clab_spine_asn }}
+ neighbor 10.0.0.254 description spine-evpn
+ neighbor 10.0.0.254 update-source lo0
+ neighbor 10.0.0.254 ebgp-multihop 3
+ !
+ address-family ipv4 unicast
+  network 10.0.0.2/32
+  neighbor 10.1.0.5 activate
+  no neighbor 10.0.0.254 activate
+ exit-address-family
+ !
+ address-family l2vpn evpn
+  neighbor 10.0.0.254 activate
+  neighbor 10.0.0.254 allowas-in origin
+  advertise-all-vni
+ exit-address-family
+exit
+!
+{% for t in udn_bgp_tenants %}
+router bgp {{ clab_leaf2_asn }} vrf {{ t.name }}
+ bgp router-id {{ t.external_gw }}
+ no bgp ebgp-requires-policy
+ !
+ address-family ipv4 unicast
+  ! The tenant's external network is originated here now, not on leaf1 - so
+  ! the cluster can only learn it across the EVPN fabric.
+  network {{ t.external_prefix }}
+ exit-address-family
+ !
+ address-family l2vpn evpn
+  advertise ipv4 unicast
+  route-target import {{ clab_spine_asn }}:{{ t.evpn_ip_vni }}
+  route-target export {{ clab_spine_asn }}:{{ t.evpn_ip_vni }}
+ exit-address-family
+exit
+!
+{% endfor %}
+line vty
+!

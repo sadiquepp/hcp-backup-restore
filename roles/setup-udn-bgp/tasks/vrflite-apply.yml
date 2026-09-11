@@ -1,0 +1,61 @@
+---
+# Phase 3b - render and apply the VRF-Lite plumbing.
+#
+# Split from the discovery step so the rendered NNCPs can be read before they
+# are applied. These are the objects that edit a VRF OVN-Kubernetes owns; the
+# rendered file shows the full port list that will be written, which is the
+# thing worth checking with your own eyes at least once.
+
+- name: Render a VRF-Lite policy per node and tenant
+  ansible.builtin.template:
+    src: nncp-vrflite.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/nncp-vrflite-{{ vrf_fact.tenant }}-{{ vrf_fact.ip_key }}.yaml"
+    mode: '0644'
+  loop: "{{ udn_bgp_vrf_facts }}"
+  loop_control:
+    loop_var: vrf_fact
+    label: "{{ vrf_fact.node }}/{{ vrf_fact.tenant }}"
+  delegate_to: localhost
+
+- name: Render the per-VRF BGP peering
+  ansible.builtin.template:
+    src: frrconfiguration-vrflite.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/frrconfiguration-vrflite.yaml"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: Apply the VRF-Lite policies
+  ansible.builtin.command:
+    cmd: >-
+      oc apply -f
+      {{ udn_bgp_manifest_dir }}/nncp-vrflite-{{ item.tenant }}-{{ item.ip_key }}.yaml
+  loop: "{{ udn_bgp_vrf_facts }}"
+  loop_control:
+    label: "{{ item.node }}/{{ item.tenant }}"
+
+- name: Wait for the VRF-Lite policies to be applied
+  ansible.builtin.command:
+    cmd: >-
+      oc wait nncp/vrflite-{{ item.tenant }}-{{ item.ip_key }}
+      --for=condition=Available --timeout=300s
+  loop: "{{ udn_bgp_vrf_facts }}"
+  loop_control:
+    label: "{{ item.node }}/{{ item.tenant }}"
+  changed_when: false
+
+- name: Create the per-VRF BGP peering
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/frrconfiguration-vrflite.yaml"
+
+- name: Advertise each UDN inside its own VRF (targetVRF auto)
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-udn.yaml"
+
+# The shared-VRF advertisement from phase 2, if it is still there, selects the
+# same CUDNs. Two RouteAdvertisements CRs may not select the same network -
+# OVN-Kubernetes reports an error and applies neither - so the phase-2 object
+# has to go before the phase-3 one can work. Removed after applying rather
+# than before so a half-finished run leaves at least one in place.
+- name: Remove the shared-VRF advertisement so it cannot contend for the same networks
+  ansible.builtin.command:
+    cmd: "oc delete routeadvertisements udn-shared-vrf --ignore-not-found"

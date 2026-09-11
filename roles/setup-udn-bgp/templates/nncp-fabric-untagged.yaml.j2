@@ -1,0 +1,43 @@
+{#
+  Address each node's fabric NIC for the untagged, default-VRF BGP session.
+
+  Matched on MAC, not on interface name. The NIC is hot-plugged by
+  setup-clab-fabric, so its name depends on PCI enumeration order and on
+  whether the node was running at the time; the MAC is assigned by this lab
+  and is deterministic. NMState's capture syntax resolves one to the other at
+  apply time, which is why there is one policy per node rather than one for
+  all of them.
+
+  Note what this policy does NOT do: no gateway, no DNS, no default route,
+  no auto-dns, no routes at all. The node keeps reaching everything it
+  currently reaches via its virbr0 NIC and {{ lab_network_prefix }}.1. The
+  only thing that will ever send traffic out this interface is a route
+  learned over BGP from the fabric - which is exactly the property that makes
+  this safe to apply to a working cluster.
+#}
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: fabric-untagged-{{ node_entry.ip_key }}
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: {{ node_entry.node }}
+  capture:
+    fabric-nic: interfaces.mac-address=="{{ clab_fabric_mac_prefix | upper }}:{{ ip_list[node_entry.ip_key] }}"
+  desiredState:
+    interfaces:
+      - name: "{{ '{{' }} capture.fabric-nic.interfaces.0.name {{ '}}' }}"
+        type: ethernet
+        state: up
+        {# Matches clab_fabric_mtu on the bridge and on the FRR containers.
+           A mismatch here is the classic "BGP is up but nothing works"
+           failure: small packets pass, full-size ones vanish. #}
+        mtu: {{ clab_fabric_mtu }}
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: {{ clab_fabric_prefix }}.{{ ip_list[node_entry.ip_key] }}
+              prefix-length: {{ clab_fabric_netmask_bits }}
+        ipv6:
+          enabled: false

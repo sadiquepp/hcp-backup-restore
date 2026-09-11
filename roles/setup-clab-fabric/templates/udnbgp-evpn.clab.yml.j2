@@ -1,0 +1,151 @@
+{#
+  containerlab topology for phase 4: a small EVPN fabric.
+
+    leaf1  - border leaf. Still the router the OCP nodes peer with, exactly
+             as in phases 1-3: same untagged default-VRF session, same
+             per-tenant VLANs and VRFs. What is added is that each tenant VRF
+             is now mapped to an EVPN VNI and carried over VXLAN.
+    spine  - route reflector for the l2vpn evpn address family. No VTEP, no
+             tenant VRFs; it never sees tenant traffic in the data plane,
+             only carries EVPN routes between the leaves and forwards VXLAN.
+    leaf2  - the far-end leaf. The tenant external endpoints move behind it,
+             so a pod reaching {{ udn_bgp_tenants[0].external_host }} now
+             genuinely crosses the fabric, gets VXLAN-encapsulated on leaf1,
+             decapsulated on leaf2, and lands in the right VRF.
+
+  That last point is the reason for a three-node fabric rather than two: with
+  the endpoints hanging off leaf1, EVPN would be configured and never
+  actually carry anything, and every test would pass whether or not the
+  overlay worked.
+
+  Underlay: point-to-point /30s between each leaf and the spine, eBGP for
+  IPv4 unicast (so loopbacks are reachable), iBGP inside the spine's ASN for
+  l2vpn evpn with the spine as route reflector. That is the conventional
+  arrangement and it is what lets the leaves keep next hops intact.
+
+    leaf1 lo0 10.0.0.1   leaf1:eth10 <-> spine:eth1   10.1.0.0/30
+    leaf2 lo0 10.0.0.2   leaf2:eth10 <-> spine:eth2   10.1.0.4/30
+    spine lo0 10.0.0.254
+
+  Whether the OCP nodes themselves are VTEPs depends on the cluster: on
+  OpenShift {{ udn_bgp_evpn_min_version }}+ with the cluster-side phase-4
+  manifests applied, they are, and they peer EVPN with the spine directly.
+  On an older cluster they are not, and leaf1 is the VTEP for them - the
+  cluster hands its tenants off with ordinary VRF-Lite and leaf1 maps VRF to
+  VNI. Both are real designs; this topology serves either without change.
+#}
+name: {{ clab_lab_name }}
+
+mgmt:
+  network: {{ clab_lab_name }}-mgmt
+  ipv4-subnet: 172.30.30.0/24
+
+topology:
+  kinds:
+    linux:
+      image: {{ clab_frr_image }}
+
+  nodes:
+    {{ clab_bridge_for_topology }}:
+      kind: bridge
+
+    leaf1:
+      kind: linux
+      image: {{ clab_frr_image }}
+      binds:
+        - leaf1/frr.conf:/etc/frr/frr.conf
+        - leaf1/daemons:/etc/frr/daemons
+      exec:
+        - ip link add lo0 type dummy
+        - ip addr add 10.0.0.1/32 dev lo0
+        - ip link set lo0 up
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+        - ip addr add {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}/{{ clab_fabric_netmask_bits }} dev eth1
+        - ip link set eth10 mtu {{ clab_fabric_mtu }} up
+        - ip addr add 10.1.0.1/30 dev eth10
+{% for t in udn_bgp_tenants %}
+        ## Tenant {{ t.name }}: VRF bound to IP-VRF VNI {{ t.evpn_ip_vni }}.
+        ## FRR reads the 'vni' from the VRF device's linked VXLAN interface,
+        ## so the VRF, its VXLAN device and the bridge that ties them together
+        ## all have to exist before bgpd starts - hence the restart at the end.
+        - ip link add {{ t.name }} type vrf table {{ 1000 + t.vlan }}
+        - ip link set {{ t.name }} up
+        - ip link add link eth1 name eth1.{{ t.vlan }} type vlan id {{ t.vlan }}
+        - ip link set eth1.{{ t.vlan }} master {{ t.name }}
+        - ip link set eth1.{{ t.vlan }} mtu {{ clab_fabric_mtu }} up
+        - ip addr add {{ t.vrf_prefix }}.{{ clab_fabric_router_octet }}/{{ clab_fabric_netmask_bits }} dev eth1.{{ t.vlan }}
+        ## L3VNI plumbing: a VXLAN device in the tenant's VNI, a bridge to
+        ## hold it, and the bridge enslaved to the VRF. This is the standard
+        ## Linux/FRR symmetric-IRB arrangement.
+        - ip link add vni{{ t.evpn_ip_vni }} type vxlan id {{ t.evpn_ip_vni }} local 10.0.0.1 dstport 4789 nolearning
+        - ip link add br{{ t.evpn_ip_vni }} type bridge
+        - ip link set br{{ t.evpn_ip_vni }} master {{ t.name }}
+        - ip link set vni{{ t.evpn_ip_vni }} master br{{ t.evpn_ip_vni }}
+        - ip link set vni{{ t.evpn_ip_vni }} type bridge_slave neigh_suppress on learning off
+        - ip link set vni{{ t.evpn_ip_vni }} mtu {{ clab_fabric_mtu }} up
+        - ip link set br{{ t.evpn_ip_vni }} mtu {{ clab_fabric_mtu }} up
+{% endfor %}
+        - /usr/lib/frr/frrinit.sh restart
+
+    spine:
+      kind: linux
+      image: {{ clab_frr_image }}
+      binds:
+        - spine/frr.conf:/etc/frr/frr.conf
+        - spine/daemons:/etc/frr/daemons
+      exec:
+        - ip link add lo0 type dummy
+        - ip addr add 10.0.0.254/32 dev lo0
+        - ip link set lo0 up
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+        - ip addr add 10.1.0.2/30 dev eth1
+        - ip link set eth2 mtu {{ clab_fabric_mtu }} up
+        - ip addr add 10.1.0.5/30 dev eth2
+        - /usr/lib/frr/frrinit.sh restart
+
+    leaf2:
+      kind: linux
+      image: {{ clab_frr_image }}
+      binds:
+        - leaf2/frr.conf:/etc/frr/frr.conf
+        - leaf2/daemons:/etc/frr/daemons
+      exec:
+        - ip link add lo0 type dummy
+        - ip addr add 10.0.0.2/32 dev lo0
+        - ip link set lo0 up
+        - ip link set eth10 mtu {{ clab_fabric_mtu }} up
+        - ip addr add 10.1.0.6/30 dev eth10
+{% for t in udn_bgp_tenants %}
+        - ip link add {{ t.name }} type vrf table {{ 1000 + t.vlan }}
+        - ip link set {{ t.name }} up
+        - ip link add vni{{ t.evpn_ip_vni }} type vxlan id {{ t.evpn_ip_vni }} local 10.0.0.2 dstport 4789 nolearning
+        - ip link add br{{ t.evpn_ip_vni }} type bridge
+        - ip link set br{{ t.evpn_ip_vni }} master {{ t.name }}
+        - ip link set vni{{ t.evpn_ip_vni }} master br{{ t.evpn_ip_vni }}
+        - ip link set vni{{ t.evpn_ip_vni }} type bridge_slave neigh_suppress on learning off
+        - ip link set vni{{ t.evpn_ip_vni }} mtu {{ clab_fabric_mtu }} up
+        - ip link set br{{ t.evpn_ip_vni }} mtu {{ clab_fabric_mtu }} up
+        ## The tenant's external network now lives here, behind the far leaf.
+        - ip link set {{ t.name }}-ext master {{ t.name }}
+        - ip addr add {{ t.external_gw }}/{{ t.external_prefix_bits }} dev {{ t.name }}-ext
+        - ip link set {{ t.name }}-ext up
+{% endfor %}
+        - /usr/lib/frr/frrinit.sh restart
+
+{% for t in udn_bgp_tenants %}
+    {{ t.name }}-ext:
+      kind: linux
+      image: {{ clab_alpine_image }}
+      exec:
+        - ip addr add {{ t.external_host }}/{{ t.external_prefix_bits }} dev eth1
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+        - ip route replace default via {{ t.external_gw }} dev eth1
+{% endfor %}
+
+  links:
+    - endpoints: ["leaf1:eth1", "{{ clab_bridge_for_topology }}:leaf1-fab"]
+    - endpoints: ["leaf1:eth10", "spine:eth1"]
+    - endpoints: ["leaf2:eth10", "spine:eth2"]
+{% for t in udn_bgp_tenants %}
+    - endpoints: ["leaf2:{{ t.name }}-ext", "{{ t.name }}-ext:eth1"]
+{% endfor %}

@@ -1,0 +1,87 @@
+---
+# Tasks file for setup-clab-fabric
+#
+# Builds the provider network the UDN/BGP lab peers with: an isolated L2
+# fabric (virbr1), a second NIC on each OCP node attached to it, and a
+# containerlab topology of FRR routers on the same bridge.
+#
+# Nothing here touches virbr0, the hub, the hosted clusters, MetalLB or any
+# node's default route. The single point of contact with the existing lab is
+# that the node VMs gain one extra, initially unconfigured NIC.
+#
+# Task ordering matters in one place only: the fabric network has to exist
+# before either a node NIC or the containerlab VM can be attached to it.
+
+- name: Validate clab_deploy_mode
+  ansible.builtin.assert:
+    that: clab_deploy_mode in ['vm', 'host']
+    fail_msg: "clab_deploy_mode must be 'vm' or 'host', got '{{ clab_deploy_mode }}'"
+  tags: [always]
+
+- name: Validate clab_topology
+  ansible.builtin.assert:
+    that: clab_topology in ['bgp', 'evpn']
+    fail_msg: "clab_topology must be 'bgp' or 'evpn', got '{{ clab_topology }}'"
+  tags: [always]
+
+# Two tenants sharing a VLAN, a VRF prefix or a VNI would produce a fabric
+# that looks built and behaves incoherently. Caught here rather than in FRR's
+# logs an hour later.
+- name: Validate that tenant VLANs, VRF prefixes and VNIs are unique
+  ansible.builtin.assert:
+    that:
+      - (udn_bgp_tenants | map(attribute='name') | list | unique | length) == (udn_bgp_tenants | length)
+      - (udn_bgp_tenants | map(attribute='vlan') | list | unique | length) == (udn_bgp_tenants | length)
+      - (udn_bgp_tenants | map(attribute='vrf_prefix') | list | unique | length) == (udn_bgp_tenants | length)
+      - (udn_bgp_tenants | map(attribute='udn_subnet_shared') | list | unique | length) == (udn_bgp_tenants | length)
+      - ((udn_bgp_tenants | map(attribute='evpn_mac_vni') | list) + (udn_bgp_tenants | map(attribute='evpn_ip_vni') | list)) | unique | length == (udn_bgp_tenants | length) * 2
+    fail_msg: >-
+      udn_bgp_tenants must have unique name, vlan, vrf_prefix,
+      udn_subnet_shared and EVPN VNI values. Note udn_subnet is deliberately
+      allowed to overlap between tenants - that is the VRF-Lite isolation
+      test - but udn_subnet_shared is leaked into one VRF in phase 2 and
+      must not.
+  tags: [always]
+
+# Where the containerlab half of this role runs. In 'vm' mode every task
+# that installs Docker, creates the in-guest bridge or drives containerlab is
+# delegated to the containerlab VM over ssh; in 'host' mode it all stays on
+# the bare-metal host. The fabric bridge and the node NICs are libvirt
+# operations and always run on the host either way.
+- name: Decide where containerlab itself runs
+  ansible.builtin.set_fact:
+    clab_exec_host: >-
+      {{ (lab_network_prefix ~ '.' ~ ip_list.clab) if clab_deploy_mode == 'vm' else 'localhost' }}
+  tags: [always]
+
+- name: Build the fabric bridge
+  ansible.builtin.include_tasks: fabric-network.yml
+  tags: [fabric, network]
+
+- name: Attach a fabric NIC to each OCP node VM
+  ansible.builtin.include_tasks: node-nics.yml
+  tags: [fabric, nodenics]
+
+- name: Build the containerlab VM
+  ansible.builtin.include_tasks: clab-vm.yml
+  when: clab_deploy_mode == 'vm'
+  tags: [fabric, clabvm]
+
+# 'apply' propagates delegate_to onto every task in the included file, which
+# is what lets one role body serve both deployment modes without a when: on
+# each task. delegate_facts is deliberately not set: these tasks read lab
+# variables (ip_list, the tenant list) that belong to the controller's view,
+# and only the connection should move.
+- name: Install Docker and containerlab
+  ansible.builtin.include_tasks:
+    file: clab-install.yml
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+  tags: [fabric, clabinstall]
+
+- name: Render the topology and deploy the fabric
+  ansible.builtin.include_tasks:
+    file: clab-deploy.yml
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+  tags: [fabric, clabdeploy]

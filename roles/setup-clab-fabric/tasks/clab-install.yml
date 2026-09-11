@@ -1,0 +1,174 @@
+---
+# Phase 0d - Docker, containerlab, and the in-guest fabric bridge.
+#
+# Runs wherever clab_deploy_mode put the fabric: delegated to the clab VM in
+# 'vm' mode, on the bare-metal host in 'host' mode. Everything below is
+# written to be correct in both, which is why it never assumes the fabric
+# bridge is libvirt's.
+#
+# In 'vm' mode the guest needs its own bridge, because containerlab's
+# 'bridge' kind attaches veths to an EXISTING Linux bridge and the guest has
+# a NIC, not a bridge. Enslaving the fabric NIC to a plain (vlan_filtering=0)
+# in-guest bridge extends virbr1 into the VM: FRR containers hang off the
+# guest bridge, their frames - 802.1Q tags and all - go out the virtio NIC,
+# across virbr1, and into the OCP nodes' taps. A plain Linux bridge forwards
+# tagged frames transparently, which is exactly what VRF-Lite needs, and the
+# virtio tap on the host passes frames with the containers' own source MACs
+# because libvirt applies no nwfilter by default.
+#
+# In 'host' mode there is nothing to do here - virbr1 IS the bridge
+# containerlab attaches to.
+
+- name: Install container and networking tooling
+  ansible.builtin.dnf:
+    name:
+      - iproute
+      - tcpdump
+      - bridge-utils
+      - iptables-nft
+      - git
+      - tar
+    state: present
+
+- name: Install Docker CE from the upstream repository
+  block:
+    - name: Add the Docker CE repository
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/rhel/docker-ce.repo
+        dest: /etc/yum.repos.d/docker-ce.repo
+        mode: '0644'
+
+    - name: Install Docker CE
+      ansible.builtin.dnf:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+
+    - name: Start and enable Docker
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+  rescue:
+    - name: Report that Docker could not be installed
+      ansible.builtin.fail:
+        msg: >-
+          Docker CE could not be installed. On a subscription-attached RHEL9
+          this usually means the container-tools module is masking it, or the
+          host has no route to download.docker.com. containerlab also runs on
+          podman - set the CLAB_RUNTIME=podman environment variable and
+          install podman instead - but the bridge-kind wiring this lab relies
+          on is far better tested on Docker, so fix the repo rather than
+          switching runtime if you can.
+
+- name: Check whether containerlab is already installed
+  ansible.builtin.command:
+    cmd: containerlab version
+  register: clab_version
+  failed_when: false
+  changed_when: false
+
+- name: Install containerlab
+  ansible.builtin.shell:
+    cmd: "curl -sL https://get.containerlab.dev | bash -s -- -v {{ clab_version_pin }}"
+  when: clab_version.rc != 0
+
+- name: Report the containerlab version in use
+  ansible.builtin.command:
+    cmd: containerlab version
+  register: clab_version_after
+  changed_when: false
+
+- name: Show containerlab version
+  ansible.builtin.debug:
+    msg: "{{ clab_version_after.stdout_lines }}"
+
+# ---------------------------------------------------------------------------
+# vm mode only: extend virbr1 into the guest.
+# ---------------------------------------------------------------------------
+- name: Find the fabric NIC inside the containerlab VM by MAC
+  ansible.builtin.shell:
+    cmd: >-
+      ip -o link show |
+      awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}/ {gsub(":","",$2); print $2; exit}'
+  register: clab_guest_nic
+  changed_when: false
+  when: clab_deploy_mode == 'vm'
+
+- name: Fail if the fabric NIC is not visible in the containerlab VM
+  ansible.builtin.assert:
+    that: clab_guest_nic.stdout | length > 0
+    fail_msg: >-
+      No interface with MAC {{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}
+      inside {{ clab_vm_name }}. The VM was defined with two NICs - if it
+      predates this role it has only one. Add it with:
+        virsh attach-interface {{ clab_vm_name }} --type network
+          --source {{ clab_fabric_network }} --model virtio
+          --mac {{ clab_fabric_mac_prefix }}:{{ ip_list.clab }} --live --config
+  when: clab_deploy_mode == 'vm'
+
+- name: Create the in-guest fabric bridge and enslave the fabric NIC
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      ip link show {{ clab_guest_bridge }} >/dev/null 2>&1 || {
+        ip link add name {{ clab_guest_bridge }} type bridge
+        # vlan_filtering stays 0 (the default): the bridge must forward
+        # 802.1Q-tagged frames untouched for VRF-Lite to work. Turning it on
+        # would require a PVID/vid table per port and silently drop tagged
+        # traffic until one existed.
+        ip link set {{ clab_guest_bridge }} type bridge vlan_filtering 0
+      }
+      ip link set {{ clab_guest_bridge }} mtu {{ clab_fabric_mtu }}
+      ip link set {{ clab_guest_bridge }} up
+      # NetworkManager will otherwise keep trying DHCP on a NIC that has no
+      # DHCP server and periodically bounce the carrier under the bridge.
+      nmcli device set {{ clab_guest_nic.stdout }} managed no || true
+      ip link set {{ clab_guest_nic.stdout }} mtu {{ clab_fabric_mtu }}
+      ip link set {{ clab_guest_nic.stdout }} up
+      ip link set {{ clab_guest_nic.stdout }} master {{ clab_guest_bridge }}
+    executable: /bin/bash
+  when: clab_deploy_mode == 'vm'
+
+# ip link is not persistent. A reboot of the clab VM would leave containerlab
+# pointing at a bridge that no longer exists, which presents as every BGP
+# session down and no obvious cause. A tiny oneshot unit is less surprising
+# here than an NM connection profile, because the bridge deliberately has no
+# IP configuration for NM to manage.
+- name: Make the in-guest fabric bridge survive a reboot
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/clab-fabric-bridge.service
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Fabric bridge for the containerlab UDN/BGP lab
+      After=network-pre.target
+      Before=docker.service
+      Wants=network-pre.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/sbin/ip link add name {{ clab_guest_bridge }} type bridge
+      ExecStart=/sbin/ip link set {{ clab_guest_bridge }} type bridge vlan_filtering 0
+      ExecStart=/sbin/ip link set {{ clab_guest_bridge }} mtu {{ clab_fabric_mtu }}
+      ExecStart=/sbin/ip link set {{ clab_guest_bridge }} up
+      ExecStart=/sbin/ip link set {{ clab_guest_nic.stdout }} mtu {{ clab_fabric_mtu }}
+      ExecStart=/sbin/ip link set {{ clab_guest_nic.stdout }} up
+      ExecStart=/sbin/ip link set {{ clab_guest_nic.stdout }} master {{ clab_guest_bridge }}
+      # The unit is idempotent by being allowed to fail on the "already
+      # exists" paths rather than by guarding each step.
+      SuccessExitStatus=0 1 2
+
+      [Install]
+      WantedBy=multi-user.target
+  when: clab_deploy_mode == 'vm'
+
+- name: Enable the fabric bridge unit
+  ansible.builtin.systemd:
+    name: clab-fabric-bridge
+    enabled: true
+    daemon_reload: true
+  when: clab_deploy_mode == 'vm'

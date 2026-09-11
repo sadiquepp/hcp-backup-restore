@@ -1,0 +1,60 @@
+{#
+  VRF-Lite handoff for one tenant on one node.
+
+  Adds a VLAN subinterface on the fabric NIC, gives it this tenant's
+  point-to-point address, and enslaves it to the VRF OVN-Kubernetes already
+  created for the tenant's UDN.
+
+  The port list below is the discovered list PLUS the new VLAN, not just the
+  VLAN. NMState rewrites a VRF's ports to exactly what is declared, so
+  omitting {{ vrf_fact.ports | join(', ') }} here would detach OVN-Kubernetes'
+  own management port from the VRF and take the tenant's pods off the network
+  on this node. The values came from vrflite-discover.yml reading the live
+  node; they are not guesses and they are not defaults.
+
+  route-table-id is likewise the id OVN-Kubernetes allocated
+  ({{ vrf_fact.table }}). Declaring a different one makes NMState recreate the
+  VRF instead of editing it, with the same consequence.
+
+  The VLAN interface carries an address and nothing else - no gateway, no
+  routes, no DNS. Routes into this VRF arrive over BGP from the leaf.
+#}
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: vrflite-{{ vrf_fact.tenant }}-{{ vrf_fact.ip_key }}
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: {{ vrf_fact.node }}
+  capture:
+    fabric-nic: interfaces.mac-address=="{{ clab_fabric_mac_prefix | upper }}:{{ ip_list[vrf_fact.ip_key] }}"
+  desiredState:
+    interfaces:
+      - name: "{{ '{{' }} capture.fabric-nic.interfaces.0.name {{ '}}' }}.{{ vrf_fact.vlan }}"
+        type: vlan
+        state: up
+        mtu: {{ clab_fabric_mtu }}
+        vlan:
+          base-iface: "{{ '{{' }} capture.fabric-nic.interfaces.0.name {{ '}}' }}"
+          id: {{ vrf_fact.vlan }}
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: {{ vrf_fact.vrf_prefix }}.{{ ip_list[vrf_fact.ip_key] }}
+              prefix-length: {{ clab_fabric_netmask_bits }}
+        ipv6:
+          enabled: false
+
+      - name: {{ vrf_fact.vrf }}
+        type: vrf
+        state: up
+        vrf:
+          route-table-id: {{ vrf_fact.table }}
+          port:
+{% for p in vrf_fact.ports %}
+            ## Pre-existing port, owned by OVN-Kubernetes - restated so
+            ## NMState does not remove it.
+            - {{ p }}
+{% endfor %}
+            - "{{ '{{' }} capture.fabric-nic.interfaces.0.name {{ '}}' }}.{{ vrf_fact.vlan }}"

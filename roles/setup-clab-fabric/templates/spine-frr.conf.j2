@@ -1,0 +1,66 @@
+{#
+  Spine.
+
+  Deliberately dumb: it carries the underlay and reflects EVPN routes between
+  the leaves. It has no tenant VRFs, no VXLAN devices and no VTEP, so tenant
+  traffic passes through it as opaque VXLAN and it can never leak a route
+  between tenants by accident.
+
+  'retain route-target all' is essential on a route reflector that holds no
+  VRFs of its own: without it the spine drops every EVPN route whose route
+  target it does not import locally - which, having no VRFs, is all of them.
+  The symptom is EVPN sessions up, routes on both leaves, and nothing
+  reaching the other side.
+#}
+frr version 10.2
+frr defaults datacenter
+hostname spine
+log stdout
+service integrated-vtysh-config
+!
+router bgp {{ clab_spine_asn }}
+ bgp router-id 10.0.0.254
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+ neighbor 10.1.0.1 remote-as {{ clab_leaf1_asn }}
+ neighbor 10.1.0.1 description leaf1-underlay
+ neighbor 10.1.0.6 remote-as {{ clab_leaf2_asn }}
+ neighbor 10.1.0.6 description leaf2-underlay
+ neighbor 10.0.0.1 remote-as {{ clab_leaf1_asn }}
+ neighbor 10.0.0.1 description leaf1-evpn
+ neighbor 10.0.0.1 update-source lo0
+ neighbor 10.0.0.1 ebgp-multihop 3
+ neighbor 10.0.0.2 remote-as {{ clab_leaf2_asn }}
+ neighbor 10.0.0.2 description leaf2-evpn
+ neighbor 10.0.0.2 update-source lo0
+ neighbor 10.0.0.2 ebgp-multihop 3
+ !
+ address-family ipv4 unicast
+  network 10.0.0.254/32
+  neighbor 10.1.0.1 activate
+  neighbor 10.1.0.6 activate
+  no neighbor 10.0.0.1 activate
+  no neighbor 10.0.0.2 activate
+ exit-address-family
+ !
+ address-family l2vpn evpn
+  neighbor 10.0.0.1 activate
+  neighbor 10.0.0.2 activate
+  ! Keep next hops intact so the leaves tunnel to each other directly rather
+  ! than through the spine - the spine is a control-plane reflector, not a
+  ! data-plane gateway.
+  neighbor 10.0.0.1 route-map NEXTHOP-UNCHANGED out
+  neighbor 10.0.0.2 route-map NEXTHOP-UNCHANGED out
+  ! See the note at the top: the spine holds no VRFs, so without this it
+  ! discards every EVPN route it is meant to be reflecting.
+  bgp retain route-target all
+ exit-address-family
+exit
+!
+route-map NEXTHOP-UNCHANGED permit 10
+ set ip next-hop unchanged
+!
+bgp route-reflector allow-outbound-policy
+!
+line vty
+!

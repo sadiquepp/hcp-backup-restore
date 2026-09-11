@@ -1,0 +1,149 @@
+---
+# Phase 3a - find the VRF OVN-Kubernetes created for each tenant.
+#
+# This is the step that cannot be templated from static values, and skipping
+# it is the most likely way to break a working cluster.
+#
+# When a primary UDN exists, OVN-Kubernetes creates a Linux VRF per network
+# on every node and enslaves its own management port (ovn-k8s-mpN) to it.
+# VRF-Lite then needs a VLAN subinterface added to that SAME VRF so the
+# tenant's BGP session runs inside it.
+#
+# The trap: NMState treats a VRF's port list as declarative. Writing a policy
+# that declares the VRF with only the VLAN in ports removes ovn-k8s-mpN,
+# which severs the UDN from the node and takes the tenant's pods off the
+# network. So the port list has to be read first and re-stated in full.
+# Hence: discover, then template, then apply - never template blind.
+#
+# The route-table id has to be preserved for the same reason: it is allocated
+# by OVN-Kubernetes, and a policy that names a different one recreates the
+# VRF rather than editing it.
+
+- name: Check that the tenant CUDNs exist before looking for their VRFs
+  ansible.builtin.command:
+    cmd: "oc get clusteruserdefinednetwork {{ item.name }}"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: udn_bgp_cudn_check
+  failed_when: false
+  changed_when: false
+
+- name: Fail if a tenant CUDN is missing
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      ClusterUserDefinedNetwork '{{ item.item.name }}' does not exist. The
+      per-tenant VRFs are created by OVN-Kubernetes in response to the CUDN,
+      so the CUDNs must be applied (and their pods scheduled) before VRF-Lite
+      can be wired. Run the 'udn' tag first.
+  loop: "{{ udn_bgp_cudn_check.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+# One debug pod per node. 'ip -j -d link show' returns the whole link table
+# as JSON in a single call, which is worth doing rather than parsing 'ip'
+# text output through awk: every VRF, its route table and its enslaved ports
+# are all derivable from it, and there is no quoting to get wrong through
+# YAML -> shell -> oc debug -> chroot.
+#
+# In that JSON a VRF is an entry with linkinfo.info_kind == "vrf" (its table
+# id is linkinfo.info_data.table), and its ports are the entries whose
+# "master" is that VRF's ifname.
+- name: Read the link table from each node
+  ansible.builtin.command:
+    cmd: "oc debug node/{{ item.node }} --quiet -- chroot /host ip -j -d link show"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.node }}"
+  register: udn_bgp_links_raw
+  changed_when: false
+
+- name: Summarise the VRFs found on each node
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.item.node }}:
+      {{ item.stdout | from_json
+         | selectattr('linkinfo', 'defined')
+         | selectattr('linkinfo.info_kind', 'defined')
+         | selectattr('linkinfo.info_kind', 'equalto', 'vrf')
+         | map(attribute='ifname') | list | default(['(no VRFs found)'], true) }}
+  loop: "{{ udn_bgp_links_raw.results }}"
+  loop_control:
+    label: "{{ item.item.node }}"
+
+# Turn the JSON into one dict per (node, tenant):
+#   {node, ip_key, tenant, vlan, vrf_prefix, vrf, table, ports[]}
+# Only tenants whose VRF is actually present are kept; a missing one is
+# asserted on next, with a message that says what to do about it, rather than
+# silently producing a policy with an empty VRF name and an empty port list -
+# which is the exact shape that would detach ovn-k8s-mpN.
+- name: Parse the discovered VRFs into facts
+  ansible.builtin.set_fact:
+    udn_bgp_vrf_facts: >-
+      {{ udn_bgp_vrf_facts | default([]) + [{
+           'node': item.0.item.node,
+           'ip_key': item.0.item.ip_key,
+           'tenant': item.1.name,
+           'vlan': item.1.vlan,
+           'vrf_prefix': item.1.vrf_prefix,
+           'vrf': item.1.name,
+           'table': (item.0.stdout | from_json
+                     | selectattr('ifname', 'equalto', item.1.name)
+                     | map(attribute='linkinfo.info_data.table')
+                     | first),
+           'ports': (item.0.stdout | from_json
+                     | selectattr('master', 'defined')
+                     | selectattr('master', 'equalto', item.1.name)
+                     | map(attribute='ifname') | list)
+         }] }}
+  loop: "{{ udn_bgp_links_raw.results | product(udn_bgp_tenants) | list }}"
+  loop_control:
+    label: "{{ item.0.item.node }}/{{ item.1.name }}"
+  when:
+    - item.0.stdout | from_json
+      | selectattr('linkinfo', 'defined')
+      | selectattr('linkinfo.info_kind', 'defined')
+      | selectattr('linkinfo.info_kind', 'equalto', 'vrf')
+      | selectattr('ifname', 'equalto', item.1.name)
+      | list | length > 0
+
+- name: Fail if any node is missing a tenant VRF
+  ansible.builtin.assert:
+    that: (udn_bgp_vrf_facts | default([]) | length) == (clab_fabric_nodes | length) * (udn_bgp_tenants | length)
+    fail_msg: >-
+      Expected {{ (clab_fabric_nodes | length) * (udn_bgp_tenants | length) }}
+      tenant VRFs ({{ clab_fabric_nodes | length }} nodes x
+      {{ udn_bgp_tenants | length }} tenants) but found
+      {{ udn_bgp_vrf_facts | default([]) | length }}.
+
+      This role looks for a VRF named exactly after each tenant CUDN
+      ({{ udn_bgp_tenants | map(attribute='name') | join(', ') }}). The VRFs
+      actually present on each node are listed in the task above - read that
+      output first, because there are two quite different causes:
+
+      1. The VRF does not exist yet. OVN-Kubernetes creates a node's UDN VRF
+         when that network first has something on the node, so a node with no
+         pod on a tenant network genuinely has no VRF. Confirm a test pod of
+         each tenant is Running on every node in clab_fabric_nodes
+         (`oc get pods -A -o wide -l app=udn-test`) and re-run.
+
+      2. The VRF exists under a different name. The naming convention is
+         OVN-Kubernetes', not this lab's, and it can change between releases.
+         If the listed VRFs are the tenants' under another name, that name is
+         what belongs in the 'vrf' field here and in
+         templates/frrconfiguration-vrflite.yaml.j2 - they must match the
+         kernel device exactly, because FRR-K8s passes the value straight
+         through to FRR's 'router bgp <asn> vrf <name>'.
+
+- name: Report the VRF facts VRF-Lite will be built from
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.node }} / {{ item.tenant }}: VRF {{ item.vrf }}
+      table {{ item.table }},
+      existing ports {{ item.ports | join(', ') }}
+      -> adding VLAN {{ item.vlan }} at
+      {{ item.vrf_prefix }}.{{ ip_list[item.ip_key] }}/{{ clab_fabric_netmask_bits }}
+  loop: "{{ udn_bgp_vrf_facts | default([]) }}"
+  loop_control:
+    label: "{{ item.node }}/{{ item.tenant }}"

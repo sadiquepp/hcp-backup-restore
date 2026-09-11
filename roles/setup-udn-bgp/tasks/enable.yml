@@ -1,0 +1,75 @@
+---
+# Phase 1a - turn on FRR and route advertisements.
+#
+# One merge patch does both, and it has to: route advertisements cannot be
+# Enabled unless the FRR routing-capability provider is already available, so
+# setting them in separate patches fails on the first one.
+#
+# This restarts every ovnkube-node pod. On this lab that is a few minutes of
+# rolling disruption to pod egress; the API, the hosted clusters' control
+# planes and MetalLB are unaffected.
+
+- name: Enable the FRR routing capability and route advertisements
+  ansible.builtin.command:
+    cmd: >-
+      oc patch network.operator.openshift.io cluster --type=merge
+      -p {{ patch | to_json | quote }}
+  vars:
+    patch:
+      spec:
+        additionalRoutingCapabilities:
+          providers: ["FRR"]
+        defaultNetwork:
+          ovnKubernetesConfig:
+            routeAdvertisements: "Enabled"
+  register: udn_bgp_enable_patch
+  changed_when: "'patched' in udn_bgp_enable_patch.stdout and 'no change' not in udn_bgp_enable_patch.stdout"
+
+# VRF-Lite and EVPN are only implemented in local gateway mode. Done as a
+# separate, opt-out patch because flipping gateway mode is a second full
+# ovnkube-node rollout and changes how ALL pod egress leaves the node - not
+# something to do silently on the way to a phase that may not need it.
+- name: Switch OVN-Kubernetes to local gateway mode (required for VRF-Lite and EVPN)
+  ansible.builtin.command:
+    cmd: >-
+      oc patch network.operator.openshift.io cluster --type=merge
+      -p {{ patch | to_json | quote }}
+  vars:
+    patch:
+      spec:
+        defaultNetwork:
+          ovnKubernetesConfig:
+            gatewayConfig:
+              routingViaHost: true
+  when: udn_bgp_set_local_gateway | bool
+  register: udn_bgp_gateway_patch
+  changed_when: "'patched' in udn_bgp_gateway_patch.stdout and 'no change' not in udn_bgp_gateway_patch.stdout"
+
+- name: Wait for the network operator to finish rolling out
+  ansible.builtin.command:
+    cmd: >-
+      oc wait clusteroperator/network
+      --for=condition=Progressing=False
+      --timeout={{ udn_bgp_rollout_timeout }}s
+  changed_when: false
+
+- name: Wait for the network operator to report Available
+  ansible.builtin.command:
+    cmd: >-
+      oc wait clusteroperator/network
+      --for=condition=Available=True
+      --timeout={{ udn_bgp_rollout_timeout }}s
+  changed_when: false
+
+- name: Confirm FRR-K8s is running on every node
+  ansible.builtin.command:
+    cmd: "oc get daemonset frr-k8s -n {{ udn_bgp_frrk8s_namespace }} -o wide"
+  register: udn_bgp_frrk8s_ds
+  retries: 20
+  delay: 15
+  until: udn_bgp_frrk8s_ds.rc == 0
+  changed_when: false
+
+- name: Show the FRR-K8s daemonset
+  ansible.builtin.debug:
+    msg: "{{ udn_bgp_frrk8s_ds.stdout_lines }}"

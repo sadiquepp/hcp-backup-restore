@@ -1,0 +1,68 @@
+{#
+  Per-tenant test namespace and workload.
+
+  The namespace carries udn-tenant={{ tenant.name }}, which is what binds it
+  to that tenant's ClusterUserDefinedNetwork. This label MUST be present when
+  the namespace is created - OVN-Kubernetes binds a primary network at
+  namespace creation and labelling an existing namespace afterwards does
+  nothing at all. That is why this template ships namespace and workload
+  together and why the apply task deletes and recreates rather than patching.
+
+  A DaemonSet rather than a Deployment, deliberately: VRF-Lite is per node,
+  and a tenant VRF only exists on a node that has something on that network.
+  One pod per node makes every node's VRF real and gives the verification
+  steps somewhere to exec on whichever node they care about.
+
+  The image is the cluster's own tools image - already present on every node,
+  so this needs no registry access, which keeps it working on the
+  disconnected hubs too.
+#}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: udn-{{ tenant.name }}
+  labels:
+    udn-tenant: {{ tenant.name }}
+    {# Primary UDNs require these to be relaxed - the pods get their address
+       from the UDN, not from the cluster default network, and the restricted
+       PSA profile blocks the tooling the tests need (ip, ping, tcpdump). #}
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: udn-test
+  namespace: udn-{{ tenant.name }}
+spec:
+  selector:
+    matchLabels:
+      app: udn-test
+      tenant: {{ tenant.name }}
+  template:
+    metadata:
+      labels:
+        app: udn-test
+        tenant: {{ tenant.name }}
+    spec:
+      containers:
+        - name: shell
+          image: registry.redhat.io/rhel9/support-tools:latest
+          command: ["/bin/bash", "-c", "sleep infinity"]
+          securityContext:
+            capabilities:
+              add: ["NET_RAW", "NET_ADMIN"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+      {# Workers only. The fabric NICs are on workers (clab_fabric_nodes), so
+         a pod on a master would have no VRF-Lite path and would fail the
+         tests for a reason that has nothing to do with what is being
+         tested. #}
+      nodeSelector:
+        node-role.kubernetes.io/worker: ""
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule

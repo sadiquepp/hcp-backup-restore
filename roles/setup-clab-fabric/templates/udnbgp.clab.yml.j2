@@ -1,0 +1,104 @@
+{#
+  containerlab topology for phases 1-3: BGP, UDN-over-BGP, and VRF-Lite.
+
+  One border leaf ("leaf1") plays the provider-edge router the cluster peers
+  with, plus one small endpoint container per tenant standing in for
+  "something on the customer's network that a UDN pod should be able to
+  reach". The endpoints exist so the verification steps can ping a real
+  address rather than the router's own interface - a router answering its own
+  IP proves the session is up but proves nothing about forwarding, VRF
+  separation or the return path.
+
+  leaf1 attaches to {{ clab_bridge_for_topology }} with containerlab's
+  'bridge' kind, which puts one end of a veth into that bridge. That bridge
+  is the same L2 domain as the OCP nodes' second NICs, so leaf1 and the nodes
+  are directly adjacent at layer 2 - no routing, no tunnelling, no NAT
+  between them. That adjacency is the whole trick: everything else is
+  ordinary BGP.
+
+  Addressing, all on {{ clab_bridge_for_topology }}:
+    untagged        {{ clab_fabric_prefix }}.0/{{ clab_fabric_netmask_bits }}   leaf1 .{{ clab_fabric_router_octet }}, nodes on their ip_list octet
+{% for t in udn_bgp_tenants %}
+    VLAN {{ t.vlan }} ({{ t.name }})  {{ t.vrf_prefix }}.0/{{ clab_fabric_netmask_bits }}   leaf1 .{{ clab_fabric_router_octet }}, nodes on their ip_list octet
+{% endfor %}
+
+  The VLAN subinterfaces and VRFs inside leaf1 are built by the 'exec' block
+  below rather than by FRR, because they are kernel netdevs - FRR configures
+  routing over them, it does not create them. FRR is restarted at the end of
+  the exec list so that bgpd sees every VRF at startup; zebra does pick VRFs
+  up dynamically, but a restart removes the question entirely and costs a
+  second.
+#}
+name: {{ clab_lab_name }}
+
+mgmt:
+  {# containerlab's own management network. Used only to pull images and to
+     'docker exec' into nodes - no lab traffic crosses it. Given an explicit
+     subnet so it can never collide with {{ lab_network_prefix }}.0/24 or with
+     any tenant prefix. #}
+  network: {{ clab_lab_name }}-mgmt
+  ipv4-subnet: 172.30.30.0/24
+
+topology:
+  kinds:
+    linux:
+      image: {{ clab_frr_image }}
+
+  nodes:
+    ## The bridge the OCP nodes live on. containerlab does not create this -
+    ## it is {{ 'the libvirt fabric network (virbr1)' if clab_deploy_mode == 'host' else 'the in-guest bridge that virbr1 is extended into' }},
+    ## created before containerlab runs. containerlab also inserts FORWARD
+    ## ACCEPT rules for it, which is what keeps Docker's default DROP policy
+    ## from eating fabric traffic.
+    {{ clab_bridge_for_topology }}:
+      kind: bridge
+
+    leaf1:
+      kind: linux
+      image: {{ clab_frr_image }}
+      binds:
+        - leaf1/frr.conf:/etc/frr/frr.conf
+        - leaf1/daemons:/etc/frr/daemons
+      exec:
+        ## Fabric link: the untagged default-VRF session (phases 1 and 2).
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+        - ip addr add {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}/{{ clab_fabric_netmask_bits }} dev eth1
+{% for t in udn_bgp_tenants %}
+        ## Tenant {{ t.name }}: VRF + VLAN {{ t.vlan }} handoff (phase 3) and the
+        ## link down to its external endpoint. The table id is 1000+VLAN so it
+        ## is derivable by eye from the VLAN and cannot collide with the main
+        ## tables.
+        - ip link add {{ t.name }} type vrf table {{ 1000 + t.vlan }}
+        - ip link set {{ t.name }} up
+        - ip link add link eth1 name eth1.{{ t.vlan }} type vlan id {{ t.vlan }}
+        - ip link set eth1.{{ t.vlan }} master {{ t.name }}
+        - ip link set eth1.{{ t.vlan }} mtu {{ clab_fabric_mtu }} up
+        - ip addr add {{ t.vrf_prefix }}.{{ clab_fabric_router_octet }}/{{ clab_fabric_netmask_bits }} dev eth1.{{ t.vlan }}
+        - ip link set {{ t.name }}-ext master {{ t.name }}
+        - ip addr add {{ t.external_gw }}/{{ t.external_prefix_bits }} dev {{ t.name }}-ext
+        - ip link set {{ t.name }}-ext up
+{% endfor %}
+        ## Restart FRR now that every VRF and subinterface exists.
+        - /usr/lib/frr/frrinit.sh restart
+
+{% for t in udn_bgp_tenants %}
+    ## "Customer" endpoint on tenant {{ t.name }}'s external network. Deliberately
+    ## a plain container with a static route back - if a UDN pod can reach
+    ## {{ t.external_host }} then routing, the BGP-learned return path and (in
+    ## phase 3) the VRF separation are all genuinely working end to end.
+    {{ t.name }}-ext:
+      kind: linux
+      image: {{ clab_alpine_image }}
+      exec:
+        - ip addr add {{ t.external_host }}/{{ t.external_prefix_bits }} dev eth1
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+        - ip route replace default via {{ t.external_gw }} dev eth1
+{% endfor %}
+
+  links:
+    ## leaf1 into the OCP nodes' broadcast domain. Everything the cluster
+    ## peers over rides on this one link, untagged and VLAN-tagged alike.
+    - endpoints: ["leaf1:eth1", "{{ clab_bridge_for_topology }}:leaf1-fab"]
+{% for t in udn_bgp_tenants %}
+    - endpoints: ["leaf1:{{ t.name }}-ext", "{{ t.name }}-ext:eth1"]
+{% endfor %}

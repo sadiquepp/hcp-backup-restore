@@ -1,0 +1,112 @@
+---
+# Phase 0b - give each OCP node a second NIC on the fabric bridge.
+#
+# The node keeps its existing virbr0 NIC, its address, its DHCP reservation
+# and its default route. Nothing about how the node reaches the API, the
+# registry, DNS or MetalLB changes. All this adds is a second, unaddressed
+# link into the fabric broadcast domain, which NMState then configures in a
+# later phase.
+#
+# The MAC is 52:54:00:e2:55:<the node's existing last octet> - the lab's
+# usual scheme with the fifth octet bumped, so a fabric NIC is recognisable
+# at a glance and can never collide with a virbr0 DHCP reservation (those are
+# all 52:54:00:e2:54:*). It is also what the NMState policies match on, which
+# is why it has to be deterministic rather than generated.
+
+- name: Look up each node VM's current interfaces
+  ansible.builtin.command:
+    cmd: "virsh domiflist {{ item.domain }}"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  register: clab_domiflist
+  failed_when: false
+  changed_when: false
+
+- name: Fail with a useful message if a node VM does not exist
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      libvirt domain '{{ item.item.domain }}' does not exist on this host.
+      clab_fabric_nodes lists the VMs that get a fabric NIC - edit it in
+      vars.yaml to match the cluster you are actually attaching (the default
+      is hub1's three workers, built by setup_hub_cluster.yaml).
+  loop: "{{ clab_domiflist.results }}"
+  loop_control:
+    label: "{{ item.item.domain }}"
+
+- name: Check whether each node VM is running
+  ansible.builtin.shell:
+    cmd: "virsh domstate {{ item.domain }} | head -1"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  register: clab_domstate
+  changed_when: false
+
+# --live --config on a running domain hot-plugs the NIC and persists it;
+# --config alone is all a shut-off domain can take. Splitting the two is the
+# only reason this is two tasks rather than one.
+- name: Attach the fabric NIC to running node VMs (hot-plug + persist)
+  ansible.builtin.command:
+    cmd: >-
+      virsh attach-interface {{ item.0.domain }}
+      --type network --source {{ clab_fabric_network }}
+      --model virtio
+      --mac {{ clab_fabric_mac_prefix }}:{{ ip_list[item.0.ip_key] }}
+      --live --config
+  loop: "{{ clab_fabric_nodes | zip(clab_domiflist.results, clab_domstate.results) | list }}"
+  loop_control:
+    label: "{{ item.0.domain }}"
+  when:
+    - clab_fabric_mac_prefix ~ ':' ~ ip_list[item.0.ip_key] not in item.1.stdout
+    - "'running' in item.2.stdout"
+
+- name: Attach the fabric NIC to shut-off node VMs (persist only)
+  ansible.builtin.command:
+    cmd: >-
+      virsh attach-interface {{ item.0.domain }}
+      --type network --source {{ clab_fabric_network }}
+      --model virtio
+      --mac {{ clab_fabric_mac_prefix }}:{{ ip_list[item.0.ip_key] }}
+      --config
+  loop: "{{ clab_fabric_nodes | zip(clab_domiflist.results, clab_domstate.results) | list }}"
+  loop_control:
+    label: "{{ item.0.domain }}"
+  when:
+    - clab_fabric_mac_prefix ~ ':' ~ ip_list[item.0.ip_key] not in item.1.stdout
+    - "'running' not in item.2.stdout"
+
+- name: Re-read each node VM's interfaces
+  ansible.builtin.command:
+    cmd: "virsh domiflist {{ item.domain }}"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  register: clab_domiflist_after
+  changed_when: false
+
+- name: Report the fabric NIC each node now has
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.item.domain }} ({{ item.item.node }}):
+      fabric MAC {{ clab_fabric_mac_prefix }}:{{ ip_list[item.item.ip_key] }}
+      -> {{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}/{{ clab_fabric_netmask_bits }},
+      expected in-guest name {{ clab_fabric_nic_name }}
+  loop: "{{ clab_domiflist_after.results }}"
+  loop_control:
+    label: "{{ item.item.domain }}"
+
+# A hot-plugged NIC appears immediately, but RHCOS only settles on its
+# predictable name (enp2s0) and lets NetworkManager see it after udev has
+# processed it. That is fast, and nothing here depends on it having happened
+# yet - the NMState policies applied in later phases match on MAC precisely
+# so that this ordering never matters. Said out loud because "the NIC is not
+# there yet" is the first thing anyone suspects.
+- name: Note on in-guest visibility
+  ansible.builtin.debug:
+    msg: >-
+      Fabric NICs are attached. Confirm from the cluster with:
+        oc debug node/<node> -- chroot /host ip -br link | grep -i
+      '{{ clab_fabric_mac_prefix }}'
+      A VM that was shut off picks its NIC up on next boot.

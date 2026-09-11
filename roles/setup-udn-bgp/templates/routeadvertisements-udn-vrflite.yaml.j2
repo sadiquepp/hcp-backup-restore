@@ -1,0 +1,37 @@
+{#
+  Phase 3: VRF-Lite.
+
+  targetVRF 'auto' is the whole difference from phase 2. Instead of leaking
+  every selected UDN's routes into the default VRF, OVN-Kubernetes advertises
+  each network's subnet inside the VRF that corresponds to that network - so
+  blue's pod subnet goes out the blue VRF over the blue VLAN and is never
+  seen by red or by the default VRF.
+
+  That is what makes it legitimate for blue and red to carry the SAME pod
+  subnet ({{ udn_bgp_tenants | map(attribute='udn_subnet') | first }}), which
+  phase 2 could not do. It is also what makes the isolation test meaningful:
+  a blue pod must reach blue's external endpoint and must NOT reach red's,
+  even though both leaf-side networks are one hop away on the same physical
+  link.
+
+  Requires OVN-Kubernetes local gateway mode. In shared gateway mode this CR
+  is accepted and VRF-Lite does not work.
+#}
+apiVersion: k8s.ovn.org/v1
+kind: RouteAdvertisements
+metadata:
+  name: udn-vrflite
+spec:
+  targetVRF: auto
+  networkSelectors:
+    - networkSelectionType: ClusterUserDefinedNetworks
+      clusterUserDefinedNetworkSelector:
+        networkSelector:
+          matchLabels:
+            {{ udn_bgp_cudn_label_key }}: "enabled"
+  nodeSelector: {}
+  frrConfigurationSelector:
+    matchLabels:
+      {{ udn_bgp_frr_label_key }}: fabric-vrflite
+  advertisements:
+    - PodNetwork

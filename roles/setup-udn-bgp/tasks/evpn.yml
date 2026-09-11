@@ -1,0 +1,79 @@
+---
+# Phase 4 - EVPN transport for the tenant UDNs.
+#
+# This phase is gated, not attempted-and-caught. EVPN for cluster
+# user-defined networks is GA in OpenShift {{ udn_bgp_evpn_min_version }}; on
+# an older cluster the VTEP CRD and the CUDN transport/evpnConfiguration
+# fields simply do not exist, and applying the manifests produces a wall of
+# schema errors that says nothing useful. Better to say so plainly.
+
+- name: Stop with an explanation if this cluster has no EVPN support
+  ansible.builtin.fail:
+    msg: |
+      This cluster ({{ udn_bgp_cluster_version.stdout }}) does not have the
+      VTEP API, so cluster-side EVPN cannot be configured here. EVPN for
+      cluster user-defined networks is GA in OpenShift
+      {{ udn_bgp_evpn_min_version }}.
+
+      This is not a dead end for the work you are doing. Two options:
+
+      1. Move this cluster to {{ udn_bgp_evpn_min_version }}. vars.yaml already
+         carries a 4.22 entry in agent_service_config_os_images, so the
+         plumbing for a 4.22 hub exists in this lab.
+
+      2. Build the EVPN fabric anyway and hand off to it with VRF-Lite:
+           ansible-playbook ... setup_udn_bgp_lab.yaml --tags fabric \
+             -e clab_topology=evpn
+         The cluster keeps peering with leaf1 over per-tenant VLANs exactly
+         as in phase 3, and leaf1 maps each VRF into an EVPN VNI carried over
+         VXLAN to leaf2. The tenants' external endpoints move behind leaf2,
+         so traffic genuinely crosses an EVPN fabric - it just terminates at
+         the border leaf rather than on the OCP nodes themselves. That is a
+         normal production design, not a workaround, and it exercises the
+         route-target and VNI mapping you will need either way.
+  when: not udn_bgp_has_evpn
+
+- name: Render the VTEP CR
+  ansible.builtin.template:
+    src: vtep.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/vtep.yaml"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: Render the EVPN-transport CUDNs
+  ansible.builtin.template:
+    src: cudn-evpn.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/cudn-evpn-{{ tenant.name }}.yaml"
+    mode: '0644'
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    loop_var: tenant
+    label: "{{ tenant.name }}"
+  delegate_to: localhost
+
+- name: Create the VTEP
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/vtep.yaml"
+
+- name: Switch the tenant CUDNs to EVPN transport
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/cudn-evpn-{{ item.name }}.yaml"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Show the EVPN routes the fabric has learned
+  ansible.builtin.command:
+    cmd: >-
+      docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
+      -c 'show bgp l2vpn evpn summary'
+      -c 'show bgp l2vpn evpn'
+      -c 'show evpn vni'
+  delegate_to: "{{ clab_exec_host }}"
+  register: udn_bgp_evpn_state
+  changed_when: false
+  failed_when: false
+
+- name: Report the EVPN state
+  ansible.builtin.debug:
+    msg: "{{ udn_bgp_evpn_state.stdout_lines }}"

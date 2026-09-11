@@ -1,0 +1,78 @@
+---
+# Render every manifest for the requested phase to udn_bgp_manifest_dir, then
+# apply it.
+#
+# Rendering to disk first is not ceremony: these are the objects that change
+# how a working cluster forwards traffic, and being able to read, diff and
+# re-apply exactly what was sent - without re-running Ansible - is what makes
+# a bad phase recoverable. Nothing written here is secret.
+
+- name: Create the manifest directory
+  ansible.builtin.file:
+    path: "{{ udn_bgp_manifest_dir }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+
+- name: Render the base (default VRF) peering and advertisements
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ udn_bgp_manifest_dir }}/{{ item }}"
+    mode: '0644'
+  loop:
+    - frrconfiguration-default.yaml
+    - routeadvertisements-default.yaml
+  delegate_to: localhost
+
+- name: Render the per-node fabric NIC policies
+  ansible.builtin.template:
+    src: nncp-fabric-untagged.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/nncp-fabric-untagged-{{ node_entry.ip_key }}.yaml"
+    mode: '0644'
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    loop_var: node_entry
+    label: "{{ node_entry.node }}"
+  delegate_to: localhost
+
+- name: Render the tenant CUDNs
+  ansible.builtin.template:
+    src: cudn.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/cudn-{{ tenant.name }}.yaml"
+    mode: '0644'
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    loop_var: tenant
+    label: "{{ tenant.name }}"
+  delegate_to: localhost
+
+- name: Render the tenant workloads
+  ansible.builtin.template:
+    src: workload.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/workload-{{ tenant.name }}.yaml"
+    mode: '0644'
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    loop_var: tenant
+    label: "{{ tenant.name }}"
+  delegate_to: localhost
+
+# The evpn phase reuses the VRF-Lite advertisement unchanged: EVPN changes
+# the TRANSPORT a UDN uses, not how it is advertised, so the same
+# targetVRF 'auto' CR applies. It is listed explicitly here because the evpn
+# phase runs vrflite-apply.yml, which applies this file - omitting it is a
+# missing-file failure part-way through a phase rather than an obvious one.
+- name: Render the phase-appropriate UDN advertisements
+  ansible.builtin.template:
+    src: "routeadvertisements-udn-{{ 'shared' if udn_phase == 'shared' else 'vrflite' }}.yaml.j2"
+    dest: "{{ udn_bgp_manifest_dir }}/routeadvertisements-udn.yaml"
+    mode: '0644'
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+  delegate_to: localhost
+
+- name: Report where the manifests were written
+  ansible.builtin.debug:
+    msg: >-
+      Manifests for phase '{{ udn_phase }}' rendered to
+      {{ udn_bgp_manifest_dir }}. Review them before the apply steps below,
+      or apply by hand with `oc apply -f`.
