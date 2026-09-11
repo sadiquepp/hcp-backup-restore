@@ -1,0 +1,57 @@
+{#
+  The tenant CUDN with EVPN as its transport.
+
+  Two things change relative to the phase-3 CUDN, and both live INSIDE
+  spec.network - not at the top of spec:
+
+    network.transport: EVPN   - east/west pod traffic for this network stops
+                                using Geneve and uses VXLAN instead, with the
+                                EVPN control plane distributing reachability.
+                                The UDN's addressing, isolation and role are
+                                unchanged. The field is immutable, which is
+                                why the apply tasks recreate the CUDN rather
+                                than patching it when moving between phases.
+
+    network.evpn              - which VTEP to use, and the VNI/route-target
+                                per VRF type.
+
+  Layer3 topology takes ipVRF and the API *forbids* macVRF here; Layer2 takes
+  macVRF (required) and may add ipVRF. Layer3 is the right shape for routed
+  tenant segmentation, which is what this lab's tenants are, and it is the
+  direct continuation of the VRF-Lite phase - the same tenant, the same
+  subnet, carried over EVPN instead of a VLAN handoff. See the README for
+  what a Layer2/macVRF tenant would additionally need on the fabric side.
+
+  routeTarget is set explicitly rather than left to default to <ASN>:<VNI>,
+  because the fabric side has to match and an explicit value on both ends is
+  one less thing to derive when a route is not appearing where it should. Two
+  UDNs sharing a route target of the same VRF type would leak routes between
+  tenants - exactly what this lab is trying to prove does not happen - so the
+  values are distinct per tenant. The API requires the form
+  <global>:<local> where global is an ASN or an IPv4 address; {{ clab_spine_asn }}
+  is a 2-byte ASN so the local part may be up to 4294967295.
+#}
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: {{ tenant.name }}
+  labels:
+    {{ udn_bgp_cudn_label_key }}: "enabled"
+    udn-lab-phase: evpn
+spec:
+  namespaceSelector:
+    matchLabels:
+      udn-tenant: {{ tenant.name }}
+  network:
+    topology: Layer3
+    layer3:
+      role: Primary
+      subnets:
+        - cidr: {{ tenant.udn_subnet }}
+          hostSubnet: {{ tenant.udn_host_subnet }}
+    transport: EVPN
+    evpn:
+      vtep: evpn-vtep
+      ipVRF:
+        vni: {{ tenant.evpn_ip_vni }}
+        routeTarget: "{{ clab_spine_asn }}:{{ tenant.evpn_ip_vni }}"

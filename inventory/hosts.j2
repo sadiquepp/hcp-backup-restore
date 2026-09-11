@@ -52,3 +52,10 @@ worker3.{{ hub2_disconnected_domain }} ansible_ssh_host={{ lab_network_prefix }}
 [ceph_nodes:children]
 ceph
 ceph_admin
+
+{# containerlab host for the UDN+BGP lab (setup_udn_bgp_lab.yaml). Rendered
+   unconditionally - the group simply goes unused unless that playbook is
+   run with clab_deploy_mode 'vm'. In 'host' mode containerlab runs on the
+   bare-metal host and nothing connects to this address. #}
+[clab]
+{{ lab_network_prefix }}.{{ ip_list.clab }} ansible_ssh_private_key_file=~/.ssh/lab_rsa ansible_ssh_common_args='-o StrictHostKeyChecking=no'

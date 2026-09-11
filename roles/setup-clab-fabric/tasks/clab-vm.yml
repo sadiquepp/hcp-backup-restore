@@ -1,0 +1,66 @@
+---
+# Phase 0c - the containerlab VM (clab_deploy_mode: vm only).
+#
+# Same offline virt-resize-from-base-image pattern as setup-minio-vm,
+# setup-ceph-vm and setup-mirror-registry-vm: create a sparse qcow2 at the
+# target size and expand the 10G rhel9_kvm_image into it, rather than copying
+# the base image and growing it later. The qcow2 costs nothing until used.
+#
+# Two NICs, and which is which matters:
+#   1. virbr0 at {{ lab_network_prefix }}.{{ ip_list.clab }} - management
+#      only. ssh, dnf, container image pulls. Configured by the lab's existing
+#      DHCP reservation, so it needs nothing here.
+#   2. virbr1, no address - the fabric. Enslaved to an in-guest bridge that
+#      containerlab attaches FRR nodes to.
+#
+# NIC order is the order they are given to virt-install, so the fabric NIC is
+# the second PCI device and RHEL9 names it enp2s0. clab-install.yml matches on
+# MAC rather than trusting that, for the same reason the NMState policies do.
+
+- name: Check whether the containerlab VM disk already exists
+  ansible.builtin.stat:
+    path: "{{ clab_vm_disk_path }}"
+  register: clab_disk_status
+
+- name: Create the containerlab VM disk ({{ clab_vm_disk_size }}, sparse)
+  ansible.builtin.command:
+    cmd: "qemu-img create -f qcow2 {{ clab_vm_disk_path }} {{ clab_vm_disk_size }}"
+  when: not clab_disk_status.stat.exists
+
+- name: Expand the base RHEL9 image into the containerlab VM disk (virt-resize)
+  ansible.builtin.command:
+    cmd: >
+      virt-resize --expand {{ clab_vm_resize_partition }}
+      {{ playbook_dir }}/roles/setup-bm-host/files/{{ rhel9_kvm_image }}
+      {{ clab_vm_disk_path }}
+  when: not clab_disk_status.stat.exists
+
+- name: Check whether the containerlab VM is already defined
+  ansible.builtin.shell:
+    cmd: "virsh dominfo {{ clab_vm_name }} 2>/dev/null | grep 'State' | awk '{print $2}'"
+  register: clab_vm_state
+  changed_when: false
+
+- name: Define the containerlab VM (mgmt NIC on virbr0, fabric NIC on virbr1)
+  ansible.builtin.shell:
+    cmd: |
+      virt-install \
+      --import \
+      --name "{{ clab_vm_name }}" \
+      --memory "{{ clab_vm_memory }}" \
+      --vcpus "{{ clab_vm_vcpus }}" \
+      --disk "{{ clab_vm_disk_path }}",format=qcow2,cache=none,bus=virtio \
+      --os-variant=rhel9.5 \
+      --memballoon model=virtio,freePageReporting=on \
+      --noautoconsole \
+      --cpu host-passthrough \
+      --network network:default,mac=52:54:00:e2:54:{{ ip_list.clab }} \
+      --network network:{{ clab_fabric_network }},model=virtio,mac={{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}
+  when: clab_vm_state.stdout == ''
+
+- name: Wait for the containerlab VM to accept ssh
+  ansible.builtin.wait_for:
+    host: "{{ lab_network_prefix }}.{{ ip_list.clab }}"
+    port: 22
+    timeout: 300
+    delay: 10

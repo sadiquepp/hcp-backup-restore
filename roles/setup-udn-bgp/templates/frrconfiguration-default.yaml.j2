@@ -1,0 +1,56 @@
+{#
+  Base BGP peering in the DEFAULT VRF - the session phases 1 and 2 ride on.
+
+  This is the CR an admin writes. OVN-Kubernetes does not replace it: when a
+  RouteAdvertisements CR selects it (via frrConfigurationSelector matching the
+  label below), OVN-Kubernetes reads the peering out of it and GENERATES a
+  second, additive FRRConfiguration carrying the prefixes to advertise. Both
+  exist; the generated one is named route-advertisements-* and should not be
+  edited.
+
+  nodeSelector is empty on purpose - every node with a fabric NIC peers. If
+  clab_fabric_nodes is ever narrowed to a subset of the cluster, add a
+  matching nodeSelector here, because a node without a fabric NIC will
+  otherwise try to open a session out of an interface it does not have and
+  log about it forever.
+
+  toReceive mode 'all' is what makes the fabric's prefixes usable inside the
+  cluster: FRR-K8s installs received routes into the node's kernel routing
+  table, so a route to a tenant's external network learned here becomes a
+  real route on the node. This is the mechanism that replaces the "point the
+  UDN's default gateway at the router" idea - the pods' gateway never moves,
+  the node simply learns where the fabric's prefixes are. The leaf's own
+  outbound route-map still refuses to send {{ lab_network_prefix }}.0/24, so
+  no BGP-learned route can ever shadow the lab's management network.
+#}
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: fabric-peering-default
+  namespace: {{ udn_bgp_frrk8s_namespace }}
+  labels:
+    {{ udn_bgp_frr_label_key }}: fabric-default
+spec:
+  bgp:
+    routers:
+      - asn: {{ clab_cluster_asn }}
+        neighbors:
+          - address: {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
+            asn: {{ clab_leaf1_asn }}
+            {# Short timers so a lab session converges in seconds. The leaf
+               runs FRR's 'datacenter' defaults, which match. #}
+            holdTime: 9s
+            keepaliveTime: 3s
+            port: 179
+            toReceive:
+              allowed:
+                mode: all
+            toAdvertise:
+              allowed:
+                {# 'filtered' with no prefixes of our own: everything this
+                   session advertises comes from the FRRConfiguration
+                   OVN-Kubernetes generates off the RouteAdvertisements CR.
+                   Setting 'all' here would advertise the node's own
+                   connected routes, {{ lab_network_prefix }}.0/24 included. #}
+                mode: filtered
+  nodeSelector: {}

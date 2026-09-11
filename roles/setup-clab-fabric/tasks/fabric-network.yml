@@ -1,0 +1,81 @@
+---
+# Phase 0a - the fabric bridge.
+#
+# Creates the libvirt network that becomes virbr1 and leaves virbr0 entirely
+# alone. Idempotent: an existing network is only started/autostarted, never
+# redefined, because redefining it would tear down every tap already on it
+# (i.e. every OCP node's fabric NIC and the containerlab VM's).
+
+- name: Check whether the fabric network is already defined
+  ansible.builtin.command:
+    cmd: "virsh net-info {{ clab_fabric_network }}"
+  register: clab_net_info
+  failed_when: false
+  changed_when: false
+
+- name: Render the fabric network XML
+  ansible.builtin.template:
+    src: fabric-network.xml.j2
+    dest: "/tmp/{{ clab_fabric_network }}-network.xml"
+    mode: '0644'
+
+- name: Define the fabric network
+  ansible.builtin.command:
+    cmd: "virsh net-define /tmp/{{ clab_fabric_network }}-network.xml"
+  when: clab_net_info.rc != 0
+
+- name: Start the fabric network and mark it autostart
+  ansible.builtin.command:
+    cmd: "{{ item }}"
+  loop:
+    - "virsh net-start {{ clab_fabric_network }}"
+    - "virsh net-autostart {{ clab_fabric_network }}"
+  register: clab_net_start
+  # net-start on an already-running network and net-autostart on an
+  # already-autostarting one both exit non-zero. Neither is a failure, and
+  # distinguishing them from a real one by message is more robust than
+  # re-querying state between the two commands.
+  failed_when:
+    - clab_net_start.rc != 0
+    - "'already active' not in clab_net_start.stderr"
+    - "'already marked as autostarted' not in clab_net_start.stderr"
+  changed_when: clab_net_start.rc == 0
+
+- name: Confirm the fabric bridge exists with the expected MTU
+  ansible.builtin.shell:
+    cmd: "ip -o link show {{ clab_fabric_bridge }}"
+  register: clab_bridge_link
+  changed_when: false
+
+- name: Report the fabric bridge
+  ansible.builtin.debug:
+    msg: "{{ clab_bridge_link.stdout }}"
+
+- name: Warn if the fabric bridge did not come up at the configured MTU
+  ansible.builtin.debug:
+    msg: >-
+      {{ clab_fabric_bridge }} is not at MTU {{ clab_fabric_mtu }}. An
+      existing bridge is never redefined by this role, so a fabric created
+      before clab_fabric_mtu was raised keeps the old value. Fix it in place
+      with `ip link set {{ clab_fabric_bridge }} mtu {{ clab_fabric_mtu }}`
+      (and on every tap already attached), or destroy/undefine the
+      '{{ clab_fabric_network }}' network while no VM is using it and re-run.
+  when: "'mtu ' ~ clab_fabric_mtu not in clab_bridge_link.stdout"
+
+# br_netfilter pushes bridged frames through iptables' FORWARD chain. Nothing
+# in this lab loads it - but Docker does, and clab_deploy_mode: host puts
+# Docker on this host. Docker also sets the FORWARD policy to DROP, so the
+# moment both are true, frames being switched between two taps on virbr1 hit
+# a DROP and the fabric dies with no log anywhere.
+#
+# containerlab inserts exactly these rules for any bridge its topology
+# references, so in host mode this is usually belt-and-braces. It is not
+# redundant in vm mode: there the bridge is referenced by no containerlab
+# topology on this host at all, and Docker may still be present for other
+# reasons. Cheap either way, and -C makes it idempotent.
+- name: Allow traffic switched within the fabric bridge past any FORWARD policy
+  ansible.builtin.shell:
+    cmd: |
+      iptables -C FORWARD -i {{ clab_fabric_bridge }} -o {{ clab_fabric_bridge }} -j ACCEPT 2>/dev/null \
+        || iptables -I FORWARD 1 -i {{ clab_fabric_bridge }} -o {{ clab_fabric_bridge }} -j ACCEPT
+  changed_when: false

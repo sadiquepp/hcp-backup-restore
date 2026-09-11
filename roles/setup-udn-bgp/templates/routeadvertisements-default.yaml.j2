@@ -1,0 +1,36 @@
+{#
+  Phase 1: advertise the DEFAULT cluster pod network.
+
+  networkSelectionType DefaultNetwork means "the ordinary pod network every
+  namespace already uses" - no UDN involved. This is the simplest thing that
+  demonstrates the mechanism, and it is worth doing first because it is the
+  one phase where a failure is unambiguously about BGP rather than about UDN.
+
+  The observable change is not just reachability - it is that pod egress to
+  the fabric STOPS BEING SNATed. Once the pod network is advertised, packets
+  leave with the real pod IP, because the fabric now has a route back to it.
+  tcpdump on the leaf is the proof; see the verify tasks.
+#}
+apiVersion: k8s.ovn.org/v1
+kind: RouteAdvertisements
+metadata:
+  name: default-podnetwork
+spec:
+  {# 'default' leaks into the default VRF. For the cluster default network
+     that is the only sensible value - the CDN lives in the default VRF. #}
+  targetVRF: default
+  networkSelectors:
+    - networkSelectionType: DefaultNetwork
+  {# Empty selectors mean "every node" and "the one FRRConfiguration matching
+     the label below". RouteAdvertisements errors out if the
+     frrConfigurationSelector matches more than one, which is why the label
+     is specific rather than something like app=frr. #}
+  nodeSelector: {}
+  frrConfigurationSelector:
+    matchLabels:
+      {{ udn_bgp_frr_label_key }}: fabric-default
+  advertisements:
+    - PodNetwork
+    {# EgressIP is advertisable too and works the same way. Left off because
+       this lab defines no EgressIPs, and advertising an empty set just makes
+       the status harder to read. #}

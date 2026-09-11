@@ -1,0 +1,122 @@
+## Builds a BGP/EVPN provider fabric out of containerlab and wires this lab's
+## OpenShift cluster into it, so User Defined Networks can be tested over BGP
+## with and without VRF-Lite, and then over EVPN.
+##
+## WHAT THIS DOES TO THE EXISTING LAB: almost nothing. The OCP node VMs each
+## gain one extra NIC on a new, isolated bridge (virbr1). Nothing on virbr0
+## changes - not the addresses, not DNS, not the DHCP reservations, not
+## MetalLB, and in particular not any node's default route. The cluster's
+## Network CR is patched to enable FRR and route advertisements, which
+## restarts ovnkube-node; see the README section for what that costs.
+##
+## THE CORRECTION WORTH READING FIRST: you do not point a UDN's default
+## gateway at the fabric router, and there is no setting that would let you.
+## A primary UDN pod's gateway is always the OVN gateway router on its own
+## node. What BGP changes is the NODE's routing table: the fabric advertises
+## its prefixes in, the cluster advertises pod/UDN subnets out, and pod
+## traffic to those prefixes stops being SNATed. The gateway never moves,
+## which is precisely why this is safe to run against a working cluster.
+##
+## Phases, in the order they are meant to be run. Each one eliminates a class
+## of explanation for a failure in the next:
+##
+##   --tags fabric      containerlab fabric, virbr1, node NICs. No cluster
+##                      changes at all.
+##   --tags preflight   report what the cluster can do. Changes nothing.
+##   --tags default     advertise the cluster DEFAULT pod network over BGP.
+##                      No UDN involved - if this fails, UDN is not the cause.
+##   --tags shared      primary UDNs advertised into the default VRF
+##                      (targetVRF: default). Adds UDN, no VLANs or VRFs.
+##   --tags vrflite     per-tenant VRFs and VLANs (targetVRF: auto), with the
+##                      tenant isolation that comes with them.
+##   --tags evpn        VXLAN/EVPN transport. Needs OpenShift 4.22+ on the
+##                      cluster side; the fabric half builds on any version.
+##
+## Usage:
+##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric
+##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags preflight
+##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
+##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags shared
+##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags vrflite
+##
+## Run containerlab on the bare-metal host instead of in a VM:
+##   ... -e clab_deploy_mode=host
+##
+## Build the three-node EVPN fabric instead of the single border leaf:
+##   ... --tags fabric -e clab_topology=evpn
+
+- name: Build the containerlab provider fabric
+  hosts: localhost
+  become: true
+  gather_facts: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tags: [fabric]
+  tasks:
+    # Same pattern as setup_bm_host.yaml: the inventory Ansible parsed at
+    # startup predates the [clab] group this lab needs, so render it and
+    # re-read it before anything tries to delegate to the containerlab VM.
+    - name: Render inventory/hosts so the [clab] group exists
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/inventory/hosts.j2"
+        dest: "{{ playbook_dir }}/inventory/hosts"
+        mode: '0644'
+
+    - name: Re-read the inventory that was just rendered
+      ansible.builtin.meta: refresh_inventory
+
+    - ansible.builtin.import_role:
+        name: setup-clab-fabric
+
+# The containerlab VM is a bare RHEL9 image with no entitlement, so dnf
+# cannot install anything until it is registered - same as the helper. Only
+# needed in vm mode; in host mode the bare-metal host is already registered.
+- name: Wire the cluster into the fabric
+  hosts: localhost
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  vars:
+    hub_install_folder_selected: >-
+      {{ (udn_bgp_target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}
+    hub_kubeconfig: "{{ hub_install_folder_selected }}/auth/kubeconfig"
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+  tasks:
+    - name: Pre-flight only
+      ansible.builtin.import_role:
+        name: setup-udn-bgp
+      vars:
+        udn_phase: preflight
+      tags: [preflight, never]
+
+    - name: Advertise the cluster default pod network
+      ansible.builtin.import_role:
+        name: setup-udn-bgp
+      vars:
+        udn_phase: default
+      tags: [default, never]
+
+    - name: UDNs advertised into the default VRF
+      ansible.builtin.import_role:
+        name: setup-udn-bgp
+      vars:
+        udn_phase: shared
+      tags: [shared, never]
+
+    - name: UDNs with VRF-Lite
+      ansible.builtin.import_role:
+        name: setup-udn-bgp
+      vars:
+        udn_phase: vrflite
+      tags: [vrflite, never]
+
+    - name: UDNs over EVPN
+      ansible.builtin.import_role:
+        name: setup-udn-bgp
+      vars:
+        udn_phase: evpn
+      tags: [evpn, never]

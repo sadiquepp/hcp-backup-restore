@@ -1,0 +1,48 @@
+{#
+  A primary ClusterUserDefinedNetwork per tenant.
+
+  Layer3 topology with role Primary: this becomes THE network for pods in the
+  selected namespaces - their eth0, their default gateway, their isolation
+  boundary. It is not a secondary attachment.
+
+  The subnet depends on which phase this is rendered for, and the difference
+  matters:
+
+    shared  (phase 2, targetVRF: default) -> udn_subnet_shared, unique per
+            tenant. Both tenants' routes end up in one VRF on the node and on
+            the leaf, so overlapping subnets are rejected by OVN-Kubernetes
+            with an error on the RouteAdvertisements status.
+
+    vrflite (phase 3, targetVRF: auto)    -> udn_subnet, deliberately
+            IDENTICAL between tenants. Each tenant's routes live only in its
+            own VRF, so the same addresses can exist twice. Proving that is
+            most of the point of VRF-Lite, and it is the one result that
+            cannot be faked by a phase-2 setup that happens to work.
+
+  A namespace only joins this network if it carries the matching label AND
+  the label is present when the namespace is created - OVN-Kubernetes binds a
+  primary network at namespace creation time, so labelling an existing
+  namespace does nothing. The workload tasks create the namespaces fresh for
+  that reason.
+#}
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: {{ tenant.name }}
+  labels:
+    {{ udn_bgp_cudn_label_key }}: "enabled"
+    udn-lab-phase: {{ udn_phase }}
+spec:
+  namespaceSelector:
+    matchLabels:
+      udn-tenant: {{ tenant.name }}
+  network:
+    topology: Layer3
+    layer3:
+      role: Primary
+      subnets:
+        - cidr: {{ tenant.udn_subnet_shared if udn_phase == 'shared' else tenant.udn_subnet }}
+          {# Per-node slice of the tenant subnet. /24 out of a /16 gives 254
+             pods per node and 256 nodes, which is far past what this lab
+             needs and keeps the advertised prefixes readable in FRR. #}
+          hostSubnet: {{ tenant.udn_host_subnet }}

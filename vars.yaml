@@ -57,9 +57,15 @@ rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
 ## 4.2.33 instead of 4.20.33. Everything downstream (release pullspecs, the
 ## RHCOS download urls, the operator index tag, the openshift-install path)
 ## interpolates this into a string, so keep the quotes.
-ocp_major_version: "4.21"
-ocp_minor_version: 15
-coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
+##
+## 4.22 rather than 4.21 because BGP EVPN for primary cluster user-defined
+## networks is GA in 4.22 - on 4.21 the VTEP CRD and the CUDN
+## network.transport/network.evpn fields do not exist at all. Everything else
+## in this lab works on either; see the UDN/BGP section of the README. To go
+## back to 4.21, set these three to "4.21" / 15 / 0 and drop the evpn phase.
+ocp_major_version: "4.22"
+ocp_minor_version: 8
+coreos_minor_version: 8  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
 
 ## --- VM sizing -------------------------------------------------------------
 
@@ -230,7 +236,8 @@ ip_list:
   # is free, deliberately avoiding 60-69 and 90-99 where the hosted clusters'
   # MetalLB pool addresses live (hosted_cluster_metallb_pools) - .63 in
   # particular is left alone because it is already spoken for elsewhere.
-  # Remaining free octets after these: 40, 47, 50, 57, 64-66, 70, 87, 88.
+  # Remaining free octets after these: 47, 50, 57, 64-66, 70, 87, 88.
+  # (40 is now taken by the containerlab VM, added below.)
   c1dworker1: 44
   c1dworker2: 45
   c1dworker3: 46
@@ -309,6 +316,12 @@ ip_list:
   ceph2: 25
   ceph3: 26
   cephadmin: 27
+
+  # Containerlab host VM - the provider BGP/EVPN fabric for the UDN+BGP lab
+  # (see setup_udn_bgp_lab.yaml). This is its address on virbr0, used only
+  # for ssh/management; the fabric itself lives on virbr1 and this VM's
+  # second NIC gets clab_fabric_prefix.40 there, same last octet.
+  clab: 40
 
 helper_name: helper
 helper_disk: helper_disk.qcow2
@@ -1138,3 +1151,211 @@ ceph_odf_exporter_local_path: "{{ playbook_dir }}/ceph-odf/ceph-external-cluster
 ## Where the exported JSON (contains cluster credentials!) lands
 ## locally - see .gitignore, never commit this.
 ceph_odf_export_dir: "{{ playbook_dir }}/ceph-odf"
+
+## ===========================================================================
+## UDN + BGP lab (VRF-Lite, EVPN) - containerlab provider fabric
+##
+## Everything below is used only by setup_udn_bgp_lab.yaml. Nothing in the
+## hub, hosted-cluster, OADP or Ceph flows reads any of it, so the existing
+## lab behaves identically whether or not this is ever run.
+##
+## The design in one paragraph: the OCP nodes keep their existing NIC on
+## virbr0 and their default route through it (image pulls, DNS, the API and
+## MetalLB all stay exactly as they are). A SECOND NIC is added to each node
+## on a new, isolated bridge (virbr1) that carries nothing but the provider
+## fabric. A containerlab topology - FRR routers - sits on that same bridge
+## and peers BGP with the nodes. Pod/UDN subnets are advertised out to the
+## fabric with RouteAdvertisements; fabric prefixes are learned back in. No
+## default gateway anywhere is moved.
+## ===========================================================================
+
+## Where containerlab itself runs.
+##   vm   - a dedicated RHEL9 VM (clab_vm_name) with two NICs: virbr0 for
+##          management/ssh and virbr1 for the fabric. Keeps Docker's iptables
+##          rules off the hypervisor entirely, which is the main reason to
+##          prefer it on a host that is also running the whole HCP lab.
+##   host - containerlab runs directly on the bare-metal host and attaches to
+##          virbr1 with containerlab's 'bridge' kind. One less hop and easier
+##          to tcpdump, at the cost of installing Docker on the hypervisor.
+## Both modes produce the identical fabric; only the placement differs.
+clab_deploy_mode: vm
+
+## The containerlab VM (clab_deploy_mode: vm only). Sized for FRR containers,
+## which are tiny - bump clab_vm_memory if you swap FRR for cEOS/SR Linux.
+clab_vm_name: clab
+clab_vm_disk: clab_disk.qcow2
+clab_vm_disk_size: 60G
+clab_vm_memory: 8192
+clab_vm_vcpus: 4
+## Partition inside rhel9_kvm_image to expand - same value the helper uses.
+clab_vm_resize_partition: /dev/sda4
+
+## The fabric L2 domain. A new libvirt network, deliberately <forward mode
+## 'none'> - no NAT, no DHCP, no DNS, no route to anywhere. It exists purely
+## as a broadcast domain shared by the OCP nodes' second NICs and the
+## containerlab routers, so it cannot perturb virbr0 or the lab's egress.
+##
+## MTU 9000 because the fabric has to carry Geneve (phases 1-3) and VXLAN
+## (phase 4) on top of already-encapsulated pod traffic. Leave it at 1500 and
+## the BGP sessions still come up while large flows silently black-hole.
+clab_fabric_network: fabric
+clab_fabric_bridge: virbr1
+clab_fabric_mtu: 9000
+
+## Fabric addressing. The last octet of every fabric address is the SAME
+## octet the node already has in ip_list on virbr0 - worker1 is .34 on both -
+## so there is one number per node to remember and no new collision surface.
+## The containerlab border leaf takes .1 on every fabric subnet.
+clab_fabric_prefix: "192.168.140"
+clab_fabric_netmask_bits: 24
+clab_fabric_router_octet: 1
+
+## BGP. eBGP between the cluster and the fabric: every node shares one ASN
+## (that is how FRR-K8s and RouteAdvertisements model it) and each fabric
+## device gets its own, which is the ordinary datacentre design and avoids
+## the route-reflector/next-hop-self problems an iBGP lab runs into as soon
+## as a second fabric router appears.
+clab_cluster_asn: 64512
+clab_leaf1_asn: 64513
+clab_leaf2_asn: 64514
+clab_spine_asn: 65000
+
+## Container images for the fabric. FRR is what OVN-Kubernetes itself is
+## built and tested against, and a node costs ~50MB of RAM. Swap in
+## ghcr.io/nokia/srlinux or ceos if you need vendor-accurate EVPN behaviour -
+## budget ~2GB per node if you do.
+clab_frr_image: "quay.io/frrouting/frr:10.2.1"
+clab_alpine_image: "alpine:3.20"
+
+## Which node VMs get a fabric NIC. These are ip_list keys AND libvirt domain
+## names - see clab_fabric_nodes entries below. Defaults to hub1's three
+## workers: hub1 is a plain standalone cluster whose
+## Network.operator.openshift.io CR you can patch directly, which is what
+## every phase below needs. Hosted-cluster workers are deliberately NOT here;
+## see the README section on why to prove this out on hub1 first.
+clab_fabric_nodes:
+  - domain: hub_worker1
+    ip_key: worker1
+    node: worker1.hub.mylab.com
+  - domain: hub_worker2
+    ip_key: worker2
+    node: worker2.hub.mylab.com
+  - domain: hub_worker3
+    ip_key: worker3
+    node: worker3.hub.mylab.com
+
+## The fabric NIC's MAC follows the lab's existing scheme with a bumped
+## fifth octet, so a fabric NIC is recognisable at a glance and can never
+## collide with a virbr0 reservation: 52:54:00:e2:55:<same last octet>.
+clab_fabric_mac_prefix: "52:54:00:e2:55"
+
+## In-guest name of the fabric NIC. These VMs are all single-NIC virtio
+## guests before this role runs, so the added NIC lands on the second PCI
+## slot and RHCOS names it enp2s0. The NNCPs match on MAC rather than on this
+## name, so it is only used for the pre-flight report - but if a node has
+## picked up an extra NIC from somewhere, check with:
+##   oc debug node/<node> -- chroot /host ip -br link
+clab_fabric_nic_name: enp2s0
+
+## ---------------------------------------------------------------------------
+## Tenants. Each one becomes: a ClusterUserDefinedNetwork, a VLAN on the
+## fabric NIC, a VRF on both the node and the border leaf, and (phase 4) a
+## pair of EVPN VNIs.
+##
+## udn_subnet values deliberately OVERLAP between tenants once VRF-Lite is on
+## (phase 3) - proving two UDNs can carry the same addresses in isolation is
+## most of the point of VRF-Lite, and it is the one test that cannot pass in
+## the shared-VRF phases. Phase 2 (targetVRF: default) therefore uses
+## udn_subnet_shared, which must be unique, because leaking overlapping
+## subnets into one VRF is rejected by OVN-Kubernetes with an error on the
+## RouteAdvertisements status.
+##
+## external_prefix is the network that lives BEHIND the border leaf for this
+## tenant - the thing a UDN pod should be able to reach, and that pods in the
+## other tenant should not.
+## ---------------------------------------------------------------------------
+udn_bgp_tenants:
+  - name: blue
+    vlan: 110
+    ## Point-to-point subnet for this tenant's VRF-Lite BGP session. Node
+    ## takes its ip_list octet here too, leaf takes .1.
+    vrf_prefix: "192.168.141"
+    ## Phase 3 (VRF-Lite) UDN subnet - identical to red's on purpose.
+    udn_subnet: "10.200.0.0/16"
+    ## Phase 2 (shared default VRF) UDN subnet - must not overlap anything.
+    udn_subnet_shared: "10.220.0.0/16"
+    udn_host_subnet: 24
+    ## The "customer" network behind the leaf, and the address of a test
+    ## endpoint on it that the verification steps ping.
+    external_prefix: "10.210.10.0/24"
+    external_prefix_bits: 24
+    ## Address of the border leaf on that network, and of the test endpoint
+    ## behind it. Spelled out rather than derived from external_prefix so
+    ## nothing here depends on the ansible.utils/netaddr collection.
+    external_gw: "10.210.10.1"
+    external_host: "10.210.10.10"
+    ## Phase 4 only. VNIs must be unique across every tenant.
+    evpn_mac_vni: 100
+    evpn_ip_vni: 101
+  - name: red
+    vlan: 120
+    vrf_prefix: "192.168.142"
+    udn_subnet: "10.200.0.0/16"
+    udn_subnet_shared: "10.221.0.0/16"
+    udn_host_subnet: 24
+    external_prefix: "10.211.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.211.10.1"
+    external_host: "10.211.10.10"
+    evpn_mac_vni: 200
+    evpn_ip_vni: 201
+
+## Where the rendered containerlab topology and FRR configs are staged, on
+## whichever host clab_deploy_mode selected.
+clab_lab_dir: /root/udn-bgp-fabric
+clab_lab_name: udnbgp
+
+## Where the cluster-side manifests this role renders are written locally,
+## so they can be read, diffed and re-applied by hand. Nothing secret.
+udn_bgp_manifest_dir: "{{ playbook_dir }}/udn-bgp"
+
+## Which cluster the cluster-side phases target. Same convention as the rest
+## of the lab: hub (default) or hub2.
+udn_bgp_target_hub: hub
+
+## VRF-Lite and EVPN both require OVN-Kubernetes LOCAL gateway mode
+## (routingViaHost: true). Switching gateway mode restarts every ovnkube-node
+## pod and briefly disrupts pod egress, so it is a deliberate opt-in rather
+## than something the phase-3 tasks do silently.
+udn_bgp_set_local_gateway: true
+
+## Phase 4. EVPN for cluster user-defined networks is GA in OpenShift 4.22 -
+## on 4.21 the VTEP CRD and the CUDN network.transport/network.evpn fields do
+## not exist, so the cluster-side phase-4 tasks refuse to run and only the
+## EVPN fabric is built. See the README section for what that still buys you.
+## ocp_major_version is 4.22, so the full path is available.
+udn_bgp_evpn_min_version: "4.22"
+
+## VTEP (VXLAN tunnel endpoint) addressing for phase 4.
+##
+## The VTEP CR runs in Unmanaged mode and these addresses are assigned by
+## NMState, one per node, at <prefix>.<the node's usual ip_list octet> - so
+## worker1 is .34 here exactly as it is on virbr0 and on the fabric. In
+## Managed mode OVN-Kubernetes would allocate them itself, which is right on
+## a real fabric with an IGP but leaves this lab's FRR containers with no way
+## to know which node got which address. Assigning them here means the
+## border leaf can carry static /32s written at render time.
+##
+## Deliberately a block that appears nowhere else in this lab - not
+## lab_network_prefix, not clab_fabric_prefix, not any tenant prefix. A VTEP
+## address that collides with a real one builds tunnels to the wrong place.
+##
+## Note the VTEP CR's cidrs are append-only in Managed mode; in Unmanaged
+## they can be changed freely, which is another small reason to prefer
+## Unmanaged in a lab you expect to re-address.
+udn_bgp_vtep_prefix: "100.64.0"
+## Dummy interface the VTEP address is put on. A dummy rather than an address
+## on the fabric NIC because the VTEP address is the node's identity in the
+## overlay and has to stay up independently of any one link - the same shape
+## as a router loopback.
+udn_bgp_vtep_iface: vtep0

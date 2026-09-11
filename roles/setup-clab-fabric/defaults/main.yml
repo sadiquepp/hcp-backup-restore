@@ -1,0 +1,39 @@
+---
+# defaults file for roles/setup-clab-fabric
+#
+# Everything a deployer normally touches lives in vars.yaml under the
+# "UDN + BGP lab" heading. These are the knobs that rarely change.
+
+## Where the containerlab VM's disk lives, derived from the lab-wide
+## download_dir rather than hardcoded, so moving the image store moves this
+## disk with everything else. The sibling VM roles (setup-ceph-vm,
+## setup-minio-vm, setup-mirror-registry-vm) still spell the path out in
+## full - they are left alone deliberately, since converting them touches
+## files other feature branches are editing.
+##
+## The trailing slash is stripped because download_dir carries one in some
+## revisions of vars.yaml and not others. A doubled separator works fine on
+## Linux, but a libvirt disk path reading "images//clab_disk.qcow2" is the
+## kind of thing that makes someone stop and wonder, so it is normalised in
+## the one place the path is built.
+clab_vm_disk_path: "{{ download_dir | regex_replace('/+$', '') }}/{{ clab_vm_disk }}"
+
+## containerlab release to install when none is present. Pinned rather than
+## floating so a re-run months later builds the same fabric - the bridge-kind
+## and VLAN behaviour this lab leans on has been stable for a long time, but
+## an unpinned installer is still an unpinned installer.
+clab_version_pin: "0.68.0"
+
+## Name of the Linux bridge INSIDE the containerlab VM that the fabric NIC is
+## enslaved to and that containerlab attaches FRR nodes to (vm mode only). In
+## host mode containerlab attaches to clab_fabric_bridge (virbr1) directly and
+## this is unused.
+clab_guest_bridge: br-fabric
+
+## Which containerlab topology to build:
+##   bgp  - one border leaf (leaf1) plus a per-tenant external endpoint.
+##          Everything phases 1 to 3 need.
+##   evpn - leaf1 + spine + leaf2, iBGP EVPN with VXLAN between the leaves,
+##          and the tenant external endpoints moved behind leaf2 so traffic
+##          genuinely crosses the fabric. Phase 4.
+clab_topology: bgp

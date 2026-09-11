@@ -1,0 +1,102 @@
+{#
+  Border leaf in the EVPN topology.
+
+  Its job here is narrower than it looks, and getting that straight makes the
+  config obvious: with the OCP nodes acting as VTEPs, leaf1 is not a tunnel
+  endpoint for tenant traffic at all. VXLAN flows node <-> leaf2 directly.
+  leaf1 provides two things:
+
+    1. Underlay reachability. It knows a route to each node's VTEP (static
+       /32s, written from the same ip_list octets everything else uses) and
+       originates the aggregate into the fabric so leaf2 can build tunnels
+       back. Without this the EVPN sessions come up, both ends hold the right
+       routes, and no tunnel ever forms - a failure that looks like a data
+       plane problem and is not one.
+
+    2. EVPN transit. It peers l2vpn evpn with each node and with the spine,
+       and passes routes between them.
+
+  Because it holds no tenant VRFs of its own, it needs 'bgp retain
+  route-target all' for the same reason the spine does: a speaker with no
+  matching VRF discards every EVPN route whose route target it does not
+  import locally, which here is all of them. This is the single most common
+  way an EVPN lab ends up with healthy sessions and an empty table on the
+  far side.
+
+  The tenant VRFs and the tenant external networks live on leaf2.
+#}
+frr version 10.2
+frr defaults datacenter
+hostname leaf1
+log stdout
+service integrated-vtysh-config
+!
+{# Management network stays out of the fabric in both directions. #}
+ip prefix-list LAB-MGMT seq 5 permit {{ lab_network_prefix }}.0/24 le 32
+!
+route-map FROM-CLUSTER deny 5
+ match ip address prefix-list LAB-MGMT
+route-map FROM-CLUSTER permit 10
+!
+route-map TO-CLUSTER deny 5
+ match ip address prefix-list LAB-MGMT
+route-map TO-CLUSTER permit 10
+!
+router bgp {{ clab_leaf1_asn }}
+ bgp router-id 10.0.0.1
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+ !
+ ! Underlay to the spine - carries loopbacks and the VTEP aggregate.
+ neighbor 10.1.0.2 remote-as {{ clab_spine_asn }}
+ neighbor 10.1.0.2 description spine-underlay
+ !
+ ! Overlay to the spine, sourced from the loopback (not on the p2p link).
+ neighbor 10.0.0.254 remote-as {{ clab_spine_asn }}
+ neighbor 10.0.0.254 description spine-evpn
+ neighbor 10.0.0.254 update-source lo0
+ neighbor 10.0.0.254 ebgp-multihop 3
+ !
+ ! The OCP nodes. One session each, carrying BOTH address families: ipv4
+ ! unicast so the node can learn its way to the other VTEPs, and l2vpn evpn
+ ! for the tenant routes. The node side of this is the FRRConfiguration
+ ! roles/setup-udn-bgp renders as fabric-peering-evpn.
+{% for n in clab_fabric_nodes %}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ clab_cluster_asn }}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.node }}
+{% endfor %}
+ !
+ address-family ipv4 unicast
+  network 10.0.0.1/32
+  ! The VTEP aggregate. A blackhole route for it is installed in the exec
+  ! block so that 'network' has something to originate; the real forwarding
+  ! is done by the per-node /32s alongside it.
+  network {{ udn_bgp_vtep_prefix }}.0/24
+  neighbor 10.1.0.2 activate
+{% for n in clab_fabric_nodes %}
+  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} activate
+  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} route-map FROM-CLUSTER in
+  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} route-map TO-CLUSTER out
+{% endfor %}
+  ! The spine's EVPN session carries l2vpn evpn only. Activating it for ipv4
+  ! unicast as well is a common way to end up with two paths for one prefix
+  ! and non-deterministic forwarding.
+  no neighbor 10.0.0.254 activate
+ exit-address-family
+ !
+ address-family l2vpn evpn
+  neighbor 10.0.0.254 activate
+  neighbor 10.0.0.254 allowas-in origin
+{% for n in clab_fabric_nodes %}
+  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} activate
+  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} allowas-in origin
+{% endfor %}
+  ! See the note at the top - without this, leaf1 drops every EVPN route it
+  ! is supposed to be passing along, because it holds no tenant VRF whose
+  ! route target would match.
+  bgp retain route-target all
+ exit-address-family
+exit
+!
+line vty
+!

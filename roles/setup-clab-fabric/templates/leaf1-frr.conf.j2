@@ -1,0 +1,118 @@
+{#
+  Border leaf / provider-edge router for phases 1-3.
+
+  Three independent BGP contexts live here, and which one a given phase
+  exercises is the thing to keep straight:
+
+    * the DEFAULT VRF instance peers with every node over the untagged
+      fabric link. Phases 1 and 2 use only this one: the cluster advertises
+      the default pod network (phase 1) or a UDN leaked into the default VRF
+      (phase 2, targetVRF: default), and both arrive here.
+
+{% for t in udn_bgp_tenants %}
+    * the '{{ t.name }}' VRF instance peers with every node over VLAN {{ t.vlan }}.
+      Phase 3 (VRF-Lite, targetVRF: auto) uses these: the {{ t.name }} UDN's pod
+      subnet is advertised only inside the {{ t.name }} VRF and only over the
+      {{ t.name }} VLAN, so it is invisible to the default VRF and to the other
+      tenant even though the same addresses exist there.
+{% endfor %}
+
+  There is no route leaking between any of them. That is deliberate and it is
+  what makes the isolation test meaningful: if a blue pod can reach red's
+  external endpoint, something is wrong, not permissive.
+
+  eBGP throughout ({{ clab_cluster_asn }} on the cluster side, {{ clab_leaf1_asn }} here). eBGP means
+  routes are re-advertised between peers without a route reflector and the
+  next hop is rewritten for free, both of which an iBGP lab has to work
+  around the moment a second fabric device appears.
+#}
+frr version 10.2
+frr defaults datacenter
+hostname leaf1
+log stdout
+service integrated-vtysh-config
+!
+{# 'datacenter' defaults already give 3s/9s timers and no connect delay; the
+   point of saying so is that a lab session should converge in seconds, not
+   in the 90s an FRR default would take, so a phase that is genuinely broken
+   is distinguishable from one that has not converged yet. #}
+!
+{#
+  Prefix lists. The leaf accepts whatever the cluster sends but only
+  originates what it is supposed to own, so a mistake on the cluster side
+  cannot turn the leaf into a transit for the lab's real network. In
+  particular {{ lab_network_prefix }}.0/24 must never be advertised into the
+  fabric - that is virbr0, and a node preferring a BGP path to its own
+  management network would lose the API, the registry and DNS at once.
+#}
+{# /24 is hardcoded because the lab's L2 network is a /24 by construction -
+   lab_network_netmask is 255.255.255.0 and ip_list is a map of last octets,
+   so a different mask would break far more than this line. #}
+ip prefix-list LAB-MGMT seq 5 permit {{ lab_network_prefix }}.0/24 le 32
+!
+route-map FROM-CLUSTER deny 5
+ match ip address prefix-list LAB-MGMT
+route-map FROM-CLUSTER permit 10
+!
+route-map TO-CLUSTER deny 5
+ match ip address prefix-list LAB-MGMT
+route-map TO-CLUSTER permit 10
+!
+! ---------------------------------------------------------------------------
+! Default VRF - phases 1 and 2
+! ---------------------------------------------------------------------------
+router bgp {{ clab_leaf1_asn }}
+ bgp router-id {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+{% for n in clab_fabric_nodes %}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ clab_cluster_asn }}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.node }}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} bfd
+{% endfor %}
+ !
+ address-family ipv4 unicast
+{% for n in clab_fabric_nodes %}
+  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} activate
+  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} route-map FROM-CLUSTER in
+  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} route-map TO-CLUSTER out
+  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} soft-reconfiguration inbound
+{% endfor %}
+{% for t in udn_bgp_tenants %}
+  ! Phase 2 only: with targetVRF 'default' the cluster leaks a UDN into the
+  ! default VRF and expects to reach something. {{ t.name }}'s external network
+  ! lives in the {{ t.name }} VRF, so it is NOT reachable from here - phase 2 is
+  ! verified against the leaf's own fabric address and against the other
+  ! nodes' advertised pod subnets, not against {{ t.external_host }}.
+{% endfor %}
+ exit-address-family
+exit
+!
+{% for t in udn_bgp_tenants %}
+! ---------------------------------------------------------------------------
+! VRF {{ t.name }} - phase 3 (VRF-Lite), VLAN {{ t.vlan }}
+! ---------------------------------------------------------------------------
+router bgp {{ clab_leaf1_asn }} vrf {{ t.name }}
+ bgp router-id {{ t.vrf_prefix }}.{{ clab_fabric_router_octet }}
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+{% for n in clab_fabric_nodes %}
+ neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ clab_cluster_asn }}
+ neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.node }} ({{ t.name }})
+{% endfor %}
+ !
+ address-family ipv4 unicast
+  ! The tenant's external network is originated here, so the cluster learns a
+  ! route to it over the {{ t.name }} VLAN and only over the {{ t.name }} VLAN.
+  network {{ t.external_prefix }}
+{% for n in clab_fabric_nodes %}
+  neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} activate
+  neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} route-map FROM-CLUSTER in
+  neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} soft-reconfiguration inbound
+{% endfor %}
+ exit-address-family
+exit
+!
+{% endfor %}
+line vty
+!

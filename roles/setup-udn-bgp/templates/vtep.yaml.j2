@@ -1,0 +1,44 @@
+{#
+  VTEP addresses for EVPN.
+
+  OVN-Kubernetes discovers each node's VXLAN tunnel endpoint address from
+  the addresses already on it that fall inside these CIDRs, and annotates the
+  node with what it found. The fabric uses those addresses as the next hop
+  for every EVPN route, so they have to be routable from the fabric - which
+  they are, because the nodes advertise {{ udn_bgp_vtep_prefix }}.0/24 over
+  the unicast half of the EVPN session and leaf1 carries a static /32 per
+  node besides.
+
+  Deliberately a block that exists nowhere else in this lab: not
+  {{ lab_network_prefix }}.0/24, not {{ clab_fabric_prefix }}.0/24, not any
+  tenant prefix. A VTEP address that collides with a real one produces
+  tunnels that form and then carry traffic to the wrong place.
+
+  mode is 'Unmanaged' - capitalised; the API enum is Managed/Unmanaged.
+  Managed means OVN-Kubernetes allocates an IP per node out of the CIDRs
+  here; Unmanaged means something external assigns them and OVN-Kubernetes
+  discovers what is already on each node.
+
+  Unmanaged, because this lab's fabric is three FRR containers with no IGP
+  and something has to give them a route to each VTEP. With Managed
+  allocation you do not know which node holds which address until after the
+  fact; with Unmanaged, the NNCPs this role renders put a known address on a
+  known node and the border leaf carries static /32s written at the same
+  time. One less moving part when a tunnel does not form.
+
+  Exactly one address per node may fall inside these CIDRs. If a node has two
+  the VTEP goes to a failed status rather than picking one - so if you widen
+  this block, check nothing else on the nodes is already inside it.
+
+  (Managed mode is the right answer on a real fabric. It also makes cidrs
+  append-only: entries cannot then be removed, reordered or narrowed, only
+  widened or appended to.)
+#}
+apiVersion: k8s.ovn.org/v1
+kind: VTEP
+metadata:
+  name: evpn-vtep
+spec:
+  cidrs:
+    - {{ udn_bgp_vtep_prefix }}.0/24
+  mode: Unmanaged

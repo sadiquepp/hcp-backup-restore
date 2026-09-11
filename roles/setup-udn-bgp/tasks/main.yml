@@ -1,0 +1,169 @@
+---
+# Tasks file for setup-udn-bgp
+#
+# The cluster half of the UDN/BGP lab. Runs against one OpenShift cluster
+# with KUBECONFIG already set by the playbook.
+#
+# Driven by udn_phase, which the playbook sets from a tag. The phases are
+# cumulative and are meant to be run in order, because each one removes an
+# entire class of explanation for a failure in the next:
+#
+#   preflight - what this cluster can and cannot do
+#   enable    - FRR-K8s + route advertisements on, optionally local gateway
+#   default   - advertise the cluster default pod network. No UDN involved.
+#               If this does not work, nothing about UDN is the problem.
+#   shared    - primary UDNs advertised into the default VRF (targetVRF:
+#               default). Adds UDN, still no VLANs or VRF plumbing.
+#   vrflite   - per-tenant VRFs and VLANs (targetVRF: auto). Adds the
+#               plumbing, and the isolation guarantee that goes with it.
+#   evpn      - VXLAN/EVPN transport. 4.22+ only.
+
+- name: Validate udn_phase
+  ansible.builtin.assert:
+    that: udn_phase in ['preflight', 'enable', 'default', 'shared', 'vrflite', 'evpn']
+    fail_msg: >-
+      udn_phase must be one of preflight, enable, default, shared, vrflite,
+      evpn - got '{{ udn_phase | default("(unset)") }}'.
+
+- name: Resolve where the containerlab fabric can be reached
+  ansible.builtin.set_fact:
+    clab_exec_host: >-
+      {{ (lab_network_prefix ~ '.' ~ ip_list.clab) if clab_deploy_mode == 'vm' else 'localhost' }}
+
+- name: Pre-flight checks
+  ansible.builtin.include_tasks: preflight.yml
+
+- name: Enable FRR and route advertisements
+  ansible.builtin.include_tasks: enable.yml
+  when: udn_phase != 'preflight'
+
+- name: Render the manifests for this phase
+  ansible.builtin.include_tasks: apply.yml
+  when: udn_phase != 'preflight'
+
+# ---------------------------------------------------------------------------
+# Fabric NIC addressing + base peering. Needed by every phase from 'default'
+# on, because every phase rides on the untagged session or is compared
+# against it.
+# ---------------------------------------------------------------------------
+- name: Address the fabric NICs
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-fabric-untagged-{{ item.ip_key }}.yaml"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.node }}"
+  when: udn_phase != 'preflight'
+
+- name: Wait for the fabric NIC policies to be applied
+  ansible.builtin.command:
+    cmd: >-
+      oc wait nncp/fabric-untagged-{{ item.ip_key }}
+      --for=condition=Available --timeout=300s
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.node }}"
+  when: udn_phase != 'preflight'
+  changed_when: false
+
+- name: Create the base BGP peering in the default VRF
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/frrconfiguration-default.yaml"
+  when: udn_phase != 'preflight'
+
+# ---------------------------------------------------------------------------
+# Phase: default - advertise the cluster default pod network
+# ---------------------------------------------------------------------------
+- name: Advertise the cluster default pod network
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-default.yaml"
+  when: udn_phase in ['default', 'shared', 'vrflite', 'evpn']
+
+# ---------------------------------------------------------------------------
+# Phases: shared / vrflite / evpn - the tenant UDNs and their workloads
+# ---------------------------------------------------------------------------
+#
+# A namespace's primary network is bound when the namespace is created, so a
+# namespace that already exists from an earlier phase is on the OLD network
+# and cannot be moved by relabelling. Recreating it is the only way to switch
+# a tenant between the shared-VRF and VRF-Lite subnets, and it is why these
+# are test namespaces holding nothing of value.
+- name: Remove test namespaces left over from a previous phase
+  ansible.builtin.command:
+    cmd: "oc delete namespace udn-{{ item.name }} --ignore-not-found --wait=true --timeout=300s"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+# Two reasons this is a delete rather than an apply: the phases use different
+# subnets (unique in shared, deliberately overlapping in vrflite), and
+# network.transport is immutable, so a CUDN created without it can never be
+# moved to transport: EVPN in place.
+- name: Remove CUDNs from a previous phase (subnets differ, and transport is immutable)
+  ansible.builtin.command:
+    cmd: "oc delete clusteruserdefinednetwork {{ item.name }} --ignore-not-found --wait=true --timeout=300s"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+- name: Create the tenant CUDNs
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/cudn-{{ item.name }}.yaml"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+- name: Create the tenant namespaces and test workloads
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/workload-{{ item.name }}.yaml"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+- name: Wait for a test pod on every node of each tenant
+  ansible.builtin.command:
+    cmd: >-
+      oc -n udn-{{ item.name }} rollout status daemonset/udn-test --timeout=600s
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# Phase: shared
+# ---------------------------------------------------------------------------
+- name: Advertise the UDNs into the default VRF
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-udn.yaml"
+  when: udn_phase == 'shared'
+
+# ---------------------------------------------------------------------------
+# Phase: vrflite
+# ---------------------------------------------------------------------------
+# vrflite only. Under EVPN the tenant VRFs still exist on each node, but
+# nothing hands them off over a VLAN - the data plane is VXLAN between node
+# VTEPs. Building the VLAN plumbing anyway would give every tenant a second
+# path to the same destinations with nothing choosing between them, so the
+# evpn phase skips this and removes it if a previous phase left it behind.
+- name: Discover the per-tenant VRFs OVN-Kubernetes created
+  ansible.builtin.include_tasks: vrflite-discover.yml
+  when: udn_phase == 'vrflite'
+
+- name: Render and apply the VRF-Lite plumbing
+  ansible.builtin.include_tasks: vrflite-apply.yml
+  when: udn_phase == 'vrflite'
+
+# ---------------------------------------------------------------------------
+# Phase: evpn
+# ---------------------------------------------------------------------------
+- name: Configure EVPN transport for the tenant UDNs
+  ansible.builtin.include_tasks: evpn.yml
+  when: udn_phase == 'evpn'
+
+- name: Verify
+  ansible.builtin.include_tasks: verify.yml
+  when: udn_phase != 'preflight'

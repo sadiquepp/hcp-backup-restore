@@ -1,0 +1,101 @@
+---
+# Cluster-side pre-flight.
+#
+# Every check here is one that, left unchecked, produces a lab that looks
+# configured and does not work - which is much more expensive to debug than a
+# failed assertion.
+
+- name: Read the cluster version
+  ansible.builtin.command:
+    cmd: oc get clusterversion version -o jsonpath={.status.desired.version}
+  register: udn_bgp_cluster_version
+  changed_when: false
+
+- name: Report the cluster under test
+  ansible.builtin.debug:
+    msg: >-
+      Targeting {{ udn_bgp_target_hub }} at {{ hub_kubeconfig }},
+      OpenShift {{ udn_bgp_cluster_version.stdout }}
+
+- name: Check whether the RouteAdvertisements API is present
+  ansible.builtin.command:
+    cmd: oc get crd routeadvertisements.k8s.ovn.org
+  register: udn_bgp_ra_crd
+  failed_when: false
+  changed_when: false
+
+- name: Fail if the cluster is too old for route advertisements
+  ansible.builtin.assert:
+    that: udn_bgp_ra_crd.rc == 0
+    fail_msg: >-
+      routeadvertisements.k8s.ovn.org is not present on this cluster.
+      BGP route advertisements need OpenShift 4.19 or later with the
+      OVN-Kubernetes network plugin. This cluster reports
+      {{ udn_bgp_cluster_version.stdout }}.
+
+- name: Check whether the VTEP API is present (EVPN, 4.22+)
+  ansible.builtin.command:
+    cmd: oc get crd vteps.k8s.ovn.org
+  register: udn_bgp_vtep_crd
+  failed_when: false
+  changed_when: false
+
+- name: Record what this cluster can do
+  ansible.builtin.set_fact:
+    udn_bgp_has_evpn: "{{ udn_bgp_vtep_crd.rc == 0 }}"
+
+- name: Report EVPN availability
+  ansible.builtin.debug:
+    msg: >-
+      {% if udn_bgp_has_evpn %}
+      EVPN is available on this cluster (vteps.k8s.ovn.org present) - phase 4
+      can run against it.
+      {% else %}
+      EVPN is NOT available on this cluster. EVPN for cluster user-defined
+      networks is GA in OpenShift {{ udn_bgp_evpn_min_version }}; this cluster
+      is {{ udn_bgp_cluster_version.stdout }}, so the VTEP CRD and the CUDN
+      transport/evpnConfiguration fields do not exist. Phases 1-3 are
+      unaffected. Build the EVPN fabric anyway (clab_topology: evpn) and hand
+      the cluster off to it with VRF-Lite at the border leaf - see the README.
+      {% endif %}
+
+# MetalLB is already running on this lab for the hosted clusters' API VIPs,
+# and MetalLB ships its own FRR-K8s. The CNO deploying a second one into
+# openshift-frr-k8s is supported and is the intended arrangement, but two
+# FRR-K8s instances both claiming the node's FRR is not - so it is worth
+# knowing which is present before rather than after enabling the feature.
+- name: Look for an existing FRR-K8s deployment
+  ansible.builtin.shell:
+    cmd: >-
+      oc get daemonset -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name --no-headers
+      | grep -i frr-k8s || true
+  register: udn_bgp_existing_frr
+  changed_when: false
+
+- name: Report existing FRR-K8s daemonsets
+  ansible.builtin.debug:
+    msg: >-
+      FRR-K8s daemonsets currently on the cluster:
+      {{ udn_bgp_existing_frr.stdout_lines | default(['(none)'], true) }}
+
+      This lab runs MetalLB in L2 mode for the hosted clusters' API VIPs, so
+      MetalLB is not competing for BGP sessions. If you later switch a
+      MetalLB pool to BGP mode, point it at the CNO's FRR-K8s in
+      {{ udn_bgp_frrk8s_namespace }} rather than letting the MetalLB operator
+      stand up a second instance.
+
+- name: Check the OVN-Kubernetes gateway mode
+  ansible.builtin.command:
+    cmd: >-
+      oc get network.operator.openshift.io cluster
+      -o jsonpath={.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.routingViaHost}
+  register: udn_bgp_gateway_mode
+  changed_when: false
+
+- name: Report the gateway mode
+  ansible.builtin.debug:
+    msg: >-
+      routingViaHost is '{{ udn_bgp_gateway_mode.stdout | default('', true) or "false (shared gateway mode, the default)" }}'.
+      Phases 1 and 2 work in either mode. Phase 3 (VRF-Lite) and phase 4
+      (EVPN) both require LOCAL gateway mode (routingViaHost: true) - that is
+      an OVN-Kubernetes restriction, not a lab one.

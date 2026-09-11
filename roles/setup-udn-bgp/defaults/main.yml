@@ -1,0 +1,28 @@
+---
+# defaults file for roles/setup-udn-bgp
+#
+# Deployer-facing values live in vars.yaml under "UDN + BGP lab".
+
+## Namespace FRR-K8s is deployed into when the Cluster Network Operator
+## brings it up via additionalRoutingCapabilities. This is NOT metallb-system
+## - the upstream OKEP examples use that namespace because upstream installs
+## FRR-K8s through MetalLB, but on OpenShift the CNO owns the deployment and
+## puts it here. Applying an FRRConfiguration to the wrong namespace is
+## silently inert: the CR is accepted and nothing ever reads it.
+udn_bgp_frrk8s_namespace: openshift-frr-k8s
+
+## Label that marks the FRRConfiguration objects RouteAdvertisements is
+## allowed to build on. RouteAdvertisements refuses to act if its
+## frrConfigurationSelector matches more than one FRRConfiguration, so this
+## has to select exactly the base peering CR for the phase in play.
+udn_bgp_frr_label_key: routeAdvertisements
+
+## Label put on the ClusterUserDefinedNetworks so a RouteAdvertisements CR
+## can select them as a set.
+udn_bgp_cudn_label_key: bgp
+
+## How long to wait for the cluster network operator to finish rolling out a
+## change to the Network CR. Enabling FRR or flipping gateway mode restarts
+## every ovnkube-node pod, which on this lab's three workers takes a few
+## minutes.
+udn_bgp_rollout_timeout: 900
