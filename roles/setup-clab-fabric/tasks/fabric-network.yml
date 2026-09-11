@@ -73,6 +73,28 @@
 # redundant in vm mode: there the bridge is referenced by no containerlab
 # topology on this host at all, and Docker may still be present for other
 # reasons. Cheap either way, and -C makes it idempotent.
+# The template argues that an isolated network with no <ip> gives libvirt
+# nothing to build REJECT rules from. That is an argument, not a measurement,
+# and it is cheap to check on the machine actually running this - so print
+# whatever does reference the bridge rather than assuming.
+- name: Show any firewall rules referencing the fabric bridge
+  ansible.builtin.shell:
+    cmd: "iptables -S FORWARD | grep -- '{{ clab_fabric_bridge }}' || true"
+  register: clab_fabric_fw
+  changed_when: false
+
+- name: Report them
+  ansible.builtin.debug:
+    msg: >-
+      {{ clab_fabric_fw.stdout_lines
+         | default(['(no FORWARD rules mention ' ~ clab_fabric_bridge ~ ')'], true) }}
+
+      A REJECT here is only a problem if something has loaded br_netfilter
+      with bridge-nf-call-iptables=1, which pushes frames switched inside the
+      bridge through FORWARD. Docker does that, and clab_deploy_mode 'host'
+      puts Docker on this machine. The ACCEPT inserted below sits above
+      anything libvirt added.
+
 - name: Allow traffic switched within the fabric bridge past any FORWARD policy
   ansible.builtin.shell:
     cmd: |
