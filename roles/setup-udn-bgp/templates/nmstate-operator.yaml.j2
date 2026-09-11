@@ -1,0 +1,33 @@
+# Kubernetes NMState Operator - the source of the NodeNetworkConfiguration
+# Policy API this lab uses to address the fabric NICs, build the VRF-Lite
+# VLAN subinterfaces and place the EVPN VTEP addresses.
+#
+# Rendered per-run so the catalog can differ between a connected and a
+# disconnected hub, the same way roles/setup-hub-acm renders its
+# subscriptions. Everything else is identical either way.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ udn_bgp_nmstate_namespace }}
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-nmstate
+  namespace: {{ udn_bgp_nmstate_namespace }}
+spec:
+  targetNamespaces:
+    - {{ udn_bgp_nmstate_namespace }}
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: kubernetes-nmstate-operator
+  namespace: {{ udn_bgp_nmstate_namespace }}
+spec:
+  channel: {{ udn_bgp_nmstate_channel }}
+  name: kubernetes-nmstate-operator
+  installPlanApproval: Automatic
+  source: "{{ udn_bgp_catalog_source }}"
+  sourceNamespace: "{{ udn_bgp_catalog_source_namespace }}"

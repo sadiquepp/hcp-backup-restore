@@ -93,6 +93,23 @@
       switched on, so "(none yet)" is normal on a first run - the enable step
       creates them and this play checks afterwards that they appeared.
 
+- name: Check whether the NMState operator is present
+  ansible.builtin.command:
+    cmd: oc get crd nodenetworkconfigurationpolicies.nmstate.io
+  register: udn_bgp_pf_nncp
+  failed_when: false
+  changed_when: false
+
+- name: Report NMState availability
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'NMState is installed - NodeNetworkConfigurationPolicy is available.'
+         if udn_bgp_pf_nncp.rc == 0 else
+         'NMState is NOT installed. Every phase from "default" on applies
+          NodeNetworkConfigurationPolicies, so the run will install the
+          Kubernetes NMState Operator from catalog ' ~ udn_bgp_catalog_source ~
+          ' and create its NMState instance before using them.' }}
+
 # MetalLB is already running on this lab for the hosted clusters' API VIPs,
 # and MetalLB ships its own FRR-K8s. The CNO deploying a second one into
 # openshift-frr-k8s is supported and is the intended arrangement, but two

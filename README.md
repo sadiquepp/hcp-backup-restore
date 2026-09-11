@@ -2002,6 +2002,11 @@ on the hypervisor. Stay on `vm` otherwise.
   `vault.yaml` the helper uses - it is a bare RHEL9 image and cannot install
   Docker or containerlab until it is entitled. In `host` mode this does not
   apply, since containerlab runs on the already-registered hypervisor.
+- On the cluster: the **Kubernetes NMState Operator** is installed if absent
+  (namespace `openshift-nmstate`, plus its `NMState` instance) - every phase
+  from `default` on applies `NodeNetworkConfigurationPolicy` objects, which
+  come from it. On a disconnected hub, point `udn_bgp_catalog_source` at the
+  mirrored catalog; it follows `acm_catalog_source` when vars.yaml sets one.
 - On the cluster: `Network.operator.openshift.io/cluster` is patched to
   enable FRR and route advertisements, which **restarts every ovnkube-node
   pod**. That is a few minutes of rolling pod-egress disruption on this lab's
