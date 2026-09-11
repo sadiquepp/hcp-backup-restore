@@ -95,7 +95,11 @@
     label: "{{ item.name }}"
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
-- name: Remove CUDNs from a previous phase (their subnets differ between phases)
+# Two reasons this is a delete rather than an apply: the phases use different
+# subnets (unique in shared, deliberately overlapping in vrflite), and
+# network.transport is immutable, so a CUDN created without it can never be
+# moved to transport: EVPN in place.
+- name: Remove CUDNs from a previous phase (subnets differ, and transport is immutable)
   ansible.builtin.command:
     cmd: "oc delete clusteruserdefinednetwork {{ item.name }} --ignore-not-found --wait=true --timeout=300s"
   loop: "{{ udn_bgp_tenants }}"
@@ -140,13 +144,18 @@
 # ---------------------------------------------------------------------------
 # Phase: vrflite
 # ---------------------------------------------------------------------------
+# vrflite only. Under EVPN the tenant VRFs still exist on each node, but
+# nothing hands them off over a VLAN - the data plane is VXLAN between node
+# VTEPs. Building the VLAN plumbing anyway would give every tenant a second
+# path to the same destinations with nothing choosing between them, so the
+# evpn phase skips this and removes it if a previous phase left it behind.
 - name: Discover the per-tenant VRFs OVN-Kubernetes created
   ansible.builtin.include_tasks: vrflite-discover.yml
-  when: udn_phase in ['vrflite', 'evpn']
+  when: udn_phase == 'vrflite'
 
 - name: Render and apply the VRF-Lite plumbing
   ansible.builtin.include_tasks: vrflite-apply.yml
-  when: udn_phase in ['vrflite', 'evpn']
+  when: udn_phase == 'vrflite'
 
 # ---------------------------------------------------------------------------
 # Phase: evpn

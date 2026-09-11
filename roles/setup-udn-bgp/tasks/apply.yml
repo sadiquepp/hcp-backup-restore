@@ -35,9 +35,13 @@
     label: "{{ node_entry.node }}"
   delegate_to: localhost
 
+# network.transport is immutable, so an EVPN tenant has to be CREATED with
+# transport: EVPN - applying the plain CUDN first and patching it afterwards
+# is rejected by the API. Hence one template per shape, chosen here, and the
+# delete-then-create in main.yml rather than a plain apply.
 - name: Render the tenant CUDNs
   ansible.builtin.template:
-    src: cudn.yaml.j2
+    src: "{{ 'cudn-evpn.yaml.j2' if udn_phase == 'evpn' else 'cudn.yaml.j2' }}"
     dest: "{{ udn_bgp_manifest_dir }}/cudn-{{ tenant.name }}.yaml"
     mode: '0644'
   loop: "{{ udn_bgp_tenants }}"
@@ -57,14 +61,13 @@
     label: "{{ tenant.name }}"
   delegate_to: localhost
 
-# The evpn phase reuses the VRF-Lite advertisement unchanged: EVPN changes
-# the TRANSPORT a UDN uses, not how it is advertised, so the same
-# targetVRF 'auto' CR applies. It is listed explicitly here because the evpn
-# phase runs vrflite-apply.yml, which applies this file - omitting it is a
-# missing-file failure part-way through a phase rather than an obvious one.
+# One template per phase, named after it. The shared and vrflite CRs differ
+# in targetVRF; the evpn one matches vrflite's targetVRF but selects a
+# different FRRConfiguration, because EVPN changes how routes travel rather
+# than how they are advertised.
 - name: Render the phase-appropriate UDN advertisements
   ansible.builtin.template:
-    src: "routeadvertisements-udn-{{ 'shared' if udn_phase == 'shared' else 'vrflite' }}.yaml.j2"
+    src: "routeadvertisements-udn-{{ udn_phase }}.yaml.j2"
     dest: "{{ udn_bgp_manifest_dir }}/routeadvertisements-udn.yaml"
     mode: '0644'
   when: udn_phase in ['shared', 'vrflite', 'evpn']

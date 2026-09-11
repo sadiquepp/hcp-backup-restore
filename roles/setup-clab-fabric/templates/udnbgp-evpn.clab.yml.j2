@@ -1,10 +1,11 @@
 {#
   containerlab topology for phase 4: a small EVPN fabric.
 
-    leaf1  - border leaf. Still the router the OCP nodes peer with, exactly
-             as in phases 1-3: same untagged default-VRF session, same
-             per-tenant VLANs and VRFs. What is added is that each tenant VRF
-             is now mapped to an EVPN VNI and carried over VXLAN.
+    leaf1  - border leaf, and with node VTEPs its role is narrower than in
+             phases 1-3: underlay reachability to each node's VTEP, plus
+             EVPN transit between the nodes and the spine. It holds no
+             tenant VRFs and terminates no tunnels - VXLAN flows node <->
+             leaf2 directly.
     spine  - route reflector for the l2vpn evpn address family. No VTEP, no
              tenant VRFs; it never sees tenant traffic in the data plane,
              only carries EVPN routes between the leaves and forwards VXLAN.
@@ -27,12 +28,15 @@
     leaf2 lo0 10.0.0.2   leaf2:eth10 <-> spine:eth2   10.1.0.4/30
     spine lo0 10.0.0.254
 
-  Whether the OCP nodes themselves are VTEPs depends on the cluster: on
-  OpenShift {{ udn_bgp_evpn_min_version }}+ with the cluster-side phase-4
-  manifests applied, they are, and they peer EVPN with the spine directly.
-  On an older cluster they are not, and leaf1 is the VTEP for them - the
-  cluster hands its tenants off with ordinary VRF-Lite and leaf1 maps VRF to
-  VNI. Both are real designs; this topology serves either without change.
+  This topology assumes the OCP nodes are themselves VTEPs, which needs
+  OpenShift {{ udn_bgp_evpn_min_version }}+ and the cluster-side phase-4
+  manifests. They peer l2vpn evpn with leaf1 over the same fabric link they
+  already use, so no new adjacency is needed - only a second address family
+  on an existing session.
+
+  On an older cluster, use clab_topology 'bgp' with --tags vrflite instead:
+  there leaf1 terminates the tenants on VLANs and would map VRF to VNI
+  itself. That variant is described in the README; it is not this file.
 #}
 name: {{ clab_lab_name }}
 
@@ -63,28 +67,20 @@ topology:
         - ip addr add {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}/{{ clab_fabric_netmask_bits }} dev eth1
         - ip link set eth10 mtu {{ clab_fabric_mtu }} up
         - ip addr add 10.1.0.1/30 dev eth10
-{% for t in udn_bgp_tenants %}
-        ## Tenant {{ t.name }}: VRF bound to IP-VRF VNI {{ t.evpn_ip_vni }}.
-        ## FRR reads the 'vni' from the VRF device's linked VXLAN interface,
-        ## so the VRF, its VXLAN device and the bridge that ties them together
-        ## all have to exist before bgpd starts - hence the restart at the end.
-        - ip link add {{ t.name }} type vrf table {{ 1000 + t.vlan }}
-        - ip link set {{ t.name }} up
-        - ip link add link eth1 name eth1.{{ t.vlan }} type vlan id {{ t.vlan }}
-        - ip link set eth1.{{ t.vlan }} master {{ t.name }}
-        - ip link set eth1.{{ t.vlan }} mtu {{ clab_fabric_mtu }} up
-        - ip addr add {{ t.vrf_prefix }}.{{ clab_fabric_router_octet }}/{{ clab_fabric_netmask_bits }} dev eth1.{{ t.vlan }}
-        ## L3VNI plumbing: a VXLAN device in the tenant's VNI, a bridge to
-        ## hold it, and the bridge enslaved to the VRF. This is the standard
-        ## Linux/FRR symmetric-IRB arrangement.
-        - ip link add vni{{ t.evpn_ip_vni }} type vxlan id {{ t.evpn_ip_vni }} local 10.0.0.1 dstport 4789 nolearning
-        - ip link add br{{ t.evpn_ip_vni }} type bridge
-        - ip link set br{{ t.evpn_ip_vni }} master {{ t.name }}
-        - ip link set vni{{ t.evpn_ip_vni }} master br{{ t.evpn_ip_vni }}
-        - ip link set vni{{ t.evpn_ip_vni }} type bridge_slave neigh_suppress on learning off
-        - ip link set vni{{ t.evpn_ip_vni }} mtu {{ clab_fabric_mtu }} up
-        - ip link set br{{ t.evpn_ip_vni }} mtu {{ clab_fabric_mtu }} up
+        ## Underlay reachability to each node's VTEP. The nodes are directly
+        ## adjacent on the fabric, but their VTEP addresses live on dummy
+        ## interfaces, so leaf1 has to be told the way in. Written from the
+        ## same ip_list octets as everything else, which is only possible
+        ## because the VTEP CR runs in Unmanaged mode - see
+        ## roles/setup-udn-bgp/templates/vtep.yaml.j2.
+{% for n in clab_fabric_nodes %}
+        - ip route replace {{ udn_bgp_vtep_prefix }}.{{ ip_list[n.ip_key] }}/32 via {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} dev eth1
 {% endfor %}
+        ## A blackhole for the aggregate so FRR's 'network {{ udn_bgp_vtep_prefix }}.0/24'
+        ## has a matching route to originate. Forwarding is done by the /32s
+        ## above, which are longer matches, so this never black-holes real
+        ## traffic - it only makes the aggregate advertisable.
+        - ip route replace blackhole {{ udn_bgp_vtep_prefix }}.0/24
         - /usr/lib/frr/frrinit.sh restart
 
     spine:

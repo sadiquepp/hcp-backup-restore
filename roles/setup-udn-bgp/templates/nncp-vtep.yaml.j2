@@ -1,0 +1,47 @@
+{#
+  This node's VXLAN tunnel endpoint address.
+
+  The VTEP CR is deliberately in Unmanaged mode, and this policy is why.
+
+  In Managed mode OVN-Kubernetes allocates a VTEP IP per node out of the CR's
+  CIDRs, which is the right choice on a real fabric where the underlay
+  already has a route to the whole block. This lab's fabric is three FRR
+  containers with no IGP, so something has to give leaf1 a route to each
+  VTEP - and with Managed allocation you do not know which node got which
+  address until after the fact.
+
+  Unmanaged inverts that: this policy puts a known address on a known node
+  (100.64.0.<the node's usual octet>, same scheme as every other address in
+  this lab), OVN-Kubernetes discovers it, and the fabric can carry static
+  /32s written at render time. Deterministic, and one less moving part when
+  a tunnel does not form.
+
+  A dummy interface rather than an address on the fabric NIC: the VTEP
+  address is the node's identity in the overlay, not an interface address,
+  and it must stay up and reachable independently of any one link. This is
+  the same shape as a router loopback and is what OVN-Kubernetes expects to
+  discover.
+
+  Exactly one address per node may match the VTEP CR's CIDRs - if a node has
+  two, the VTEP CR goes to a failed status rather than picking one.
+#}
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: vtep-{{ node_entry.ip_key }}
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: {{ node_entry.node }}
+  desiredState:
+    interfaces:
+      - name: {{ udn_bgp_vtep_iface }}
+        type: dummy
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: {{ udn_bgp_vtep_prefix }}.{{ ip_list[node_entry.ip_key] }}
+              prefix-length: 32
+        ipv6:
+          enabled: false

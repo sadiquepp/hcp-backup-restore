@@ -19,27 +19,59 @@
 # by OVN-Kubernetes, and a policy that names a different one recreates the
 # VRF rather than editing it.
 
-- name: Check that the tenant CUDNs exist before looking for their VRFs
+# The VRF's name comes from the CUDN's own status, not from its metadata
+# name. OVN-Kubernetes publishes status.vrfName precisely so that consumers
+# who must name the VRF - FRRConfiguration authors filling in a router's
+# 'vrf' field, and NMState policies like the ones this role writes - read it
+# rather than deriving it. Linux caps an interface name at 15 characters, so
+# a CUDN whose name is longer necessarily has a VRF called something else,
+# and the naming scheme is OVN-Kubernetes' to change between releases.
+#
+# Reading it also doubles as the check that the CUDN exists and has been
+# reconciled: vrfName is only populated for a primary network the controller
+# has processed.
+- name: Read each tenant CUDN's VRF name from its status
   ansible.builtin.command:
-    cmd: "oc get clusteruserdefinednetwork {{ item.name }}"
+    cmd: >-
+      oc get clusteruserdefinednetwork {{ item.name }}
+      -o jsonpath={.status.vrfName}
   loop: "{{ udn_bgp_tenants }}"
   loop_control:
     label: "{{ item.name }}"
-  register: udn_bgp_cudn_check
+  register: udn_bgp_cudn_vrfname
   failed_when: false
   changed_when: false
 
-- name: Fail if a tenant CUDN is missing
+- name: Fail if a tenant CUDN is missing or has not published a VRF name
   ansible.builtin.assert:
-    that: item.rc == 0
+    that:
+      - item.rc == 0
+      - item.stdout | trim | length > 0
     fail_msg: >-
-      ClusterUserDefinedNetwork '{{ item.item.name }}' does not exist. The
-      per-tenant VRFs are created by OVN-Kubernetes in response to the CUDN,
-      so the CUDNs must be applied (and their pods scheduled) before VRF-Lite
-      can be wired. Run the 'udn' tag first.
-  loop: "{{ udn_bgp_cudn_check.results }}"
+      ClusterUserDefinedNetwork '{{ item.item.name }}'
+      {{ 'does not exist' if item.rc != 0 else 'has not published status.vrfName yet' }}.
+      The per-tenant VRFs are created by OVN-Kubernetes in response to the
+      CUDN, so the CUDNs must exist and be reconciled before VRF-Lite can be
+      wired. Apply them with the 'shared' or 'vrflite' phase first, and check
+      `oc get clusteruserdefinednetwork {{ item.item.name }} -o yaml` for a
+      NetworkCreated condition that is not True.
+  loop: "{{ udn_bgp_cudn_vrfname.results }}"
   loop_control:
     label: "{{ item.item.name }}"
+
+# tenant name -> the VRF device name OVN-Kubernetes actually uses.
+- name: Map each tenant to its published VRF device name
+  ansible.builtin.set_fact:
+    udn_bgp_vrf_names: >-
+      {{ dict(udn_bgp_cudn_vrfname.results
+              | map(attribute='item.name') | list
+              | zip(udn_bgp_cudn_vrfname.results
+                    | map(attribute='stdout') | map('trim') | list)) }}
+
+- name: Report the VRF device names
+  ansible.builtin.debug:
+    msg: >-
+      CUDN -> VRF device: {{ udn_bgp_vrf_names }}
 
 # One debug pod per node. 'ip -j -d link show' returns the whole link table
 # as JSON in a single call, which is worth doing rather than parsing 'ip'
@@ -87,14 +119,14 @@
            'tenant': item.1.name,
            'vlan': item.1.vlan,
            'vrf_prefix': item.1.vrf_prefix,
-           'vrf': item.1.name,
+           'vrf': udn_bgp_vrf_names[item.1.name],
            'table': (item.0.stdout | from_json
-                     | selectattr('ifname', 'equalto', item.1.name)
+                     | selectattr('ifname', 'equalto', udn_bgp_vrf_names[item.1.name])
                      | map(attribute='linkinfo.info_data.table')
                      | first),
            'ports': (item.0.stdout | from_json
                      | selectattr('master', 'defined')
-                     | selectattr('master', 'equalto', item.1.name)
+                     | selectattr('master', 'equalto', udn_bgp_vrf_names[item.1.name])
                      | map(attribute='ifname') | list)
          }] }}
   loop: "{{ udn_bgp_links_raw.results | product(udn_bgp_tenants) | list }}"
@@ -105,7 +137,7 @@
       | selectattr('linkinfo', 'defined')
       | selectattr('linkinfo.info_kind', 'defined')
       | selectattr('linkinfo.info_kind', 'equalto', 'vrf')
-      | selectattr('ifname', 'equalto', item.1.name)
+      | selectattr('ifname', 'equalto', udn_bgp_vrf_names[item.1.name])
       | list | length > 0
 
 - name: Fail if any node is missing a tenant VRF
@@ -128,13 +160,12 @@
          each tenant is Running on every node in clab_fabric_nodes
          (`oc get pods -A -o wide -l app=udn-test`) and re-run.
 
-      2. The VRF exists under a different name. The naming convention is
-         OVN-Kubernetes', not this lab's, and it can change between releases.
-         If the listed VRFs are the tenants' under another name, that name is
-         what belongs in the 'vrf' field here and in
-         templates/frrconfiguration-vrflite.yaml.j2 - they must match the
-         kernel device exactly, because FRR-K8s passes the value straight
-         through to FRR's 'router bgp <asn> vrf <name>'.
+      2. The node has not converged yet. The VRF names looked for are the
+         ones each CUDN published in status.vrfName
+         ({{ udn_bgp_vrf_names | default({}) }}), so this is not a naming
+         guess - if those names are absent from a node's link table, the
+         node has not finished creating them. Give it a moment and re-run;
+         if it persists, check ovnkube-node's logs on that node.
 
 - name: Report the VRF facts VRF-Lite will be built from
   ansible.builtin.debug:

@@ -6,10 +6,11 @@
   writes; OVN-Kubernetes generates the additive one carrying the actual
   prefixes once the RouteAdvertisements CR with targetVRF 'auto' selects it.
 
-  The VRF names here are the ones discovered on the nodes, which are the UDN
-  names - blue and red. FRR-K8s passes them straight through to FRR's
-  'router bgp <asn> vrf <name>', so they have to match the kernel devices
-  exactly.
+  The VRF names here are read from each CUDN's status.vrfName, not derived
+  from the tenant name. FRR-K8s passes the value straight through to FRR's
+  'router bgp <asn> vrf <name>', so it has to match the kernel device
+  exactly - and OVN-Kubernetes publishes vrfName for exactly this purpose
+  (a CUDN name over 15 characters cannot be an interface name at all).
 
   Note there is no router stanza for the default VRF in this file. Phase 3
   peering is entirely inside the tenant VRFs; the untagged default-VRF
@@ -28,7 +29,7 @@ spec:
     routers:
 {% for t in udn_bgp_tenants %}
       - asn: {{ clab_cluster_asn }}
-        vrf: {{ t.name }}
+        vrf: {{ udn_bgp_vrf_names[t.name] }}
         neighbors:
           - address: {{ t.vrf_prefix }}.{{ clab_fabric_router_octet }}
             asn: {{ clab_leaf1_asn }}

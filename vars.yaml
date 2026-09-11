@@ -205,9 +205,16 @@ hosted_domain_disconnected: hcp-cluster1-d.mylab.com
 ## 4.2.33 instead of 4.20.33. Everything downstream (release pullspecs, the
 ## RHCOS download urls, the operator index tag, the openshift-install path)
 ## interpolates this into a string, so keep the quotes.
-ocp_major_version: "4.21"
-ocp_minor_version: 15 
-coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
+##
+## 4.22 rather than 4.21 because BGP EVPN for primary cluster user-defined
+## networks is GA in 4.22 - on 4.21 the VTEP CRD and the CUDN
+## network.transport/network.evpn fields do not exist at all. Everything
+## else in this lab works on either; see the UDN/BGP section of the README.
+## To go back to 4.21, set these three to "4.21" / 15 / 0 and drop the evpn
+## phase - nothing else needs changing.
+ocp_major_version: "4.22"
+ocp_minor_version: 8
+coreos_minor_version: 8  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
 download_dir: /var/lib/libvirt/images/
 hub_vm_folder: /var/lib/libvirt/images/hub
 hub_install_folder: /var/lib/libvirt/images/hub_install
@@ -506,13 +513,13 @@ agent_service_database_storage: 10Gi
 agent_service_filesystem_storage: 100Gi
 agent_service_image_storage: 50Gi
 agent_service_os_images:
-  - openshiftVersion: "4.21"
-    version: "4.21.0"
-    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.21/4.21.0/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
-    cpuArchitecture: "x86_64"
   - openshiftVersion: "4.22"
     version: "4.22.8"
     url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+  - openshiftVersion: "4.21"
+    version: "4.21.0"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.21/4.21.0/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
     cpuArchitecture: "x86_64"
   - openshiftVersion: "4.20"
     version: "4.20.13"
@@ -564,7 +571,7 @@ agent_service_os_images:
 ## setup-bminfra: bare-metal infra namespace and InfraEnv OCP version.
 ## osImageVersion must match an entry in agent_service_os_images above.
 bminfra_location: singapore
-bminfra_ocp_version: '4.21'
+bminfra_ocp_version: '4.22'
 discovery_iso_filename: "bminfra-discovery-{{ bminfra_ocp_version }}.iso"
 discovery_boot_kernel_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-vmlinuz"
 discovery_boot_initrd_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-initrd.img"
@@ -1139,7 +1146,32 @@ udn_bgp_target_hub: hub
 udn_bgp_set_local_gateway: true
 
 ## Phase 4. EVPN for cluster user-defined networks is GA in OpenShift 4.22 -
-## on 4.21 the VTEP CRD and the CUDN transport/evpnConfiguration fields do
+## on 4.21 the VTEP CRD and the CUDN network.transport/network.evpn fields do
 ## not exist, so the cluster-side phase-4 tasks refuse to run and only the
 ## EVPN fabric is built. See the README section for what that still buys you.
+## ocp_major_version is 4.22, so the full path is available.
 udn_bgp_evpn_min_version: "4.22"
+
+## VTEP (VXLAN tunnel endpoint) addressing for phase 4.
+##
+## The VTEP CR runs in Unmanaged mode and these addresses are assigned by
+## NMState, one per node, at <prefix>.<the node's usual ip_list octet> - so
+## worker1 is .34 here exactly as it is on virbr0 and on the fabric. In
+## Managed mode OVN-Kubernetes would allocate them itself, which is right on
+## a real fabric with an IGP but leaves this lab's FRR containers with no way
+## to know which node got which address. Assigning them here means the
+## border leaf can carry static /32s written at render time.
+##
+## Deliberately a block that appears nowhere else in this lab - not
+## lab_network_prefix, not clab_fabric_prefix, not any tenant prefix. A VTEP
+## address that collides with a real one builds tunnels to the wrong place.
+##
+## Note the VTEP CR's cidrs are append-only in Managed mode; in Unmanaged
+## they can be changed freely, which is another small reason to prefer
+## Unmanaged in a lab you expect to re-address.
+udn_bgp_vtep_prefix: "100.64.0"
+## Dummy interface the VTEP address is put on. A dummy rather than an address
+## on the fabric NIC because the VTEP address is the node's identity in the
+## overlay and has to stay up independently of any one link - the same shape
+## as a router loopback.
+udn_bgp_vtep_iface: vtep0

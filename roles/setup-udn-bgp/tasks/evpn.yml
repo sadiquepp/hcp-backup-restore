@@ -1,11 +1,24 @@
 ---
-# Phase 4 - EVPN transport for the tenant UDNs.
+# Phase 4 - EVPN transport for the tenant UDNs, with the OCP nodes as VTEPs.
 #
-# This phase is gated, not attempted-and-caught. EVPN for cluster
-# user-defined networks is GA in OpenShift {{ udn_bgp_evpn_min_version }}; on
-# an older cluster the VTEP CRD and the CUDN transport/evpnConfiguration
-# fields simply do not exist, and applying the manifests produces a wall of
-# schema errors that says nothing useful. Better to say so plainly.
+# How this differs from phase 3 is worth being explicit about, because the
+# cluster-side objects look similar and the data path is completely
+# different:
+#
+#   VRF-Lite  each tenant gets a VLAN subinterface to a directly attached PE
+#             router, and its routes ride that link. One link per tenant per
+#             node, and the tenant count is bounded by how many VLANs and
+#             host interfaces you are willing to manage.
+#
+#   EVPN      each NODE is a VXLAN tunnel endpoint. Tenant routes are
+#             type-5 EVPN routes carrying a per-tenant VNI, and the data
+#             plane is VXLAN node-to-node. No VLANs, no per-tenant link.
+#
+# So this phase does NOT build the VRF-Lite plumbing - no VLAN
+# subinterfaces, no per-tenant VRF BGP sessions to leaf1. Leaving phase 3's
+# plumbing in place alongside would give each tenant two paths to the same
+# destinations with nothing deciding between them, so the tasks below remove
+# it.
 
 - name: Stop with an explanation if this cluster has no EVPN support
   ansible.builtin.fail:
@@ -15,60 +28,129 @@
       cluster user-defined networks is GA in OpenShift
       {{ udn_bgp_evpn_min_version }}.
 
-      This is not a dead end for the work you are doing. Two options:
+      vars.yaml sets ocp_major_version to {{ ocp_major_version }}. If that is
+      4.22 and you are still seeing this, the cluster itself predates the
+      variable change - rebuild or upgrade it.
 
-      1. Move this cluster to {{ udn_bgp_evpn_min_version }}. vars.yaml already
-         carries a 4.22 entry in agent_service_config_os_images, so the
-         plumbing for a 4.22 hub exists in this lab.
-
-      2. Build the EVPN fabric anyway and hand off to it with VRF-Lite:
-           ansible-playbook ... setup_udn_bgp_lab.yaml --tags fabric \
-             -e clab_topology=evpn
-         The cluster keeps peering with leaf1 over per-tenant VLANs exactly
-         as in phase 3, and leaf1 maps each VRF into an EVPN VNI carried over
-         VXLAN to leaf2. The tenants' external endpoints move behind leaf2,
-         so traffic genuinely crosses an EVPN fabric - it just terminates at
-         the border leaf rather than on the OCP nodes themselves. That is a
-         normal production design, not a workaround, and it exercises the
-         route-target and VNI mapping you will need either way.
+      Alternatively, build the EVPN fabric and hand off to it with VRF-Lite:
+        ansible-playbook ... setup_udn_bgp_lab.yaml --tags fabric \
+          -e clab_topology=evpn
+      then run --tags vrflite. The cluster peers per-tenant VLANs with leaf1
+      exactly as in phase 3, and leaf1 maps each VRF into an EVPN VNI carried
+      over VXLAN to leaf2. That is a normal production design - plenty of
+      real clusters hand off at a border leaf rather than running VTEPs on
+      the nodes - and it exercises the VNI and route-target mapping either
+      way. What it does not exercise is node-level VTEPs.
   when: not udn_bgp_has_evpn
 
-- name: Render the VTEP CR
+- name: Render the VTEP CR and the per-node VTEP addresses
   ansible.builtin.template:
-    src: vtep.yaml.j2
-    dest: "{{ udn_bgp_manifest_dir }}/vtep.yaml"
+    src: "{{ item.src }}"
+    dest: "{{ udn_bgp_manifest_dir }}/{{ item.dest }}"
     mode: '0644'
+  loop:
+    - { src: vtep.yaml.j2, dest: vtep.yaml }
+    - { src: frrconfiguration-evpn.yaml.j2, dest: frrconfiguration-evpn.yaml }
+  loop_control:
+    label: "{{ item.dest }}"
   delegate_to: localhost
 
-- name: Render the EVPN-transport CUDNs
+- name: Render a VTEP address policy per node
   ansible.builtin.template:
-    src: cudn-evpn.yaml.j2
-    dest: "{{ udn_bgp_manifest_dir }}/cudn-evpn-{{ tenant.name }}.yaml"
+    src: nncp-vtep.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/nncp-vtep-{{ node_entry.ip_key }}.yaml"
     mode: '0644'
-  loop: "{{ udn_bgp_tenants }}"
+  loop: "{{ clab_fabric_nodes }}"
   loop_control:
-    loop_var: tenant
-    label: "{{ tenant.name }}"
+    loop_var: node_entry
+    label: "{{ node_entry.node }}"
   delegate_to: localhost
+
+# Order matters here. The addresses have to be on the nodes before the VTEP
+# CR is created: in Unmanaged mode the CR's job is to discover what is
+# already there, and a CR created against nodes with no matching address goes
+# straight to a failed status.
+- name: Put each node's VTEP address in place
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-vtep-{{ item.ip_key }}.yaml"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.node }}"
+
+- name: Wait for the VTEP address policies to be applied
+  ansible.builtin.command:
+    cmd: "oc wait nncp/vtep-{{ item.ip_key }} --for=condition=Available --timeout=300s"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.node }}"
+  changed_when: false
 
 - name: Create the VTEP
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/vtep.yaml"
 
-- name: Switch the tenant CUDNs to EVPN transport
+- name: Wait for the VTEP to be accepted
   ansible.builtin.command:
-    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/cudn-evpn-{{ item.name }}.yaml"
-  loop: "{{ udn_bgp_tenants }}"
-  loop_control:
-    label: "{{ item.name }}"
+    cmd: >-
+      oc wait vtep/evpn-vtep --for=condition=Accepted=True --timeout=300s
+  register: udn_bgp_vtep_accept
+  failed_when: false
+  changed_when: false
 
-- name: Show the EVPN routes the fabric has learned
+- name: Report the VTEP status
+  ansible.builtin.command:
+    cmd: oc get vtep evpn-vtep -o wide
+  register: udn_bgp_vtep_status
+  changed_when: false
+
+- name: Fail with the VTEP's own reason if it was not accepted
+  ansible.builtin.assert:
+    that: udn_bgp_vtep_accept.rc == 0
+    fail_msg: >-
+      The VTEP CR was not accepted: {{ udn_bgp_vtep_status.stdout }}.
+      In Unmanaged mode the usual causes are that a node has no address
+      inside {{ udn_bgp_vtep_prefix }}.0/24, or that it has more than one -
+      an ambiguous match is a failure, not a choice. Check with
+      `oc get vtep evpn-vtep -o yaml` and
+      `oc debug node/<node> -- chroot /host ip -br addr show {{ udn_bgp_vtep_iface }}`.
+
+# The EVPN session carries the unicast address family as well as evpn, so
+# this replaces the phase-1/3 peering rather than sitting alongside it for
+# the tenant networks. The phase-1 default-VRF CR is left in place: it still
+# carries the cluster default pod network, which is not part of any EVPN.
+- name: Create the EVPN BGP peering
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/frrconfiguration-evpn.yaml"
+
+- name: Advertise the tenant UDNs over EVPN
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-udn.yaml"
+
+# Phase 3's objects, if they are still around, give each tenant a second path
+# to the same destinations. Removed after the EVPN ones are applied, so a
+# half-finished run never leaves a tenant with no path at all.
+- name: Remove the VRF-Lite advertisement so it cannot contend for the same networks
+  ansible.builtin.command:
+    cmd: "oc delete routeadvertisements udn-vrflite udn-shared-vrf --ignore-not-found"
+
+- name: Remove the VRF-Lite VLAN plumbing
+  ansible.builtin.command:
+    cmd: "oc delete nncp vrflite-{{ item.0.name }}-{{ item.1.ip_key }} --ignore-not-found"
+  loop: "{{ udn_bgp_tenants | product(clab_fabric_nodes) | list }}"
+  loop_control:
+    label: "vrflite-{{ item.0.name }}-{{ item.1.ip_key }}"
+  failed_when: false
+
+- name: Remove the VRF-Lite BGP peering
+  ansible.builtin.command:
+    cmd: "oc delete frrconfiguration fabric-peering-vrflite -n {{ udn_bgp_frrk8s_namespace }} --ignore-not-found"
+
+- name: Show the EVPN state the fabric has reached
   ansible.builtin.command:
     cmd: >-
       docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
       -c 'show bgp l2vpn evpn summary'
       -c 'show bgp l2vpn evpn'
-      -c 'show evpn vni'
   delegate_to: "{{ clab_exec_host }}"
   register: udn_bgp_evpn_state
   changed_when: false

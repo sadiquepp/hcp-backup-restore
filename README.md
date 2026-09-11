@@ -68,7 +68,7 @@ In a hurry? [steps.md](steps.md) is the same end-to-end run as commands only.
   - [Constraints worth knowing before you start](#constraints-worth-knowing-before-you-start)
   - [Building it](#building-it-1)
   - [Verifying each phase](#verifying-each-phase)
-  - [EVPN on a 4.21 cluster](#evpn-on-a-421-cluster)
+  - [EVPN, two ways](#evpn-two-ways)
   - [Troubleshooting](#troubleshooting)
 - [Playbook Reference](#playbook-reference)
 - [Key Roles](#key-roles)
@@ -1691,15 +1691,15 @@ What is and is not testable on this lab, stated up front:
 | BGP, default pod network | Yes | 4.19+ |
 | BGP + primary UDN, shared VRF | Yes | 4.19+ |
 | BGP + UDN with **VRF-Lite** | Yes | 4.19+, **local gateway mode** |
-| **EVPN**, cluster nodes as VTEPs | Only on 4.22+ | 4.22 cluster (this lab is 4.21) |
-| **EVPN** fabric with VRF-Lite handoff | Yes, on 4.21 | nothing extra |
+| **EVPN**, cluster nodes as VTEPs | Yes | **4.22**, local gateway mode |
+| **EVPN** fabric with VRF-Lite handoff at the border leaf | Yes | works on 4.21 too |
 
-EVPN for cluster user-defined networks is GA in OpenShift 4.22. `vars.yaml`
-pins `ocp_major_version: "4.21"`, so the cluster-side EVPN phase refuses to
-run and says so rather than producing schema errors. The fabric half still
-builds, and the VRF-Lite-to-EVPN handoff described
-[below](#evpn-on-a-421-cluster) is a real production design, not a
-consolation prize.
+EVPN for primary cluster user-defined networks is GA in OpenShift 4.22, and
+`vars.yaml` sets `ocp_major_version: "4.22"` so the full path - nodes as
+VTEPs, VXLAN between them, type-5 routes carrying a per-tenant VNI - is
+available. The border-leaf handoff variant is still described
+[below](#evpn-two-ways) because it is a legitimate production design and the
+only option on 4.21.
 
 ### The one idea to drop first: you do not move a UDN's default gateway
 
@@ -1806,6 +1806,16 @@ direction, so no BGP-learned route can shadow the lab's management network.
 
 ### Constraints worth knowing before you start
 
+**The lab is now 4.22.** `ocp_major_version` is `"4.22"` (with
+`ocp_minor_version: 8` / `coreos_minor_version: 8`) because BGP EVPN for
+primary cluster user-defined networks is GA there and does not exist on 4.21.
+That variable drives the hub install, the RHCOS images, the mirror registry
+payload, the hosted clusters' release image and the operator channels, so it
+is not a UDN-only change - a hub built before the bump is still 4.21 and must
+be rebuilt or upgraded for the EVPN phase. Everything except `--tags evpn`
+works on either version; to go back, set those three values to `"4.21"` / 15
+/ 0.
+
 **Do this on hub1, not on a hosted cluster.** Every phase patches
 `Network.operator.openshift.io/cluster` and applies `NodeNetworkConfiguration`
 policies. hub1 is a plain standalone cluster where that is straightforward.
@@ -1876,10 +1886,14 @@ ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --ta
 # 3. VRF-Lite: per-tenant VRFs and VLANs (targetVRF: auto).
 ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags vrflite
 
-# 4. EVPN. 4.22+ on the cluster side; see below for 4.21.
+# 4. EVPN. Rebuild the fabric as leaf/spine/leaf first, then the cluster side.
 ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric -e clab_topology=evpn
 ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags evpn
 ```
+
+`--tags fabric -e clab_topology=evpn` redeploys the containerlab topology in
+place (`containerlab deploy --reconfigure`); it does not disturb the node
+NICs, `virbr1`, or anything on the cluster.
 
 Run containerlab on the bare-metal host instead: `-e clab_deploy_mode=host`.
 
@@ -1896,10 +1910,16 @@ role reads the live VRF layout off each node first (`vrflite-discover.yml`),
 and templates the policy with the discovered port list and route-table id
 restated in full. Never hand-write one of these from the example; render it.
 
-That discovery needs the tenant's VRF to exist, and OVN-Kubernetes only
-creates it on a node that has something on that network - which is why the
-test workload is a DaemonSet, and why the CUDNs and workloads are applied
-before the discovery runs.
+The VRF's *name* is not guessed either: it comes from the CUDN's own
+`status.vrfName`, which OVN-Kubernetes publishes precisely so that NMState
+policies and `FRRConfiguration` authors read it rather than deriving it from
+the CUDN name (a Linux interface name caps at 15 characters, so a longer CUDN
+name necessarily has a VRF called something else).
+
+The discovery still needs the VRF to *exist*, and OVN-Kubernetes only creates
+it on a node that has something on that network - which is why the test
+workload is a DaemonSet, and why the CUDNs and workloads are applied before
+the discovery runs.
 
 ### Verifying each phase
 
@@ -1940,27 +1960,71 @@ oc debug node/worker1.hub.mylab.com -- chroot /host ip route show default
 # expect: default via 192.168.122.1
 ```
 
-### EVPN on a 4.21 cluster
+### EVPN, two ways
 
 `-e clab_topology=evpn` builds a three-node fabric - `leaf1` (border),
 `spine` (EVPN route reflector), `leaf2` (far end) - with VXLAN between the
-leaves and the tenant external endpoints moved behind `leaf2`, so traffic
+VTEPs and the tenant external endpoints moved behind `leaf2`, so traffic
 genuinely crosses the overlay instead of being configured and never used.
 
-On 4.22+ the OpenShift nodes are themselves VTEPs: the `VTEP` CR allocates
-each node a tunnel endpoint and the CUDN carries `transport: EVPN` with an
-`ipVRF` VNI and route target.
+**Nodes as VTEPs (4.22, what this lab does).** Each OCP node is a tunnel
+endpoint. The `VTEP` CR discovers the node's address, the CUDN carries
+`network.transport: EVPN` with an `ipVRF` VNI and route target, and the node
+peers `l2vpn evpn` with `leaf1` over the fabric link it already uses - a
+second address family on an existing session, not a new adjacency. VXLAN
+then flows node to `leaf2` directly; `leaf1` only provides underlay
+reachability and EVPN transit, and holds no tenant VRFs.
 
-On 4.21 they are not, and the cluster hands its tenants to the fabric with
-ordinary VRF-Lite while `leaf1` maps each VRF to an EVPN VNI (`advertise ipv4
-unicast` under `address-family l2vpn evpn`). Traffic from a blue pod is
-encapsulated on `leaf1`, decapsulated on `leaf2`, and delivered in the blue
-VRF. **This is a normal production design** - plenty of real clusters hand
-off to an EVPN fabric at a border leaf rather than running VTEPs on the
-nodes - and it exercises the VNI and route-target mapping you will need
-either way. What it does not exercise is node-level VTEPs and stretched
-Layer 2 segments; for those, move the cluster to 4.22 (`vars.yaml` already
-carries a 4.22 entry in `agent_service_config_os_images`).
+Note this phase does **not** use the VRF-Lite VLAN plumbing, and removes it
+if phase 3 left it behind. Under EVPN the tenant routes travel as type-5
+routes over VXLAN; keeping the VLAN handoff as well would give every tenant
+two paths to the same destinations with nothing choosing between them.
+
+**Border-leaf handoff (works on 4.21).** Use `clab_topology=evpn` with
+`--tags vrflite` instead of `--tags evpn`. The cluster keeps peering
+per-tenant VLANs with `leaf1` exactly as in phase 3, and `leaf1` maps each
+VRF into an EVPN VNI itself. Plenty of real clusters hand off to an EVPN
+fabric at a border leaf rather than running VTEPs on nodes, and it exercises
+the same VNI and route-target mapping. What it does not exercise is
+node-level VTEPs.
+
+**VTEP addressing is deliberately `Unmanaged`.** The `VTEP` CR supports
+`Managed` (OVN-Kubernetes allocates a VTEP IP per node) and `Unmanaged` (it
+discovers an address something else put there). This lab uses `Unmanaged`
+and assigns `100.64.0.<the node's usual octet>` via NMState, because the
+fabric is three FRR containers with no IGP: something has to give `leaf1` a
+route to each VTEP, and with `Managed` you do not know which node holds
+which address until after allocation. Assigning them means `leaf1` carries
+static `/32`s written at render time. On a real fabric with an IGP, `Managed`
+is the right answer. Exactly one address per node may fall inside the CR's
+CIDRs - two is a failed status, not a choice.
+
+**Layer 2 / MAC-VRF is not wired up.** Both tenants here are `Layer3` with
+an `ipVRF`, which is the direct continuation of the VRF-Lite phase. The API
+also supports `Layer2` primary CUDNs with a `macVRF` VNI, which is what you
+want for stretching an L2 segment off-cluster and preserving a VM's MAC and
+IP across migration. That needs a MAC-VRF on the fabric side too - an L2VNI
+bridge and SVI on `leaf2` - which this topology does not build. The tenant
+definitions already carry an unused `evpn_mac_vni` for that extension. The
+API shape is:
+
+```yaml
+  network:
+    topology: Layer2
+    layer2:
+      role: Primary
+      subnets: ["10.200.0.0/16"]
+      # for a VM keeping its off-cluster gateway and address:
+      # defaultGatewayIPs / infrastructureSubnets / reservedSubnets
+    transport: EVPN
+    evpn:
+      vtep: evpn-vtep
+      macVRF: { vni: 100, routeTarget: "65000:100" }
+      ipVRF:  { vni: 101, routeTarget: "65000:101" }   # optional on Layer2
+```
+
+`macVRF` is required for `Layer2` and forbidden for `Layer3`; `ipVRF` is
+required for `Layer3`.
 
 ### Troubleshooting
 

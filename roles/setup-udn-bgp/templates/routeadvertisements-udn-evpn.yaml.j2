@@ -1,0 +1,34 @@
+{#
+  Phase 4: advertise the tenant UDNs over EVPN.
+
+  Shape-identical to the VRF-Lite CR - targetVRF 'auto', same network
+  selector - and that is the point worth noticing: RouteAdvertisements does
+  not have an EVPN mode. What changes is the CUDN's network.transport, and
+  which FRRConfiguration this selects. The advertisement semantics are the
+  same either way: each network's routes are advertised in the VRF that
+  corresponds to it.
+
+  The difference is entirely in how those routes travel. Under VRF-Lite they
+  go out a VLAN subinterface to a directly attached PE. Under EVPN they are
+  originated as type-5 routes carrying the VNI from the CUDN's
+  network.evpn.ipVRF block, and the data plane is VXLAN between node VTEPs -
+  no VLANs, no per-tenant link to the leaf.
+#}
+apiVersion: k8s.ovn.org/v1
+kind: RouteAdvertisements
+metadata:
+  name: udn-evpn
+spec:
+  targetVRF: auto
+  networkSelectors:
+    - networkSelectionType: ClusterUserDefinedNetworks
+      clusterUserDefinedNetworkSelector:
+        networkSelector:
+          matchLabels:
+            {{ udn_bgp_cudn_label_key }}: "enabled"
+  nodeSelector: {}
+  frrConfigurationSelector:
+    matchLabels:
+      {{ udn_bgp_frr_label_key }}: fabric-evpn
+  advertisements:
+    - PodNetwork
