@@ -1,9 +1,21 @@
 ---
 # Cluster-side pre-flight.
 #
-# Every check here is one that, left unchecked, produces a lab that looks
-# configured and does not work - which is much more expensive to debug than a
-# failed assertion.
+# Every check here answers "can this cluster do the thing", which is a
+# question about its VERSION and network plugin - NOT about whether the
+# feature's CRDs are already present.
+#
+# That distinction is the whole point of this file. routeadvertisements
+# .k8s.ovn.org and vteps.k8s.ovn.org are installed by the Cluster Network
+# Operator when the feature is switched on, which is what enable.yml does
+# immediately after this runs. Their absence is the normal state of a
+# perfectly capable cluster that has not been through the enable step yet.
+# Treating it as "too old" made this play refuse to start on a 4.22.10
+# cluster - demanding, as a precondition, the very thing the next task
+# creates.
+#
+# So: gate on version, report CRD presence as information, and verify the
+# CRDs after enable.yml, where their absence really is a failure.
 
 - name: Read the cluster version
   ansible.builtin.command:
@@ -11,53 +23,75 @@
   register: udn_bgp_cluster_version
   changed_when: false
 
+- name: Read the configured network plugin
+  ansible.builtin.command:
+    cmd: >-
+      oc get network.operator.openshift.io cluster
+      -o jsonpath={.spec.defaultNetwork.type}
+  register: udn_bgp_network_type
+  changed_when: false
+
 - name: Report the cluster under test
   ansible.builtin.debug:
     msg: >-
-      Targeting {{ udn_bgp_target_hub }} at {{ hub_kubeconfig }},
-      OpenShift {{ udn_bgp_cluster_version.stdout }}
-
-- name: Check whether the RouteAdvertisements API is present
-  ansible.builtin.command:
-    cmd: oc get crd routeadvertisements.k8s.ovn.org
-  register: udn_bgp_ra_crd
-  failed_when: false
-  changed_when: false
+      Targeting {{ udn_bgp_target_hub }} at {{ hub_kubeconfig }} -
+      OpenShift {{ udn_bgp_cluster_version.stdout }},
+      network plugin {{ udn_bgp_network_type.stdout }}
 
 - name: Fail if the cluster is too old for route advertisements
   ansible.builtin.assert:
-    that: udn_bgp_ra_crd.rc == 0
+    that: udn_bgp_cluster_version.stdout is version(udn_bgp_bgp_min_version, '>=')
     fail_msg: >-
-      routeadvertisements.k8s.ovn.org is not present on this cluster.
-      BGP route advertisements need OpenShift 4.19 or later with the
-      OVN-Kubernetes network plugin. This cluster reports
-      {{ udn_bgp_cluster_version.stdout }}.
+      BGP route advertisements need OpenShift {{ udn_bgp_bgp_min_version }} or
+      later. This cluster is {{ udn_bgp_cluster_version.stdout }}.
 
-- name: Check whether the VTEP API is present (EVPN, 4.22+)
-  ansible.builtin.command:
-    cmd: oc get crd vteps.k8s.ovn.org
-  register: udn_bgp_vtep_crd
-  failed_when: false
-  changed_when: false
+- name: Fail if this is not an OVN-Kubernetes cluster
+  ansible.builtin.assert:
+    that: udn_bgp_network_type.stdout == 'OVNKubernetes'
+    fail_msg: >-
+      Route advertisements, user-defined networks and VRF-Lite are all
+      OVN-Kubernetes features. This cluster's defaultNetwork.type is
+      '{{ udn_bgp_network_type.stdout }}'.
 
-- name: Record what this cluster can do
+# Version, not CRD presence - see the note at the top of this file.
+- name: Record whether this cluster's version supports EVPN
   ansible.builtin.set_fact:
-    udn_bgp_has_evpn: "{{ udn_bgp_vtep_crd.rc == 0 }}"
+    udn_bgp_has_evpn: >-
+      {{ udn_bgp_cluster_version.stdout is version(udn_bgp_evpn_min_version, '>=') }}
 
 - name: Report EVPN availability
   ansible.builtin.debug:
     msg: >-
-      {% if udn_bgp_has_evpn %}
-      EVPN is available on this cluster (vteps.k8s.ovn.org present) - phase 4
-      can run against it.
+      {% if udn_bgp_has_evpn | bool %}
+      EVPN is available on this cluster ({{ udn_bgp_cluster_version.stdout }}
+      >= {{ udn_bgp_evpn_min_version }}) - phase 4 can run against it.
       {% else %}
-      EVPN is NOT available on this cluster. EVPN for cluster user-defined
-      networks is GA in OpenShift {{ udn_bgp_evpn_min_version }}; this cluster
-      is {{ udn_bgp_cluster_version.stdout }}, so the VTEP CRD and the CUDN
-      transport/evpnConfiguration fields do not exist. Phases 1-3 are
-      unaffected. Build the EVPN fabric anyway (clab_topology: evpn) and hand
-      the cluster off to it with VRF-Lite at the border leaf - see the README.
+      EVPN is NOT available: it is GA in OpenShift
+      {{ udn_bgp_evpn_min_version }} and this cluster is
+      {{ udn_bgp_cluster_version.stdout }}. Phases 1-3 are unaffected. You can
+      still build the EVPN fabric (clab_topology: evpn) and hand the cluster
+      off to it with VRF-Lite at the border leaf - see the README.
       {% endif %}
+
+# Informational only. Absent is the expected answer on a cluster that has not
+# been enabled yet; present means a previous run already did it.
+- name: Check whether the feature has already been enabled
+  ansible.builtin.shell:
+    cmd: >-
+      oc get crd routeadvertisements.k8s.ovn.org vteps.k8s.ovn.org
+      -o name --ignore-not-found 2>/dev/null || true
+  register: udn_bgp_feature_crds
+  changed_when: false
+
+- name: Report how far this cluster has already been taken
+  ansible.builtin.debug:
+    msg: >-
+      Feature CRDs present:
+      {{ udn_bgp_feature_crds.stdout_lines | default(['(none yet)'], true) }}
+
+      These are installed by the Cluster Network Operator when the feature is
+      switched on, so "(none yet)" is normal on a first run - the enable step
+      creates them and this play checks afterwards that they appeared.
 
 # MetalLB is already running on this lab for the hosted clusters' API VIPs,
 # and MetalLB ships its own FRR-K8s. The CNO deploying a second one into
