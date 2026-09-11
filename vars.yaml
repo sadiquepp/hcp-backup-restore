@@ -1145,6 +1145,13 @@ udn_bgp_target_hub: hub
 ## than something the phase-3 tasks do silently.
 udn_bgp_set_local_gateway: true
 
+## Minimum cluster version for BGP route advertisements. Checked against the
+## cluster's VERSION, not against whether routeadvertisements.k8s.ovn.org
+## exists: that CRD is installed by the Cluster Network Operator when the
+## feature is enabled, so on a capable but not-yet-enabled cluster it is
+## legitimately absent.
+udn_bgp_bgp_min_version: "4.19"
+
 ## Phase 4. EVPN for cluster user-defined networks is GA in OpenShift 4.22 -
 ## on 4.21 the VTEP CRD and the CUDN network.transport/network.evpn fields do
 ## not exist, so the cluster-side phase-4 tasks refuse to run and only the

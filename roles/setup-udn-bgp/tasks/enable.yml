@@ -61,6 +61,54 @@
       --timeout={{ udn_bgp_rollout_timeout }}s
   changed_when: false
 
+# This is where the feature CRDs are supposed to appear. Preflight only
+# reported on them, because before this patch their absence says nothing
+# about the cluster; here it means the enablement did not take, and every
+# later task would fail on a missing resource type with a far less obvious
+# message.
+- name: Wait for the route advertisements CRD the enablement installs
+  ansible.builtin.command:
+    cmd: oc get crd routeadvertisements.k8s.ovn.org
+  register: udn_bgp_ra_crd_after
+  retries: 30
+  delay: 10
+  until: udn_bgp_ra_crd_after.rc == 0
+  failed_when: false
+  changed_when: false
+
+- name: Fail if enabling route advertisements did not install its CRD
+  ansible.builtin.assert:
+    that: udn_bgp_ra_crd_after.rc == 0
+    fail_msg: >-
+      routeadvertisements.k8s.ovn.org still does not exist several minutes
+      after patching the Network CR. Check that the patch actually applied
+      and that the network operator is healthy:
+        oc get network.operator.openshift.io cluster -o yaml | grep -A3 additionalRoutingCapabilities
+        oc get co network
+        oc -n openshift-network-operator logs deploy/network-operator --tail=50
+
+- name: Wait for the VTEP CRD (EVPN, {{ udn_bgp_evpn_min_version }}+)
+  ansible.builtin.command:
+    cmd: oc get crd vteps.k8s.ovn.org
+  register: udn_bgp_vtep_crd_after
+  retries: 12
+  delay: 10
+  until: udn_bgp_vtep_crd_after.rc == 0
+  failed_when: false
+  changed_when: false
+  when: udn_bgp_has_evpn | bool
+
+- name: Note if the VTEP CRD did not appear on a version that should have it
+  ansible.builtin.debug:
+    msg: >-
+      vteps.k8s.ovn.org is not present even though this cluster is
+      {{ udn_bgp_cluster_version.stdout }}. Phases 1-3 are unaffected; only
+      the evpn phase needs it. It may still be rolling out - re-run the
+      preflight tag in a few minutes before concluding anything.
+  when:
+    - udn_bgp_has_evpn | bool
+    - udn_bgp_vtep_crd_after.rc | default(1) != 0
+
 - name: Confirm FRR-K8s is running on every node
   ansible.builtin.command:
     cmd: "oc get daemonset frr-k8s -n {{ udn_bgp_frrk8s_namespace }} -o wide"

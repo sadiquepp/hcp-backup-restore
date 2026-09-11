@@ -20,17 +20,19 @@
 # destinations with nothing deciding between them, so the tasks below remove
 # it.
 
-- name: Stop with an explanation if this cluster has no EVPN support
+- name: Stop with an explanation if this cluster is too old for EVPN
   ansible.builtin.fail:
     msg: |
-      This cluster ({{ udn_bgp_cluster_version.stdout }}) does not have the
-      VTEP API, so cluster-side EVPN cannot be configured here. EVPN for
+      This cluster is {{ udn_bgp_cluster_version.stdout }}, and EVPN for
       cluster user-defined networks is GA in OpenShift
-      {{ udn_bgp_evpn_min_version }}.
+      {{ udn_bgp_evpn_min_version }}. The VTEP API and the CUDN
+      network.transport / network.evpn fields do not exist before that.
 
       vars.yaml sets ocp_major_version to {{ ocp_major_version }}. If that is
-      4.22 and you are still seeing this, the cluster itself predates the
-      variable change - rebuild or upgrade it.
+      already {{ udn_bgp_evpn_min_version }} and you are still seeing this,
+      the CLUSTER predates the variable change - the version that matters is
+      the one reported above, not the one in vars.yaml. Rebuild or upgrade
+      it.
 
       Alternatively, build the EVPN fabric and hand off to it with VRF-Lite:
         ansible-playbook ... setup_udn_bgp_lab.yaml --tags fabric \
