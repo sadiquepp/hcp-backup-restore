@@ -37,8 +37,8 @@ spec:
         neighbors:
           - address: {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
             asn: {{ clab_leaf1_asn }}
-            {# Short timers so a lab session converges in seconds. The leaf
-               runs FRR's 'datacenter' defaults, which match. #}
+            # Short timers so a lab session converges in seconds. The leaf
+            # runs FRR's 'datacenter' defaults, which match.
             holdTime: 9s
             keepaliveTime: 3s
             port: 179
@@ -47,10 +47,10 @@ spec:
                 mode: all
             toAdvertise:
               allowed:
-                {# 'filtered' with no prefixes of our own: everything this
-                   session advertises comes from the FRRConfiguration
-                   OVN-Kubernetes generates off the RouteAdvertisements CR.
-                   Setting 'all' here would advertise the node's own
-                   connected routes, {{ lab_network_prefix }}.0/24 included. #}
+                # 'filtered' with no prefixes of our own: everything this
+                # session advertises comes from the FRRConfiguration
+                # OVN-Kubernetes generates off the RouteAdvertisements CR.
+                # Setting 'all' here would advertise the node's own
+                # connected routes, {{ lab_network_prefix }}.0/24 included.
                 mode: filtered
   nodeSelector: {}

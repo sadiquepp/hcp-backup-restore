@@ -42,7 +42,7 @@ spec:
       role: Primary
       subnets:
         - cidr: {{ tenant.udn_subnet_shared if udn_phase == 'shared' else tenant.udn_subnet }}
-          {# Per-node slice of the tenant subnet. /24 out of a /16 gives 254
-             pods per node and 256 nodes, which is far past what this lab
-             needs and keeps the advertised prefixes readable in FRR. #}
+          # Per-node slice of the tenant subnet. /24 out of a /16 gives 254
+          # pods per node and 256 nodes, which is far past what this lab
+          # needs and keeps the advertised prefixes readable in FRR.
           hostSubnet: {{ tenant.udn_host_subnet }}

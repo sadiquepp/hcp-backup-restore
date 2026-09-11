@@ -38,11 +38,11 @@ spec:
             port: 179
             toReceive:
               allowed:
-                {# Accept the tenant's external prefix from the leaf. 'all'
-                   is safe inside a tenant VRF in a way it would not be in
-                   the default VRF: the only thing that can inject here is
-                   the leaf's {{ t.name }} VRF, which originates exactly
-                   {{ t.external_prefix }}. #}
+                # Accept the tenant's external prefix from the leaf. 'all'
+                # is safe inside a tenant VRF in a way it would not be in
+                # the default VRF: the only thing that can inject here is
+                # the leaf's {{ t.name }} VRF, which originates exactly
+                # {{ t.external_prefix }}.
                 mode: all
             toAdvertise:
               allowed:

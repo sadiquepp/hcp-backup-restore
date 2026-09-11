@@ -23,9 +23,9 @@ metadata:
   name: udn-{{ tenant.name }}
   labels:
     udn-tenant: {{ tenant.name }}
-    {# Primary UDNs require these to be relaxed - the pods get their address
-       from the UDN, not from the cluster default network, and the restricted
-       PSA profile blocks the tooling the tests need (ip, ping, tcpdump). #}
+    # Primary UDNs require these to be relaxed - the pods get their address
+    # from the UDN, not from the cluster default network, and the restricted
+    # PSA profile blocks the tooling the tests need (ip, ping, tcpdump).
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/warn: privileged
@@ -57,10 +57,10 @@ spec:
             requests:
               cpu: 10m
               memory: 32Mi
-      {# Workers only. The fabric NICs are on workers (clab_fabric_nodes), so
-         a pod on a master would have no VRF-Lite path and would fail the
-         tests for a reason that has nothing to do with what is being
-         tested. #}
+      # Workers only. The fabric NICs are on workers (clab_fabric_nodes), so
+      # a pod on a master would have no VRF-Lite path and would fail the
+      # tests for a reason that has nothing to do with what is being
+      # tested.
       nodeSelector:
         node-role.kubernetes.io/worker: ""
       tolerations:
