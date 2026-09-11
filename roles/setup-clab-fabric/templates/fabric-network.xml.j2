@@ -2,43 +2,60 @@
   The provider fabric's L2 domain: a second libvirt network alongside the
   lab's existing 'default' (virbr0).
 
-  Deliberately minimal, and every omission is load-bearing:
+  An ISOLATED network - no <forward> element at all - and deliberately with
+  no <ip>. Both halves of that matter, and the combination is the only one
+  libvirt actually allows for what this needs to be:
 
-  <forward mode='open'/> - libvirt creates and manages the bridge but adds NO
-      firewall rules of its own for it. That is the whole reason this is
-      'open' and not an isolated network (no <forward> element at all, or
-      mode='isolated'): an isolated network gets
+  no <ip>, and therefore no <dhcp> and no <dns>
+      Every address on this network is static, configured by NMState on the
+      OCP nodes and by the containerlab FRR configs on the fabric side. The
+      decisive consequence is that libvirt starts NO dnsmasq for this
+      network: a network with an address gets one whether or not DHCP is
+      configured, and a second DHCP/DNS server on a bridge that three
+      OpenShift nodes are plugged into is the kind of thing that ruins an
+      afternoon and is miserable to diagnose. Leaving the host itself off the
+      fabric also keeps the "provider network" genuinely external, which is
+      the point of the simulation - the host talks to the nodes and to the
+      containerlab VM over virbr0, as it always has.
+
+  no <forward>
+      <forward mode='open'/> looks like the better choice here, because open
+      mode adds no firewall rules at all, whereas an isolated network can get
 
         -A FORWARD -i virbr1 -j REJECT
         -A FORWARD -o virbr1 -j REJECT
 
-      which is fine while traffic is only ever switched inside the bridge -
-      until something loads br_netfilter and sets bridge-nf-call-iptables=1,
-      at which point bridged frames start traversing FORWARD too and the
-      first of those rules silently kills the entire fabric. Docker loads
-      br_netfilter, and clab_deploy_mode: host puts Docker on this very host.
-      'open' sidesteps the whole class of problem.
+      which would matter if anything ever loaded br_netfilter and started
+      pushing bridged frames through FORWARD. But libvirt REQUIRES an IP
+      address for open mode and refuses to define the network without one:
 
-      Isolation is not lost by this: there is no <ip> below, so the host has
-      no address on the fabric and no route into it, and there is no <forward>
-      NAT to anywhere. Nothing can leave virbr1 because nothing is routing
-      for it - not because a REJECT rule says so.
+        XML error: open forwarding requested, but no IP address provided
 
-  no <ip>, no <dhcp>, no <dns> - every address on this network is static,
-      configured by NMState on the OCP nodes and by the containerlab FRR
-      configs on the fabric side. A dnsmasq here would be a second DHCP
-      server on a bridge the OCP nodes are attached to, which is exactly the
-      sort of thing that ruins an afternoon. Leaving the host itself off the
-      fabric also keeps the "provider network" genuinely external, which is
-      the point of the simulation.
+      so 'open plus no address' does not exist. Between 'open with an address
+      on the host' and 'isolated with none', isolated wins: the dnsmasq
+      problem above is worse than the REJECT problem, and the REJECT problem
+      is narrower than it first appears -
 
-  MTU {{ clab_fabric_mtu }} - the fabric carries Geneve (phases 1-3) or VXLAN
-      (phase 4) wrapped around pod traffic that is itself already at the
-      cluster MTU. At 1500 the BGP sessions come up fine and then large flows
-      black-hole, which is a miserable thing to debug. libvirt applies this to
-      the bridge and to every tap it creates on it; the guests still need
-      their own MTU set, which the NMState policies and the containerlab
-      topology both do.
+        * libvirt builds those rules around the network's IP range. With no
+          <ip> there is no range and nothing to build them from.
+        * In clab_deploy_mode 'vm' - the default - Docker lives inside the
+          containerlab VM, so br_netfilter is never loaded on the hypervisor
+          and bridged frames on virbr1 do not traverse FORWARD at all.
+        * In 'host' mode Docker is on the hypervisor and does load it, but
+          containerlab inserts an ACCEPT for every bridge its topology
+          references, and fabric-network.yml inserts an explicit intra-bridge
+          ACCEPT above anything libvirt may have added.
+
+      fabric-network.yml prints whatever rules do reference this bridge after
+      the network starts, so the assumption is checked rather than trusted.
+
+  MTU {{ clab_fabric_mtu }}
+      The fabric carries Geneve (phases 1-3) or VXLAN (phase 4) wrapped
+      around pod traffic that is itself already at the cluster MTU. At 1500
+      the BGP sessions come up fine and then large flows black-hole, which is
+      a miserable thing to debug. libvirt applies this to the bridge and to
+      every tap it creates on it; the guests still need their own MTU set,
+      which the NMState policies and the containerlab topology both do.
 
   STP stays on (libvirt's default) - harmless here, and the phase-4 EVPN
   fabric puts more than one device on this bridge.
@@ -47,5 +64,4 @@
   <name>{{ clab_fabric_network }}</name>
   <bridge name='{{ clab_fabric_bridge }}' stp='on' delay='0'/>
   <mtu size='{{ clab_fabric_mtu }}'/>
-  <forward mode='open'/>
 </network>
