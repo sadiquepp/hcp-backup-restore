@@ -1779,9 +1779,14 @@ project. In a VM it is somebody else's problem.
 virbr1. One less hop, and `tcpdump`/`ip netns`/`containerlab inspect` all
 live where you already run Ansible - noticeably easier to debug. Containerlab
 inserts `FORWARD ACCEPT` rules for any bridge its topology references, which
-handles the specific Docker problem above; the fabric network is also created
-with `<forward mode='open'/>` so libvirt adds no rules of its own to fight
-with.
+handles the specific Docker problem above, and the role inserts an explicit
+intra-bridge ACCEPT of its own and then prints whatever rules end up
+referencing the bridge, so you can see the situation rather than assume it.
+
+(`<forward mode='open'/>` would have libvirt add no rules at all, but libvirt
+refuses to define an open network without an IP address, and giving the
+fabric an address starts a dnsmasq on a bridge three OpenShift nodes are
+plugged into - the worse trade. Hence an isolated network with no address.)
 
 Pick `host` if you want the easiest debugging and are comfortable with Docker
 on the hypervisor. Stay on `vm` otherwise.
@@ -1790,8 +1795,9 @@ on the hypervisor. Stay on `vm` otherwise.
 
 - Each node VM in `clab_fabric_nodes` gains **one extra NIC**. Hot-plugged on
   a running VM, no reboot, no rebuild.
-- A new libvirt network (`virbr1`). No NAT, no DHCP, no DNS, no address on
-  the host - it cannot route anywhere and cannot perturb virbr0.
+- A new libvirt network (`virbr1`): isolated, with no `<ip>` at all - so no
+  NAT, no DHCP, no DNS, no address on the host, and no dnsmasq started for
+  it. It cannot route anywhere and cannot perturb virbr0.
 - One extra VM (`clab`, `.40`) in `vm` mode: 4 vCPU / 8G. It is registered
   with subscription-manager from the same `org_id` / `activation_key` in
   `vault.yaml` the helper uses - it is a bare RHEL9 image and cannot install
