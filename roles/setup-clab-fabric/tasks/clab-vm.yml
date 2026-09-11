@@ -19,12 +19,12 @@
 
 - name: Check whether the containerlab VM disk already exists
   ansible.builtin.stat:
-    path: "/var/lib/libvirt/images/{{ clab_vm_disk }}"
+    path: "{{ clab_vm_disk_path }}"
   register: clab_disk_status
 
 - name: Create the containerlab VM disk ({{ clab_vm_disk_size }}, sparse)
   ansible.builtin.command:
-    cmd: "qemu-img create -f qcow2 /var/lib/libvirt/images/{{ clab_vm_disk }} {{ clab_vm_disk_size }}"
+    cmd: "qemu-img create -f qcow2 {{ clab_vm_disk_path }} {{ clab_vm_disk_size }}"
   when: not clab_disk_status.stat.exists
 
 - name: Expand the base RHEL9 image into the containerlab VM disk (virt-resize)
@@ -32,7 +32,7 @@
     cmd: >
       virt-resize --expand {{ clab_vm_resize_partition }}
       {{ playbook_dir }}/roles/setup-bm-host/files/{{ rhel9_kvm_image }}
-      /var/lib/libvirt/images/{{ clab_vm_disk }}
+      {{ clab_vm_disk_path }}
   when: not clab_disk_status.stat.exists
 
 - name: Check whether the containerlab VM is already defined
@@ -49,7 +49,7 @@
       --name "{{ clab_vm_name }}" \
       --memory "{{ clab_vm_memory }}" \
       --vcpus "{{ clab_vm_vcpus }}" \
-      --disk "/var/lib/libvirt/images/{{ clab_vm_disk }}",format=qcow2,cache=none,bus=virtio \
+      --disk "{{ clab_vm_disk_path }}",format=qcow2,cache=none,bus=virtio \
       --os-variant=rhel9.5 \
       --memballoon model=virtio,freePageReporting=on \
       --noautoconsole \

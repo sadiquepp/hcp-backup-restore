@@ -4,6 +4,20 @@
 # Everything a deployer normally touches lives in vars.yaml under the
 # "UDN + BGP lab" heading. These are the knobs that rarely change.
 
+## Where the containerlab VM's disk lives, derived from the lab-wide
+## download_dir rather than hardcoded, so moving the image store moves this
+## disk with everything else. The sibling VM roles (setup-ceph-vm,
+## setup-minio-vm, setup-mirror-registry-vm) still spell the path out in
+## full - they are left alone deliberately, since converting them touches
+## files other feature branches are editing.
+##
+## The trailing slash is stripped because download_dir carries one in some
+## revisions of vars.yaml and not others. A doubled separator works fine on
+## Linux, but a libvirt disk path reading "images//clab_disk.qcow2" is the
+## kind of thing that makes someone stop and wonder, so it is normalised in
+## the one place the path is built.
+clab_vm_disk_path: "{{ download_dir | regex_replace('/+$', '') }}/{{ clab_vm_disk }}"
+
 ## containerlab release to install when none is present. Pinned rather than
 ## floating so a re-run months later builds the same fabric - the bridge-kind
 ## and VLAN behaviour this lab leans on has been stable for a long time, but
