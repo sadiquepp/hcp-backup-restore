@@ -19,13 +19,17 @@
 # In 'host' mode there is nothing to do here - virbr1 IS the bridge
 # containerlab attaches to.
 
+# Deliberately no bridge-utils: it was dropped in RHEL 9, and nothing here
+# wants it anyway. Its brctl has been obsolete for years - every bridge
+# operation below uses `ip link ... type bridge` and the `bridge` command,
+# both from iproute. Listing it only made dnf fail with "No match for
+# argument: bridge-utils" before any of the real work started.
 - name: Install container and networking tooling
   ansible.builtin.dnf:
     name:
-      - iproute
-      - tcpdump
-      - bridge-utils
-      - iptables-nft
+      - iproute      # ip, bridge - creates and inspects the fabric bridge
+      - tcpdump      # proving what is actually on the wire
+      - iptables-nft # the FORWARD rules containerlab and this role insert
       - git
       - tar
     state: present
