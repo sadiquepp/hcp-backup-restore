@@ -29,9 +29,9 @@ spec:
       - name: "{{ '{{' }} capture.fabric-nic.interfaces.0.name {{ '}}' }}"
         type: ethernet
         state: up
-        {# Matches clab_fabric_mtu on the bridge and on the FRR containers.
-           A mismatch here is the classic "BGP is up but nothing works"
-           failure: small packets pass, full-size ones vanish. #}
+        # Matches clab_fabric_mtu on the bridge and on the FRR containers.
+        # A mismatch here is the classic "BGP is up but nothing works"
+        # failure: small packets pass, full-size ones vanish.
         mtu: {{ clab_fabric_mtu }}
         ipv4:
           enabled: true

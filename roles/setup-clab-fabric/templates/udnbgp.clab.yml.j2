@@ -32,10 +32,10 @@
 name: {{ clab_lab_name }}
 
 mgmt:
-  {# containerlab's own management network. Used only to pull images and to
-     'docker exec' into nodes - no lab traffic crosses it. Given an explicit
-     subnet so it can never collide with {{ lab_network_prefix }}.0/24 or with
-     any tenant prefix. #}
+  # containerlab's own management network. Used only to pull images and to
+  # 'docker exec' into nodes - no lab traffic crosses it. Given an explicit
+  # subnet so it can never collide with {{ lab_network_prefix }}.0/24 or with
+  # any tenant prefix.
   network: {{ clab_lab_name }}-mgmt
   ipv4-subnet: 172.30.30.0/24
 

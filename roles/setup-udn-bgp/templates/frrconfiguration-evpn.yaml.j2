@@ -48,11 +48,11 @@ spec:
                 mode: all
             toAdvertise:
               allowed:
-                {# The VTEP block is what the far end needs in order to build
-                   a tunnel back to this node. It is advertised explicitly
-                   rather than with mode 'all', which would also put
-                   {{ lab_network_prefix }}.0/24 - the lab's management
-                   network - into the fabric. #}
+                # The VTEP block is what the far end needs in order to build
+                # a tunnel back to this node. It is advertised explicitly
+                # rather than with mode 'all', which would also put
+                # {{ lab_network_prefix }}.0/24 - the lab's management
+                # network - into the fabric.
                 prefixes:
                   - {{ udn_bgp_vtep_prefix }}.0/24
         prefixes:
