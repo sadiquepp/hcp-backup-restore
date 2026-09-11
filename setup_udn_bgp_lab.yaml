@@ -72,32 +72,6 @@
 # The containerlab VM is a bare RHEL9 image with no entitlement, so dnf
 # cannot install anything until it is registered - same as the helper. Only
 # needed in vm mode; in host mode the bare-metal host is already registered.
-- name: Register the containerlab VM with subscription-manager
-  hosts: clab
-  become: true
-  gather_facts: false
-  vars_files:
-    - vars.yaml
-    - vault.yaml
-  tags: [fabric, rhsm]
-  tasks:
-    - name: Skip unless containerlab runs in a VM
-      ansible.builtin.meta: end_play
-      when: clab_deploy_mode != 'vm'
-
-    - name: Fail fast if org_id/activation_key are missing from vault.yaml
-      ansible.builtin.assert:
-        that:
-          - org_id is defined
-          - activation_key is defined
-        fail_msg: >-
-          Add org_id / activation_key to vault.yaml (ansible-vault edit
-          vault.yaml) - needed to register the containerlab VM with
-          subscription-manager, same as the helper.
-
-    - ansible.builtin.import_role:
-        name: setup-rhsm
-
 - name: Wire the cluster into the fabric
   hosts: localhost
   become: true

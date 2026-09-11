@@ -1792,7 +1792,11 @@ on the hypervisor. Stay on `vm` otherwise.
   a running VM, no reboot, no rebuild.
 - A new libvirt network (`virbr1`). No NAT, no DHCP, no DNS, no address on
   the host - it cannot route anywhere and cannot perturb virbr0.
-- One extra VM (`clab`, `.40`) in `vm` mode: 4 vCPU / 8G.
+- One extra VM (`clab`, `.40`) in `vm` mode: 4 vCPU / 8G. It is registered
+  with subscription-manager from the same `org_id` / `activation_key` in
+  `vault.yaml` the helper uses - it is a bare RHEL9 image and cannot install
+  Docker or containerlab until it is entitled. In `host` mode this does not
+  apply, since containerlab runs on the already-registered hypervisor.
 - On the cluster: `Network.operator.openshift.io/cluster` is patched to
   enable FRR and route advertisements, which **restarts every ovnkube-node
   pod**. That is a few minutes of rolling pod-egress disruption on this lab's

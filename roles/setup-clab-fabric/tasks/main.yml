@@ -67,6 +67,40 @@
   when: clab_deploy_mode == 'vm'
   tags: [fabric, clabvm]
 
+# Registration has to sit HERE - after the VM exists, before anything runs
+# dnf on it. The containerlab VM is a bare rhel9_kvm_image with no
+# entitlement, so the very first task in clab-install.yml ("Install container
+# and networking tooling") fails with "no repositories available through
+# subscriptions" on a guest that was created seconds ago.
+#
+# This is the same shape setup_bm_host.yaml uses for the helper: create the
+# VM, register it, then use it, all in one ordered sequence with the
+# connection delegated. Doing it as a separate play later in the playbook
+# looks equivalent and is not - plays run in file order, so the registration
+# would land after the dnf that needed it.
+#
+# host mode skips this: containerlab runs on the bare-metal host, which is
+# already registered (it is the machine running this playbook).
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml (ansible-vault edit
+      vault.yaml) - needed to register the containerlab VM with
+      subscription-manager, same as the helper.
+  when: clab_deploy_mode == 'vm'
+  tags: [fabric, clabvm, rhsm, clabinstall]
+
+- name: Register the containerlab VM with subscription-manager
+  ansible.builtin.include_role:
+    name: setup-rhsm
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+  when: clab_deploy_mode == 'vm'
+  tags: [fabric, rhsm, clabinstall]
+
 # 'apply' propagates delegate_to onto every task in the included file, which
 # is what lets one role body serve both deployment modes without a when: on
 # each task. delegate_facts is deliberately not set: these tasks read lab
