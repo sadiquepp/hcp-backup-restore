@@ -32,6 +32,8 @@ where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
 - [Part 5: address the fabric NICs](#part-5-address-the-fabric-nics)
 - [Part 6: the base BGP peering](#part-6-the-base-bgp-peering)
 - [Phase 1: advertise the default pod network](#phase-1-advertise-the-default-pod-network)
+  - [Following one packet](#following-one-packet)
+  - [Seeing it yourself](#seeing-it-yourself)
 - [Phase 2: UDNs in the default VRF](#phase-2-udns-in-the-default-vrf)
 - [Phase 3: VRF-Lite](#phase-3-vrf-lite)
 - [Phase 4: EVPN](#phase-4-evpn)
@@ -731,6 +733,309 @@ oc debug node/worker1 -- chroot /host ip route show default
 ```bash
 oc -n default delete pod bgp-probe
 ```
+
+---
+
+## Following one packet
+
+Worth doing once, because the path crosses four routing decisions and only
+two of them are Linux routing tables. The numbers below are from a real run:
+a pod `10.129.2.58` on worker1 pinging leaf1 at `192.168.140.1`.
+
+```
+                        pod: 10.129.2.58/23   gateway: 10.129.2.1
+                        node subnet: 10.129.2.0/23
+worker1                 ovn-k8s-mp0: 10.129.2.2
+                        enp8s0: 192.168.140.34/24
+leaf1                   eth1: 192.168.140.1/24
+```
+
+### Out
+
+| # | Where | What decides the next hop |
+| --- | --- | --- |
+| 1 | Pod network namespace | The pod's own table: `default via 10.129.2.1 dev eth0`. That gateway is a **logical** router port, not a device on any host |
+| 2 | veth → `br-int` | The pod's logical switch port. From here until step 4 the packet is inside OVN and no kernel routing table is consulted |
+| 3 | `ovn_cluster_router` | In **local gateway** mode a logical router policy sends egress at the node's management port, `10.129.2.2`, instead of out the gateway router. This is the fork in the road: in shared gateway mode the packet would leave through `br-ex` and never touch the fabric NIC |
+| 4 | `ovn-k8s-mp0` | The packet leaves OVN and enters the host kernel. Its source is still `10.129.2.58` — see [SNAT](#the-snat-that-does-not-happen) below |
+| 5 | Host main routing table | `192.168.140.0/24 dev enp8s0 proto kernel scope link` — directly connected. The kernel ARPs for `192.168.140.1` and sends it out `enp8s0`. **Forwarding is checked here**, on the *incoming* interface, which is `ovn-k8s-mp0` and is enabled by OVN-Kubernetes |
+| 6 | The wire | `enp8s0` → the node's tap on `virbr1` → the clab VM's NIC → `br-fabric` → the `leaf1-fab` veth → leaf1's `eth1`. All layer 2; no routing decision anywhere in this hop |
+
+Only **one** kernel routing table is consulted on the way out — the host's
+`main` table, at step 5. Steps 1–3 are OVN's logical topology, which looks
+like routing and is not in any table `ip route` can show you.
+
+### Back
+
+| # | Where | What decides the next hop |
+| --- | --- | --- |
+| 6' | leaf1 | `10.129.2.0/23 via 192.168.140.34` — **learned over BGP** from worker1 itself. Without this the reply has nowhere to go, and a ping that leaves un-SNATed dies here |
+| 5' | worker1, `enp8s0` | Main table again: `10.129.2.0/23 dev ovn-k8s-mp0 proto kernel scope link`. Forwarding is checked here too, on `enp8s0` — **this is the one OVN-Kubernetes does not enable**, and the Tuned profile in Part 5 exists for this single check |
+| 4' | `ovn-k8s-mp0` | Back into OVN |
+| 3'–1' | `br-int` → logical switch → veth | Delivered to the pod by MAC; no further routing |
+
+The return path is not the mirror image of the outbound one, and that
+asymmetry is where both of this lab's hardest bugs lived. Outbound needs
+nothing from BGP — the node has a connected route to `192.168.140.0/24` and
+would reach the leaf with no advertisement at all. Inbound needs **two**
+things that outbound does not: a BGP-learned route on the leaf, and
+forwarding enabled on a NIC that OVN-Kubernetes has never heard of.
+
+### The SNAT that does not happen
+
+Normally a pod's egress to anything outside the cluster is SNATed to the
+node's IP by a NAT rule on the node's gateway router. With the pod network
+advertised, OVN-Kubernetes stops applying it: the fabric has a route back to
+the pod, so there is nothing to hide behind.
+
+That is the single most useful observation in phase 1, because it is visible
+without reading any OVN state:
+
+```bash
+sudo tcpdump -ni virbr1 icmp
+```
+
+`10.129.2.58 > 192.168.140.1` means the advertisement is in effect.
+`192.168.122.34 > 192.168.140.1` means it is not, and everything else you
+are looking at is a distraction until that changes.
+
+The commands to see the rule itself, rather than its effect, are in
+[Seeing it yourself](#seeing-it-yourself) below.
+
+### Seeing it yourself
+
+Set these up first. Everything below assumes the pod is `bgp-probe` in
+`default`, on `worker1`.
+
+```bash
+NODE=worker1
+POD_IP=$(oc -n default get pod bgp-probe -o jsonpath='{.status.podIP}')
+OVNPOD=$(oc -n openshift-ovn-kubernetes get pod -l app=ovnkube-node \
+           --field-selector spec.nodeName=$NODE -o name | head -1)
+FRRPOD=$(oc -n openshift-frr-k8s get pod -l app=frr-k8s \
+           --field-selector spec.nodeName=$NODE -o name | head -1)
+echo "$POD_IP / $OVNPOD / $FRRPOD"
+```
+
+That `FRRPOD` matters more than it looks. **`oc exec ds/frr-k8s` picks an
+arbitrary pod**, so `show bgp summary` run that way may be answering for a
+different node than the one you are debugging — check the router-id in the
+output against the node you meant. It is an easy hour to lose.
+
+#### Hop 1 — inside the pod
+
+```bash
+oc -n default exec bgp-probe -- ip -br addr show eth0
+oc -n default exec bgp-probe -- ip route
+oc -n default exec bgp-probe -- ip neigh          # who answered for the gateway
+
+# what OVN told the pod it is
+oc -n default get pod bgp-probe \
+  -o jsonpath='{.metadata.annotations.k8s\.ovn\.org/pod-networks}' | python3 -m json.tool
+```
+
+The annotation is the authoritative answer for the pod's IP, MAC and gateway
+— it is what OVN-Kubernetes handed the CNI, before anything could drift.
+
+#### Hops 2–4 — inside OVN
+
+The northbound database is the declarative layer: logical switches, routers,
+policies and NAT rules. One database per node under OVN interconnect.
+
+```bash
+NB="oc -n openshift-ovn-kubernetes exec $OVNPOD -c nbdb -- ovn-nbctl"
+
+$NB show | head -40                       # the whole logical topology
+$NB lr-list                               # router names - they vary by release
+$NB ls-list                               # switch names
+
+# Hop 3: the local-gateway redirect. In local gateway mode a policy sends
+# egress at the management port instead of the gateway router.
+$NB lr-policy-list ovn_cluster_router
+$NB lr-route-list  ovn_cluster_router
+
+# The SNAT that should NOT list the pod subnet once the network is advertised
+$NB lr-nat-list GR_$NODE
+
+# The pod's logical switch port
+$NB lsp-list $NODE | grep bgp-probe
+```
+
+If `-c nbdb` is not a container on your build, try `-c northd`, and use
+`ovn-nbctl show` to find the real router and switch names before assuming
+`ovn_cluster_router` and `GR_<node>`.
+
+To ask OVN what it *would* do with a specific packet rather than reading the
+tables and inferring — this is the tool worth knowing:
+
+```bash
+oc -n openshift-ovn-kubernetes exec $OVNPOD -c northd -- \
+  ovn-trace --minimal "$NODE" \
+  "inport==\"$(oc -n default get pod bgp-probe -o jsonpath='{.metadata.namespace}_{.metadata.name}')\"
+   && eth.src==<pod mac> && eth.dst==<gateway mac>
+   && ip4.src==$POD_IP && ip4.dst==192.168.140.1 && ip.ttl==64"
+```
+
+Fill the MACs from the pod annotation above and the router port. `--minimal`
+prints just the decisions; drop it for the full table-by-table walk.
+
+Underneath the logical layer, the actual OpenFlow rules on `br-int`. OVS runs
+on the host, so go through `oc debug` rather than the pod:
+
+```bash
+oc debug node/$NODE -- chroot /host ovs-vsctl show
+oc debug node/$NODE -- chroot /host ovs-ofctl dump-flows br-int | grep $POD_IP
+
+# what the kernel datapath is really doing, per packet, right now
+oc debug node/$NODE -- chroot /host ovs-appctl dpctl/dump-flows --names | grep $POD_IP
+```
+
+And the question phase 1 is really asking — was it translated?
+
+```bash
+oc debug node/$NODE -- chroot /host conntrack -L -p icmp 2>/dev/null | grep $POD_IP
+```
+
+A tuple whose reply direction is `src=192.168.140.1 dst=<pod ip>` means no
+NAT happened. If the reply direction says `dst=192.168.122.34`, the packet
+was SNATed to the node and the advertisement is not in effect.
+
+#### Hop 5 — the host routing table
+
+```bash
+oc debug node/$NODE -- chroot /host ip route
+oc debug node/$NODE -- chroot /host ip -br addr show
+
+# the outbound decision
+oc debug node/$NODE -- chroot /host ip route get 192.168.140.1 from $POD_IP iif ovn-k8s-mp0
+
+# the return decision - the one that was broken
+oc debug node/$NODE -- chroot /host ip route get $POD_IP from 192.168.140.1 iif enp8s0
+
+# and why it was broken
+oc debug node/$NODE -- chroot /host sysctl net.ipv4.conf.enp8s0.forwarding \
+                                           net.ipv4.conf.ovn-k8s-mp0.forwarding \
+                                           net.ipv4.conf.all.forwarding
+
+oc debug node/$NODE -- chroot /host ip neigh show dev enp8s0
+oc debug node/$NODE -- chroot /host ip route show proto bgp
+oc debug node/$NODE -- chroot /host ip rule show
+```
+
+`ip route get ... iif ...` is the highest-value command in this list: it asks
+the kernel the exact question the forwarding path asks, and distinguishes
+*no route* (`ENETUNREACH`, "Network is unreachable") from *route fine,
+forwarding off* (`EHOSTUNREACH`, "No route to host").
+
+#### Hop 6 — the wire, and the leaf
+
+```bash
+# on the lab host - every node-to-fabric packet crosses this bridge
+sudo tcpdump -eni virbr1 icmp          # -e for MACs, to check who it is addressed to
+ip -br link show master virbr1
+
+# in the clab VM
+sudo tcpdump -ni br-fabric icmp
+ip -br link show master br-fabric
+
+# leaf1's own view
+docker exec clab-udnbgp-leaf1 ip -br addr show
+docker exec clab-udnbgp-leaf1 ip route show
+docker exec clab-udnbgp-leaf1 vtysh -c 'show ip route 10.129.2.0/23'
+docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp ipv4 unicast 10.129.2.0/23'
+docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp summary'
+```
+
+The FRR image ships no tcpdump — capture on the bridge, not inside the node.
+
+#### The BGP layer, on the cluster side
+
+```bash
+# the two CRs and what they produced
+oc get frrconfiguration -n openshift-frr-k8s
+oc get frrconfiguration -n openshift-frr-k8s -o yaml | grep -A20 'name: route-advertisements'
+oc get ra
+oc get routeadvertisements default-podnetwork -o yaml
+
+# the config FRR-K8s actually rendered on THIS node, both CRs merged
+oc -n openshift-frr-k8s exec $FRRPOD -c frr -- vtysh -c 'show running-config'
+oc -n openshift-frr-k8s exec $FRRPOD -c frr -- vtysh -c 'show bgp summary'
+oc -n openshift-frr-k8s exec $FRRPOD -c frr -- vtysh -c 'show bgp ipv4 unicast'
+oc -n openshift-frr-k8s exec $FRRPOD -c frr -- vtysh -c 'show bgp neighbors 192.168.140.1 advertised-routes'
+oc -n openshift-frr-k8s exec $FRRPOD -c frr -- vtysh -c 'show bgp neighbors 192.168.140.1 received-routes'
+```
+
+`advertised-routes` is the one that closes the loop on
+`RouteAdvertisements`: it should list this node's own pod subnet and nothing
+else. If the session is up and that list is empty, the generated
+`FRRConfiguration` never arrived — look at the CR's status, not at FRR.
+
+### What the two CRDs actually did
+
+They divide cleanly, and confusing them is the source of most
+"why is nothing being advertised" time:
+
+| | `FRRConfiguration` | `RouteAdvertisements` |
+| --- | --- | --- |
+| Scope | Namespaced, in `openshift-frr-k8s` | Cluster-scoped |
+| Answers | *Who do I peer with, and on what terms?* | *Whose prefixes go out over that session, and into which VRF?* |
+| Read by | FRR-K8s | OVN-Kubernetes |
+| Produces | The BGP session itself | A **generated** `FRRConfiguration` per node, plus data-plane changes in OVN |
+| Knows about pods? | No | Yes |
+
+The sequence, in order:
+
+1. You apply **`fabric-peering-default`**. FRR-K8s renders it into the FRR
+   config inside the `frr-k8s` pod on every node the `nodeSelector` matches,
+   and the session to `192.168.140.1` comes up. At this point **zero prefixes
+   are being advertised** — `toAdvertise: mode: filtered` with no prefix list
+   is an empty set, deliberately. A session that is `Established` and
+   advertising nothing is the expected state after this step.
+
+2. You apply **`default-podnetwork`**. OVN-Kubernetes resolves
+   `networkSelectors` to a set of networks, works out **per node** which
+   prefixes that node owns for them, and writes a second, additive
+   `FRRConfiguration` carrying exactly those:
+
+   ```bash
+   oc get frrconfiguration -n openshift-frr-k8s
+   # fabric-peering-default          ← yours
+   # route-advertisements-...        ← generated, one per node. Do not edit
+   ```
+
+   FRR-K8s merges both into one FRR config. This is why the CR names a
+   `frrConfigurationSelector` rather than a session: it is saying "take that
+   peering, and add these prefixes to it".
+
+3. At the same time, OVN-Kubernetes changes the **data plane** — the SNAT
+   above. `RouteAdvertisements` is not only a BGP object; accepting it
+   changes how packets leave the node.
+
+4. Separately and continuously, `toReceive: mode: all` on your
+   `FRRConfiguration` makes FRR-K8s install everything learned from the leaf
+   into the node's kernel table:
+
+   ```bash
+   oc debug node/worker1 -- chroot /host ip route show proto bgp
+   # 10.128.2.0/23 via 192.168.140.35 dev enp8s0   ← worker2's pods
+   # 10.131.0.0/23 via 192.168.140.36 dev enp8s0   ← worker3's pods
+   ```
+
+   Note what is *absent*: worker1's own `10.129.2.0/23`. leaf1 advertises all
+   three node subnets to every node, but each node rejects its own — the
+   AS-path already contains AS 64512. That loop check is doing real work
+   here: a node that installed a BGP route to its own pod subnet would send
+   its pods' return traffic out to the fabric.
+
+   This is also the mechanism that replaces the idea of pointing a UDN's
+   default gateway at the router. The pods' gateway never moves. The node
+   simply learns where the fabric's prefixes are.
+
+So: `FRRConfiguration` without `RouteAdvertisements` gives you a BGP session
+that carries nothing. `RouteAdvertisements` without a matching
+`FRRConfiguration` is rejected outright — there is no session to add prefixes
+to. Neither is useful alone, and the split is the reason a lab can bring the
+session up first and confirm it before any pod route is involved.
 
 ---
 
