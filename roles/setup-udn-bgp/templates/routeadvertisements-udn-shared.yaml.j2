@@ -9,9 +9,14 @@
 
   The cost of the simplicity is real and should be stated: leaking a UDN into
   the default VRF gives up the UDN's isolation at the node boundary. Anything
-  else in that VRF can now reach these pods. OVN-Kubernetes will refuse to
-  leak two UDNs whose subnets overlap, which is why phase 2 uses the
-  non-overlapping udn_subnet_shared values.
+  else in that VRF can now reach these pods.
+
+  It also means two UDNs leaked here may not carry the same subnet - one
+  prefix in one VRF cannot mean two things. OVN-Kubernetes does NOT check
+  that; its route advertisements controller has a literal
+  `// TODO check overlaps?` where the validation would go, so overlapping
+  subnets are Accepted and produce one winner and one silently unreachable
+  tenant. Hence udn_subnet_shared, and the assert in main.yml.
 #}
 apiVersion: k8s.ovn.org/v1
 kind: RouteAdvertisements

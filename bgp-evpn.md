@@ -1135,8 +1135,17 @@ EOF
 ```
 
 Red is identical with `name: red`, `udn-tenant: red` and `10.221.0.0/16`.
-Distinct subnets are required in this phase: OVN-Kubernetes refuses to leak
-two UDNs with overlapping subnets into one VRF.
+Distinct subnets are required in this phase, and **nothing enforces that**.
+Both tenants' routes land in the default VRF, where one prefix cannot mean
+two things - but the `RouteAdvertisements` is still Accepted, because
+OVN-Kubernetes does not validate it. Its route advertisements controller
+carries a literal `// TODO check overlaps?` where the check would go. The
+result is one winner and one tenant quietly unreachable.
+
+Overlap becomes legal in phase 3, where `targetVRF: auto` gives each tenant
+its own VRF and the same prefix in two VRFs is two different routes. That is
+the whole point of VRF-Lite, and it is why these two phases use different
+subnets.
 
 The `bgp: "enabled"` label is how the `RouteAdvertisements` selects them as a
 set.
