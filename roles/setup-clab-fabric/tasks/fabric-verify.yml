@@ -76,6 +76,41 @@
     success_msg: >-
       clab-{{ clab_lab_name }}-leaf1 has not restarted since deploy.
 
+# vtysh answering is not the same as bgpd running. With the daemons down,
+# vtysh still starts, still prints output, and reports
+# "Configuration file[/etc/frr/frr.conf] processing failure: N" - N being the
+# number of config lines it could not push to a daemon that is not there.
+# Checking that each node appears as a neighbour proves bgpd is up AND holds
+# the configuration, which is what the cluster side is about to depend on.
+- name: Read the border leaf's BGP neighbours
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-leaf1 vtysh -c 'show bgp summary'"
+  register: clab_leaf1_bgp
+  changed_when: false
+  failed_when: false
+
+- name: Fail if the border leaf is not running BGP for every node
+  ansible.builtin.assert:
+    that:
+      - clab_leaf1_bgp.rc == 0
+      - (clab_fabric_prefix ~ '.' ~ ip_list[item.ip_key]) in clab_leaf1_bgp.stdout
+    fail_msg: >-
+      leaf1 has no BGP neighbour for
+      {{ clab_fabric_prefix }}.{{ ip_list[item.ip_key] }} ({{ item.ip_key }}).
+      leaf1 reports: {{ clab_leaf1_bgp.stdout | default(clab_leaf1_bgp.stderr, true) }}
+      -- "Configuration file[/etc/frr/frr.conf] processing failure: N" means
+      the FRR daemons are not running: vtysh starts anyway, cannot push the
+      config to anything, and counts the lines that failed. The cluster side
+      of this shows as a session stuck in Active with MsgSent climbing and
+      MsgRcvd at 0 - the node's SYNs are refused because nothing is listening
+      on port 179. Redeploy with --tags clabdeploy.
+    success_msg: >-
+      leaf1 is peering with {{ clab_fabric_prefix }}.{{ ip_list[item.ip_key] }}
+      ({{ item.ip_key }}).
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+
 - name: Read the fabric bridge's ports
   ansible.builtin.command:
     cmd: "ip -br link show master {{ clab_bridge_for_topology }}"
