@@ -27,6 +27,14 @@ udn_bgp_cudn_label_key: bgp
 ## minutes.
 udn_bgp_rollout_timeout: 900
 
+## How long to wait for a RouteAdvertisements CR to reach Accepted. Applying
+## one always succeeds - acceptance is decided afterwards - so every phase
+## that applies one waits here before claiming the phase worked. Acceptance
+## normally takes seconds; the wait is generous because it also covers the
+## node and subnet annotations OVN-Kubernetes reads while deciding.
+udn_bgp_ra_accept_retries: 30
+udn_bgp_ra_accept_delay: 10
+
 ## Kubernetes NMState Operator - the source of the
 ## NodeNetworkConfigurationPolicy API. Every NNCP this role applies (fabric
 ## NIC addresses, VRF-Lite VLANs, EVPN VTEP addresses) needs it, so the role

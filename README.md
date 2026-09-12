@@ -1863,8 +1863,8 @@ installs FRR-K8s via MetalLB. On OpenShift the CNO owns it. An
 `FRRConfiguration` in the wrong namespace is accepted and silently never
 read, which is a tedious hour to lose.
 
-**Overlapping UDN subnets only work with VRF-Lite.** With
-`targetVRF: default` both tenants' routes land in one VRF, and
+**Overlapping UDN subnets only work with VRF-Lite.** With `targetVRF`
+unset both tenants' routes land in the default VRF, and
 OVN-Kubernetes rejects overlapping subnets with an error on the
 `RouteAdvertisements` status. The tenant definitions carry two subnets for
 this reason: `udn_subnet_shared` (unique, used by the `shared` phase) and
@@ -1894,7 +1894,7 @@ ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --ta
 #    if this does not work, UDN is not the reason.
 ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
 
-# 2. Primary UDNs advertised into the default VRF (targetVRF: default).
+# 2. Primary UDNs advertised into the default VRF (targetVRF unset).
 #    Adds UDN. Still no VLANs, no VRFs, no NMState.
 ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags shared
 
@@ -2047,7 +2047,8 @@ required for `Layer3`.
 | --- | --- |
 | BGP session never establishes | Fabric NIC not addressed (check `oc get nncp`), or MTU mismatch, or the node has no fabric NIC at all |
 | Session up, `RouteAdvertisements` Accepted, no `route-advertisements-*` FRRConfiguration | `frrConfigurationSelector` matched zero or more than one FRRConfiguration |
-| `RouteAdvertisements` not Accepted | Overlapping UDN subnets leaked into one VRF (`targetVRF: default`), or two CRs selecting the same network |
+| `RouteAdvertisements` not Accepted: "has no VRF matching the target VRF" | `targetVRF` was set to the string `default`. Unset means the default VRF; a value is matched literally against the routers' `vrf` field, and a default-VRF router has none. Only `auto` or unset are meaningful |
+| `RouteAdvertisements` not Accepted, other reasons | Overlapping UDN subnets leaked into the default VRF, or two CRs selecting the same network |
 | Everything green, pods still SNATed | The advertisement did not reach the node - check the generated FRRConfiguration, not the CR |
 | VRF-Lite configured, no isolation | Cluster is in shared gateway mode. VRF-Lite needs `routingViaHost: true` |
 | Tenant pods lose the network after an NNCP | A VRF policy was applied without the discovered `ovn-k8s-mpN` port restated. Re-render, do not hand-write |

@@ -8,7 +8,7 @@
   The subnet depends on which phase this is rendered for, and the difference
   matters:
 
-    shared  (phase 2, targetVRF: default) -> udn_subnet_shared, unique per
+    shared  (phase 2, targetVRF unset)    -> udn_subnet_shared, unique per
             tenant. Both tenants' routes end up in one VRF on the node and on
             the leaf, so overlapping subnets are rejected by OVN-Kubernetes
             with an error on the RouteAdvertisements status.

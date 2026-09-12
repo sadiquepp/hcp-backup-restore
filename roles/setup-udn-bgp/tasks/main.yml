@@ -12,8 +12,8 @@
 #   enable    - FRR-K8s + route advertisements on, optionally local gateway
 #   default   - advertise the cluster default pod network. No UDN involved.
 #               If this does not work, nothing about UDN is the problem.
-#   shared    - primary UDNs advertised into the default VRF (targetVRF:
-#               default). Adds UDN, still no VLANs or VRF plumbing.
+#   shared    - primary UDNs advertised into the default VRF (targetVRF
+#               unset). Adds UDN, still no VLANs or VRF plumbing.
 #   vrflite   - per-tenant VRFs and VLANs (targetVRF: auto). Adds the
 #               plumbing, and the isolation guarantee that goes with it.
 #   evpn      - VXLAN/EVPN transport. 4.22+ only.
@@ -93,6 +93,12 @@
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-default.yaml"
   when: udn_phase in ['default', 'shared', 'vrflite', 'evpn']
 
+- name: Confirm the default pod network advertisement was accepted
+  ansible.builtin.include_tasks: wait-ra.yml
+  vars:
+    udn_bgp_ra_name: default-podnetwork
+  when: udn_phase in ['default', 'shared', 'vrflite', 'evpn']
+
 # ---------------------------------------------------------------------------
 # Phases: shared / vrflite / evpn - the tenant UDNs and their workloads
 # ---------------------------------------------------------------------------
@@ -154,6 +160,12 @@
 - name: Advertise the UDNs into the default VRF
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-udn.yaml"
+  when: udn_phase == 'shared'
+
+- name: Confirm the UDN advertisement was accepted
+  ansible.builtin.include_tasks: wait-ra.yml
+  vars:
+    udn_bgp_ra_name: udn-shared-vrf
   when: udn_phase == 'shared'
 
 # ---------------------------------------------------------------------------

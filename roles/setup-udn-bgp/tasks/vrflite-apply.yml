@@ -59,3 +59,11 @@
 - name: Remove the shared-VRF advertisement so it cannot contend for the same networks
   ansible.builtin.command:
     cmd: "oc delete routeadvertisements udn-shared-vrf --ignore-not-found"
+
+# After the delete, not before it: while both CRs select the same networks
+# neither is accepted, so waiting earlier would time out on a state the next
+# task was about to fix.
+- name: Confirm the VRF-Lite advertisement was accepted
+  ansible.builtin.include_tasks: wait-ra.yml
+  vars:
+    udn_bgp_ra_name: udn-vrflite

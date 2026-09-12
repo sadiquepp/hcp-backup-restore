@@ -1,0 +1,42 @@
+---
+# Wait for one RouteAdvertisements CR to reach Accepted, and fail with the
+# cluster's own reason if it does not.
+#
+# This deserves its own file because `oc apply` of a RouteAdvertisements
+# always succeeds. The CR is well formed; whether OVN-Kubernetes can act on
+# it at all - whether the target VRF exists in the selected FRRConfiguration,
+# whether every selected network is covered on every node - is decided
+# afterwards and reported only in status. A phase that applies the CR and
+# moves on passes while advertising nothing.
+#
+# status.status carries the reason verbatim ("Not Accepted: configuration
+# error: ..."), so surfacing it is more useful than any message written here.
+#
+# Callers set udn_bgp_ra_name.
+
+- name: Confirm the RouteAdvertisements is accepted
+  block:
+    - name: Wait for RouteAdvertisements {{ udn_bgp_ra_name }} to be accepted
+      ansible.builtin.command:
+        argv:
+          - oc
+          - get
+          - routeadvertisements
+          - "{{ udn_bgp_ra_name }}"
+          - -o
+          - jsonpath={.status.status}
+      register: udn_bgp_ra_status
+      until: udn_bgp_ra_status.stdout == 'Accepted'
+      retries: "{{ udn_bgp_ra_accept_retries }}"
+      delay: "{{ udn_bgp_ra_accept_delay }}"
+      changed_when: false
+  rescue:
+    - name: Report why the RouteAdvertisements was rejected
+      ansible.builtin.fail:
+        msg: >-
+          RouteAdvertisements '{{ udn_bgp_ra_name }}' never reached Accepted.
+          The cluster reports:
+          {{ udn_bgp_ra_status.stdout | default('(no status set yet)', true) }}
+          -- Nothing is being advertised while this is the case. Inspect it
+          with `oc get routeadvertisements {{ udn_bgp_ra_name }} -o yaml` and
+          the applied manifest in {{ udn_bgp_manifest_dir }}.
