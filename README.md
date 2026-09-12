@@ -1884,6 +1884,18 @@ and `udn_subnet` (**deliberately identical between blue and red**, used by
 because the cluster will not. Proving two UDNs can carry the same addresses in
 isolation is most of the point of VRF-Lite.
 
+**The fourth tenant, `green`, is Layer2**, and is the only one a VM belongs
+on. Layer3 slices its subnet per node, so a workload that moves node
+necessarily changes address; Layer2 is one flat broadcast domain across every
+node, and with `ipam.lifecycle: Persistent` the allocation follows the VM
+rather than the pod behind it. That combination is what lets an OpenShift
+Virtualization live migration keep its IP - a migration replaces the
+`virt-launcher` pod, so without persistent IPAM the VM arrives with a new
+address. Under EVPN it takes a `macVRF` (an L2VNI carrying MAC reachability)
+where the Layer3 tenants take an `ipVRF`, which is what `evpn_mac_vni` in
+`vars.yaml` has been reserved for. [bgp-evpn.md](bgp-evpn.md) has the VM
+manifest and the migration walkthrough.
+
 **The third tenant, `orange`, is the control.** It overlaps with nothing in
 any phase, and it exists to make the isolation result unambiguous. "blue
 cannot reach red's external network" has two possible explanations - the VRF,

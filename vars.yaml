@@ -1111,6 +1111,7 @@ clab_fabric_nic_name: enp2s0
 ## ---------------------------------------------------------------------------
 udn_bgp_tenants:
   - name: blue
+    topology: Layer3
     vlan: 110
     ## Point-to-point subnet for this tenant's VRF-Lite BGP session. Node
     ## takes its ip_list octet here too, leaf takes .1.
@@ -1133,6 +1134,7 @@ udn_bgp_tenants:
     evpn_mac_vni: 100
     evpn_ip_vni: 101
   - name: red
+    topology: Layer3
     vlan: 120
     vrf_prefix: "192.168.142"
     udn_subnet: "10.200.0.0/16"
@@ -1152,6 +1154,7 @@ udn_bgp_tenants:
   ## everywhere, which makes it the one to look for when reading a routing
   ## table on the leaf or a node.
   - name: orange
+    topology: Layer3
     vlan: 130
     vrf_prefix: "192.168.143"
     udn_subnet: "10.202.0.0/16"
@@ -1163,6 +1166,40 @@ udn_bgp_tenants:
     external_host: "10.212.10.10"
     evpn_mac_vni: 300
     evpn_ip_vni: 301
+
+  ## The Layer2 tenant, and the only one a VM should live on.
+  ##
+  ## Layer3 slices its subnet per node, so a workload that moves between
+  ## nodes necessarily changes address. Layer2 is one flat broadcast domain
+  ## across every node: the whole prefix exists everywhere, and an address
+  ## stays valid wherever the workload runs. With ipam.lifecycle Persistent -
+  ## set by the template for this topology - the allocation is tied to the VM
+  ## rather than to the pod backing it, so it survives live migration, which
+  ## replaces that pod with a new one on the target node.
+  ##
+  ## It also changes what the fabric sees: every node advertises this same
+  ## prefix, so the leaf gets one prefix with three paths instead of a
+  ## distinct per-node prefix from each. Under EVPN it takes a macVRF rather
+  ## than an ipVRF - the L2VNI carrying MAC reachability is the point, and
+  ## that is what evpn_mac_vni has been reserved for all along.
+  ##
+  ## Overlaps with nothing, like orange: a live migration that keeps its
+  ## address is only convincing if the address was unambiguous to begin with.
+  - name: green
+    topology: Layer2
+    vlan: 140
+    vrf_prefix: "192.168.144"
+    udn_subnet: "10.204.0.0/16"
+    udn_subnet_shared: "10.223.0.0/16"
+    ## Ignored for Layer2 - there is no per-node slice to size. Kept so every
+    ## tenant has the same shape.
+    udn_host_subnet: 24
+    external_prefix: "10.213.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.213.10.1"
+    external_host: "10.213.10.10"
+    evpn_mac_vni: 400
+    evpn_ip_vni: 401
 
 ## Where the rendered containerlab topology and FRR configs are staged, on
 ## whichever host clab_deploy_mode selected.
