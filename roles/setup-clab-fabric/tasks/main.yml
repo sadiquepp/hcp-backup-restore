@@ -98,6 +98,7 @@
     name: setup-rhsm
     apply:
       delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, rhsm, clabinstall]
   when: clab_deploy_mode == 'vm'
   tags: [fabric, rhsm, clabinstall]
 
@@ -106,11 +107,19 @@
 # each task. delegate_facts is deliberately not set: these tasks read lab
 # variables (ip_list, the tenant list) that belong to the controller's view,
 # and only the connection should move.
+#
+# The tags MUST be repeated inside apply, not only on the include. An
+# include_tasks without apply passes its tags down to the tasks it includes;
+# the moment apply appears, the apply block becomes the whole of what the
+# included tasks inherit, and tags left out of it are lost. The include then
+# still runs under --tags, prints "included: ...", and executes nothing -
+# which reads as a no-op run rather than as an error.
 - name: Install Docker and containerlab
   ansible.builtin.include_tasks:
     file: clab-install.yml
     apply:
       delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, clabinstall]
   tags: [fabric, clabinstall]
 
 - name: Render the topology and deploy the fabric
@@ -118,6 +127,7 @@
     file: clab-deploy.yml
     apply:
       delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, clabdeploy]
   tags: [fabric, clabdeploy]
 
 # Separate from clab-deploy.yml so it can be re-run on its own against a
@@ -128,4 +138,5 @@
     file: fabric-verify.yml
     apply:
       delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, clabdeploy, clabverify]
   tags: [fabric, clabdeploy, clabverify]
