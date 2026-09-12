@@ -62,6 +62,54 @@
   ansible.builtin.debug:
     msg: "{{ udn_bgp_nncp.stdout_lines }}"
 
+# The check that only exists because its absence cost a long debugging
+# session. A fabric NIC that does not forward breaks the return path and
+# leaves no trace: the reply is on the NIC in tcpdump and never reaches
+# ovn-k8s-mpN. Everything above this - NNCP Available, session Established,
+# RouteAdvertisements Accepted, prefixes exchanged - is green while it is
+# broken, because every one of them is about the control plane.
+- name: Check the fabric NIC forwards on each node
+  ansible.builtin.command:
+    argv:
+      - oc
+      - debug
+      - "node/{{ udn_bgp_node_names[item.ip_key] }}"
+      - --quiet
+      - --
+      - chroot
+      - /host
+      - bash
+      - -c
+      - >-
+        nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ {gsub(":","",$2); print $2; exit}');
+        echo "${nic:-NONE} $(cat /proc/sys/net/ipv4/conf/${nic:-lo}/forwarding 2>/dev/null || echo unknown)"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  register: udn_bgp_fwd
+  changed_when: false
+  failed_when: false
+
+- name: Fail if a fabric NIC has forwarding disabled
+  ansible.builtin.assert:
+    that: item.stdout is search(' 1\s*$')
+    fail_msg: >-
+      On {{ udn_bgp_node_names[item.item.ip_key] }} the fabric NIC reports
+      '{{ item.stdout | trim }}' (interface, net.ipv4.conf.<nic>.forwarding).
+      It must be 1. Traffic from the fabric to a pod arrives on this NIC and
+      has to be forwarded to ovn-k8s-mpN; with forwarding off the kernel
+      drops it in the routing decision and the only direct evidence is
+      `ip route get <pod ip> from {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
+      iif <nic>` answering "No route to host". The fabric NNCP sets
+      ipv4.forwarding, which needs nmstate 2.2.51 or later - check
+      `oc get nncp fabric-untagged-{{ item.item.ip_key }} -o yaml` for a
+      rejected field.
+    success_msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] }}: {{ item.stdout | trim }} (forwarding on)
+  loop: "{{ udn_bgp_fwd.results }}"
+  loop_control:
+    label: "{{ item.item.ip_key }}"
+
 - name: Show BGP sessions from the border leaf's point of view
   ansible.builtin.command:
     cmd: >-
