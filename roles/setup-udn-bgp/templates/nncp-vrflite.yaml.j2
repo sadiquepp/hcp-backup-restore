@@ -37,6 +37,10 @@ spec:
         vlan:
           base-iface: "{{ '{{' }} capture.fabric-nic.interfaces.0.name {{ '}}' }}"
           id: {{ vrf_fact.vlan }}
+        # Same reason as the untagged NIC: this is the return path for
+        # {{ vrf_fact.tenant }}'s pods, inside the {{ vrf_fact.tenant }} VRF. See
+        # nncp-fabric-untagged.yaml.j2 for what an unforwarding NIC looks like.
+        forwarding: true
         ipv4:
           enabled: true
           dhcp: false

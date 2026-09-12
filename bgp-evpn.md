@@ -430,6 +430,7 @@ spec:
         ipv4:
           enabled: true
           dhcp: false
+          forwarding: true
           address:
             - ip: 192.168.140.34
               prefix-length: 24
@@ -440,6 +441,26 @@ EOF
 
 Repeat for worker2 (`...:35`, `192.168.140.35`) and worker3 (`...:36`,
 `192.168.140.36`). The MAC must be uppercase — that is how nmstate reports it.
+
+`forwarding: true` is the return path, and it is not optional.
+OVN-Kubernetes turns IP forwarding on **per interface** — `br-ex` and
+`ovn-k8s-mpN` — and leaves `net.ipv4.conf.all.forwarding` at 0, so any
+interface it does not know about inherits `conf.default.forwarding`, also 0,
+and silently refuses to forward. A reply from the fabric to a pod arrives on
+this NIC and has to reach `ovn-k8s-mpN`; without this the kernel drops it in
+the routing decision, leaving no trace — the reply is visible here with
+`tcpdump` and never appears on `mp0`. The only direct evidence is:
+
+```
+# ip route get 10.129.2.55 from 192.168.140.1 iif enp8s0
+RTNETLINK answers: No route to host
+```
+
+`EHOSTUNREACH`, which the kernel substitutes **only** when forwarding is off
+on the incoming interface. A genuinely missing route gives `ENETUNREACH`,
+"Network is unreachable". Needs nmstate 2.2.51 (September 2025) or later; set
+it per interface rather than reaching for `conf.all.forwarding`, which would
+turn forwarding on for every interface on the node.
 
 Note what this policy does **not** do: no gateway, no DNS, no default route,
 no auto-dns, no routes at all. The node keeps reaching everything it currently
@@ -458,6 +479,9 @@ oc get nncp
 
 oc debug node/worker1 -- chroot /host ip -br addr show | grep 192.168.140
 oc debug node/worker1 -- chroot /host ping -c3 192.168.140.1
+
+# forwarding actually took - 1, not 0
+oc debug node/worker1 -- chroot /host sysctl net.ipv4.conf.enp8s0.forwarding
 ```
 
 That ping is the underlay. If it fails, nothing below can work and the cause
@@ -911,6 +935,7 @@ spec:
         ipv4:
           enabled: true
           dhcp: false
+          forwarding: true
           address:
             - ip: 192.168.141.34
               prefix-length: 24
