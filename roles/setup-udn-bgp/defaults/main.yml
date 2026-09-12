@@ -49,6 +49,31 @@ udn_bgp_tuned_namespace: openshift-cluster-node-tuning-operator
 ## the route back points at another - strict RPF drops that silently.
 udn_bgp_loose_rp_filter: false
 
+## Whether phase 1 advertises the CLUSTER DEFAULT pod network.
+##
+## READ THIS BEFORE LEAVING IT ON. Advertising a network removes OVN's SNAT
+## for it - that is the point of phase 1, and it is not scoped to the BGP
+## fabric. It applies to ALL egress from that network. For the default pod
+## network that means every pod in the cluster, OpenShift's own included,
+## starts talking to the lab's management network with its pod IP.
+##
+## Nothing on {{ lab_network_prefix }}.0/24 has a route back to pod space, so
+## that traffic is one-way. The first casualty is DNS: CoreDNS forwards
+## *.apps and external names to the lab's resolver, gets no answer, and
+## returns SERVFAIL - which surfaces as the authentication, console and
+## ingress operators going Degraded with "server misbehaving" from
+## 172.30.0.10. The cluster is not broken; it just cannot be answered.
+##
+## Two ways to have phase 1 and a healthy cluster:
+##   - leave this true and add return routes on the lab host, one per node:
+##       ip route add <node pod subnet> via {{ lab_network_prefix }}.<node octet>
+##     (read the subnets from k8s.ovn.org/node-subnets on each node)
+##   - set this false and start at the 'shared' phase, where only the tenant
+##     UDNs are advertised and OpenShift's own pods keep their SNAT.
+##
+## Either way the later phases remove this CR - see main.yml.
+udn_bgp_advertise_default: true
+
 ## Kubernetes NMState Operator - the source of the
 ## NodeNetworkConfigurationPolicy API. Every NNCP this role applies (fabric
 ## NIC addresses, VRF-Lite VLANs, EVPN VTEP addresses) needs it, so the role
