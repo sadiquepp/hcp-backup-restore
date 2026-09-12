@@ -25,6 +25,7 @@ where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
 - [How this maps to the playbook](#how-this-maps-to-the-playbook)
 - [The values used throughout](#the-values-used-throughout)
 - [Part 0: the fabric side](#part-0-the-fabric-side)
+  - [Verifying the fabric by hand](#verifying-the-fabric-by-hand)
 - [Part 1: preflight](#part-1-preflight)
 - [Part 2: enable the feature](#part-2-enable-the-feature)
 - [Part 3: resolve the node names](#part-3-resolve-the-node-names)
@@ -176,6 +177,118 @@ second NIC, and behind it live `10.210.10.0/24` and `10.211.10.0/24`.*
 
 Nothing below depends on containerlab specifically. Point the same manifests
 at any BGP router on the same L2 segment and they work unchanged.
+
+### Verifying the fabric by hand
+
+> **Automate this step**
+> ```
+> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags clabverify
+> ```
+> Role: `roles/setup-clab-fabric/tasks/fabric-verify.yml`
+>
+> Runs every check below and fails with what was missing. Safe to re-run at
+> any time — it changes nothing.
+
+**The fabric is topology-agnostic.** Layer2 vs Layer3 is a property of the
+CUDN, decided inside the cluster; leaf1 hands every tenant a VLAN into a VRF
+the same way regardless. So on the fabric side **green must look identical to
+orange**. If it doesn't, the topology did not deploy fully — that is the point
+of looking.
+
+Run these on the **clab VM** (`192.168.122.40`), not on the lab host.
+
+```bash
+# One leaf plus one endpoint per tenant: 5 containers for the default
+# topology, 7 for evpn (which adds spine and leaf2).
+docker ps --format '{{.Names}}\t{{.Status}}'
+```
+
+Expect `clab-udnbgp-leaf1` and `clab-udnbgp-{blue,red,orange,green}-ext`, all
+`Up`, and — this is the one worth reading — **none of them with a restart in
+the status**. A restarted container has lost every veth containerlab gave it
+and will never repair itself.
+
+```bash
+# One VRF per tenant. Table id is 1000+VLAN, so it reads back as the VLAN.
+docker exec clab-udnbgp-leaf1 ip -d link show type vrf | grep -E '^[0-9]+:|table'
+```
+
+```bash
+# The VLAN subinterfaces, their VRF, and the handoff addresses
+docker exec clab-udnbgp-leaf1 ip -br link show | grep 'eth1\.'
+docker exec clab-udnbgp-leaf1 ip -br addr show | grep '192\.168\.14'
+```
+
+Four rows each, and green is indistinguishable from the rest:
+
+| Tenant | VRF (table) | Subinterface | Handoff address | External side |
+| --- | --- | --- | --- | --- |
+| blue | `blue` (1110) | `eth1.110` | `192.168.141.1/24` | `10.210.10.1/24` |
+| red | `red` (1120) | `eth1.120` | `192.168.142.1/24` | `10.211.10.1/24` |
+| orange | `orange` (1130) | `eth1.130` | `192.168.143.1/24` | `10.212.10.1/24` |
+| green | `green` (1140) | `eth1.140` | `192.168.144.1/24` | `10.213.10.1/24` |
+
+The external legs are veths down to the tenant containers, and they are in
+the tenant VRF too:
+
+```bash
+docker exec clab-udnbgp-leaf1 ip -br addr show | grep -- '-ext'
+docker exec clab-udnbgp-leaf1 ip -br link show | grep -- '-ext'   # master <tenant>
+```
+
+Then each endpoint itself. **These containers are `alpine:3.20`, so `ip` is
+BusyBox** — it accepts only `-f` and `-o`, and `-br` gets you the usage
+message rather than an error you would recognise as one:
+
+```bash
+for t in blue red orange green; do
+  printf '%-7s ' "$t"
+  docker exec clab-udnbgp-$t-ext ip -o addr show eth1 | grep -o 'inet [0-9.]*'
+done
+```
+
+```
+blue    inet 10.210.10.10
+red     inet 10.211.10.10
+orange  inet 10.212.10.10
+green   inet 10.213.10.10
+```
+
+Each also needs its default route back through the leaf, or the pod-side
+tests later will look like a fabric failure when they are really a return-path
+failure:
+
+```bash
+docker exec clab-udnbgp-green-ext ip route show
+# default via 10.213.10.1 dev eth1
+```
+
+Finally, FRR. One BGP instance per VRF, plus the default one:
+
+```bash
+docker exec clab-udnbgp-leaf1 vtysh -c 'show running-config' | grep -E 'router bgp|^ vrf'
+docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp vrf all summary' | grep -E 'VRF|Neighbor|^192'
+```
+
+Nothing is peering yet if the cluster side has not been built — `Active` or
+`Idle` against the node addresses is the correct state at the end of
+`--tags fabric`. What matters here is that the **instances exist**: a tenant
+with no `router bgp ... vrf <tenant>` will silently never advertise anything
+in phase 3, and the failure will look like a cluster problem.
+
+#### What this cannot tell you
+
+Nothing above distinguishes green's Layer2-ness, because nothing on the
+fabric depends on it — in phases 2 and 3 a Layer2 CUDN hands its prefix over
+the same VLAN into the same VRF as a Layer3 one. The only fabric-visible
+difference arrives in phase 4, where green takes a **macVRF** (L2VNI 400)
+rather than an ipVRF. Until then, "green looks exactly like orange" *is* the
+pass condition.
+
+The Layer2 behaviour that actually matters is verified from the cluster side:
+one flat subnet with no `hostSubnet` slicing, and an address that survives a
+move between nodes. See
+[Live migration on the Layer2 tenant](#live-migration-on-the-layer2-tenant).
 
 ---
 
