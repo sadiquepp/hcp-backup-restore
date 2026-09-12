@@ -1,28 +1,35 @@
 ---
-# Wait for every tenant CUDN to be realised, and fail with the cluster's own
-# conditions if one is not.
+# Wait for every tenant CUDN to be realised into a real NetworkAttachment-
+# Definition in its namespace, and fail with the cluster's own conditions if
+# one is not.
 #
-# Two separate things go wrong without this, and neither announces itself:
+# This runs AFTER the namespaces are created, and the ordering is the whole
+# point. A CUDN creates its NAD *in each namespace its namespaceSelector
+# matches*, so before the namespaces exist it has nothing to do and reports
+# NetworkCreated=True over an empty set. Gating on the condition alone, before
+# the namespaces, therefore passes vacuously and proves nothing. Hence the
+# second check: a NAD named after the tenant must actually exist in the
+# tenant's namespace.
 #
-# 1. RouteAdvertisements reports "configuration pending: no networks
-#    selected". The RA selects CUDNs by label, but OVN-Kubernetes resolves
-#    that to the set of networks it has actually instantiated - a CUDN whose
-#    NetworkAttachmentDefinition has not been created yet is a labelled
-#    object, not a network, and selects as nothing. The RA is then stuck
-#    Pending with a message that sounds like a label typo and usually is not.
+# What this catches, and what nothing else does: the namespace missing the
+# k8s.ovn.org/primary-user-defined-network label. OVN-Kubernetes then refuses
+# to create the NAD -
 #
-# 2. Worse, and silently: OVN-Kubernetes binds a namespace's primary network
-#    at NAMESPACE CREATION time. A namespace created before its CUDN is
-#    realised gets no primary network at all, and labelling it afterwards
-#    does nothing. The pods come up healthy on the default cluster network,
-#    the DaemonSet rolls out, every task passes, and the tenant is simply not
-#    on its UDN. That is why this gate is before the namespaces, not just
-#    before the RouteAdvertisements.
+#   NetworkCreated=False  NetworkAttachmentDefinitionSyncError
+#   invalid primary network state for namespace "udn-blue": a valid primary
+#   user defined network or network attachment definition custom resource,
+#   and required namespace label "k8s.ovn.org/primary-user-defined-network"
+#   must both be present
+#
+# - and everything downstream carries on looking healthy. The pods schedule,
+# the DaemonSet rolls out, and the tenant is quietly on the default cluster
+# network. The only later symptom is the RouteAdvertisements sitting at
+# "configuration pending: no networks selected", a message that points at the
+# label selector rather than at this.
 #
 # The condition type differs across releases (NetworkCreated in current
 # OVN-Kubernetes, NetworkAllocationSucceeded in some), so this matches on any
-# condition going True rather than naming one, and prints whatever conditions
-# are actually there when it gives up.
+# condition going True rather than naming one.
 
 - name: Confirm every tenant CUDN has been realised
   block:
@@ -43,8 +50,29 @@
       retries: "{{ udn_bgp_cudn_ready_retries }}"
       delay: "{{ udn_bgp_cudn_ready_delay }}"
       changed_when: false
+
+    # The condition can be True over an empty namespace set. This cannot.
+    - name: Wait for each tenant's NetworkAttachmentDefinition to exist
+      ansible.builtin.command:
+        argv:
+          - oc
+          - -n
+          - "udn-{{ item.name }}"
+          - get
+          - net-attach-def
+          - "{{ item.name }}"
+          - -o
+          - jsonpath={.metadata.name}
+      loop: "{{ udn_bgp_tenants }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: udn_bgp_cudn_nad
+      until: udn_bgp_cudn_nad.stdout | default('') == item.name
+      retries: "{{ udn_bgp_cudn_ready_retries }}"
+      delay: "{{ udn_bgp_cudn_ready_delay }}"
+      changed_when: false
   rescue:
-    - name: Collect the CUDN conditions
+    - name: Collect the CUDN conditions and namespace labels
       ansible.builtin.shell:
         cmd: |
           set -u
@@ -52,8 +80,9 @@
               echo "=== $t ==="
               oc get clusteruserdefinednetwork "$t" \
                   -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1
-              echo "labels: $(oc get clusteruserdefinednetwork "$t" \
+              echo "namespace labels: $(oc get namespace "udn-$t" \
                   -o jsonpath='{.metadata.labels}' 2>&1)"
+              echo "nad: $(oc -n "udn-$t" get net-attach-def -o name 2>&1 | tr '\n' ' ')"
           done
       register: udn_bgp_cudn_debug
       changed_when: false
@@ -62,9 +91,11 @@
     - name: Report which CUDN never came up, then fail
       ansible.builtin.fail:
         msg: >-
-          {{ ['One or more tenant CUDNs never reported a successful condition.',
-              'Nothing downstream can work while this is true: the'
-              ' RouteAdvertisements will select no networks ("configuration'
-              ' pending: no networks selected"), and any namespace created'
-              ' meanwhile gets no primary network at all.',
+          {{ ['One or more tenant CUDNs were never realised into a'
+              ' NetworkAttachmentDefinition.',
+              'Check the namespace labels below for'
+              ' k8s.ovn.org/primary-user-defined-network - without it'
+              ' OVN-Kubernetes refuses to create the NAD, and the namespace'
+              ' and its pods run on the default cluster network instead,'
+              ' healthy and on the wrong network.',
               ''] + udn_bgp_cudn_debug.stdout_lines | default([]) }}

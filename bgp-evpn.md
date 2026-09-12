@@ -1295,6 +1295,7 @@ metadata:
   name: udn-blue
   labels:
     udn-tenant: blue
+    k8s.ovn.org/primary-user-defined-network: ""
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/warn: privileged
@@ -1359,6 +1360,49 @@ A DaemonSet rather than a Deployment, because phase 3 needs a pod of each
 tenant on **every** node: OVN-Kubernetes creates a node's UDN VRF only when
 that network first has something on the node. It is also the reason the
 verification steps can `oc exec` into whichever node they care about.
+
+#### Why `k8s.ovn.org/primary-user-defined-network`
+
+This label is the namespace's opt-in to having a primary UDN at all, and it
+is not optional. Without it OVN-Kubernetes refuses to create the
+NetworkAttachmentDefinition, and says so on the **CUDN**, not on the
+namespace and not on the pods:
+
+```bash
+oc get cudn blue -o jsonpath='{.status.conditions}' | jq
+```
+```
+"type": "NetworkCreated", "status": "False",
+"reason": "NetworkAttachmentDefinitionSyncError",
+"message": "invalid primary network state for namespace \"udn-blue\": a valid
+ primary user defined network or network attachment definition custom
+ resource, and required namespace label
+ \"k8s.ovn.org/primary-user-defined-network\" must both be present"
+```
+
+Everything downstream of that stays green. The namespace is created, the pods
+schedule, the DaemonSet rolls out, `oc exec` works — all on the **default
+cluster network**. The first visible symptom arrives two steps later, when the
+RouteAdvertisements sits at `configuration pending: no networks selected`, a
+message that points at the label selector on the RA rather than at the label
+missing on the namespace.
+
+The value is deliberately empty; only the key's presence is read.
+
+Two things make this worth checking explicitly rather than trusting. The label
+must be present **when the namespace is created** — OVN-Kubernetes binds a
+primary network at creation time and adding the label afterwards does nothing,
+which is why the workload template ships the namespace and the DaemonSet
+together and the play deletes and recreates rather than patching. And the
+pod's own annotation is the only place the outcome is written down:
+
+```bash
+oc -n udn-blue get pod -o jsonpath='{.items[0].metadata.annotations.k8s\.ovn\.org/pod-networks}' | jq
+```
+
+Two keys — `default` and `blue` — is correct. **One key, `default`, with
+`"role": "primary"`, means the UDN never attached** and the pod is an ordinary
+cluster-network pod. Nothing else in the lab distinguishes those two states.
 
 #### Why the ServiceAccount and the RoleBinding
 
