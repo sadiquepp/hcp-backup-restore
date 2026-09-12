@@ -430,7 +430,6 @@ spec:
         ipv4:
           enabled: true
           dhcp: false
-          forwarding: true
           address:
             - ip: 192.168.140.34
               prefix-length: 24
@@ -442,7 +441,10 @@ EOF
 Repeat for worker2 (`...:35`, `192.168.140.35`) and worker3 (`...:36`,
 `192.168.140.36`). The MAC must be uppercase — that is how nmstate reports it.
 
-`forwarding: true` is the return path, and it is not optional.
+### Forwarding: the step that is not in the NNCP
+
+Before or alongside these policies, the fabric nodes need IP forwarding, and
+it is not optional — it is the return path.
 OVN-Kubernetes turns IP forwarding on **per interface** — `br-ex` and
 `ovn-k8s-mpN` — and leaves `net.ipv4.conf.all.forwarding` at 0, so any
 interface it does not know about inherits `conf.default.forwarding`, also 0,
@@ -458,9 +460,53 @@ RTNETLINK answers: No route to host
 
 `EHOSTUNREACH`, which the kernel substitutes **only** when forwarding is off
 on the incoming interface. A genuinely missing route gives `ENETUNREACH`,
-"Network is unreachable". Needs nmstate 2.2.51 (September 2025) or later; set
-it per interface rather than reaching for `conf.all.forwarding`, which would
-turn forwarding on for every interface on the node.
+"Network is unreachable".
+
+nmstate grew a per-device `ipv4.forwarding` in 2.2.51, but the build shipped
+with the 4.22 NMState operator (2.2.60) rejects it — `unknown field
+'forwarding'` — and rolls the **whole policy** back when it does, taking the
+NIC's address with it. So it goes in a Tuned profile instead:
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: tuned.openshift.io/v1
+kind: Tuned
+metadata:
+  name: udn-bgp-fabric-forwarding
+  namespace: openshift-cluster-node-tuning-operator
+spec:
+  profile:
+    - name: udn-bgp-fabric-forwarding
+      data: |
+        [main]
+        summary=Forward between the UDN/BGP fabric NIC and the OVN management port
+        include=openshift-node
+
+        [sysctl]
+        net.ipv4.ip_forward=1
+  recommend:
+    - priority: 20
+      profile: udn-bgp-fabric-forwarding
+      match:
+        - label: node-role.kubernetes.io/worker
+EOF
+```
+
+Three things in there are deliberate:
+
+- **`include=openshift-node`.** The Node Tuning Operator applies *one* profile
+  per node. A profile that does not inherit the base one replaces it, silently
+  dropping OpenShift's own tuning.
+- **`priority: 20`.** Lower wins; the built-in `openshift-node` profile is 30.
+- **The global knob rather than `conf.<nic>.forwarding`** — the opposite of
+  the usual advice, for one reason: a per-interface sysctl has to name the
+  interface, and this NIC is hot-plugged, so its name comes from PCI
+  enumeration and is not guaranteed stable. A Tuned profile naming an
+  interface that no longer exists applies cleanly and does nothing, which is
+  exactly the silent failure being fixed here. `net.ipv4.ip_forward` cannot
+  miss: it is the same knob as `conf.all.forwarding`, and writing it
+  propagates to every interface present and sets the default every later one
+  inherits. The cost is forwarding on for every interface on those nodes.
 
 Note what this policy does **not** do: no gateway, no DNS, no default route,
 no auto-dns, no routes at all. The node keeps reaching everything it currently
@@ -935,7 +981,6 @@ spec:
         ipv4:
           enabled: true
           dhcp: false
-          forwarding: true
           address:
             - ip: 192.168.141.34
               prefix-length: 24
@@ -1337,7 +1382,7 @@ That is another full `ovnkube-node` rollout.
 | Part 2 | `tasks/enable.yml` |
 | Part 3 | `tasks/node-names.yml` |
 | Part 4 | `tasks/nmstate.yml`, `templates/nmstate-operator.yaml.j2`, `templates/nmstate-instance.yaml.j2` |
-| Part 5 | `templates/nncp-fabric-untagged.yaml.j2` |
+| Part 5 | `templates/tuned-forwarding.yaml.j2`, `templates/nncp-fabric-untagged.yaml.j2` |
 | Part 6 | `templates/frrconfiguration-default.yaml.j2` |
 | Phase 1 | `templates/routeadvertisements-default.yaml.j2` |
 | Phase 2 | `templates/cudn.yaml.j2`, `templates/workload.yaml.j2`, `templates/routeadvertisements-udn-shared.yaml.j2` |

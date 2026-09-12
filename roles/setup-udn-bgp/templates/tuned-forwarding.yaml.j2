@@ -1,0 +1,81 @@
+{#
+  IP forwarding for the fabric NIC, via the Node Tuning Operator.
+
+  WHY THIS IS NEEDED AT ALL
+
+  OVN-Kubernetes enables IP forwarding per interface - br-ex and ovn-k8s-mpN -
+  and leaves net.ipv4.conf.all.forwarding at 0. An interface it does not
+  manage inherits conf.default.forwarding, also 0, and refuses to forward.
+
+  That is the entire return path for an advertised pod network: a reply from
+  the fabric arrives on the fabric NIC and has to reach ovn-k8s-mpN. With
+  forwarding off the kernel drops it in the routing decision, leaving nothing
+  on the wire - the reply is visible on the NIC with tcpdump and never
+  appears on mp0 - while every control-plane signal stays green. The one
+  direct piece of evidence is
+
+    ip route get <pod ip> from {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }} iif <nic>
+    RTNETLINK answers: No route to host
+
+  EHOSTUNREACH, which the kernel substitutes only when forwarding is off on
+  the incoming interface. A missing route gives ENETUNREACH, "Network is
+  unreachable".
+
+  WHY TUNED AND NOT THE NNCP
+
+  nmstate grew per-device ipv4.forwarding in 2.2.51, but the build shipped
+  with the 4.22 NMState operator (2.2.60) rejects the field - "unknown field
+  `forwarding`" - and rolls the whole policy back when it does, taking the
+  NIC's address with it. Tuned is the operator-supported way to set a sysctl
+  on a set of nodes, needs no reboot, and is version-independent.
+
+  WHY THE GLOBAL KNOB AND NOT conf.<nic>.forwarding
+
+  Deliberate, and the opposite of the usual advice. A per-interface sysctl
+  has to name the interface, and this NIC is hot-plugged - its name comes
+  from PCI enumeration and is not guaranteed stable across nodes or across a
+  re-attach. A Tuned profile naming an interface that no longer exists
+  applies cleanly and does nothing, which is precisely the silent failure
+  this is fixing. net.ipv4.ip_forward cannot miss: it is the same knob as
+  conf.all.forwarding, and writing it propagates to every interface present
+  and sets the default every later one inherits.
+
+  The cost is that forwarding is on for every interface on these nodes rather
+  than the one that needs it. On a node already routing pod traffic through
+  br-ex and mp0 that is a small widening, and it is what the node would have
+  had if OVN-Kubernetes used the global knob in the first place.
+
+  include=openshift-node is not optional. The Node Tuning Operator applies
+  ONE profile per node; a profile that does not inherit the base one replaces
+  it, silently dropping OpenShift's own tuning.
+#}
+apiVersion: tuned.openshift.io/v1
+kind: Tuned
+metadata:
+  name: {{ udn_bgp_tuned_name }}
+  namespace: {{ udn_bgp_tuned_namespace }}
+spec:
+  profile:
+    - name: {{ udn_bgp_tuned_name }}
+      data: |
+        [main]
+        summary=Forward between the UDN/BGP fabric NIC and the OVN management port
+        include=openshift-node
+
+        [sysctl]
+        net.ipv4.ip_forward=1
+{% if udn_bgp_loose_rp_filter | bool %}
+        # Loose reverse-path filtering. Off by default: the untagged fabric
+        # session is symmetric, so strict filtering passes. Turn it on if
+        # VRF-Lite or EVPN shows traffic arriving on one interface with the
+        # route back pointing at another - that is asymmetry, and strict RPF
+        # drops it silently.
+        net.ipv4.conf.all.rp_filter=2
+{% endif %}
+  recommend:
+    # Lower number wins. The built-in openshift-node profile is 30, so 20
+    # takes precedence while still inheriting it via include= above.
+    - priority: 20
+      profile: {{ udn_bgp_tuned_name }}
+      match:
+        - label: node-role.kubernetes.io/worker

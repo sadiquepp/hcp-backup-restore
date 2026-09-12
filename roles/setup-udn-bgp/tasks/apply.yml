@@ -22,6 +22,7 @@
   loop:
     - frrconfiguration-default.yaml
     - routeadvertisements-default.yaml
+    - tuned-forwarding.yaml
   delegate_to: localhost
 
 - name: Render the per-node fabric NIC policies
