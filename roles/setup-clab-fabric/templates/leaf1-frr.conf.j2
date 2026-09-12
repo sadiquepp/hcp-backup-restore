@@ -65,10 +65,22 @@ router bgp {{ clab_leaf1_asn }}
  bgp router-id {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
  no bgp ebgp-requires-policy
  bgp log-neighbor-changes
+{#
+  Deliberately no `neighbor <ip> bfd`. BFD is a two-ended protocol: the
+  session only comes up if both peers run it, and FRR-K8s does not configure
+  BFD for these neighbours (it would need a bfdProfile in the
+  FRRConfiguration). With BFD configured on this side only, bfdd reports the
+  session permanently down, bgpd holds the peer administratively down, and
+  the peer sits in Idle having never sent a packet - `Last write never`. The
+  cluster side then shows Active with MsgSent climbing and MsgRcvd at 0,
+  which reads like a connectivity problem and is not one.
+
+  Sub-second failure detection buys this lab nothing anyway: the datacenter
+  defaults already give 3s/9s timers.
+#}
 {% for n in clab_fabric_nodes %}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ clab_cluster_asn }}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }}
- neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} bfd
 {% endfor %}
  !
  address-family ipv4 unicast
