@@ -1,0 +1,73 @@
+#!/bin/bash
+# Extend the libvirt fabric network into this VM.
+#
+# containerlab's 'bridge' kind attaches veths to an EXISTING Linux bridge,
+# and this guest has a NIC, not a bridge. Enslaving that NIC to a plain
+# bridge puts the FRR containers and the OCP nodes in one L2 domain.
+#
+# The NIC is found by MAC, never by name: names come from PCI enumeration and
+# are not stable across a reboot or a NIC being re-attached. The MAC is
+# assigned by this lab and is deterministic.
+#
+# Run from both Ansible and a systemd unit, so it is idempotent throughout,
+# and it FAILS rather than half-configuring. A bridge that exists with no
+# uplink is the worst outcome available here: leaf1 comes up, FRR is healthy,
+# the topology deploys, and every OCP node silently fails to ARP the leaf.
+set -euo pipefail
+
+BRIDGE={{ clab_guest_bridge }}
+MAC={{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}
+MTU={{ clab_fabric_mtu }}
+
+find_nic() {
+    ip -o link show | awk -v mac="$MAC" \
+        'tolower($0) ~ mac { gsub(":","",$2); print $2; exit }'
+}
+
+# The device may not exist yet when this runs at boot: virtio NICs appear
+# early, but 'early' is not 'before network-pre.target'.
+NIC=""
+for _ in $(seq 1 30); do
+    NIC=$(find_nic)
+    [ -n "$NIC" ] && break
+    sleep 1
+done
+
+if [ -z "$NIC" ]; then
+    echo "no interface with MAC $MAC in this VM - the fabric NIC is missing." >&2
+    echo "Attach it with: virsh attach-interface {{ clab_vm_name }} --type network" >&2
+    echo "  --source {{ clab_fabric_network }} --model virtio --mac $MAC --live --config" >&2
+    exit 1
+fi
+
+if ! ip link show "$BRIDGE" >/dev/null 2>&1; then
+    ip link add name "$BRIDGE" type bridge
+fi
+# vlan_filtering stays 0: the bridge must forward 802.1Q-tagged frames
+# untouched for VRF-Lite's VLAN handoff to work. Turning it on would need a
+# PVID/vid table per port and would silently drop tagged traffic until one
+# existed.
+ip link set "$BRIDGE" type bridge vlan_filtering 0
+ip link set "$BRIDGE" mtu "$MTU"
+ip link set "$BRIDGE" up
+
+# NetworkManager will otherwise keep trying DHCP on a NIC that has no DHCP
+# server, and bounce the carrier under the bridge while it does.
+nmcli device set "$NIC" managed no >/dev/null 2>&1 || true
+ip link set "$NIC" mtu "$MTU"
+ip link set "$NIC" up
+
+CURRENT_MASTER=$(ip -o link show "$NIC" | grep -o 'master [^ ]*' | awk '{print $2}' || true)
+if [ "$CURRENT_MASTER" != "$BRIDGE" ]; then
+    ip link set "$NIC" master "$BRIDGE"
+fi
+
+# Verify rather than assume. This is the line that turns a silent
+# misconfiguration into a failed unit.
+CURRENT_MASTER=$(ip -o link show "$NIC" | grep -o 'master [^ ]*' | awk '{print $2}' || true)
+if [ "$CURRENT_MASTER" != "$BRIDGE" ]; then
+    echo "$NIC is not enslaved to $BRIDGE (master is '${CURRENT_MASTER:-none}')." >&2
+    exit 1
+fi
+
+echo "$BRIDGE is up with $NIC ($MAC) enslaved, mtu $MTU."

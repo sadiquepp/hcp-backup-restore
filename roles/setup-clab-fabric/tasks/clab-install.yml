@@ -92,55 +92,39 @@
 # ---------------------------------------------------------------------------
 # vm mode only: extend virbr1 into the guest.
 # ---------------------------------------------------------------------------
-- name: Find the fabric NIC inside the containerlab VM by MAC
-  ansible.builtin.shell:
-    cmd: >-
-      ip -o link show |
-      awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}/ {gsub(":","",$2); print $2; exit}'
-  register: clab_guest_nic
-  changed_when: false
-  when: clab_deploy_mode == 'vm'
-
-- name: Fail if the fabric NIC is not visible in the containerlab VM
-  ansible.builtin.assert:
-    that: clab_guest_nic.stdout | length > 0
-    fail_msg: >-
-      No interface with MAC {{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}
-      inside {{ clab_vm_name }}. The VM was defined with two NICs - if it
-      predates this role it has only one. Add it with:
-        virsh attach-interface {{ clab_vm_name }} --type network
-          --source {{ clab_fabric_network }} --model virtio
-          --mac {{ clab_fabric_mac_prefix }}:{{ ip_list.clab }} --live --config
+# One script, run from here and from the unit below, so the boot path and
+# the Ansible path cannot drift apart. It finds the NIC by MAC, waits for it
+# to appear, and - importantly - verifies the enslavement rather than
+# assuming it, so a bridge with no uplink fails loudly here instead of
+# surfacing days later as "every BGP session is stuck in Active".
+- name: Install the fabric bridge script
+  ansible.builtin.template:
+    src: clab-fabric-bridge.sh.j2
+    dest: /usr/local/sbin/clab-fabric-bridge.sh
+    mode: '0755'
   when: clab_deploy_mode == 'vm'
 
 - name: Create the in-guest fabric bridge and enslave the fabric NIC
-  ansible.builtin.shell:
-    cmd: |
-      set -e
-      ip link show {{ clab_guest_bridge }} >/dev/null 2>&1 || {
-        ip link add name {{ clab_guest_bridge }} type bridge
-        # vlan_filtering stays 0 (the default): the bridge must forward
-        # 802.1Q-tagged frames untouched for VRF-Lite to work. Turning it on
-        # would require a PVID/vid table per port and silently drop tagged
-        # traffic until one existed.
-        ip link set {{ clab_guest_bridge }} type bridge vlan_filtering 0
-      }
-      ip link set {{ clab_guest_bridge }} mtu {{ clab_fabric_mtu }}
-      ip link set {{ clab_guest_bridge }} up
-      # NetworkManager will otherwise keep trying DHCP on a NIC that has no
-      # DHCP server and periodically bounce the carrier under the bridge.
-      nmcli device set {{ clab_guest_nic.stdout }} managed no || true
-      ip link set {{ clab_guest_nic.stdout }} mtu {{ clab_fabric_mtu }}
-      ip link set {{ clab_guest_nic.stdout }} up
-      ip link set {{ clab_guest_nic.stdout }} master {{ clab_guest_bridge }}
-    executable: /bin/bash
+  ansible.builtin.command:
+    cmd: /usr/local/sbin/clab-fabric-bridge.sh
+  register: clab_bridge_setup
+  changed_when: true
   when: clab_deploy_mode == 'vm'
 
-# ip link is not persistent. A reboot of the clab VM would leave containerlab
-# pointing at a bridge that no longer exists, which presents as every BGP
-# session down and no obvious cause. A tiny oneshot unit is less surprising
-# here than an NM connection profile, because the bridge deliberately has no
-# IP configuration for NM to manage.
+- name: Report the in-guest fabric bridge
+  ansible.builtin.debug:
+    msg: "{{ clab_bridge_setup.stdout_lines }}"
+  when: clab_deploy_mode == 'vm'
+
+# ip link is not persistent. A reboot of the clab VM would otherwise leave
+# containerlab attached to a bridge with no uplink - which is far worse than
+# no bridge at all, because everything looks healthy from inside the VM.
+#
+# The previous version of this unit listed each ip command as its own
+# ExecStart with SuccessExitStatus=0 1 2 to make it idempotent. That made the
+# one failure that matters - the enslave - indistinguishable from success,
+# and it hard-coded a NIC name that is not stable across reboots. The script
+# handles both.
 - name: Make the in-guest fabric bridge survive a reboot
   ansible.builtin.copy:
     dest: /etc/systemd/system/clab-fabric-bridge.service
@@ -155,16 +139,7 @@
       [Service]
       Type=oneshot
       RemainAfterExit=yes
-      ExecStart=/sbin/ip link add name {{ clab_guest_bridge }} type bridge
-      ExecStart=/sbin/ip link set {{ clab_guest_bridge }} type bridge vlan_filtering 0
-      ExecStart=/sbin/ip link set {{ clab_guest_bridge }} mtu {{ clab_fabric_mtu }}
-      ExecStart=/sbin/ip link set {{ clab_guest_bridge }} up
-      ExecStart=/sbin/ip link set {{ clab_guest_nic.stdout }} mtu {{ clab_fabric_mtu }}
-      ExecStart=/sbin/ip link set {{ clab_guest_nic.stdout }} up
-      ExecStart=/sbin/ip link set {{ clab_guest_nic.stdout }} master {{ clab_guest_bridge }}
-      # The unit is idempotent by being allowed to fail on the "already
-      # exists" paths rather than by guarding each step.
-      SuccessExitStatus=0 1 2
+      ExecStart=/usr/local/sbin/clab-fabric-bridge.sh
 
       [Install]
       WantedBy=multi-user.target
