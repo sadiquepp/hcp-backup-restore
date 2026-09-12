@@ -1,0 +1,80 @@
+---
+# Phase 0f - prove the fabric is wired, not merely deployed.
+#
+# containerlab reports success once the containers start. It says nothing
+# about whether leaf1's exec: block actually ran, whether eth1 ended up with
+# an address, or whether the bridge the topology names reaches the OCP nodes
+# at all. Each of those failures looks identical much later and a long way
+# from here: a BGP session stuck in Active, and a pod ping answered with
+# "Destination Host Unreachable" by the node's own kernel because it could
+# not ARP the leaf. Checking here costs seconds and names the cause.
+
+- name: Read the border leaf's fabric interface
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-leaf1 ip -o addr show dev eth1"
+  register: clab_leaf1_eth1
+  changed_when: false
+  failed_when: false
+
+- name: Fail if the border leaf never got its fabric address
+  ansible.builtin.assert:
+    that:
+      - clab_leaf1_eth1.rc == 0
+      - (clab_fabric_prefix ~ '.' ~ clab_fabric_router_octet) in clab_leaf1_eth1.stdout
+    fail_msg: >-
+      leaf1 has no {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }} on
+      eth1. The address is set by the topology's exec: block, which runs only
+      when the container is created - so the usual cause is a redeploy that
+      reused an existing container. Re-run with
+      `containerlab deploy --reconfigure`, or set it by hand with
+      `docker exec clab-{{ clab_lab_name }}-leaf1 ip addr add
+      {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}/{{ clab_fabric_netmask_bits }} dev eth1`.
+      What leaf1 reports now: {{ clab_leaf1_eth1.stdout | default(clab_leaf1_eth1.stderr, true) }}
+    success_msg: >-
+      leaf1 holds {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }} on eth1.
+
+# Resolved here rather than reused from clab-install.yml so this file stands
+# on its own: --tags clabverify has to work against a fabric that is already
+# up, without re-running the install.
+- name: Find the fabric NIC inside the containerlab VM by MAC
+  ansible.builtin.shell:
+    cmd: >-
+      ip -o link show |
+      awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}/ {gsub(":","",$2); print $2; exit}'
+  register: clab_verify_nic
+  changed_when: false
+  when: clab_deploy_mode == 'vm'
+
+- name: Read the fabric bridge's ports
+  ansible.builtin.command:
+    cmd: "ip -br link show master {{ clab_bridge_for_topology }}"
+  register: clab_bridge_ports
+  changed_when: false
+  failed_when: false
+
+# Two ports have to be on this bridge for anything to work: the veth
+# containerlab gave leaf1, and - in vm mode - the NIC that carries the L2
+# domain out to virbr1 and the OCP nodes. A bridge with only the veth is the
+# exact shape of failure that leaves every node unable to ARP the leaf while
+# leaf1 itself looks perfectly healthy.
+- name: Fail if the fabric bridge is missing a port
+  ansible.builtin.assert:
+    that:
+      - clab_bridge_ports.rc == 0
+      - "'leaf1-fab' in clab_bridge_ports.stdout"
+      - clab_deploy_mode != 'vm' or clab_verify_nic.stdout in clab_bridge_ports.stdout
+    fail_msg: >-
+      {{ clab_bridge_for_topology }} is not wired as expected. Expected the
+      leaf1-fab veth
+      {{ ('and the fabric NIC ' ~ clab_verify_nic.stdout) if clab_deploy_mode == 'vm' else '' }}
+      to be enslaved to it. Ports found:
+      {{ clab_bridge_ports.stdout_lines | default([], true) }}
+      -- Without the fabric NIC on this bridge the containers can talk to
+      each other and to nothing else, which presents on the cluster side as
+      every BGP session stuck in Active.
+    success_msg: >-
+      {{ clab_bridge_for_topology }} carries the expected ports.
+
+- name: Report the fabric bridge's ports
+  ansible.builtin.debug:
+    msg: "{{ clab_bridge_ports.stdout_lines | default([], true) }}"
