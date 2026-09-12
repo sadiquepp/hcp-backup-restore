@@ -141,6 +141,92 @@
     success_msg: >-
       {{ clab_bridge_for_topology }} carries the expected ports.
 
+# Per-tenant plumbing. Until now this file checked the fabric link and the
+# BGP session and stopped - which is everything the tenants ride on and
+# nothing about the tenants themselves. A tenant whose VLAN, VRF or external
+# endpoint never got built looks completely healthy from every check above,
+# and only shows up as one phase-3 ping that will not answer.
+#
+# Note what is NOT checked here: whether a tenant is Layer2 or Layer3. That
+# is a property of the ClusterUserDefinedNetwork, not of the fabric. leaf1
+# hands every tenant a VLAN into a VRF the same way whatever its topology,
+# so green and orange are expected to look identical from this side.
+- name: Read the border leaf's interfaces
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-leaf1 ip -o addr show"
+  register: clab_leaf1_ifaces
+  changed_when: false
+  failed_when: false
+
+- name: Read the border leaf's link masters
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-leaf1 ip -o link show"
+  register: clab_leaf1_masters
+  changed_when: false
+  failed_when: false
+
+- name: Fail if a tenant's VLAN, VRF or external interface is missing on the leaf
+  ansible.builtin.assert:
+    that:
+      # the VRF device, and the VLAN subinterface enslaved to it
+      - clab_leaf1_masters.stdout is search(item.name ~ ':')
+      - clab_leaf1_masters.stdout is search('eth1\\.' ~ item.vlan ~ '.*master ' ~ item.name)
+      # the handoff address the cluster peers with
+      - clab_leaf1_ifaces.stdout is search(item.vrf_prefix ~ '\\.' ~ clab_fabric_router_octet ~ '/')
+      # the tenant's own external network, behind the leaf
+      - clab_leaf1_ifaces.stdout is search(item.external_gw | replace('.', '\\.') ~ '/')
+    fail_msg: >-
+      leaf1 is missing part of tenant '{{ item.name }}': expected a VRF named
+      {{ item.name }}, eth1.{{ item.vlan }} enslaved to it holding
+      {{ item.vrf_prefix }}.{{ clab_fabric_router_octet }}, and
+      {{ item.name }}-ext holding {{ item.external_gw }}.
+      These are built by the topology's exec: block, which runs only when the
+      container is created - so a redeploy that reused it, or a tenant added
+      to vars.yaml since the last --tags fabric, produces exactly this.
+      Re-run --tags fabric.
+      What leaf1 has: {{ clab_leaf1_ifaces.stdout_lines | default([], true) }}
+    success_msg: >-
+      {{ item.name }}: VRF, VLAN {{ item.vlan }} at
+      {{ item.vrf_prefix }}.{{ clab_fabric_router_octet }}, external
+      {{ item.external_gw }}.
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: clab_topology != 'evpn'
+
+- name: Read each tenant's external endpoint
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-{{ item.name }}-ext ip -o addr show eth1"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: clab_ext_hosts
+  changed_when: false
+  failed_when: false
+
+- name: Fail if a tenant's external endpoint is not addressed
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout is search(item.item.external_host | replace('.', '\\.') ~ '/')
+    fail_msg: >-
+      The {{ item.item.name }}-ext container is missing or has no
+      {{ item.item.external_host }}. This is what a {{ item.item.name }} pod
+      is supposed to reach in phase 3, so the isolation test would fail for a
+      reason that has nothing to do with isolation.
+      It reports: {{ item.stdout | default(item.stderr, true) }}
+    success_msg: >-
+      {{ item.item.name }}-ext holds {{ item.item.external_host }}.
+  loop: "{{ clab_ext_hosts.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Report the per-tenant plumbing
+  ansible.builtin.debug:
+    msg: >-
+      {{ udn_bgp_tenants | map(attribute='name') | list }} on leaf1 -
+      {{ clab_leaf1_ifaces.stdout_lines | default([], true) | select('search', 'eth1\\.') | list }}
+
 - name: Report the fabric bridge's ports
   ansible.builtin.debug:
     msg: "{{ clab_bridge_ports.stdout_lines | default([], true) }}"
