@@ -2245,6 +2245,8 @@ required for `Layer3`.
 | Symptom | Cause |
 | --- | --- |
 | BGP session never establishes | Fabric NIC not addressed (check `oc get nncp`), or MTU mismatch, or the node has no fabric NIC at all |
+| Pod ping returns `Destination Host Unreachable` from the node subnet's `.2` | That address is `ovn-k8s-mp0` - the host, not OVN. The packet reached the node's kernel and it could not ARP the next hop. Underlay problem: check the fabric NIC's address on the node, then `virbr1` on the lab host, then the bridge inside the clab VM. The BGP session will be down too, for the same reason |
+| `tcpdump: executable file not found` inside a clab node | The FRR image does not ship tcpdump. Capture on `virbr1` on the lab host (or `br-fabric` in the clab VM) instead - all fabric traffic crosses it |
 | Session up, `RouteAdvertisements` Accepted, no `route-advertisements-*` FRRConfiguration | `frrConfigurationSelector` matched zero or more than one FRRConfiguration |
 | `RouteAdvertisements` not Accepted: "has no VRF matching the target VRF" | `targetVRF` was set to the string `default`. Unset means the default VRF; a value is matched literally against the routers' `vrf` field, and a default-VRF router has none. Only `auto` or unset are meaningful |
 | `RouteAdvertisements` not Accepted, other reasons | Overlapping UDN subnets leaked into the default VRF, or two CRs selecting the same network |

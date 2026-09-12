@@ -183,6 +183,17 @@
         oc -n udn-{{ t.name }} get pods -o wide
       {% endfor %}
       {% endif %}
+      {% set ns.step = ns.step + 1 %}
+
+      {{ ns.step }}. The node can reach the leaf at all. This is the underlay, and it is
+         the first thing to check because the BGP session rides on the same
+         path - if this fails, the session is down too and nothing about
+         OVN-Kubernetes is the reason:
+           oc debug node/{{ probe_node }} -- chroot /host ping -c3 {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
+           # 'Destination Host Unreachable' from the node subnet's .2 address
+           # is the host saying it could not ARP the leaf. Check the fabric
+           # NIC's address, then {{ clab_fabric_bridge }} on this host, then the
+           # bridge inside the clab VM - not OVN.
       {% if udn_phase != 'default' %}
       {% set ns.step = ns.step + 1 %}
 
@@ -201,9 +212,12 @@
       {% set ns.step = ns.step + 1 %}
 
       {{ ns.step }}. Egress is NOT SNATed once the network is advertised. Run a ping and
-         watch the leaf see the real pod IP as the source - this is the
-         single clearest proof the advertisement took effect:
-           docker exec clab-{{ clab_lab_name }}-leaf1 tcpdump -ni any icmp
+         watch the fabric see the real pod IP as the source - this is the
+         single clearest proof the advertisement took effect. Capture on the
+         bridge rather than inside leaf1: the FRR image ships no tcpdump, and
+         every packet between a node and the leaf crosses the bridge anyway.
+           # on this lab host, not inside a container
+           sudo tcpdump -ni {{ clab_fabric_bridge }} icmp
       {% if udn_phase == 'default' %}
            oc -n default exec bgp-probe -- ping -c3 {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
       {% elif udn_phase == 'shared' %}
