@@ -1549,20 +1549,23 @@ declaring the VRF with only the VLAN in `ports` removes `ovn-k8s-mpN`, which
 severs the UDN from the node and takes the tenant's pods off the network. So
 read the port list first and re-state it in full.
 
-The VRF's name comes from the CUDN's **status**, not its metadata name. Linux
-caps an interface name at 15 characters, so a longer CUDN name necessarily has
-a VRF called something else, and the naming scheme is OVN-Kubernetes' to
-change between releases:
+**The VRF is named after the CUDN, and there is no status field that tells
+you so.** An earlier version of this document said to read
+`status.vrfName`; that field does not exist —
 
 ```bash
-oc get clusteruserdefinednetwork blue -o jsonpath='{.status.vrfName}'; echo
-oc get clusteruserdefinednetwork red  -o jsonpath='{.status.vrfName}'; echo
+oc explain clusteruserdefinednetwork.status
+# FIELDS:
+#   conditions <[]Object>      <- and nothing else
 ```
 
-An empty answer means the CUDN has not been reconciled yet — check its
-`NetworkCreated` condition rather than proceeding.
+So the name is a derivation, not a published contract. Linux caps an
+interface name at 15 characters, so a CUDN with a longer name necessarily has
+a device called something else, and the scheme is OVN-Kubernetes' to change
+between releases. Derive it, then **verify it against the node** — never
+template a VRF policy from a name you have not seen in the kernel.
 
-Then, per node, read the link table:
+Per node, read the link table:
 
 ```bash
 oc debug node/worker1 --quiet -- chroot /host ip -d link show type vrf
@@ -1571,9 +1574,19 @@ oc debug node/worker1 --quiet -- chroot /host ip -br link show master blue
 
 For each (node, tenant) you need three facts:
 
+```
+118: blue   vrf table 1117
+126: green  vrf table 1123
+127: orange vrf table 1124
+128: red    vrf table 1125
+```
+
+Note the table ids — allocated by OVN-Kubernetes in creation order, with no
+relation to anything in this lab's numbering. They are read, never derived.
+
 | Fact | Where it comes from | Why it matters |
 | --- | --- | --- |
-| VRF device name | `status.vrfName` | Must match the kernel device exactly |
+| VRF device name | The CUDN's name, **confirmed against `ip -d link show type vrf`** | Must match the kernel device exactly |
 | Route table id | `linkinfo.info_data.table` | Allocated by OVN-Kubernetes. Naming a different one **recreates** the VRF instead of editing it |
 | Existing ports | links whose `master` is the VRF | Must be restated or they are removed |
 
@@ -1670,7 +1683,7 @@ spec:
 EOF
 ```
 
-The `vrf:` values are the ones read from `status.vrfName` — FRR renders them
+The `vrf:` values are the VRF device names confirmed on the nodes — FRR renders them
 straight into `router bgp 64512 vrf <name>`, so they must match the kernel
 device exactly.
 
