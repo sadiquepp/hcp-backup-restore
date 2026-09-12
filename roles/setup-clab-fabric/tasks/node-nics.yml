@@ -89,7 +89,7 @@
 - name: Report the fabric NIC each node now has
   ansible.builtin.debug:
     msg: >-
-      {{ item.item.domain }} ({{ item.item.node }}):
+      {{ item.item.domain }} ({{ item.item.ip_key }}):
       fabric MAC {{ clab_fabric_mac_prefix }}:{{ ip_list[item.item.ip_key] }}
       -> {{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}/{{ clab_fabric_netmask_bits }},
       expected in-guest name {{ clab_fabric_nic_name }}

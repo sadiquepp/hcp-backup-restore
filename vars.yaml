@@ -1233,16 +1233,24 @@ clab_alpine_image: "alpine:3.20"
 ## Network.operator.openshift.io CR you can patch directly, which is what
 ## every phase below needs. Hosted-cluster workers are deliberately NOT here;
 ## see the README section on why to prove this out on hub1 first.
+## 'domain' is the libvirt domain name (what virsh calls the VM); 'ip_key'
+## is its entry in ip_list, which gives both its address and its MAC.
+##
+## Deliberately NO Kubernetes node name here. It used to carry one and it was
+## wrong - worker1.hub.mylab.com, the SSH/DNS name, where the cluster had
+## registered the node as plain 'worker1'. Every NodeNetworkConfigurationPolicy
+## then selected a node that did not exist and was silently Ignored. There is
+## no value that is right for every lab, because the node name is whatever the
+## host sent as its hostname at install time, so the role looks it up instead:
+## it matches ip_list's address against the nodes' InternalIP. See
+## roles/setup-udn-bgp/tasks/node-names.yml.
 clab_fabric_nodes:
   - domain: hub_worker1
     ip_key: worker1
-    node: worker1.hub.mylab.com
   - domain: hub_worker2
     ip_key: worker2
-    node: worker2.hub.mylab.com
   - domain: hub_worker3
     ip_key: worker3
-    node: worker3.hub.mylab.com
 
 ## The fabric NIC's MAC follows the lab's existing scheme with a bumped
 ## fifth octet, so a fabric NIC is recognisable at a glance and can never

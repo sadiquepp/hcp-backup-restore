@@ -37,6 +37,12 @@
   ansible.builtin.include_tasks: enable.yml
   when: udn_phase != 'preflight'
 
+# Must precede apply.yml: the NNCP templates select nodes by name, and the
+# only name that works is the one the cluster actually registered.
+- name: Resolve the fabric nodes' Kubernetes node names
+  ansible.builtin.include_tasks: node-names.yml
+  when: udn_phase != 'preflight'
+
 - name: Render the manifests for this phase
   ansible.builtin.include_tasks: apply.yml
   when: udn_phase != 'preflight'
@@ -60,7 +66,7 @@
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-fabric-untagged-{{ item.ip_key }}.yaml"
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
-    label: "{{ item.node }}"
+    label: "{{ item.ip_key }}"
   when: udn_phase != 'preflight'
 
 - name: Wait for the fabric NIC policies to be applied
@@ -70,7 +76,7 @@
       --for=condition=Available --timeout=300s
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
-    label: "{{ item.node }}"
+    label: "{{ item.ip_key }}"
   when: udn_phase != 'preflight'
   changed_when: false
 

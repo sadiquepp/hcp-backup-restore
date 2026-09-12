@@ -63,7 +63,7 @@ router bgp {{ clab_leaf1_asn }}
  ! roles/setup-udn-bgp renders as fabric-peering-evpn.
 {% for n in clab_fabric_nodes %}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ clab_cluster_asn }}
- neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.node }}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }}
 {% endfor %}
  !
  address-family ipv4 unicast

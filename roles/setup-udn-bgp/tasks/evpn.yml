@@ -65,7 +65,7 @@
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
     loop_var: node_entry
-    label: "{{ node_entry.node }}"
+    label: "{{ node_entry.ip_key }}"
   delegate_to: localhost
 
 # Order matters here. The addresses have to be on the nodes before the VTEP
@@ -77,14 +77,14 @@
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-vtep-{{ item.ip_key }}.yaml"
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
-    label: "{{ item.node }}"
+    label: "{{ item.ip_key }}"
 
 - name: Wait for the VTEP address policies to be applied
   ansible.builtin.command:
     cmd: "oc wait nncp/vtep-{{ item.ip_key }} --for=condition=Available --timeout=300s"
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
-    label: "{{ item.node }}"
+    label: "{{ item.ip_key }}"
   changed_when: false
 
 - name: Create the VTEP

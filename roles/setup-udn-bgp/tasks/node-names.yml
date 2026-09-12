@@ -1,0 +1,86 @@
+---
+# Resolve each fabric node's real Kubernetes node name.
+#
+# vars.yaml used to carry the name in clab_fabric_nodes[].node, and it was
+# wrong: it held the SSH/DNS name (worker1.hub.mylab.com) while the cluster
+# had registered its nodes under their short hostnames (worker1). Every NNCP
+# therefore selected a node that does not exist, and landed as
+#
+#   NAME                      STATUS    REASON
+#   fabric-untagged-worker1   Ignored   NoMatchingNode
+#
+# That is not an error. nmstate accepts a policy whose nodeSelector matches
+# nothing and simply does nothing with it, so the play reported success while
+# no interface was ever configured - the worst kind of failure, because
+# everything downstream then fails for reasons that look unrelated.
+#
+# Hardcoding the short form instead would be the same mistake twice: the node
+# name is whatever the host sent as its hostname at install time, and differs
+# between labs. Resolving it does not depend on that. The node's address on
+# virbr0 comes from ip_list, via a DHCP reservation keyed on a MAC this lab
+# assigns - so the address is a fact this repo owns, and the node name is
+# whatever the cluster attached to it. Match on the address, take the name.
+#
+# Runs before any manifest is rendered, so the NNCP templates only ever
+# receive a name that is known to exist.
+
+- name: Read every node's name and internal address
+  ansible.builtin.command:
+    # argv form: the jsonpath contains quotes and braces that would otherwise
+    # have to survive both YAML and shell quoting.
+    argv:
+      - oc
+      - get
+      - nodes
+      - -o
+      - 'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}'
+  register: udn_bgp_node_addrs
+  changed_when: false
+
+- name: Build an address -> node name map
+  ansible.builtin.set_fact:
+    udn_bgp_name_by_ip: >-
+      {{ udn_bgp_name_by_ip | default({})
+         | combine({ item.split()[1]: item.split()[0] }) }}
+  loop: "{{ udn_bgp_node_addrs.stdout_lines | select('search', ' ') | list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Resolve each fabric node's cluster node name from its ip_list address
+  ansible.builtin.set_fact:
+    udn_bgp_node_names: >-
+      {{ udn_bgp_node_names | default({})
+         | combine({ item.ip_key:
+                     udn_bgp_name_by_ip[lab_network_prefix ~ '.' ~ ip_list[item.ip_key]]
+                     | default('', true) }) }}
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+
+- name: Report the resolved node names
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.ip_key }} at
+      {{ lab_network_prefix }}.{{ ip_list[item.ip_key] }}
+      -> cluster node '{{ udn_bgp_node_names[item.ip_key] }}'
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+
+- name: Fail if any fabric node has no matching cluster node
+  ansible.builtin.assert:
+    that: udn_bgp_node_names[item.ip_key] | length > 0
+    fail_msg: >-
+      No cluster node has internal address
+      {{ lab_network_prefix }}.{{ ip_list[item.ip_key] }}, which is where
+      ip_list says {{ item.ip_key }} lives.
+
+      What the cluster reports:
+      {{ udn_bgp_node_addrs.stdout_lines | reject('equalto', '') | list }}
+
+      Either clab_fabric_nodes lists a node that is not part of this cluster,
+      or that node's address does not match its ip_list octet. Both live in
+      vars.yaml.
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"

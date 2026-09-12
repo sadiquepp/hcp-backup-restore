@@ -21,7 +21,7 @@ metadata:
   name: fabric-untagged-{{ node_entry.ip_key }}
 spec:
   nodeSelector:
-    kubernetes.io/hostname: {{ node_entry.node }}
+    kubernetes.io/hostname: {{ udn_bgp_node_names[node_entry.ip_key] }}
   capture:
     fabric-nic: interfaces.mac-address=="{{ clab_fabric_mac_prefix | upper }}:{{ ip_list[node_entry.ip_key] }}"
   desiredState:

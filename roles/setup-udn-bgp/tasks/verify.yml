@@ -183,12 +183,12 @@
 
       5. Confirm the node learned fabric routes over BGP rather than being
          statically pointed at anything:
-           oc debug node/{{ clab_fabric_nodes[0].node }} -- chroot /host ip route show proto bgp
+           oc debug node/{{ udn_bgp_node_names[clab_fabric_nodes[0].ip_key] }} -- chroot /host ip route show proto bgp
       {% if udn_phase in ['vrflite', 'evpn'] %}
-           oc debug node/{{ clab_fabric_nodes[0].node }} -- chroot /host ip route show vrf {{ udn_bgp_tenants[0].name }}
+           oc debug node/{{ udn_bgp_node_names[clab_fabric_nodes[0].ip_key] }} -- chroot /host ip route show vrf {{ udn_bgp_tenants[0].name }}
       {% endif %}
 
       6. And confirm the thing this lab is careful NOT to have changed - the
          node's default route still points at virbr0:
-           oc debug node/{{ clab_fabric_nodes[0].node }} -- chroot /host ip route show default
+           oc debug node/{{ udn_bgp_node_names[clab_fabric_nodes[0].ip_key] }} -- chroot /host ip route show default
            # expect: default via {{ lab_network_prefix }}.1

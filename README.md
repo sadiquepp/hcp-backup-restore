@@ -2166,11 +2166,11 @@ oc -n udn-blue exec <pod> -- ping -c3 -W2 10.211.10.10
 # hop away on the same physical link. If this succeeds, the VRFs are leaking.
 
 # Routes learned over BGP, not statically pointed anywhere:
-oc debug node/worker1.hub.mylab.com -- chroot /host ip route show proto bgp
-oc debug node/worker1.hub.mylab.com -- chroot /host ip route show vrf blue
+oc debug node/worker1 -- chroot /host ip route show proto bgp
+oc debug node/worker1 -- chroot /host ip route show vrf blue
 
 # And the thing this lab is careful NOT to have changed:
-oc debug node/worker1.hub.mylab.com -- chroot /host ip route show default
+oc debug node/worker1 -- chroot /host ip route show default
 # expect: default via 192.168.122.1
 ```
 

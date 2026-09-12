@@ -84,17 +84,17 @@
 # "master" is that VRF's ifname.
 - name: Read the link table from each node
   ansible.builtin.command:
-    cmd: "oc debug node/{{ item.node }} --quiet -- chroot /host ip -j -d link show"
+    cmd: "oc debug node/{{ udn_bgp_node_names[item.ip_key] }} --quiet -- chroot /host ip -j -d link show"
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
-    label: "{{ item.node }}"
+    label: "{{ item.ip_key }}"
   register: udn_bgp_links_raw
   changed_when: false
 
 - name: Summarise the VRFs found on each node
   ansible.builtin.debug:
     msg: >-
-      {{ item.item.node }}:
+      {{ udn_bgp_node_names[item.item.ip_key] }}:
       {{ item.stdout | from_json
          | selectattr('linkinfo', 'defined')
          | selectattr('linkinfo.info_kind', 'defined')
@@ -102,7 +102,7 @@
          | map(attribute='ifname') | list | default(['(no VRFs found)'], true) }}
   loop: "{{ udn_bgp_links_raw.results }}"
   loop_control:
-    label: "{{ item.item.node }}"
+    label: "{{ item.item.ip_key }}"
 
 # Turn the JSON into one dict per (node, tenant):
 #   {node, ip_key, tenant, vlan, vrf_prefix, vrf, table, ports[]}
@@ -114,7 +114,7 @@
   ansible.builtin.set_fact:
     udn_bgp_vrf_facts: >-
       {{ udn_bgp_vrf_facts | default([]) + [{
-           'node': item.0.item.node,
+           'node': udn_bgp_node_names[item.0.item.ip_key],
            'ip_key': item.0.item.ip_key,
            'tenant': item.1.name,
            'vlan': item.1.vlan,
@@ -131,7 +131,7 @@
          }] }}
   loop: "{{ udn_bgp_links_raw.results | product(udn_bgp_tenants) | list }}"
   loop_control:
-    label: "{{ item.0.item.node }}/{{ item.1.name }}"
+    label: "{{ item.0.item.ip_key }}/{{ item.1.name }}"
   when:
     - item.0.stdout | from_json
       | selectattr('linkinfo', 'defined')
