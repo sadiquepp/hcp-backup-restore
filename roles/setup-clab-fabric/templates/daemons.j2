@@ -2,7 +2,11 @@
    kernel plumbing (VRFs, VLAN subinterfaces, route installation, and in the
    EVPN topology the VXLAN/bridge netdevs), bgpd owns every session and the
    l2vpn evpn address-family. Nothing here runs OSPF/ISIS/etc, and leaving
-   them off keeps the container small and the logs readable. #}
+   them off keeps the container small and the logs readable.
+
+   bfdd is off with the rest. BFD needs both ends to run it, FRR-K8s is not
+   configured for it here, and a one-ended BFD session holds the BGP peer
+   down in Idle forever - see the note in leaf1-frr.conf.j2. #}
 zebra=yes
 bgpd=yes
 ospfd=no
@@ -17,7 +21,7 @@ eigrpd=no
 babeld=no
 sharpd=no
 pbrd=no
-bfdd=yes
+bfdd=no
 fabricd=no
 vrrpd=no
 pathd=no
@@ -25,4 +29,3 @@ pathd=no
 vtysh_enable=yes
 zebra_options="  -A 127.0.0.1 -s 90000000"
 bgpd_options="   -A 127.0.0.1"
-bfdd_options="   -A 127.0.0.1"
