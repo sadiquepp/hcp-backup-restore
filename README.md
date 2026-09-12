@@ -1675,6 +1675,12 @@ Built by `setup_udn_bgp_lab.yaml` (roles `setup-clab-fabric` and
 or Ceph flows reads any of it, and none of those flows change whether or not
 you ever run it.
 
+**[bgp-evpn.md](bgp-evpn.md)** takes `setup-udn-bgp` apart into the `oc`
+commands it runs, phase by phase, with every manifest shown filled in rather
+than as a template. Read that to understand the mechanism, to debug a phase
+that failed, or to reproduce this on a cluster the repo does not manage - each
+section names the `--tags` that automate it.
+
 ### Can this be simulated on this lab? Yes - here is the honest shape of it
 
 Yes, on the bare-metal host, using containerlab as the provider network. The
