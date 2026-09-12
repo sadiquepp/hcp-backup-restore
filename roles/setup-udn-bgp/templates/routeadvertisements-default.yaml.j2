@@ -16,9 +16,16 @@ kind: RouteAdvertisements
 metadata:
   name: default-podnetwork
 spec:
-  # 'default' leaks into the default VRF. For the cluster default network
-  # that is the only sensible value - the CDN lives in the default VRF.
-  targetVRF: default
+  # The cluster default network lives in the default VRF, so the default VRF
+  # is the only sensible target here - but note how that is expressed:
+  # targetVRF is deliberately left unset, and unset is not the same as
+  # "default". An empty targetVRF means "advertise in the default VRF"; a
+  # non-empty one is matched LITERALLY against the vrf field of the routers
+  # in the selected FRRConfiguration. Writing 'default' therefore makes
+  # OVN-Kubernetes look for a 'router bgp <asn> vrf default', find none -
+  # a router with no vrf field IS the default VRF, it is not named - and
+  # reject the CR with "has no VRF matching the RouteAdvertisements target
+  # VRF or any selected network". 'auto' is the only other accepted value.
   networkSelectors:
     - networkSelectionType: DefaultNetwork
   # Empty selectors mean "every node" and "the one FRRConfiguration matching

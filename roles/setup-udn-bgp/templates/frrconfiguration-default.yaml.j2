@@ -8,11 +8,20 @@
   exist; the generated one is named route-advertisements-* and should not be
   edited.
 
-  nodeSelector is empty on purpose - every node with a fabric NIC peers. If
-  clab_fabric_nodes is ever narrowed to a subset of the cluster, add a
-  matching nodeSelector here, because a node without a fabric NIC will
-  otherwise try to open a session out of an interface it does not have and
-  log about it forever.
+  nodeSelector is empty on purpose and must stay that way. In this lab only
+  the workers have a fabric NIC, so narrowing it to them looks like the
+  tidier choice - it is not. RouteAdvertisements with targetVRF 'auto' (the
+  VRF-Lite and EVPN phases) checks, per node, that the FRRConfigurations
+  selected for that node cover every selected network active on it. A Layer3
+  CUDN is active on the masters too, so a master left with no matching
+  FRRConfiguration makes the whole CR fail with "selected FRRConfigurations
+  for node X don't match all selected networks".
+
+  The price is that the masters hold a BGP session they can never establish,
+  because the neighbor is on a fabric NIC they do not have. That is expected
+  here: the session sits in Connect and the master's pod subnet is not
+  advertised, which is fine because the lab's workloads run on the workers.
+  Give the masters a fabric NIC as well if you want them advertised.
 
   toReceive mode 'all' is what makes the fabric's prefixes usable inside the
   cluster: FRR-K8s installs received routes into the node's kernel routing

@@ -147,6 +147,14 @@
   ansible.builtin.command:
     cmd: "oc delete frrconfiguration fabric-peering-vrflite -n {{ udn_bgp_frrk8s_namespace }} --ignore-not-found"
 
+# After the phase-3 objects are gone, for the same reason as in
+# vrflite-apply.yml: two RouteAdvertisements selecting one network leaves
+# neither accepted.
+- name: Confirm the EVPN advertisement was accepted
+  ansible.builtin.include_tasks: wait-ra.yml
+  vars:
+    udn_bgp_ra_name: udn-evpn
+
 - name: Show the EVPN state the fabric has reached
   ansible.builtin.command:
     cmd: >-

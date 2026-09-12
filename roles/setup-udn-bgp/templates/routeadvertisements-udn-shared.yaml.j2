@@ -1,7 +1,7 @@
 {#
   Phase 2: advertise UDN pod subnets into the DEFAULT VRF.
 
-  targetVRF 'default' leaks each selected UDN's routes into the node's
+  Leaving targetVRF unset leaks each selected UDN's routes into the node's
   default VRF, where the existing untagged BGP session picks them up. No
   VLANs, no per-tenant VRFs, no NMState - which is exactly why this phase is
   worth doing before VRF-Lite: it isolates "does UDN-over-BGP work" from
@@ -18,7 +18,14 @@ kind: RouteAdvertisements
 metadata:
   name: udn-shared-vrf
 spec:
-  targetVRF: default
+  # targetVRF is deliberately left unset, and unset is not the same as
+  # "default". An empty targetVRF means "advertise in the default VRF"; a
+  # non-empty one is matched LITERALLY against the vrf field of the routers
+  # in the selected FRRConfiguration. Writing 'default' therefore makes
+  # OVN-Kubernetes look for a 'router bgp <asn> vrf default', find none -
+  # a router with no vrf field IS the default VRF, it is not named - and
+  # reject the CR with "has no VRF matching the RouteAdvertisements target
+  # VRF or any selected network". 'auto' is the only other accepted value.
   networkSelectors:
     - networkSelectionType: ClusterUserDefinedNetworks
       clusterUserDefinedNetworkSelector:
