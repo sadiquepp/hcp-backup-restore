@@ -1515,6 +1515,79 @@ Verify against leaf1's own fabric address and the other nodes' pod subnets —
 **not** against `10.210.10.10`. That host lives in leaf1's blue VRF and is not
 reachable from the default VRF. Reaching it is a phase-3 result.
 
+### What phase 2 can and cannot reach
+
+**A pod on a UDN cannot ping the fabric in this phase, and that is a property
+of the topology rather than a fault to fix.** Worth understanding, because
+everything about it looks like it should work.
+
+The control plane is genuinely complete. leaf1 has every node's slice of every
+tenant:
+
+```
+*>  10.220.0.0/24    192.168.140.35(worker2)      <- blue, per node
+*>  10.220.1.0/24    192.168.140.36(worker3)
+*>  10.220.5.0/24    192.168.140.34(worker1)
+*>  10.221.0.0/24    192.168.140.34(worker1)      <- red
+...
+*>  10.223.0.0/16    192.168.140.34(worker1)      <- green: ONE prefix, Layer2
+```
+
+and every node has installed the others' slices, learned from the fabric:
+
+```bash
+oc debug node/worker2 --quiet -- chroot /host ip route show table main | grep bgp
+# 10.220.1.0/24 via 192.168.140.36 dev enp8s0 proto bgp
+# 10.221.0.0/24 via 192.168.140.34 dev enp8s0 proto bgp
+```
+
+The data plane is where it stops, and the reason is one missing route. In
+local gateway mode (`routingViaHost: true`) pod egress is punted to the host
+at the tenant's management port — you can watch it arrive, un-SNATed, which
+proves the advertisement reached the data plane:
+
+```bash
+oc debug node/worker2 --quiet -- chroot /host timeout 10 tcpdump -nni ovn-k8s-mp5 icmp
+# IP 10.220.0.3 > 192.168.140.1: ICMP echo request     <- pod's own address
+```
+
+But the management port is enslaved to the **tenant's** VRF, and that VRF's
+routing table is not `main`:
+
+```bash
+oc debug node/worker2 --quiet -- chroot /host ip route show table 1117
+# default via 192.168.122.1 dev br-ex          <- the node's ORDINARY gateway
+# 10.220.0.0/24 dev ovn-k8s-mp5 proto kernel scope link src 10.220.0.2
+# 10.220.0.0/16 via 10.220.0.1 dev ovn-k8s-mp5
+```
+
+There is no `192.168.140.0/24` in it. That prefix is a **connected** route on
+`enp8s0`, and `enp8s0` is in the default VRF — so `main` has it and table 1117
+does not. The default route wins, and the packet leaves by the management NIC:
+
+```bash
+oc debug node/worker2 --quiet -- chroot /host ip route get 192.168.140.1 from 10.220.0.3 iif ovn-k8s-mp5
+# 192.168.140.1 from 10.220.0.3 via 192.168.122.1 dev br-ex table 1117
+
+sudo tcpdump -ni virbr0 icmp          # the MANAGEMENT bridge
+# IP 10.220.0.3 > 192.168.140.1       <- right source, wrong NIC
+```
+
+Right source, wrong NIC, and nothing on virbr1 at all.
+
+This is not OVN-Kubernetes doing something wrong. From its point of view the
+external path out of a tenant VRF *is* the node's default gateway, and in a
+deployment where the BGP fabric is what `br-ex` faces, phase 2 works exactly
+as advertised. **This lab deliberately puts the fabric on a second NIC that is
+not the node's default path** — see Part 5, which adds no gateway and no
+default route precisely so the change is safe to apply to a working cluster.
+That choice is what confines phase 2 to the control plane.
+
+Giving the tenant VRF its own way out is exactly what phase 3 adds: a VLAN
+subinterface enslaved into that same VRF, with its own connected route and its
+own BGP session. So read phase 2 as: *the advertisement works, the prefixes
+are real, the un-SNAT is real* — and treat pod-to-fabric as a phase 3 result.
+
 ---
 
 ## Phase 3: VRF-Lite
