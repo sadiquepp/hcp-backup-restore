@@ -25,8 +25,8 @@
           - "{{ udn_bgp_ra_name }}"
           - -o
           - jsonpath={.status.status}
-      register: udn_bgp_ra_status
-      until: udn_bgp_ra_status.stdout == 'Accepted'
+      register: udn_bgp_ra_accepted
+      until: udn_bgp_ra_accepted.stdout == 'Accepted'
       retries: "{{ udn_bgp_ra_accept_retries }}"
       delay: "{{ udn_bgp_ra_accept_delay }}"
       changed_when: false
@@ -36,7 +36,7 @@
         msg: >-
           RouteAdvertisements '{{ udn_bgp_ra_name }}' never reached Accepted.
           The cluster reports:
-          {{ udn_bgp_ra_status.stdout | default('(no status set yet)', true) }}
+          {{ udn_bgp_ra_accepted.stdout | default('(no status set yet)', true) }}
           -- Nothing is being advertised while this is the case. Inspect it
           with `oc get routeadvertisements {{ udn_bgp_ra_name }} -o yaml` and
           the applied manifest in {{ udn_bgp_manifest_dir }}.
