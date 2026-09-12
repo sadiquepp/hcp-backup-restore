@@ -1086,13 +1086,24 @@ clab_fabric_nic_name: enp2s0
 ## fabric NIC, a VRF on both the node and the border leaf, and (phase 4) a
 ## pair of EVPN VNIs.
 ##
-## udn_subnet values deliberately OVERLAP between tenants once VRF-Lite is on
+## blue and red deliberately OVERLAP on udn_subnet once VRF-Lite is on
 ## (phase 3) - proving two UDNs can carry the same addresses in isolation is
 ## most of the point of VRF-Lite, and it is the one test that cannot pass in
-## the shared-VRF phases. Phase 2 (targetVRF: default) therefore uses
-## udn_subnet_shared, which must be unique, because leaking overlapping
-## subnets into one VRF is rejected by OVN-Kubernetes with an error on the
-## RouteAdvertisements status.
+## the shared-VRF phases.
+##
+## orange is the control: it overlaps with nothing, in any phase. Every
+## isolation result blue and red produce is then attributable to the VRF
+## rather than to the addresses, because orange is isolated from both while
+## sharing no address with either. It is also the tenant to reach for when a
+## prefix has to be unambiguous - a route to orange's subnet on the leaf or
+## in a node's table means exactly one thing, which blue's and red's do not.
+##
+## Phase 2 (targetVRF unset) uses udn_subnet_shared, which must be unique
+## across ALL tenants: that phase leaks every UDN into the one default VRF,
+## where a prefix cannot belong to two networks. OVN-Kubernetes does NOT
+## reject overlap there - its route advertisements controller carries a
+## literal `// TODO check overlaps?` - so the RouteAdvertisements is Accepted
+## and one tenant silently stops being reachable. The roles assert it instead.
 ##
 ## external_prefix is the network that lives BEHIND the border leaf for this
 ## tenant - the thing a UDN pod should be able to reach, and that pods in the
@@ -1133,6 +1144,25 @@ udn_bgp_tenants:
     external_host: "10.211.10.10"
     evpn_mac_vni: 200
     evpn_ip_vni: 201
+
+  ## The control tenant. Overlaps with nothing in any phase, so it isolates
+  ## the variable: blue-cannot-reach-red could in principle be about the
+  ## identical subnets, blue-cannot-reach-orange cannot be about anything but
+  ## the VRF. Its subnet is also the only tenant prefix that is unambiguous
+  ## everywhere, which makes it the one to look for when reading a routing
+  ## table on the leaf or a node.
+  - name: orange
+    vlan: 130
+    vrf_prefix: "192.168.143"
+    udn_subnet: "10.202.0.0/16"
+    udn_subnet_shared: "10.222.0.0/16"
+    udn_host_subnet: 24
+    external_prefix: "10.212.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.212.10.1"
+    external_host: "10.212.10.10"
+    evpn_mac_vni: 300
+    evpn_ip_vni: 301
 
 ## Where the rendered containerlab topology and FRR configs are staged, on
 ## whichever host clab_deploy_mode selected.

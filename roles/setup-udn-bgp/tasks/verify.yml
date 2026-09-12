@@ -277,17 +277,30 @@
       {% if udn_phase in ['vrflite', 'evpn'] %}
       {% set ns.step = ns.step + 1 %}
 
-      {{ ns.step }}. Tenant isolation - the test that matters, and the one that must FAIL:
-           oc -n udn-{{ udn_bgp_tenants[0].name }} exec <pod> -- ping -c3 -W2 {{ udn_bgp_tenants[1].external_host }}
-         This MUST time out: the two tenants carry the same pod subnet and
-         their external networks are one hop away on the same physical link.
-         If it succeeds, the VRFs are leaking and VRF-Lite is not doing its
-         job - check that targetVRF is 'auto' and the cluster is in local
-         gateway mode.
+      {{ ns.step }}. Tenant isolation - the tests that matter, and the ones that must FAIL:
+      {% for t in udn_bgp_tenants[1:] %}
+           oc -n udn-{{ udn_bgp_tenants[0].name }} exec <pod> -- ping -c3 -W2 {{ t.external_host }}
+      {% endfor %}
+         Every one of these MUST time out. Their external networks are one
+         hop away on the same physical link, so nothing but the VRF is
+         keeping them apart. If any succeeds, the VRFs are leaking and
+         VRF-Lite is not doing its job - check that targetVRF is 'auto' and
+         the cluster is in local gateway mode.
+
+         These failures do not say the same thing, which is why there is
+         more than one. {{ udn_bgp_tenants[0].name }} and {{ udn_bgp_tenants[1].name }} carry the same pod
+         subnet, so a failure between them could in principle be addressing
+         rather than isolation. {{ udn_bgp_tenants[2].name if udn_bgp_tenants | length > 2 else 'A non-overlapping third tenant' }} overlaps with nothing
+         anywhere, so a failure to reach it can only be the VRF. That is
+         the one to take as the result.
       {% set ns.step = ns.step + 1 %}
 
-      {{ ns.step }}. And the positive half of the same test:
-           oc -n udn-{{ udn_bgp_tenants[1].name }} exec <pod> -- ping -c3 {{ udn_bgp_tenants[1].external_host }}
+      {{ ns.step }}. And the positive half - every tenant reaching its own:
+      {% for t in udn_bgp_tenants %}
+           oc -n udn-{{ t.name }} exec <pod> -- ping -c3 {{ t.external_host }}
+      {% endfor %}
+         All of these MUST succeed. A run where everything times out is not
+         isolation, it is a broken phase.
       {% endif %}
       {% set ns.step = ns.step + 1 %}
 
