@@ -32,7 +32,7 @@
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
     loop_var: node_entry
-    label: "{{ node_entry.node }}"
+    label: "{{ node_entry.ip_key }}"
   delegate_to: localhost
 
 # network.transport is immutable, so an EVPN tenant has to be CREATED with
