@@ -23,13 +23,17 @@
       - (clab_fabric_prefix ~ '.' ~ clab_fabric_router_octet) in clab_leaf1_eth1.stdout
     fail_msg: >-
       leaf1 has no {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }} on
-      eth1. The address is set by the topology's exec: block, which runs only
-      when the container is created - so the usual cause is a redeploy that
-      reused an existing container. Re-run with
-      `containerlab deploy --reconfigure`, or set it by hand with
-      `docker exec clab-{{ clab_lab_name }}-leaf1 ip addr add
-      {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}/{{ clab_fabric_netmask_bits }} dev eth1`.
-      What leaf1 reports now: {{ clab_leaf1_eth1.stdout | default(clab_leaf1_eth1.stderr, true) }}
+      eth1. What leaf1 reports now:
+      {{ clab_leaf1_eth1.stdout | default(clab_leaf1_eth1.stderr, true) }}
+      -- If eth1 does not exist at all, the container has been RESTARTED
+      since the lab was deployed. containerlab builds every link but eth0 as
+      a veth into the container's network namespace, and a restart destroys
+      that namespace: the node comes back with lo and its management eth0 and
+      nothing else, still running, still healthy-looking, and completely
+      disconnected from the fabric. The exec: block that addresses eth1 runs
+      only at creation, so it does not re-run either. A redeploy is the fix,
+      not a docker start: re-run this role with --tags clabdeploy, which uses
+      `containerlab deploy --reconfigure`.
     success_msg: >-
       leaf1 holds {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }} on eth1.
 
