@@ -33,32 +33,16 @@ spec:
         # A mismatch here is the classic "BGP is up but nothing works"
         # failure: small packets pass, full-size ones vanish.
         mtu: {{ clab_fabric_mtu }}
-        # OVN-Kubernetes turns IP forwarding on per interface - br-ex and
-        # ovn-k8s-mpN - and leaves net.ipv4.conf.all.forwarding at 0. Any
-        # interface it does not know about therefore inherits
-        # conf.default.forwarding, which is also 0, and silently refuses to
-        # forward.
+        # No `forwarding: true` here, though it looks like the obvious place
+        # for it. nmstatectl 2.2.60 - the build shipped by the 4.22 NMState
+        # operator - rejects it outright:
         #
-        # This NIC has to forward, because that is the entire return path: a
-        # reply from the fabric to a pod arrives here and has to reach
-        # ovn-k8s-mpN. Without it the kernel drops the packet in the routing
-        # decision, and does so without a trace on the wire - the reply is
-        # visible on this NIC with tcpdump and never appears on mp0. The only
-        # direct evidence is
+        #   NmstateError: InvalidArgument: unknown field `forwarding`
         #
-        #   ip route get <pod ip> from <leaf ip> iif <this nic>
-        #   RTNETLINK answers: No route to host
-        #
-        # which is EHOSTUNREACH, not the ENETUNREACH ("Network is
-        # unreachable") the kernel returns when a route is genuinely missing.
-        # The route is fine; forwarding is off.
-        #
-        # Per interface, deliberately. Setting conf.all.forwarding would turn
-        # forwarding on for every interface on the node and change the
-        # default for new ones, which is a node-wide change to get one NIC
-        # working, and it is the posture OVN-Kubernetes has deliberately not
-        # taken. Needs nmstate 2.2.51+ (September 2025) for ipv4.forwarding.
-        forwarding: true
+        # and a rejected policy is not a partial apply: nmstate rolls the
+        # whole thing back, so the NIC loses its address too. Forwarding is
+        # set by the Tuned profile instead - see templates/tuned-forwarding
+        # .yaml.j2 for why it is needed at all.
         ipv4:
           enabled: true
           dhcp: false

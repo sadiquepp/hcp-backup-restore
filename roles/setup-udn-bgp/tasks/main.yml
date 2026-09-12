@@ -61,6 +61,16 @@
 # on, because every phase rides on the untagged session or is compared
 # against it.
 # ---------------------------------------------------------------------------
+# Before the NICs exist, not after. Forwarding is what makes the fabric NIC
+# useful rather than decorative: without it the node accepts replies from the
+# fabric and drops them in the routing decision, with every other signal
+# green. Tuned needs a moment to land, which the NNCP apply and rollout below
+# provides for free.
+- name: Enable IP forwarding on the fabric nodes
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/tuned-forwarding.yaml"
+  when: udn_phase != 'preflight'
+
 - name: Address the fabric NICs
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-fabric-untagged-{{ item.ip_key }}.yaml"

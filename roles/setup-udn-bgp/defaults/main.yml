@@ -35,6 +35,20 @@ udn_bgp_rollout_timeout: 900
 udn_bgp_ra_accept_retries: 30
 udn_bgp_ra_accept_delay: 10
 
+## IP forwarding on the fabric nodes, set through the Node Tuning Operator.
+## OVN-Kubernetes enables forwarding only on the interfaces it manages, so
+## the fabric NIC - which carries the return path for every advertised pod
+## network - does not forward without this. See templates/tuned-forwarding
+## .yaml.j2 for why it is Tuned and why it is the global knob.
+udn_bgp_tuned_name: udn-bgp-fabric-forwarding
+udn_bgp_tuned_namespace: openshift-cluster-node-tuning-operator
+
+## Loose reverse-path filtering (rp_filter=2) on the fabric nodes. Off,
+## because the untagged session is symmetric and strict filtering passes.
+## Turn it on if a later phase shows traffic arriving on one interface while
+## the route back points at another - strict RPF drops that silently.
+udn_bgp_loose_rp_filter: false
+
 ## Kubernetes NMState Operator - the source of the
 ## NodeNetworkConfigurationPolicy API. Every NNCP this role applies (fabric
 ## NIC addresses, VRF-Lite VLANs, EVPN VTEP addresses) needs it, so the role
