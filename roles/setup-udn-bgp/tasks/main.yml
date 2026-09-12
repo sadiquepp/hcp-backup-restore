@@ -101,13 +101,46 @@
 - name: Advertise the cluster default pod network
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-default.yaml"
-  when: udn_phase in ['default', 'shared', 'vrflite', 'evpn']
+  when:
+    - udn_phase == 'default'
+    - udn_bgp_advertise_default | bool
 
 - name: Confirm the default pod network advertisement was accepted
   ansible.builtin.include_tasks: wait-ra.yml
   vars:
     udn_bgp_ra_name: default-podnetwork
-  when: udn_phase in ['default', 'shared', 'vrflite', 'evpn']
+  when:
+    - udn_phase == 'default'
+    - udn_bgp_advertise_default | bool
+
+- name: Warn about what advertising the default pod network costs
+  ansible.builtin.debug:
+    msg: >-
+      The cluster default pod network is now advertised, which means OVN has
+      stopped SNATing it - for ALL destinations, not only the fabric. Every
+      pod in this cluster, OpenShift's own included, now reaches
+      {{ lab_network_prefix }}.0/24 with its pod IP, and nothing there has a
+      route back. Expect the authentication, console and ingress operators to
+      go Degraded within minutes with DNS errors from 172.30.0.10; CoreDNS
+      can no longer be answered by the lab's resolver. That is this phase
+      working as designed, not a fault. Remove it with `oc delete ra
+      default-podnetwork` when you are done looking, or move on to --tags
+      shared, which removes it for you. See udn_bgp_advertise_default in
+      defaults/main.yml for how to keep both.
+  when:
+    - udn_phase == 'default'
+    - udn_bgp_advertise_default | bool
+
+# The default pod network carries OpenShift's own workloads, so advertising
+# it is a phase-1 proof rather than a state to stay in - see the warning
+# above and udn_bgp_advertise_default. From phase 2 on the tenant UDNs are
+# what is being advertised, and they hold nothing but test pods, so the
+# default network goes back to being SNATed and the cluster goes back to
+# being able to resolve names.
+- name: Stop advertising the cluster default pod network
+  ansible.builtin.command:
+    cmd: "oc delete routeadvertisements default-podnetwork --ignore-not-found"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
 
 # ---------------------------------------------------------------------------
 # Phases: shared / vrflite / evpn - the tenant UDNs and their workloads

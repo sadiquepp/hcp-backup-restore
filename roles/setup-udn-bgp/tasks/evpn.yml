@@ -118,8 +118,10 @@
 
 # The EVPN session carries the unicast address family as well as evpn, so
 # this replaces the phase-1/3 peering rather than sitting alongside it for
-# the tenant networks. The phase-1 default-VRF CR is left in place: it still
-# carries the cluster default pod network, which is not part of any EVPN.
+# the tenant networks. The phase-1 FRRConfiguration stays - the VTEP
+# addresses ride its unicast session - but its RouteAdvertisements does not:
+# main.yml removes default-podnetwork from phase 2 on, because advertising
+# the cluster default network un-SNATs OpenShift's own pods.
 - name: Create the EVPN BGP peering
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/frrconfiguration-evpn.yaml"

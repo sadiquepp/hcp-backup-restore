@@ -698,11 +698,53 @@ docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp ipv4 unicast'
 One prefix per node, not one blanket route, is the check most likely to look
 fine in summary output and be wrong.
 
+### What this costs, and why phase 1 is not a resting state
+
+Removing the SNAT is the point — and it is **not scoped to the fabric**. It
+applies to all egress from the advertised network. For the cluster default
+network that is every pod in the cluster, OpenShift's own included, which now
+reaches `192.168.122.0/24` with its pod IP. Nothing there has a route back.
+
+The first casualty is DNS. CoreDNS forwards `*.apps` and external names to the
+lab's resolver, gets no answer, and returns SERVFAIL:
+
+```
+authentication  False  False  True   OAuthServerRouteEndpointAccessibleControllerAvailable:
+  ... lookup oauth-openshift.apps.hub.mylab.com on 172.30.0.10:53: server misbehaving
+console         False  False  True   RouteHealthAvailable: failed to GET route ...
+ingress         True   False  True   CanaryChecksRepetitiveFailures ...
+```
+
+That is phase 1 working exactly as designed. The cluster is not broken; it
+just cannot be answered. Two ways to have both:
+
+- **Add return routes on the lab host**, one per node, and keep the
+  advertisement:
+
+  ```bash
+  oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.annotations.k8s\.ovn\.org/node-subnets}{"\n"}{end}'
+  # then, per node:
+  sudo ip route add 10.129.2.0/23 via 192.168.122.34
+  ```
+
+- **Treat phase 1 as a proof and move on.** `--tags shared` deletes
+  `default-podnetwork` for you; from there only the tenant UDNs are
+  advertised, and those hold nothing but test pods. Or set
+  `udn_bgp_advertise_default: false` to skip it entirely and start at phase 2.
+
+To undo it by hand at any point:
+
+```bash
+oc delete ra default-podnetwork
+```
+
+The operators recover within a few minutes.
+
 ### Prove the data plane
 
-The observable change is not just reachability — it is that pod egress
-**stops being SNATed**. Once the pod network is advertised, packets leave with
-the real pod IP, because the fabric now has a route back to it.
+The observable change is that pod egress **stops being SNATed**. Once the pod
+network is advertised, packets leave with the real pod IP, because the fabric
+now has a route back to it.
 
 ```bash
 oc -n default run bgp-probe --restart=Never \
