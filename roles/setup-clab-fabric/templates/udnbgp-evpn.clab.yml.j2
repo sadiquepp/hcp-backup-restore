@@ -81,7 +81,19 @@ topology:
         ## above, which are longer matches, so this never black-holes real
         ## traffic - it only makes the aggregate advertisable.
         - ip route replace blackhole {{ udn_bgp_vtep_prefix }}.0/24
-        - /usr/lib/frr/frrinit.sh restart
+        ## Re-read the config now that every VRF and subinterface exists.
+        ##
+        ## NOT `frrinit.sh restart`. FRR is this container's PID 1 (via
+        ## docker-start), so stopping it stops the container - Docker then
+        ## restarts it, and a restart destroys the network namespace along
+        ## with every veth containerlab put in it. The node comes back
+        ## running, healthy-looking, with lo and eth0 and nothing else,
+        ## permanently disconnected from the fabric. The exec: block does not
+        ## re-run on a restart, so it never repairs itself either.
+        ##
+        ## `vtysh -b` applies /etc/frr/frr.conf to the running daemons, which
+        ## is all that was ever wanted here.
+        - vtysh -b
 
     spine:
       kind: linux
@@ -97,7 +109,8 @@ topology:
         - ip addr add 10.1.0.2/30 dev eth1
         - ip link set eth2 mtu {{ clab_fabric_mtu }} up
         - ip addr add 10.1.0.5/30 dev eth2
-        - /usr/lib/frr/frrinit.sh restart
+        ## vtysh -b, never frrinit.sh restart - see leaf1 above.
+        - vtysh -b
 
     leaf2:
       kind: linux
@@ -126,7 +139,8 @@ topology:
         - ip addr add {{ t.external_gw }}/{{ t.external_prefix_bits }} dev {{ t.name }}-ext
         - ip link set {{ t.name }}-ext up
 {% endfor %}
-        - /usr/lib/frr/frrinit.sh restart
+        ## vtysh -b, never frrinit.sh restart - see leaf1 above.
+        - vtysh -b
 
 {% for t in udn_bgp_tenants %}
     {{ t.name }}-ext:

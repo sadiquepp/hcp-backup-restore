@@ -78,8 +78,22 @@ topology:
         - ip addr add {{ t.external_gw }}/{{ t.external_prefix_bits }} dev {{ t.name }}-ext
         - ip link set {{ t.name }}-ext up
 {% endfor %}
-        ## Restart FRR now that every VRF and subinterface exists.
-        - /usr/lib/frr/frrinit.sh restart
+        ## Re-read the config now that every VRF and subinterface exists.
+        ##
+        ## NOT `frrinit.sh restart`. FRR is this container's PID 1 (via
+        ## docker-start), so stopping it stops the container - Docker then
+        ## restarts it, and a restart destroys the network namespace along
+        ## with every veth containerlab put in it. The node comes back
+        ## running, healthy-looking, with lo and eth0 and nothing else,
+        ## permanently disconnected from the fabric. The exec: block does not
+        ## re-run on a restart, so it never repairs itself either.
+        ##
+        ## `vtysh -b` applies /etc/frr/frr.conf to the running daemons, which
+        ## is all that was ever wanted here. Strictly it is belt and braces:
+        ## zebra learns VRFs from netlink and bgpd activates config pending on
+        ## a VRF when the device appears, so config parsed before the VRF
+        ## existed is applied anyway.
+        - vtysh -b
 
 {% for t in udn_bgp_tenants %}
     ## "Customer" endpoint on tenant {{ t.name }}'s external network. Deliberately
