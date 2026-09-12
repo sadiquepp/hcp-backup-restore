@@ -44,7 +44,7 @@
   ansible.builtin.shell:
     cmd: >-
       ip -o link show |
-      awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}/ {gsub(":","",$2); print $2; exit}'
+      awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}/ && !f {gsub(":","",$2); print $2; f=1}'
   register: clab_verify_nic
   changed_when: false
   when: clab_deploy_mode == 'vm'
