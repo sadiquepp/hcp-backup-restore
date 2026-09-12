@@ -151,6 +151,31 @@
 # and cannot be moved by relabelling. Recreating it is the only way to switch
 # a tenant between the shared-VRF and VRF-Lite subnets, and it is why these
 # are test namespaces holding nothing of value.
+# The cluster will not catch this. Leaking two UDNs into the default VRF with
+# the same subnet is Accepted by OVN-Kubernetes - its route advertisements
+# controller has a literal `// TODO check overlaps?` where the validation
+# would be - and the result is one winner and one tenant silently
+# unreachable. The vrflite and evpn phases deliberately DO overlap, because
+# targetVRF 'auto' gives each tenant its own VRF, so this only applies here.
+- name: Fail if two tenants share a subnet in the shared-VRF phase
+  ansible.builtin.assert:
+    that:
+      - (udn_bgp_tenants | map(attribute='udn_subnet_shared') | unique | length)
+        == (udn_bgp_tenants | length)
+    fail_msg: >-
+      Two tenants have the same udn_subnet_shared
+      ({{ udn_bgp_tenants | map(attribute='udn_subnet_shared') | list }}).
+      The shared phase leaks every selected UDN into the ONE default VRF,
+      where a prefix cannot belong to two networks. OVN-Kubernetes does not
+      reject this - the RouteAdvertisements is Accepted and one tenant simply
+      stops being reachable - so it is checked here instead. Give each tenant
+      its own udn_subnet_shared in vars.yaml. The overlapping udn_subnet
+      values are for the vrflite and evpn phases, where each tenant has its
+      own VRF and overlap is the point.
+    success_msg: >-
+      Each tenant has its own shared-VRF subnet.
+  when: udn_phase == 'shared'
+
 - name: Remove test namespaces left over from a previous phase
   ansible.builtin.command:
     cmd: "oc delete namespace udn-{{ item.name }} --ignore-not-found --wait=true --timeout=300s"

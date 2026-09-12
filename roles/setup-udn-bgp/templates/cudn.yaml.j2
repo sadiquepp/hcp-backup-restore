@@ -10,8 +10,10 @@
 
     shared  (phase 2, targetVRF unset)    -> udn_subnet_shared, unique per
             tenant. Both tenants' routes end up in one VRF on the node and on
-            the leaf, so overlapping subnets are rejected by OVN-Kubernetes
-            with an error on the RouteAdvertisements status.
+            the leaf, where one prefix cannot mean two things - and nothing
+            stops you: OVN-Kubernetes does not validate this, so the CR is
+            Accepted and one tenant is quietly unreachable. main.yml asserts
+            the subnets differ, because the cluster will not.
 
     vrflite (phase 3, targetVRF: auto)    -> udn_subnet, deliberately
             IDENTICAL between tenants. Each tenant's routes live only in its

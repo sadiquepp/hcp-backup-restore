@@ -2068,14 +2068,20 @@ installs FRR-K8s via MetalLB. On OpenShift the CNO owns it. An
 `FRRConfiguration` in the wrong namespace is accepted and silently never
 read, which is a tedious hour to lose.
 
-**Overlapping UDN subnets only work with VRF-Lite.** With `targetVRF`
-unset both tenants' routes land in the default VRF, and
-OVN-Kubernetes rejects overlapping subnets with an error on the
-`RouteAdvertisements` status. The tenant definitions carry two subnets for
-this reason: `udn_subnet_shared` (unique, used by the `shared` phase) and
-`udn_subnet` (**deliberately identical between blue and red**, used by
-`vrflite`). Proving two UDNs can carry the same addresses in isolation is
-most of the point of VRF-Lite.
+**Overlapping UDN subnets only work with VRF-Lite, and nothing stops you
+getting it wrong.** With `targetVRF` unset both tenants' routes land in the
+default VRF, where the same prefix cannot mean two things - but the
+`RouteAdvertisements` is still Accepted. OVN-Kubernetes does not validate
+this; its route advertisements controller carries a literal
+`// TODO check overlaps?` where that check would go. What you get is one
+winner and one tenant quietly unreachable, not an error.
+
+The tenant definitions carry two subnets for this reason:
+`udn_subnet_shared` (unique, used by the `shared` phase) and `udn_subnet`
+(**deliberately identical between blue and red**, used by `vrflite`). The
+role asserts the shared-phase subnets are distinct, because the cluster will
+not. Proving two UDNs can carry the same addresses in isolation is most of
+the point of VRF-Lite.
 
 **MTU.** The fabric is 9000 end to end - bridge, taps, node NICs, VLAN
 subinterfaces and FRR containers. At 1500 the BGP sessions come up fine and
