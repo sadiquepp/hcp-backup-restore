@@ -6,11 +6,13 @@
   writes; OVN-Kubernetes generates the additive one carrying the actual
   prefixes once the RouteAdvertisements CR with targetVRF 'auto' selects it.
 
-  The VRF names here are read from each CUDN's status.vrfName, not derived
-  from the tenant name. FRR-K8s passes the value straight through to FRR's
+  The VRF names here come from vrflite-discover.yml, which derives them from
+  the tenant names and then confirms each one against the node's own link
+  table. FRR-K8s passes the value straight through to FRR's
   'router bgp <asn> vrf <name>', so it has to match the kernel device
-  exactly - and OVN-Kubernetes publishes vrfName for exactly this purpose
-  (a CUDN name over 15 characters cannot be an interface name at all).
+  exactly. There is no status field publishing the name to read instead -
+  status carries conditions and nothing else - so it is a derivation, and
+  the confirmation step is what makes it safe to render from.
 
   Note there is no router stanza for the default VRF in this file. Phase 3
   peering is entirely inside the tenant VRFs; the untagged default-VRF

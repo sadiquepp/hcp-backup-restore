@@ -2158,11 +2158,14 @@ role reads the live VRF layout off each node first (`vrflite-discover.yml`),
 and templates the policy with the discovered port list and route-table id
 restated in full. Never hand-write one of these from the example; render it.
 
-The VRF's *name* is not guessed either: it comes from the CUDN's own
-`status.vrfName`, which OVN-Kubernetes publishes precisely so that NMState
-policies and `FRRConfiguration` authors read it rather than deriving it from
-the CUDN name (a Linux interface name caps at 15 characters, so a longer CUDN
-name necessarily has a VRF called something else).
+The VRF's *name* is derived from the CUDN's name, and then confirmed against
+the node's link table before anything is templated from it. There is no status
+field to read instead - `oc explain clusteruserdefinednetwork.status` lists
+`conditions` and nothing else - so the derivation is the only option, and a
+derivation that is never checked is how you end up writing a policy for a VRF
+that does not exist. A Linux interface name caps at 15 characters, so the role
+also refuses tenant names longer than that rather than looking for a device
+OVN-Kubernetes had to call something else.
 
 The discovery still needs the VRF to *exist*, and OVN-Kubernetes only creates
 it on a node that has something on that network - which is why the test
