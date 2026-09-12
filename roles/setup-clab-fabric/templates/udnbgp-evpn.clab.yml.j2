@@ -59,6 +59,7 @@ topology:
       binds:
         - leaf1/frr.conf:/etc/frr/frr.conf
         - leaf1/daemons:/etc/frr/daemons
+        - leaf1/vtysh.conf:/etc/frr/vtysh.conf
       exec:
         - ip link add lo0 type dummy
         - ip addr add 10.0.0.1/32 dev lo0
@@ -101,6 +102,7 @@ topology:
       binds:
         - spine/frr.conf:/etc/frr/frr.conf
         - spine/daemons:/etc/frr/daemons
+        - spine/vtysh.conf:/etc/frr/vtysh.conf
       exec:
         - ip link add lo0 type dummy
         - ip addr add 10.0.0.254/32 dev lo0
@@ -118,6 +120,7 @@ topology:
       binds:
         - leaf2/frr.conf:/etc/frr/frr.conf
         - leaf2/daemons:/etc/frr/daemons
+        - leaf2/vtysh.conf:/etc/frr/vtysh.conf
       exec:
         - ip link add lo0 type dummy
         - ip addr add 10.0.0.2/32 dev lo0
