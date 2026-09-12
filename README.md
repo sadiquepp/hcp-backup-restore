@@ -2046,6 +2046,7 @@ required for `Layer3`.
 | Symptom | Cause |
 | --- | --- |
 | BGP session never establishes | Fabric NIC not addressed (check `oc get nncp`), or MTU mismatch, or the node has no fabric NIC at all |
+| `Configuration file[/etc/frr/frr.conf] processing failure: N` from vtysh | The FRR daemons are not running. vtysh starts regardless, cannot push the config to anything, and counts the failed lines. Cluster side this looks like a session in Active with MsgSent climbing and MsgRcvd 0 - the SYNs are refused, nothing is on port 179. Redeploy |
 | `Failed to execute command "/usr/lib/frr/frrinit.sh restart" rc=137` | FRR is the container's PID 1. Stopping it stops the container, Docker restarts it, and the restart wipes every containerlab veth. Use `vtysh -b` to apply the config instead - never restart FRR from an `exec:` block |
 | A clab node has only `lo` and `eth0`; its other interfaces vanished | The container was restarted. containerlab builds every link but the management one as a veth into the container's netns, and a restart destroys it - the node comes back running and healthy-looking with no fabric connection, and the `exec:` block that addressed those links does not re-run. Redeploy (`--tags clabdeploy`), never `docker start` |
 | BGP `Active`, never `Established`, and the node has its fabric address | The same underlay failure as the row below - the session cannot open a TCP connection to a neighbour it cannot ARP. Run `--tags clabverify` to check leaf1's address and the fabric bridge's ports before looking at any FRR configuration |
