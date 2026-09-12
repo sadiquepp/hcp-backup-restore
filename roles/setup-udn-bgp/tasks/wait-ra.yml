@@ -31,12 +31,40 @@
       delay: "{{ udn_bgp_ra_accept_delay }}"
       changed_when: false
   rescue:
+    # "no networks selected" is the one rejection whose message points away
+    # from its cause. It reads like the label selector is wrong, and the
+    # selector is almost always fine: OVN-Kubernetes resolves the selected
+    # CUDNs against the networks it has actually instantiated, so a CUDN that
+    # exists and carries the right label still selects as nothing until its
+    # NetworkAttachmentDefinition is created. Show both sides rather than
+    # letting the message send the next person hunting for a typo.
+    - name: Collect what the selector matched against
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          echo "--- CUDNs and their labels ---"
+          oc get clusteruserdefinednetwork \
+              -o custom-columns='NAME:.metadata.name,LABELS:.metadata.labels' 2>&1
+          echo "--- CUDN conditions (True means the network really exists) ---"
+          for t in {{ udn_bgp_tenants | map(attribute='name') | join(' ') }}; do
+              printf '%-8s ' "$t"
+              oc get clusteruserdefinednetwork "$t" \
+                  -o jsonpath='{range .status.conditions[*]}{.type}={.status} ({.reason}) {end}{"\n"}' 2>&1
+          done
+          echo "--- the NADs those CUDNs should have produced ---"
+          oc get net-attach-def -A 2>&1 | tail -10
+          echo "--- what this RouteAdvertisements asked for ---"
+          oc get routeadvertisements {{ udn_bgp_ra_name }} \
+              -o jsonpath='{.spec.networkSelectors}{"\n"}' 2>&1
+      register: udn_bgp_ra_debug
+      changed_when: false
+      failed_when: false
+
     - name: Report why the RouteAdvertisements was rejected
       ansible.builtin.fail:
         msg: >-
-          RouteAdvertisements '{{ udn_bgp_ra_name }}' never reached Accepted.
-          The cluster reports:
-          {{ udn_bgp_ra_accepted.stdout | default('(no status set yet)', true) }}
-          -- Nothing is being advertised while this is the case. Inspect it
-          with `oc get routeadvertisements {{ udn_bgp_ra_name }} -o yaml` and
-          the applied manifest in {{ udn_bgp_manifest_dir }}.
+          {{ ["RouteAdvertisements '" ~ udn_bgp_ra_name ~ "' never reached Accepted.",
+              'The cluster reports: '
+              ~ (udn_bgp_ra_accepted.stdout | default('(no status set yet)', true)),
+              'Nothing is being advertised while this is the case.',
+              ''] + udn_bgp_ra_debug.stdout_lines | default([]) }}
