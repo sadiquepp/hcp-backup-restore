@@ -37,6 +37,7 @@ where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
 - [Phase 2: UDNs in the default VRF](#phase-2-udns-in-the-default-vrf)
 - [Phase 3: VRF-Lite](#phase-3-vrf-lite)
 - [Phase 4: EVPN](#phase-4-evpn)
+- [Live migration on the Layer2 tenant](#live-migration-on-the-layer2-tenant)
 - [Teardown](#teardown)
 - [Which file does what](#which-file-does-what)
 
@@ -96,22 +97,43 @@ through MetalLB. On OpenShift the Cluster Network Operator owns it and it
 lives in `openshift-frr-k8s`. An `FRRConfiguration` in the wrong namespace is
 accepted and silently never read.
 
-### The two tenants
+### The four tenants
 
-| | blue | red |
-| --- | --- | --- |
-| VLAN (phase 3) | 110 | 120 |
-| VRF handoff subnet (phase 3) | `192.168.141.0/24` | `192.168.142.0/24` |
-| UDN subnet, phase 2 | `10.220.0.0/16` | `10.221.0.0/16` |
-| UDN subnet, phases 3–4 | `10.200.0.0/16` | `10.200.0.0/16` |
-| External network behind leaf1 | `10.210.10.0/24` | `10.211.10.0/24` |
-| External test host | `10.210.10.10` | `10.211.10.10` |
-| IP-VRF VNI (phase 4) | 101 | 201 |
+| | blue | red | orange | green |
+| --- | --- | --- | --- | --- |
+| Topology | Layer3 | Layer3 | Layer3 | **Layer2** |
+| VLAN (phase 3) | 110 | 120 | 130 | 140 |
+| VRF handoff subnet (phase 3) | `192.168.141.0/24` | `192.168.142.0/24` | `192.168.143.0/24` | `192.168.144.0/24` |
+| UDN subnet, phase 2 | `10.220.0.0/16` | `10.221.0.0/16` | `10.222.0.0/16` | `10.223.0.0/16` |
+| UDN subnet, phases 3–4 | `10.200.0.0/16` | `10.200.0.0/16` | `10.202.0.0/16` | `10.204.0.0/16` |
+| External network behind leaf1 | `10.210.10.0/24` | `10.211.10.0/24` | `10.212.10.0/24` | `10.213.10.0/24` |
+| External test host | `10.210.10.10` | `10.211.10.10` | `10.212.10.10` | `10.213.10.10` |
+| EVPN VNI (phase 4) | ipVRF 101 | ipVRF 201 | ipVRF 301 | **macVRF 400** |
 
-The phase 3–4 subnets are **identical on purpose**. Two UDNs carrying the same
-addresses in isolation is most of the point of VRF-Lite, and it is the one
-result a phase-2 setup cannot fake. Phase 2 has to use distinct subnets
-because leaking two overlapping UDNs into one VRF is rejected.
+**blue and red are identical on purpose** from phase 3 on. Two UDNs carrying
+the same addresses in isolation is most of the point of VRF-Lite, and it is
+the one result a phase-2 setup cannot fake.
+
+**orange is the control.** It overlaps with nothing, in any phase. That
+matters because "blue cannot reach red's network" has two possible
+explanations — the VRF, or the fact that they share a subnet and the routing
+is simply ambiguous. "blue cannot reach *orange's* network" has only one.
+Take that as the isolation result, and blue-vs-red as the overlap result.
+
+**green is Layer2**, and the only tenant a VM belongs on. Layer3 slices its
+subnet per node, so a workload that moves node necessarily changes address.
+Layer2 is one flat broadcast domain across every node, so an address stays
+valid wherever the workload runs — which is the whole requirement for live
+migration. See
+[Live migration on the Layer2 tenant](#live-migration-on-the-layer2-tenant).
+
+green differs on the wire too: every node advertises its whole prefix, so the
+leaf sees one prefix with several paths rather than a distinct per-node prefix
+from each. And under EVPN it takes a **macVRF** — an L2VNI carrying MAC
+reachability — where the Layer3 tenants take an ipVRF carrying prefixes.
+
+Phase 2 uses a distinct subnet for all four: that phase leaks every UDN into
+the one default VRF, where a prefix cannot belong to two networks.
 
 ---
 
@@ -1259,9 +1281,10 @@ reachable from the default VRF. Reaching it is a phase-3 result.
 Each tenant gets its own VRF on the node, its own VLAN to leaf1, and its own
 BGP session inside that VRF. Routes never meet.
 
-Requires local gateway mode. Recreate the tenants on the overlapping
-`10.200.0.0/16` subnet first — same delete-and-recreate as phase 2, with
-`cidr: 10.200.0.0/16` for **both** tenants and `udn-lab-phase: vrflite`.
+Requires local gateway mode. Recreate the tenants on their phase-3 subnets
+first — same delete-and-recreate as phase 2, with `udn-lab-phase: vrflite`
+and `udn_subnet` rather than `udn_subnet_shared`: `10.200.0.0/16` for **both**
+blue and red, `10.202.0.0/16` for orange, `10.204.0.0/16` for green.
 
 ### 3a. Discover the VRFs OVN-Kubernetes created
 
@@ -1355,8 +1378,10 @@ EOF
 oc wait nncp/vrflite-blue-worker1 --for=condition=Available --timeout=300s
 ```
 
-Six of these in total: 3 nodes × 2 tenants. Red uses VLAN 120 and
-`192.168.142.<octet>`.
+Twelve of these in total: 3 nodes × 4 tenants. Red uses VLAN 120 and
+`192.168.142.<octet>`, orange VLAN 130 and `192.168.143.<octet>`, green
+VLAN 140 and `192.168.144.<octet>`. The VRF edit is the same shape for the
+Layer2 tenant — a primary UDN gets a VRF per node whatever its topology.
 
 ### 3c. Per-VRF peering
 
@@ -1699,6 +1724,168 @@ oc get nodes -o custom-columns=NODE:.metadata.name,VTEP:.metadata.annotations.k8
 Empty for a node means OVN-Kubernetes found no address inside `100.64.0.0/24`
 on it. The annotation key varies by release; if the column is empty for every
 node, read `oc get node <node> -o yaml | grep -i vtep` rather than trusting it.
+
+---
+
+## Live migration on the Layer2 tenant
+
+> **No automation.** The role creates the `green` CUDN and the `udn-green`
+> namespace; the VM is yours to build. Works from `--tags shared` onwards.
+
+The reason `green` exists. A VM that changes address when it moves node has
+not really migrated, and Layer3 guarantees it will: the subnet is sliced per
+node, so an address that is valid on worker1 is not valid on worker2.
+
+Layer2 is one flat broadcast domain across every node — the whole prefix
+exists everywhere — and `ipam.lifecycle: Persistent` ties the allocation to
+the VM rather than to the pod backing it. That second part is what makes live
+migration work at all, because a migration **replaces the pod**: a new
+`virt-launcher` starts on the target node and takes over. Without persistent
+IPAM the VM arrives with a different address.
+
+Needs OpenShift Virtualization installed. Everything else is already in place
+after any phase from `shared` on.
+
+### Build a VM on it
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: green-vm
+  namespace: udn-green
+spec:
+  runStrategy: Always
+  template:
+    spec:
+      domain:
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinit
+              disk:
+                bus: virtio
+          interfaces:
+            # The interface name and the network name below must match.
+            - name: green-net
+              binding:
+                # Not masquerade. l2bridge puts the VM directly on the UDN's
+                # virtual switch, which is what keeps its MAC and IP its own
+                # rather than NATed behind the pod's.
+                name: l2bridge
+        resources:
+          requests:
+            memory: 1Gi
+      networks:
+        # pod: {} means "the namespace's primary network" - which for
+        # udn-green is the green CUDN, not the cluster pod network.
+        - name: green-net
+          pod: {}
+      volumes:
+        - name: rootdisk
+          containerDisk:
+            image: quay.io/containerdisks/fedora:41
+        - name: cloudinit
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              password: green
+              chpasswd: { expire: False }
+EOF
+
+oc -n udn-green get vmi green-vm -o wide -w
+```
+
+If `l2bridge` is rejected as an unknown binding, it has not been registered —
+check `oc get hyperconverged -n openshift-cnv kubevirt-hyperconverged -o yaml`
+for `spec.network.binding`.
+
+Record what you are about to test:
+
+```bash
+oc -n udn-green get vmi green-vm -o custom-columns=\
+NAME:.metadata.name,IP:.status.interfaces[0].ipAddress,MAC:.status.interfaces[0].mac,NODE:.status.nodeName
+```
+
+The address should be from `10.204.0.0/16` — the whole tenant prefix, not a
+per-node slice of it. That is the visible difference from the other three
+tenants, and it is worth comparing side by side:
+
+```bash
+oc -n udn-blue  get pods -o wide     # 10.200.<node slice>.x
+oc -n udn-green get vmi  -o wide     # 10.204.x.x, from anywhere in the /16
+```
+
+### Migrate it
+
+`virtctl migrate green-vm -n udn-green`, or with no virtctl:
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstanceMigration
+metadata:
+  name: green-vm-migrate-1
+  namespace: udn-green
+spec:
+  vmiName: green-vm
+EOF
+
+oc -n udn-green get vmim green-vm-migrate-1 -w
+```
+
+If it refuses, the VM is not migratable and the reason is on the VMI:
+
+```bash
+oc -n udn-green get vmi green-vm -o jsonpath='{.status.conditions}' | python3 -m json.tool
+```
+
+A `containerDisk` VM is migratable — the disk is immutable and present on
+every node. A writable RWO PVC is the usual reason one is not.
+
+### What to watch, and where
+
+Run this from the tenant's own external endpoint **before** starting the
+migration. It is the whole demonstration in one window:
+
+```bash
+# on the clab VM - green-ext is behind leaf1 in the green VRF
+docker exec clab-udnbgp-green-ext ping -i 0.2 <vm ip>
+```
+
+A successful live migration costs a handful of packets, not a timeout and a
+reconnect. Then:
+
+| Check | Expect |
+| --- | --- |
+| `oc -n udn-green get vmi green-vm -o wide` | `NODE` changed, `IP` **unchanged** |
+| Inside the VM: `ip -br addr` | Identical. No DHCP renew, no new lease |
+| `oc -n udn-green get pods` | A **different** `virt-launcher` pod, on the new node |
+| `docker exec clab-udnbgp-leaf1 vtysh -c 'show ip route vrf green'` | `10.204.0.0/16` still there; the next hop may change, the prefix does not |
+| `sudo tcpdump -eni virbr1 arp` during the migration | A gratuitous ARP for the VM's address from the new node's MAC |
+
+That last one is the mechanism made visible: nothing re-addressed anything,
+the fabric was simply told where the address lives now.
+
+### What each phase adds to it
+
+The migration itself works in every phase — it is a property of the Layer2
+UDN, not of BGP. What changes is how far the illusion extends:
+
+| Phase | The VM's address is reachable from |
+| --- | --- |
+| `shared` | The fabric, via the default VRF, alongside every other tenant |
+| `vrflite` | The fabric, inside green's own VRF and VLAN, isolated from the other tenants |
+| `evpn` | The same, over VXLAN — and the broadcast domain itself is stretched, because a Layer2 tenant under EVPN gets a **macVRF** (an L2VNI carrying MAC reachability) rather than the ipVRF a Layer3 tenant gets |
+
+The EVPN case is the interesting one for migration specifically: the L2 domain
+no longer stops at the cluster. A VM moving between nodes is a MAC moving
+between VTEPs, which is a thing EVPN has a type-2 route for and an answer to.
+That is also why `evpn_mac_vni` exists in `vars.yaml` and had nothing using it
+until this tenant.
 
 ---
 

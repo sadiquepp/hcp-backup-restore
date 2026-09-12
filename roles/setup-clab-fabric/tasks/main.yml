@@ -43,6 +43,22 @@
       must not.
   tags: [always]
 
+# Layer2 and Layer3 take different CUDN fields, different EVPN VRF types and
+# behave differently on the wire, so an unrecognised value here renders a
+# manifest the API rejects - late, and with a message about a missing field
+# rather than about the typo that caused it.
+- name: Validate tenant topologies
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_tenants | rejectattr('topology', 'defined') | list | length == 0
+      - udn_bgp_tenants | rejectattr('topology', 'in', ['Layer2', 'Layer3']) | list | length == 0
+    fail_msg: >-
+      Every tenant needs topology: Layer2 or Layer3. Got
+      {{ udn_bgp_tenants | map(attribute='topology', default='(unset)') | list }}.
+      Layer3 slices its subnet per node; Layer2 is one flat domain across all
+      of them, which is what a VM needs to keep its address when it moves.
+  tags: [always]
+
 # Where the containerlab half of this role runs. In 'vm' mode every task
 # that installs Docker, creates the in-guest bridge or drives containerlab is
 # delegated to the containerlab VM over ssh; in 'host' mode it all stays on

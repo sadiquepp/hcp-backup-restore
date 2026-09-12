@@ -38,13 +38,41 @@ spec:
   namespaceSelector:
     matchLabels:
       udn-tenant: {{ tenant.name }}
+{% set subnet = tenant.udn_subnet_shared if udn_phase == 'shared' else tenant.udn_subnet %}
+{% if tenant.topology | default('Layer3') == 'Layer2' %}
+  network:
+    topology: Layer2
+    layer2:
+      role: Primary
+      # One flat broadcast domain across every node, so the subnet is NOT
+      # sliced per node the way Layer3 slices it - the whole prefix exists
+      # everywhere. That is what lets a workload keep its address when it
+      # moves between nodes, and it is why this is the topology for VMs.
+      #
+      # It changes what BGP sees, too: every node advertises this same
+      # prefix, so the leaf gets one prefix with three paths rather than a
+      # distinct per-node prefix from each. Both are correct; only the
+      # Layer3 one looks like what a router operator expects.
+      subnets:
+        - {{ subnet }}
+      # The reason this topology is here. Persistent ties the address
+      # allocation to the VM rather than to the pod backing it, so it
+      # survives the pod being replaced - which is exactly what a live
+      # migration does: a new virt-launcher pod on the target node takes
+      # over. Without it the VM comes up on the other side with a different
+      # address, which is not a migration anyone wants. It requires subnets
+      # to be set, which they are above.
+      ipam:
+        lifecycle: Persistent
+{% else %}
   network:
     topology: Layer3
     layer3:
       role: Primary
       subnets:
-        - cidr: {{ tenant.udn_subnet_shared if udn_phase == 'shared' else tenant.udn_subnet }}
+        - cidr: {{ subnet }}
           # Per-node slice of the tenant subnet. /24 out of a /16 gives 254
           # pods per node and 256 nodes, which is far past what this lab
           # needs and keeps the advertised prefixes readable in FRR.
           hostSubnet: {{ tenant.udn_host_subnet }}
+{% endif %}

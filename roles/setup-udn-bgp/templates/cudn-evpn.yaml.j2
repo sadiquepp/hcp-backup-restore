@@ -42,6 +42,31 @@ spec:
   namespaceSelector:
     matchLabels:
       udn-tenant: {{ tenant.name }}
+{% if tenant.topology | default('Layer3') == 'Layer2' %}
+  network:
+    topology: Layer2
+    layer2:
+      role: Primary
+      subnets:
+        - {{ tenant.udn_subnet }}
+      ipam:
+        lifecycle: Persistent
+    transport: EVPN
+    evpn:
+      vtep: evpn-vtep
+      # macVRF, not ipVRF: a Layer2 network is a broadcast domain, so what
+      # EVPN carries for it is MAC reachability - type-2 routes on an L2VNI -
+      # rather than the type-5 prefix routes a Layer3 network needs. The API
+      # enforces the split: macVRF is required for Layer2 and rejected for
+      # Layer3, and ipVRF the other way round.
+      #
+      # This is the combination that stretches the broadcast domain across
+      # the fabric rather than just across the cluster's own overlay, which
+      # is what makes a live migration invisible to anything outside.
+      macVRF:
+        vni: {{ tenant.evpn_mac_vni }}
+        routeTarget: "{{ clab_spine_asn }}:{{ tenant.evpn_mac_vni }}"
+{% else %}
   network:
     topology: Layer3
     layer3:
@@ -55,3 +80,4 @@ spec:
       ipVRF:
         vni: {{ tenant.evpn_ip_vni }}
         routeTarget: "{{ clab_spine_asn }}:{{ tenant.evpn_ip_vni }}"
+{% endif %}
