@@ -49,6 +49,33 @@
   changed_when: false
   when: clab_deploy_mode == 'vm'
 
+# A restart is the one failure that leaves every other symptom looking fine,
+# so check it directly rather than inferring it from a missing interface.
+# Docker counts restarts for us.
+- name: Read how many times the border leaf has restarted
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect -f {{ '{{' }}.RestartCount{{ '}}' }}
+      clab-{{ clab_lab_name }}-leaf1
+  register: clab_leaf1_restarts
+  changed_when: false
+  failed_when: false
+
+- name: Fail if the border leaf has restarted since it was deployed
+  ansible.builtin.assert:
+    that:
+      - clab_leaf1_restarts.rc != 0 or (clab_leaf1_restarts.stdout | trim | int) == 0
+    fail_msg: >-
+      clab-{{ clab_lab_name }}-leaf1 has restarted
+      {{ clab_leaf1_restarts.stdout | trim }} time(s) since it was created.
+      containerlab builds every link but the management eth0 as a veth in the
+      container's network namespace, and a restart destroys it: the node is
+      running and looks healthy while having no fabric connection at all, and
+      the exec: block that addressed those links does not re-run. Redeploy
+      with --tags clabdeploy - `docker start` cannot repair this.
+    success_msg: >-
+      clab-{{ clab_lab_name }}-leaf1 has not restarted since deploy.
+
 - name: Read the fabric bridge's ports
   ansible.builtin.command:
     cmd: "ip -br link show master {{ clab_bridge_for_topology }}"
