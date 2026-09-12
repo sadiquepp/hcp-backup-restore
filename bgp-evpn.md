@@ -1400,9 +1400,42 @@ pod's own annotation is the only place the outcome is written down:
 oc -n udn-blue get pod -o jsonpath='{.items[0].metadata.annotations.k8s\.ovn\.org/pod-networks}' | jq
 ```
 
-Two keys — `default` and `blue` — is correct. **One key, `default`, with
-`"role": "primary"`, means the UDN never attached** and the pod is an ordinary
-cluster-network pod. Nothing else in the lab distinguishes those two states.
+```json
+{
+  "default":        { "ip_address": "10.131.0.79/23", "role": "infrastructure-locked" },
+  "udn-blue/blue":  { "ip_address": "10.220.3.3/24",  "role": "primary" }
+}
+```
+
+Read two things, not one:
+
+- The tenant's key is **`<namespace>/<CUDN name>`** — `udn-blue/blue`, not
+  `blue`. It is the NAD reference, not the network name.
+- `default` has been demoted to **`"role": "infrastructure-locked"`**. That is
+  how OVN-Kubernetes marks the cluster network of a pod whose primary network
+  is a UDN, and it is the independent corroboration: a pod that never got its
+  UDN keeps `"role": "primary"` on `default`.
+
+So a pod on the default network only looks like this, and nothing else in the
+lab distinguishes it from a healthy one:
+
+```json
+{ "default": { "ip_address": "10.131.0.74/23", "role": "primary" } }
+```
+
+One more thing you will see in the pod events even on a correct run:
+
+```
+Warning  ErrorReconcilingPod  invalid primary network state for namespace "udn-blue": ...
+Normal   AddedInterface       Add eth0 [10.131.0.79/23 10.220.3.3/24] from ovn-kubernetes
+```
+
+The warning is a real race and it resolves itself. The namespace and the
+DaemonSet are applied in one manifest, so the DaemonSet controller can create
+pods before OVN-Kubernetes has processed the namespace's primary network.
+It retries, and `AddedInterface` with **two** addresses — the cluster one and
+the UDN one — is the proof it succeeded. Judge the run by the annotation
+above, not by the presence of that warning.
 
 #### Why the ServiceAccount and the RoleBinding
 

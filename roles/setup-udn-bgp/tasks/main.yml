@@ -295,22 +295,47 @@
   failed_when: false
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
+# Parsed, not pattern-matched. The annotation keys each network by its NAD
+# reference, so a tenant's key is "<namespace>/<cudn name>" - "udn-green/green",
+# not "green". A substring test for the tenant name fails on every correctly
+# attached pod, which is how the first version of this check read a healthy
+# green tenant as broken.
+#
+# Two independent signals, because either alone can mislead. The tenant's own
+# entry must be present with role primary; and the default network's role must
+# have become "infrastructure-locked", which is how OVN-Kubernetes marks the
+# cluster network of a pod whose primary network is a UDN. A pod that never
+# got its UDN keeps role "primary" on default - that is exactly what the
+# unlabelled namespaces produced.
 - name: Fail if a test pod is on the default network instead of its UDN
+  vars:
+    udn_bgp_pod_nets: "{{ item.stdout | default('{}', true) | from_json }}"
+    udn_bgp_udn_key: "udn-{{ item.item.name }}/{{ item.item.name }}"
   ansible.builtin.assert:
     that:
-      - item.stdout is search('"' ~ item.item.name ~ '"')
+      - udn_bgp_udn_key in udn_bgp_pod_nets
+      # Guarded rather than relying on assert short-circuiting at the first
+      # false condition: a missing key would otherwise raise an undefined
+      # error and lose fail_msg, which is where the whole diagnosis lives.
+      - (udn_bgp_pod_nets[udn_bgp_udn_key] | default({}, true))['role'] | default('') == 'primary'
+      - (udn_bgp_pod_nets['default'] | default({}, true))['role'] | default('') != 'primary'
     fail_msg: >-
-      A pod in udn-{{ item.item.name }} has no {{ item.item.name }} network -
-      it attached to the default cluster network only, which means the primary
-      UDN never bound. The usual cause is the namespace missing the
-      k8s.ovn.org/primary-user-defined-network label, since OVN-Kubernetes
-      binds a primary network at namespace creation and will not retrofit it.
+      A pod in udn-{{ item.item.name }} is not on the {{ item.item.name }}
+      network. Expected a '{{ udn_bgp_udn_key }}' entry with role primary, and
+      the default network demoted to role infrastructure-locked. The primary
+      UDN never bound, which is usually the namespace missing the
+      k8s.ovn.org/primary-user-defined-network label - OVN-Kubernetes binds a
+      primary network at namespace creation and will not retrofit it, so the
+      namespace has to be recreated, not labelled.
       Nothing downstream reports this: the pod is healthy, the DaemonSet is
       rolled out, and the RouteAdvertisements will simply sit at "no networks
       selected". Its annotation reads:
       {{ item.stdout | default('(none)', true) }}
     success_msg: >-
-      udn-{{ item.item.name }} pods are on the {{ item.item.name }} network.
+      udn-{{ item.item.name }} pods are on {{ udn_bgp_udn_key }}
+      ({{ udn_bgp_pod_nets[udn_bgp_udn_key]['ip_address'] | default('?') }}),
+      with the cluster network demoted to
+      {{ udn_bgp_pod_nets['default']['role'] | default('?') }}.
   loop: "{{ udn_bgp_pod_networks.results | default([]) }}"
   loop_control:
     label: "{{ item.item.name }}"
