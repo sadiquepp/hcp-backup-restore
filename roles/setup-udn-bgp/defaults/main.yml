@@ -88,3 +88,10 @@ udn_bgp_nmstate_channel: stable
 ## there does not fail; it sits in ResolutionFailed indefinitely.
 udn_bgp_catalog_source: "{{ acm_catalog_source | default('redhat-operators', true) }}"
 udn_bgp_catalog_source_namespace: "{{ acm_catalog_source_namespace | default('openshift-marketplace', true) }}"
+
+# How long to wait for a ClusterUserDefinedNetwork to be realised before
+# giving up. The CUDN has to exist as a network, not just as an object,
+# before a namespace can be bound to it or a RouteAdvertisements can select
+# it - see tasks/wait-cudn.yml.
+udn_bgp_cudn_ready_retries: 30
+udn_bgp_cudn_ready_delay: 5

@@ -204,6 +204,13 @@
     label: "{{ item.name }}"
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
+# Before the namespaces, not after. See wait-cudn.yml: a namespace created
+# before its CUDN is realised never gets a primary network, and nothing
+# afterwards reports that.
+- name: Confirm the tenant CUDNs were realised before binding namespaces to them
+  ansible.builtin.include_tasks: wait-cudn.yml
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
 - name: Create the tenant namespaces and test workloads
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/workload-{{ item.name }}.yaml"
