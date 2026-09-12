@@ -59,6 +59,7 @@ topology:
       binds:
         - leaf1/frr.conf:/etc/frr/frr.conf
         - leaf1/daemons:/etc/frr/daemons
+        - leaf1/vtysh.conf:/etc/frr/vtysh.conf
       exec:
         ## Fabric link: the untagged default-VRF session (phases 1 and 2).
         - ip link set eth1 mtu {{ clab_fabric_mtu }} up

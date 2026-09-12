@@ -33,6 +33,16 @@
     mode: '0644'
   loop: "{{ ['leaf1'] + (['spine', 'leaf2'] if clab_topology == 'evpn' else []) }}"
 
+# Shipped for the same reason as daemons: so vtysh stops reading frr.conf as
+# its own config and printing a processing-failure banner before every
+# command. See the template for what that banner is and is not.
+- name: Render the vtysh configuration for each router
+  ansible.builtin.template:
+    src: vtysh.conf.j2
+    dest: "{{ clab_lab_dir }}/{{ item }}/vtysh.conf"
+    mode: '0644'
+  loop: "{{ ['leaf1'] + (['spine', 'leaf2'] if clab_topology == 'evpn' else []) }}"
+
 - name: Render the border leaf's FRR configuration
   ansible.builtin.template:
     src: "leaf1-frr{{ '-evpn' if clab_topology == 'evpn' else '' }}.conf.j2"

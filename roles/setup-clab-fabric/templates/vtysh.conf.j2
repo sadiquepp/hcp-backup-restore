@@ -1,0 +1,16 @@
+{#
+  vtysh's own configuration file.
+
+  Without it vtysh falls back to reading frr.conf as its own config on EVERY
+  invocation, fails the lines that are daemon configuration rather than vtysh
+  configuration, and prints
+
+    % Can't open configuration file /etc/frr/vtysh.conf ...
+    Configuration file[/etc/frr/frr.conf] processing failure: 11
+
+  ahead of the output of whatever you actually asked for. Nothing is wrong
+  when that appears, which is precisely the problem: it looks like a fault,
+  it is printed on healthy and broken labs alike, and it makes the real state
+  harder to read at exactly the moment someone is debugging.
+#}
+service integrated-vtysh-config
