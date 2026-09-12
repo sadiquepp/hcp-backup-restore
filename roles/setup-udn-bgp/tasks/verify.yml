@@ -260,6 +260,28 @@
            # address as next hop
       {% set ns.step = ns.step + 1 %}
 
+      {% if udn_phase == 'shared' %}
+      {{ ns.step }}. Egress is NOT SNATed once the network is advertised. Capture on the
+         tenant's management port, NOT on {{ clab_fabric_bridge }} - see the note below for
+         why nothing reaches the fabric in this phase. Find the port first:
+           oc debug node/<node> --quiet -- chroot /host ip -br addr show \
+               | grep {{ udn_bgp_tenants[0].udn_subnet_shared | regex_replace('\\.0\\.0/16$', '') }}.
+           # e.g. ovn-k8s-mp5   UNKNOWN   {{ udn_bgp_tenants[0].udn_subnet_shared | regex_replace('\\.0\\.0/16$', '') }}.0.2/24
+           oc debug node/<node> --quiet -- chroot /host timeout 10 tcpdump -nni <that port> icmp
+           oc -n udn-{{ udn_bgp_tenants[0].name }} exec <pod> -- ping -c5 {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
+         The source address must be the POD's, not the node's. That is the
+         advertisement taking effect on the data plane.
+
+         The ping itself will NOT succeed, and that is expected here rather
+         than a fault. Egress leaves the tenant's VRF by its default route,
+         which is the node's ordinary default gateway - the tenant VRF has no
+         route to {{ clab_fabric_prefix }}.0/{{ clab_fabric_netmask_bits }}, because the fabric NIC is in the
+         default VRF. Watch it go the wrong way:
+           # on this lab host - the MANAGEMENT bridge, not the fabric one
+           sudo tcpdump -ni virbr0 icmp
+           # {{ udn_bgp_tenants[0].udn_subnet_shared | regex_replace('\\.0\\.0/16$', '') }}.0.3 > {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }} - right source, wrong NIC
+         Giving the tenant VRF a path to the fabric is what phase 3 does.
+      {% else %}
       {{ ns.step }}. Egress is NOT SNATed once the network is advertised. Run a ping and
          watch the fabric see the real pod IP as the source - this is the
          single clearest proof the advertisement took effect. Capture on the
@@ -269,10 +291,19 @@
            sudo tcpdump -ni {{ clab_fabric_bridge }} icmp
       {% if udn_phase == 'default' %}
            oc -n default exec bgp-probe -- ping -c3 {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
-      {% elif udn_phase == 'shared' %}
-           oc -n udn-{{ udn_bgp_tenants[0].name }} exec <pod> -- ping -c3 {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
       {% else %}
            oc -n udn-{{ udn_bgp_tenants[0].name }} exec <pod> -- ping -c3 {{ udn_bgp_tenants[0].external_host }}
+      {% endif %}
+      {% endif %}
+      {% if udn_phase == 'shared' %}
+      {% set ns.step = ns.step + 1 %}
+
+      {{ ns.step }}. What phase 2 DOES prove end to end - every node installed every
+         other node's tenant slices, learned over BGP from the fabric:
+           oc debug node/<node> --quiet -- chroot /host ip route show table main | grep bgp
+           # one route per (other node, tenant), via that node's {{ clab_fabric_prefix }}.x
+           # on enp8s0 - a Layer2 tenant contributes one prefix with several
+           # paths instead of a slice per node
       {% endif %}
       {% if udn_phase in ['vrflite', 'evpn'] %}
       {% set ns.step = ns.step + 1 %}
