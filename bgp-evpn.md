@@ -1299,6 +1299,26 @@ metadata:
     pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/warn: privileged
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: udn-test
+  namespace: udn-blue
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: udn-test-privileged
+  namespace: udn-blue
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+subjects:
+  - kind: ServiceAccount
+    name: udn-test
+    namespace: udn-blue
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -1315,6 +1335,7 @@ spec:
         app: udn-test
         tenant: blue
     spec:
+      serviceAccountName: udn-test
       containers:
         - name: shell
           image: registry.redhat.io/rhel9/support-tools:latest
@@ -1336,7 +1357,45 @@ oc -n udn-blue rollout status daemonset/udn-test --timeout=600s
 
 A DaemonSet rather than a Deployment, because phase 3 needs a pod of each
 tenant on **every** node: OVN-Kubernetes creates a node's UDN VRF only when
-that network first has something on the node.
+that network first has something on the node. It is also the reason the
+verification steps can `oc exec` into whichever node they care about.
+
+#### Why the ServiceAccount and the RoleBinding
+
+The pods ask for `NET_RAW` and `NET_ADMIN` — `ping`, `tcpdump` and `ip` all
+need them, and nearly every check from here on runs inside one of these pods.
+
+**The PSA labels on the namespace do not grant that.** Pod Security Admission
+and OpenShift's SecurityContextConstraints are two independent admission
+layers, and relaxing one says nothing about the other. Without the binding the
+`default` ServiceAccount gets `restricted-v2`, which carries
+`requiredDropCapabilities: [ALL]`, and every pod the DaemonSet controller
+tries to create is refused.
+
+That failure is quiet in an unhelpful way, because **no pod object is ever
+created** — `oc get pods` is empty and there is nothing to describe:
+
+```
+oc -n udn-blue get daemonset udn-test -o yaml | grep -A6 '^status:'
+# desiredNumberScheduled: 3      <- the node selector matched
+# currentNumberScheduled: 0      <- but nothing was ever placed
+# numberUnavailable: 3
+```
+
+`desired` non-zero with `scheduled: 0` always means *refused at creation*, not
+*could not be scheduled*. The evidence is only on the DaemonSet:
+
+```bash
+oc -n udn-blue describe daemonset udn-test | tail -20
+# FailedCreate  Error creating: pods "udn-test-xxxxx" is forbidden: unable to
+# validate against any security context constraint: ... capabilities.add:
+# Invalid value: "NET_ADMIN": capability may not be added
+```
+
+Contrast with `scheduled: 3, ready: 0`, which means the pods *do* exist and
+the problem is further along — normally the CUDN not being ready yet, or the
+`registry.redhat.io` pull. Those show up in `oc get pods` and
+`oc describe pod` as usual.
 
 ### Advertise them
 

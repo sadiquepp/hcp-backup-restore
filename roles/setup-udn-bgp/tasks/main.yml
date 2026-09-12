@@ -212,15 +212,58 @@
     label: "{{ item.name }}"
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
+# `rollout status` on its own times out after ten minutes saying only that
+# it timed out, which is the least useful form of every failure this can hit.
+# The two common ones look nothing alike and are not visible in the DaemonSet
+# spec: pods refused at admission (SCC), where no pod object exists at all and
+# only the DS events say so; and pods created but stuck in ContainerCreating
+# because the CUDN is not ready yet, where the pod events say so. Pull both
+# out on failure rather than making the next person go looking.
 - name: Wait for a test pod on every node of each tenant
-  ansible.builtin.command:
-    cmd: >-
-      oc -n udn-{{ item.name }} rollout status daemonset/udn-test --timeout=600s
-  loop: "{{ udn_bgp_tenants }}"
-  loop_control:
-    label: "{{ item.name }}"
   when: udn_phase in ['shared', 'vrflite', 'evpn']
-  changed_when: false
+  block:
+    - name: Wait for the tenant DaemonSets to roll out
+      ansible.builtin.command:
+        cmd: >-
+          oc -n udn-{{ item.name }} rollout status daemonset/udn-test --timeout=600s
+      loop: "{{ udn_bgp_tenants }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+  rescue:
+    - name: Collect why the test pods did not start
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          for t in {{ udn_bgp_tenants | map(attribute='name') | join(' ') }}; do
+              echo "=== udn-$t ==="
+              oc -n "udn-$t" get daemonset udn-test \
+                  -o jsonpath='desired={.status.desiredNumberScheduled} scheduled={.status.currentNumberScheduled} ready={.status.numberReady}{"\n"}' 2>&1
+              echo "--- daemonset events (admission refusals show up here) ---"
+              oc -n "udn-$t" get events --field-selector involvedObject.name=udn-test \
+                  -o custom-columns=REASON:.reason,MESSAGE:.message --no-headers 2>&1 | tail -5
+              echo "--- pods ---"
+              oc -n "udn-$t" get pods -o wide 2>&1 | tail -5
+              echo "--- CUDN ---"
+              oc get clusteruserdefinednetwork "$t" \
+                  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1
+          done
+      register: udn_bgp_workload_debug
+      changed_when: false
+      failed_when: false
+
+    - name: Report why the test pods did not start, then fail
+      ansible.builtin.fail:
+        msg: >-
+          {{ ['The tenant test DaemonSets never started a pod.',
+              'desired=N with scheduled=0 means no pod object was ever created -'
+              ' that is an admission refusal, almost always the SCC: the pods ask'
+              ' for NET_RAW/NET_ADMIN and the ServiceAccount must be bound to the'
+              ' privileged SCC. The namespace PSA labels do not cover this.',
+              'scheduled=N with ready=0 means the pods exist but cannot start -'
+              ' look at the pod events for the CUDN not being ready, or for an'
+              ' image pull against registry.redhat.io.',
+              ''] + udn_bgp_workload_debug.stdout_lines | default([]) }}
 
 # ---------------------------------------------------------------------------
 # Phase: shared
