@@ -1445,15 +1445,28 @@ leaves at least one advertisement in place.
 ### 3e. The test that must fail
 
 ```bash
-oc -n udn-blue exec <pod> -- ping -c3 10.210.10.10      # must SUCCEED
-oc -n udn-blue exec <pod> -- ping -c3 -W2 10.211.10.10  # must TIME OUT
-oc -n udn-red  exec <pod> -- ping -c3 10.211.10.10      # must SUCCEED
+# each tenant reaches its own - all must SUCCEED
+oc -n udn-blue   exec <pod> -- ping -c3 10.210.10.10
+oc -n udn-red    exec <pod> -- ping -c3 10.211.10.10
+oc -n udn-orange exec <pod> -- ping -c3 10.212.10.10
+
+# and reaches no one else's - all must TIME OUT
+oc -n udn-blue   exec <pod> -- ping -c3 -W2 10.211.10.10
+oc -n udn-blue   exec <pod> -- ping -c3 -W2 10.212.10.10
+oc -n udn-orange exec <pod> -- ping -c3 -W2 10.210.10.10
 ```
 
-The middle one is the result worth having. Both tenants carry the same pod
-subnet and their external networks are one hop away on the same physical link;
-if it succeeds, the VRFs are leaking and VRF-Lite is not doing its job — check
-`targetVRF` is `auto` and that the cluster is in local gateway mode.
+The failures are the result, and they are not interchangeable. Their external
+networks are one hop away on the same physical link, so nothing but the VRF
+separates them — but blue→red could in principle fail because the two share a
+subnet and the routing is ambiguous rather than isolated. **blue→orange
+cannot.** Orange overlaps with nothing, so a failure to reach it is the VRF
+and only the VRF. That is the isolation result; blue→red is the overlap
+result.
+
+If any of them succeeds, the VRFs are leaking — check `targetVRF` is `auto`
+and that the cluster is in local gateway mode. If *everything* times out,
+including the positive half, that is not isolation, it is a broken phase.
 
 ```bash
 oc debug node/worker1 -- chroot /host ip route show vrf blue

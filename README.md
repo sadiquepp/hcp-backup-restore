@@ -2077,11 +2077,21 @@ this; its route advertisements controller carries a literal
 winner and one tenant quietly unreachable, not an error.
 
 The tenant definitions carry two subnets for this reason:
-`udn_subnet_shared` (unique, used by the `shared` phase) and `udn_subnet`
-(**deliberately identical between blue and red**, used by `vrflite`). The
-role asserts the shared-phase subnets are distinct, because the cluster will
-not. Proving two UDNs can carry the same addresses in isolation is most of
-the point of VRF-Lite.
+`udn_subnet_shared` (unique across all tenants, used by the `shared` phase)
+and `udn_subnet` (**deliberately identical between blue and red**, used by
+`vrflite` and `evpn`). The role asserts the shared-phase subnets are distinct,
+because the cluster will not. Proving two UDNs can carry the same addresses in
+isolation is most of the point of VRF-Lite.
+
+**The third tenant, `orange`, is the control.** It overlaps with nothing in
+any phase, and it exists to make the isolation result unambiguous. "blue
+cannot reach red's external network" has two possible explanations - the VRF,
+or the fact that they share a subnet so the routing is ambiguous rather than
+isolated. "blue cannot reach *orange's*" has only one. Read blue-vs-orange as
+the isolation result and blue-vs-red as the overlap result. Orange's prefix is
+also the only tenant prefix that means exactly one thing wherever it appears,
+which makes it the one to look for when reading a routing table on the leaf or
+on a node.
 
 **MTU.** The fabric is 9000 end to end - bridge, taps, node NICs, VLAN
 subinterfaces and FRR containers. At 1500 the BGP sessions come up fine and
