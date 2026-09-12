@@ -204,19 +204,18 @@
     label: "{{ item.name }}"
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
-# Before the namespaces, not after. See wait-cudn.yml: a namespace created
-# before its CUDN is realised never gets a primary network, and nothing
-# afterwards reports that.
-- name: Confirm the tenant CUDNs were realised before binding namespaces to them
-  ansible.builtin.include_tasks: wait-cudn.yml
-  when: udn_phase in ['shared', 'vrflite', 'evpn']
-
 - name: Create the tenant namespaces and test workloads
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/workload-{{ item.name }}.yaml"
   loop: "{{ udn_bgp_tenants }}"
   loop_control:
     label: "{{ item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+# After the namespaces, not before: a CUDN creates its NAD in the namespaces
+# its selector matches, so with no namespaces it succeeds over an empty set.
+- name: Confirm the tenant CUDNs were realised into NetworkAttachmentDefinitions
+  ansible.builtin.include_tasks: wait-cudn.yml
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
 # `rollout status` on its own times out after ten minutes saying only that
@@ -271,6 +270,51 @@
               ' look at the pod events for the CUDN not being ready, or for an'
               ' image pull against registry.redhat.io.',
               ''] + udn_bgp_workload_debug.stdout_lines | default([]) }}
+
+# The check every other one in this section is standing in for. A pod that
+# schedules, passes its rollout and answers `oc exec` has proved only that it
+# is running - not that it is running on the network this lab is about. When
+# the primary UDN fails to attach, the pod comes up on the default cluster
+# network and every signal above stays green. The pod's own annotation is the
+# only place the truth is written down.
+- name: Read which networks the test pods actually attached to
+  ansible.builtin.command:
+    argv:
+      - oc
+      - -n
+      - "udn-{{ item.name }}"
+      - get
+      - pod
+      - -o
+      - jsonpath={.items[0].metadata.annotations.k8s\.ovn\.org/pod-networks}
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: udn_bgp_pod_networks
+  changed_when: false
+  failed_when: false
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+- name: Fail if a test pod is on the default network instead of its UDN
+  ansible.builtin.assert:
+    that:
+      - item.stdout is search('"' ~ item.item.name ~ '"')
+    fail_msg: >-
+      A pod in udn-{{ item.item.name }} has no {{ item.item.name }} network -
+      it attached to the default cluster network only, which means the primary
+      UDN never bound. The usual cause is the namespace missing the
+      k8s.ovn.org/primary-user-defined-network label, since OVN-Kubernetes
+      binds a primary network at namespace creation and will not retrofit it.
+      Nothing downstream reports this: the pod is healthy, the DaemonSet is
+      rolled out, and the RouteAdvertisements will simply sit at "no networks
+      selected". Its annotation reads:
+      {{ item.stdout | default('(none)', true) }}
+    success_msg: >-
+      udn-{{ item.item.name }} pods are on the {{ item.item.name }} network.
+  loop: "{{ udn_bgp_pod_networks.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
 
 # ---------------------------------------------------------------------------
 # Phase: shared

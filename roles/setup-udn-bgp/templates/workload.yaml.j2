@@ -27,7 +27,20 @@ kind: Namespace
 metadata:
   name: udn-{{ tenant.name }}
   labels:
+    # What the CUDN's namespaceSelector matches on.
     udn-tenant: {{ tenant.name }}
+    # The opt-in for a primary UDN, and it is not optional. Without it
+    # OVN-Kubernetes refuses to create the NetworkAttachmentDefinition and
+    # the CUDN sits at
+    #   NetworkCreated=False  NetworkAttachmentDefinitionSyncError
+    #   "invalid primary network state for namespace ...: a valid primary
+    #    user defined network or network attachment definition custom
+    #    resource, and required namespace label
+    #    k8s.ovn.org/primary-user-defined-network must both be present"
+    # while the namespace and its pods come up perfectly happily on the
+    # default cluster network. The value is deliberately empty - only the
+    # key's presence is read.
+    k8s.ovn.org/primary-user-defined-network: ""
     # Primary UDNs require these to be relaxed - the pods get their address
     # from the UDN, not from the cluster default network, and the restricted
     # PSA profile blocks the tooling the tests need (ip, ping, tcpdump).
