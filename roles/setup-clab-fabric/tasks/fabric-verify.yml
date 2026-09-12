@@ -221,6 +221,42 @@
   loop_control:
     label: "{{ item.item.name }}"
 
+# An endpoint that is addressed but has no way back is the most misleading
+# failure in the lab: the pod-side reachability test times out exactly as it
+# does for a genuine isolation failure, and phase 3's whole result is "some
+# of these pings must time out". Check the return path here, where it is
+# unambiguous, rather than inferring it from a ping later.
+#
+# Note the container image is Alpine, so `ip` is BusyBox: it takes -f and -o
+# and nothing else. `-br` prints its usage text and exits 1.
+- name: Read each tenant endpoint's default route
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-{{ item.name }}-ext ip route show"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: clab_ext_routes
+  changed_when: false
+  failed_when: false
+
+- name: Fail if a tenant endpoint has no route back through the leaf
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout is search('default via ' ~ (item.item.external_gw | replace('.', '\\.')))
+    fail_msg: >-
+      {{ item.item.name }}-ext has no default route via {{ item.item.external_gw }}.
+      It is addressed, so it will answer ARP and look alive, but every reply to
+      a pod will be dropped for want of a route. A phase 3 ping to
+      {{ item.item.external_host }} would then time out identically to a
+      correctly isolated one.
+      It reports: {{ item.stdout | default(item.stderr, true) }}
+    success_msg: >-
+      {{ item.item.name }}-ext routes back via {{ item.item.external_gw }}.
+  loop: "{{ clab_ext_routes.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
 - name: Report the per-tenant plumbing
   ansible.builtin.debug:
     msg: >-
