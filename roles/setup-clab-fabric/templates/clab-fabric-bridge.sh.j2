@@ -15,13 +15,24 @@
 # the topology deploys, and every OCP node silently fails to ARP the leaf.
 set -euo pipefail
 
+# Without this, a failure under `set -e` exits with a bare status and no
+# output at all - which is how the awk pipeline below presented: rc=141,
+# empty stdout, empty stderr, and nothing to go on.
+trap 'echo "clab-fabric-bridge.sh: failed at line $LINENO with status $?" >&2' ERR
+
 BRIDGE={{ clab_guest_bridge }}
 MAC={{ clab_fabric_mac_prefix }}:{{ ip_list.clab }}
 MTU={{ clab_fabric_mtu }}
 
+# No `exit` in the awk program, deliberately. Exiting on the first match
+# closes the pipe while `ip` is still writing, `ip` takes SIGPIPE, and with
+# `set -o pipefail` the pipeline reports 141 - which `set -e` then treats as
+# a fatal error. The same awk ran fine for months in an Ansible shell task
+# because that had neither pipefail nor -e; wrapping it in a proper script is
+# what made a harmless SIGPIPE fatal. Reading the whole list costs nothing.
 find_nic() {
     ip -o link show | awk -v mac="$MAC" \
-        'tolower($0) ~ mac { gsub(":","",$2); print $2; exit }'
+        'tolower($0) ~ mac && !found { gsub(":","",$2); print $2; found = 1 }'
 }
 
 # The device may not exist yet when this runs at boot: virtio NICs appear

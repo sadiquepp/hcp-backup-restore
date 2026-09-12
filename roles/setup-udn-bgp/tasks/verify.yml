@@ -81,7 +81,7 @@
       - bash
       - -c
       - >-
-        nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ {gsub(":","",$2); print $2; exit}');
+        nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ && !f {gsub(":","",$2); print $2; f=1}');
         echo "${nic:-NONE} $(cat /proc/sys/net/ipv4/conf/${nic:-lo}/forwarding 2>/dev/null || echo unknown)"
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
