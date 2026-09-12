@@ -2079,6 +2079,8 @@ required for `Layer3`.
 
 | Symptom | Cause |
 | --- | --- |
+| Test DaemonSet stuck at `desiredNumberScheduled: 3`, `currentNumberScheduled: 0`, no pods at all | SCC, not scheduling. `desired` non-zero with `scheduled: 0` means the pods were refused at *creation*, so no pod object exists and there is nothing to `describe`. The pods ask for `NET_RAW`/`NET_ADMIN`; the namespace PSA labels do not cover that, because PSA and SecurityContextConstraints are separate admission layers. The workload now ships a ServiceAccount bound to `system:openshift:scc:privileged`. Evidence is on the DaemonSet: `oc -n udn-<tenant> describe daemonset udn-test` |
+| Test DaemonSet at `currentNumberScheduled: 3`, `numberReady: 0` | Different failure - the pods exist, so `oc get pods` and `oc describe pod` have the answer. Usually the CUDN not being ready yet, or the `registry.redhat.io/rhel9/support-tools` pull |
 | BGP session never establishes | Fabric NIC not addressed (check `oc get nncp`), or MTU mismatch, or the node has no fabric NIC at all |
 | `Configuration file[/etc/frr/frr.conf] processing failure: N` from vtysh | Cosmetic, and misleading. vtysh had no `vtysh.conf`, so it read `frr.conf` as its own config and failed the lines that are daemon config. It says nothing about whether the daemons are healthy - read `show bgp summary` for that. The role ships a `vtysh.conf` to stop it |
 | leaf1 peers `Idle` with `Last write never`, and `show bfd peers brief` says `down` | BFD configured on one end only. It is a two-ended protocol - FRR-K8s needs a `bfdProfile` to match - and a permanently-down BFD session holds the BGP peer administratively down. The lab does not use BFD for this reason |

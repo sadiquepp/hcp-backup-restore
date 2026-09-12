@@ -13,9 +13,14 @@
   One pod per node makes every node's VRF real and gives the verification
   steps somewhere to exec on whichever node they care about.
 
-  The image is the cluster's own tools image - already present on every node,
-  so this needs no registry access, which keeps it working on the
-  disconnected hubs too.
+  The pods need NET_RAW and NET_ADMIN (ping, tcpdump, ip) and therefore a
+  ServiceAccount bound to the privileged SCC. The PSA labels on the namespace
+  below are NOT sufficient and do not help here: Pod Security Admission and
+  OpenShift's SecurityContextConstraints are two separate admission layers.
+  Relaxing PSA alone leaves the default SA on restricted-v2, which drops ALL
+  capabilities, and the DaemonSet controller is then refused at pod creation -
+  no pod object is ever made, so the DaemonSet reports desiredNumberScheduled
+  3 with currentNumberScheduled 0 and nothing to look at but the DS events.
 #}
 apiVersion: v1
 kind: Namespace
@@ -29,6 +34,29 @@ metadata:
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/warn: privileged
+---
+# The SCC half of the above. `system:openshift:scc:privileged` is the
+# auto-generated ClusterRole that carries `use` on the privileged SCC; binding
+# it to this SA is what actually lets the capabilities through.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: udn-test
+  namespace: udn-{{ tenant.name }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: udn-test-privileged
+  namespace: udn-{{ tenant.name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+subjects:
+  - kind: ServiceAccount
+    name: udn-test
+    namespace: udn-{{ tenant.name }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -46,6 +74,7 @@ spec:
         app: udn-test
         tenant: {{ tenant.name }}
     spec:
+      serviceAccountName: udn-test
       containers:
         - name: shell
           image: registry.redhat.io/rhel9/support-tools:latest
