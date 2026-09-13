@@ -189,6 +189,6 @@
   ansible.builtin.include_tasks:
     file: client-config.yml
     apply:
-      delegate_to: "{{ lab_network_prefix }}.{{ ip_list[udn_client_vm_name] }}"
+      delegate_to: "{{ udn_client_vm_name }}"
       tags: [clabclient]
   tags: [clabclient]
