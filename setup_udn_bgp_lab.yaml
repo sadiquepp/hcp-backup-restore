@@ -32,6 +32,28 @@
 ##   --tags evpn        VXLAN/EVPN transport. Needs OpenShift 4.22+ on the
 ##                      cluster side; the fabric half builds on any version.
 ##
+## And one optional extra, outside the phase sequence:
+##
+##   --tags clabclient  an external client VM for phase 2 reachability tests.
+##                      Builds a VM and edits the lab host's sysctls, so it is
+##                      deliberately not part of --tags fabric. Meaningful in
+##                      phase 2 only - in phase 3 each tenant has its own VRF
+##                      on the leaf and this client reaches none of them.
+##
+## WHERE TO RUN IT. Both plays are `hosts: localhost`, so there is no
+## delegation to fall back on and the tag decides which machine you must be on:
+##
+##   fabric, clabinstall, clabdeploy, clabverify, clabclient
+##       ON THE LAB HOST. These drive libvirt - virsh, qemu-img, virt-install,
+##       the bridges - and the clab VM over ssh from there.
+##
+##   preflight, default, shared, vrflite, evpn
+##       Anywhere with a kubeconfig. These are `oc` calls and nothing else.
+##
+## Running a libvirt tag from a workstation fails at whatever tries to become
+## first, typically "sudo: a password is required", which says nothing about
+## the real problem. clabclient checks for virsh up front and says so instead.
+##
 ## Usage:
 ##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric
 ##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags preflight
