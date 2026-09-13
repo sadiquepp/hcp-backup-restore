@@ -1,12 +1,15 @@
 ---
 # In-guest configuration for the client VM. Delegated to it.
 
+# Only what the client actually uses: ip for the routes, tcpdump for watching
+# the asymmetry. bind-utils was in this list and is not - nothing here resolves
+# a name, and it was the one package the base image did not already have, so it
+# was also the only reason this task ever failed.
 - name: Install test tooling on the client VM
   ansible.builtin.dnf:
     name:
       - iproute
       - tcpdump
-      - bind-utils
     state: present
 
 - name: Install the client routing script

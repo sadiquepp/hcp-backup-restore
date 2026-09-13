@@ -185,6 +185,29 @@
       tags: [clabclient]
   tags: [clabclient]
 
+# Same ordering rule as the containerlab VM above, and for the same reason: the
+# client is a bare copy of rhel9_kvm_image with no entitlement, so the first
+# dnf on it fails with "No package ... available" on a guest created seconds
+# ago. Register between creating it and using it, in one ordered sequence.
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml (ansible-vault edit
+      vault.yaml) - needed to register the client VM with
+      subscription-manager, same as the containerlab VM and the helper.
+  tags: [clabclient]
+
+- name: Register the client VM with subscription-manager
+  ansible.builtin.include_role:
+    name: setup-rhsm
+    apply:
+      delegate_to: "{{ udn_client_vm_name }}"
+      tags: [clabclient]
+  tags: [clabclient]
+
 - name: Configure the client VM
   ansible.builtin.include_tasks:
     file: client-config.yml
