@@ -322,6 +322,7 @@ ip_list:
   # for ssh/management; the fabric itself lives on virbr1 and this VM's
   # second NIC gets clab_fabric_prefix.40 there, same last octet.
   clab: 40
+  udnclient: 60
 
 helper_name: helper
 helper_disk: helper_disk.qcow2
@@ -1441,3 +1442,24 @@ udn_bgp_vtep_prefix: "100.64.0"
 ## overlay and has to stay up independently of any one link - the same shape
 ## as a router loopback.
 udn_bgp_vtep_iface: vtep0
+
+## ---------------------------------------------------------------------------
+## Optional external client VM for phase 2 reachability testing
+## (roles/setup-clab-fabric, --tags clabclient).
+##
+## One NIC on the management network and deliberately no fabric presence: a
+## client on the fabric segment shares a broadcast domain with leaf1 and every
+## worker, so leaf1 answers with an ICMP redirect and the traffic goes direct,
+## proving nothing about routing. Off-segment it is genuinely routed - by the
+## clab VM, then by leaf1 on what BGP told it.
+## ---------------------------------------------------------------------------
+udn_client_vm_name: udnclient
+udn_client_vm_disk: udnclient_disk.qcow2
+udn_client_vm_memory: 2048
+udn_client_vm_vcpus: 2
+udn_client_os_variant: rhel9.5
+
+## A plain copy of this image, not a virt-resize expansion - the VM runs ping
+## and tcpdump and has no use for a grown root filesystem. Point it at whatever
+## base image you have; rhel8 works as well as rhel9, adjust os_variant to match.
+udn_client_base_image: "{{ rhel9_kvm_image }}"
