@@ -1688,6 +1688,62 @@ A plain unsourced `ping` gets an ICMP redirect from leaf1 (`Redirect Host, new
 nexthop 192.168.140.36`) and thereafter goes straight to the node, testing
 nothing about BGP at all.
 
+#### A dedicated client VM
+
+> **Automate this step**
+> ```
+> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags clabclient
+> ```
+> Files: `client-vm.yml`, `client-router.yml`, `client-config.yml` in `roles/setup-clab-fabric`
+>
+> Deliberately **not** part of `--tags fabric`: it builds a VM and edits the
+> lab host's sysctls, neither of which belongs in a routine fabric run.
+
+**One VM tests all four tenants**, because in phase 2 every tenant is
+advertised into leaf1's *default* VRF — one client address reaches all of them,
+and adding a tenant is one more static route:
+
+```bash
+ip route replace 10.222.0.0/16 via 192.168.140.1     # orange
+ip route replace 10.223.0.0/16 via 192.168.140.1     # green
+```
+
+That stops being true in phase 3, where each tenant has its own VRF on leaf1
+and a single default-VRF client reaches none of them. That is the isolation
+working, and it is why the lab ships one `<tenant>-ext` container per VRF
+rather than one shared client. **Do not carry this VM forward to phase 3** —
+it will report total failure and be right to.
+
+What the role builds:
+
+| Piece | Why |
+| --- | --- |
+| `udnclient` VM, **one NIC** on the management network | No fabric presence. A client on the fabric segment shares a broadcast domain with leaf1 and every worker, so leaf1 answers `Redirect Host` and the traffic goes direct — testing layer 2, not BGP |
+| Disk is a plain `cp --sparse=always` of the base image | It runs ping and tcpdump; there is nothing to grow a filesystem for, and no `virt-resize` pass to wait through |
+| DHCP reservation added with `virsh net-update ... --live` | The default network's reservations come from `ip_list`, but re-rendering that template means redefining the network and dropping every guest's lease |
+| Routes to each tenant via the **clab VM** | Forces real routing: client → clab VM → leaf1 → node |
+| An address on the clab VM's `br-fabric`, plus forwarding | The bridge has no IP normally — it is a pure layer 2 extension of virbr1. Giving it one makes the clab VM a host on the fabric and therefore able to forward |
+| `rp_filter=2` on the client, the clab VM **and the lab host** | The reply path differs from the request path at every hop |
+
+Both sides are systemd units, so they survive a reboot — unlike the by-hand
+version above, where the clab VM's fabric address disappears with the next
+restart and the failure looks like the fabric broke.
+
+Then, from the client:
+
+```bash
+ping -c3 10.221.2.3      # a red pod
+ping -c3 10.222.x.x      # orange
+ping -c3 10.223.x.x      # green
+```
+
+No `-I` needed here — the client has only the one address, which is the whole
+point of giving it a single NIC. Check `ttl=61` on the replies: three routed
+hops, so the packet really went via leaf1 and the node rather than being
+answered on-link.
+
+Blue will still fail, for the reason in the rule table above.
+
 #### Making it symmetric instead
 
 One route on the node removes every rp_filter problem at once, by sending the

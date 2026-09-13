@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Turn the clab VM into the router the UDN client reaches the fabric through.
+#
+# The fabric bridge normally has no IP at all - it is a pure layer 2 extension
+# of virbr1 into this VM. Giving it one makes this VM a host ON the fabric,
+# which is what lets it forward a client's packets to leaf1.
+#
+# Only useful in phase 2, where every tenant is advertised into leaf1's DEFAULT
+# VRF and one address reaches all of them. In phase 3 each tenant lives in its
+# own VRF on leaf1 and a single default-VRF address reaches none of them - that
+# is the isolation working, and the per-tenant *-ext containers are the clients.
+set -euo pipefail
+trap 'echo "clab-fabric-router.sh: failed at line $LINENO with status $?" >&2' ERR
+
+BR="{{ clab_guest_bridge }}"
+ADDR="{{ clab_fabric_prefix }}.{{ clab_fabric_client_gw_octet }}/{{ clab_fabric_netmask_bits }}"
+LEAF="{{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}"
+
+ip link set "$BR" up
+ip addr replace "$ADDR" dev "$BR"
+
+sysctl -qw net.ipv4.ip_forward=1
+sysctl -qw net.ipv4.conf.all.rp_filter=2
+for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 2 > "$i"; done
+
+# leaf1 must answer before any route through it is worth adding.
+for _ in $(seq 1 30); do
+    ping -c1 -W1 "$LEAF" >/dev/null 2>&1 && break
+    sleep 1
+done
+
+{% for t in udn_bgp_tenants %}
+ip route replace {{ t.udn_subnet_shared }} via "$LEAF"
+{% endfor %}
+
+echo "clab-fabric-router.sh: $ADDR on $BR, {{ udn_bgp_tenants | length }} tenant routes via $LEAF"

@@ -37,3 +37,13 @@ clab_guest_bridge: br-fabric
 ##          and the tenant external endpoints moved behind leaf2 so traffic
 ##          genuinely crosses the fabric. Phase 4.
 clab_topology: bgp
+
+## The clab VM's own address on the fabric bridge, used only when the optional
+## client VM is built (--tags clabclient). The bridge has no IP otherwise - it
+## is a pure layer 2 extension of virbr1 - so this makes the VM a host on the
+## fabric and therefore able to forward the client's packets to leaf1.
+## Must not collide with clab_fabric_router_octet (leaf1) or any node's octet.
+clab_fabric_client_gw_octet: 50
+
+udn_client_vm_disk_path: "{{ download_dir | regex_replace('/+$', '') }}/{{ udn_client_vm_disk }}"
+udn_client_base_image_path: "{{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_client_base_image }}"

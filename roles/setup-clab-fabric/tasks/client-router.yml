@@ -1,0 +1,44 @@
+---
+# Make the clab VM the router the client reaches the fabric through.
+# Delegated to the clab VM.
+
+- name: Install the fabric router script
+  ansible.builtin.template:
+    src: clab-fabric-router.sh.j2
+    dest: /usr/local/sbin/clab-fabric-router.sh
+    mode: "0755"
+  register: clab_router_script
+
+- name: Install the fabric router unit
+  ansible.builtin.template:
+    src: clab-fabric-router.service.j2
+    dest: /etc/systemd/system/clab-fabric-router.service
+    mode: "0644"
+  register: clab_router_unit
+
+- name: Enable and run the fabric router unit
+  ansible.builtin.systemd:
+    name: clab-fabric-router.service
+    enabled: true
+    state: "{{ 'restarted' if (clab_router_script is changed or clab_router_unit is changed) else 'started' }}"
+    daemon_reload: true
+
+- name: Confirm the clab VM holds its fabric address and can reach leaf1
+  ansible.builtin.command:
+    cmd: "ping -c2 -W2 {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}"
+  register: clab_router_ping
+  changed_when: false
+  failed_when: false
+
+- name: Fail if the clab VM cannot reach leaf1
+  ansible.builtin.assert:
+    that: clab_router_ping.rc == 0
+    fail_msg: >-
+      The clab VM cannot reach leaf1 at
+      {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }} from its new
+      {{ clab_guest_bridge }} address. Nothing routed through it can work until
+      that does. Check the bridge has both the fabric NIC and leaf1's veth
+      (--tags clabverify), and that leaf1 is running.
+    success_msg: >-
+      The clab VM reaches leaf1 and routes
+      {{ udn_bgp_tenants | map(attribute='name') | join(', ') }} through it.

@@ -156,3 +156,39 @@
       delegate_to: "{{ clab_exec_host }}"
       tags: [fabric, clabdeploy, clabverify]
   tags: [fabric, clabdeploy, clabverify]
+
+# ---------------------------------------------------------------------------
+# Optional: an external client VM for phase 2 reachability testing.
+#
+# Not part of the 'fabric' tag - this builds a VM and edits the lab host's
+# sysctls, neither of which belongs in a routine fabric run. Ask for it:
+#
+#   --tags clabclient
+#
+# Only meaningful in phase 2 (--tags shared), where every tenant is advertised
+# into leaf1's DEFAULT VRF and so one client with one address reaches all of
+# them. In phase 3 each tenant has its own VRF on leaf1 and this client reaches
+# none of them, which is the isolation working as intended.
+# ---------------------------------------------------------------------------
+- name: Build the external client VM
+  ansible.builtin.include_tasks:
+    file: client-vm.yml
+    apply:
+      tags: [clabclient]
+  tags: [clabclient]
+
+- name: Make the clab VM route the client onto the fabric
+  ansible.builtin.include_tasks:
+    file: client-router.yml
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+      tags: [clabclient]
+  tags: [clabclient]
+
+- name: Configure the client VM
+  ansible.builtin.include_tasks:
+    file: client-config.yml
+    apply:
+      delegate_to: "{{ lab_network_prefix }}.{{ ip_list[udn_client_vm_name] }}"
+      tags: [clabclient]
+  tags: [clabclient]

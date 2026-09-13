@@ -1,0 +1,99 @@
+---
+# An external client VM for phase 2 reachability testing.
+#
+# ONE NIC, on the management network, and no fabric presence at all. That is
+# deliberate: a client on the fabric segment shares a broadcast domain with
+# leaf1 and every worker, so leaf1 answers with `Redirect Host` and the packets
+# go direct - testing layer 2, not BGP. Off-segment the client must be routed,
+# by the clab VM and then by leaf1 on what BGP told it, and `ttl=61` on the
+# reply is the evidence.
+#
+# The disk is a plain copy of the base image rather than the virt-resize
+# expansion the other VMs use. This VM runs ping and tcpdump; it has no use for
+# a grown root filesystem, and the copy is seconds rather than minutes.
+
+- name: Fail if the base image for the client VM is missing
+  ansible.builtin.stat:
+    path: "{{ udn_client_base_image_path }}"
+  register: udn_client_base
+  failed_when: not udn_client_base.stat.exists
+
+- name: Check whether the client VM disk already exists
+  ansible.builtin.stat:
+    path: "{{ udn_client_vm_disk_path }}"
+  register: udn_client_disk
+
+# --sparse=always matters: the base image is mostly holes and a plain cp would
+# write every zero out.
+- name: Copy the base image to the client VM disk
+  ansible.builtin.command:
+    cmd: "cp --sparse=always {{ udn_client_base_image_path }} {{ udn_client_vm_disk_path }}"
+  when: not udn_client_disk.stat.exists
+
+# The default network's DHCP reservations are generated from ip_list, but that
+# template is only rendered when the network is (re)defined - and redefining it
+# on a running lab drops every guest's lease. net-update adds the one host
+# entry live instead.
+- name: Reserve the client VM's management address
+  ansible.builtin.command:
+    cmd: >-
+      virsh net-update default add ip-dhcp-host
+      "<host mac='52:54:00:e2:54:{{ ip_list[udn_client_vm_name] }}'
+             name='{{ udn_client_vm_name }}'
+             ip='{{ lab_network_prefix }}.{{ ip_list[udn_client_vm_name] }}'/>"
+      --live --config
+  register: udn_client_dhcp
+  changed_when: udn_client_dhcp.rc == 0
+  failed_when:
+    - udn_client_dhcp.rc != 0
+    - "'already exists' not in udn_client_dhcp.stderr"
+
+- name: Check whether the client VM is already defined
+  ansible.builtin.shell:
+    cmd: "virsh dominfo {{ udn_client_vm_name }} 2>/dev/null | awk '/State/ {print $2}'"
+  register: udn_client_vm_state
+  changed_when: false
+
+- name: Define the client VM (management NIC only, no fabric NIC)
+  ansible.builtin.shell:
+    cmd: |
+      virt-install \
+      --import \
+      --name "{{ udn_client_vm_name }}" \
+      --memory "{{ udn_client_vm_memory }}" \
+      --vcpus "{{ udn_client_vm_vcpus }}" \
+      --disk "{{ udn_client_vm_disk_path }}",format=qcow2,cache=none,bus=virtio \
+      --os-variant={{ udn_client_os_variant }} \
+      --memballoon model=virtio,freePageReporting=on \
+      --noautoconsole \
+      --cpu host-passthrough \
+      --network network:default,mac=52:54:00:e2:54:{{ ip_list[udn_client_vm_name] }}
+  when: udn_client_vm_state.stdout == ''
+
+- name: Wait for the client VM to accept ssh
+  ansible.builtin.wait_for:
+    host: "{{ lab_network_prefix }}.{{ ip_list[udn_client_vm_name] }}"
+    port: 22
+    timeout: 300
+    delay: 10
+
+# The reply from a UDN pod arrives here from the node's default gateway with a
+# source the host has no route to, and is forwarded back out the same bridge to
+# the client. Strict reverse-path filtering rejects exactly that. The effective
+# value is max(all, <iface>), so both have to be set - a host with
+# conf.all.rp_filter = 0 and conf.virbr0.rp_filter = 1 is strict.
+- name: Relax reverse-path filtering on the lab host's management bridge
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-udn-client.conf
+    mode: "0644"
+    content: |
+      # Phase 2 reply traffic from UDN pods is asymmetric by construction - see
+      # bgp-evpn.md, "Reaching a UDN pod from outside the cluster".
+      net.ipv4.conf.all.rp_filter = 2
+      net.ipv4.conf.virbr0.rp_filter = 2
+  register: udn_client_host_sysctl
+
+- name: Apply the host sysctls
+  ansible.builtin.command:
+    cmd: sysctl -p /etc/sysctl.d/99-udn-client.conf
+  when: udn_client_host_sysctl is changed
