@@ -1887,6 +1887,77 @@ the node's inbound path; forward only is the VRF's route out.
 It reaches the client over ssh as `root` with `~/.ssh/lab_rsa`; override with
 `UDN_CLIENT_SSH_USER` and `UDN_CLIENT_SSH_KEY`.
 
+#### A healthy phase 2, in full
+
+This is what a finished phase 2 looks like — four tenants, three nodes, both
+directions:
+
+```
+# scripts/udn-reachability.sh --both
+Pinging 192.168.122.60 from every udn-test pod (3 packets each)
+
+  blue     worker3   10.220.2.3       ok   ttl=61 1.877 ms
+  blue     worker1   10.220.0.3       ok   ttl=61 1.717 ms
+  blue     worker2   10.220.1.3       ok   ttl=61 2.317 ms
+  green    worker1   10.223.0.4       ok   ttl=61 2.433 ms
+  green    worker3   10.223.0.3       ok   ttl=61 1.836 ms
+  green    worker2   10.223.0.5       ok   ttl=61 1.869 ms
+  orange   worker3   10.222.1.3       ok   ttl=61 2.224 ms
+  orange   worker2   10.222.5.3       ok   ttl=61 2.096 ms
+  orange   worker1   10.222.3.3       ok   ttl=61 1.626 ms
+  red      worker3   10.221.2.3       ok   ttl=61 1.516 ms
+  red      worker1   10.221.0.3       ok   ttl=61 1.496 ms
+  red      worker2   10.221.1.3       ok   ttl=61 2.138 ms
+
+Pinging every udn-test pod from 192.168.122.60 (3 packets each)
+
+  blue     worker3   10.220.2.3       ok   ttl=61 1.492 ms
+  blue     worker1   10.220.0.3       ok   ttl=61 1.538 ms
+  blue     worker2   10.220.1.3       ok   ttl=61 1.497 ms
+  green    worker1   10.223.0.4       ok   ttl=61 2.135 ms
+  green    worker3   10.223.0.3       ok   ttl=61 1.348 ms
+  green    worker2   10.223.0.5       ok   ttl=61 2.767 ms
+  orange   worker3   10.222.1.3       ok   ttl=61 3.190 ms
+  orange   worker2   10.222.5.3       ok   ttl=61 2.290 ms
+  orange   worker1   10.222.3.3       ok   ttl=61 1.949 ms
+  red      worker3   10.221.2.3       ok   ttl=61 1.514 ms
+  red      worker1   10.221.0.3       ok   ttl=61 1.558 ms
+  red      worker2   10.221.1.3       ok   ttl=61 1.745 ms
+
+pod -> 192.168.122.60
+tenant   worker3   worker1   worker2
+blue     ok        ok        ok
+green    ok        ok        ok
+orange   ok        ok        ok
+red      ok        ok        ok
+
+192.168.122.60 -> pod
+tenant   worker3   worker1   worker2
+blue     ok        ok        ok
+green    ok        ok        ok
+orange   ok        ok        ok
+red      ok        ok        ok
+```
+
+Three things in that output are worth more than the twelve `ok`s.
+
+**`ttl=61` on every line, both directions.** 64 minus three routers. Nothing
+was answered on-link, and the two directions take different three-hop paths —
+the same number for different reasons, which is exactly the asymmetry
+[described above](#why-the-two-directions-differ).
+
+**green is `10.223.0.3`, `.4`, `.5` across three nodes.** One flat /24 for the
+whole cluster. Compare orange — `10.222.1.3`, `.3.3`, `.5.3` — a distinct /24
+per node. That is Layer2 against Layer3 in four lines, and it is the property
+live migration depends on: a workload that changes node keeps its address only
+because the subnet was never sliced. Reading the addresses is a faster check
+than reading the CUDN.
+
+**No `ASYMMETRIC` lines.** Each tenant is reachable both ways, so both
+mechanisms are working: the `ip rule` carrying fabric-inbound traffic into the
+tenant VRF, and the VRF's route back out. A tenant can pass one and fail the
+other, and the script names it when that happens.
+
 #### Making it symmetric instead
 
 One route on the node removes every rp_filter problem at once, by sending the
