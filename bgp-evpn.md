@@ -1251,6 +1251,13 @@ oc delete clusteruserdefinednetwork blue red --ignore-not-found --wait=true --ti
 
 ### The CUDNs
 
+> **There is no `cudn` short name.** `oc get cudn` fails with *"the server
+> doesn't have a resource type"*, which reads like the CRD is missing rather
+> than like an abbreviation that was never registered. Spell it
+> `clusteruserdefinednetwork` (case-insensitive) or `ClusterUserDefinedNetwork`
+> throughout. `RouteAdvertisements` does have one — `ra` — which is part of why
+> the missing one is surprising.
+
 ```bash
 cat <<'EOF' | oc apply -f -
 apiVersion: k8s.ovn.org/v1
@@ -1374,7 +1381,7 @@ NetworkAttachmentDefinition, and says so on the **CUDN**, not on the
 namespace and not on the pods:
 
 ```bash
-oc get cudn blue -o jsonpath='{.status.conditions}' | jq
+oc get clusteruserdefinednetwork blue -o jsonpath='{.status.conditions}' | jq
 ```
 ```
 "type": "NetworkCreated", "status": "False",
