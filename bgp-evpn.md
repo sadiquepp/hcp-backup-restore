@@ -2010,6 +2010,42 @@ Step 6 is the entire story. In phase 1 the equivalent lookup landed in `main`,
 where a connected `192.168.140.0/24` beat the default route and the packet went
 out the fabric. Here it lands in a table that has never heard of the fabric.
 
+##### Where BGP is involved in this path
+
+**In the forwarding decisions: nowhere.** Not one next hop above comes from
+BGP. Steps 1–3 are OVN's logical topology, steps 5–6 are kernel routes
+OVN-Kubernetes installed, and step 6's default route is copied from the node's
+own default gateway. Read the whole table and there is no BGP in it.
+
+**In the packet: once, and not as a route.** Advertising the network makes
+OVN-Kubernetes drop the SNAT at step 3, so the packet leaves carrying
+`10.221.2.3` instead of the node's address. That is the only fingerprint the
+advertisement leaves on the way out, and it is why watching the management port
+is the proof the advertisement reached the data plane:
+
+```
+IP 10.221.2.3 > 192.168.122.60: ICMP echo request     <- the pod's own address
+```
+
+It is worth being precise about this, because the node **does** hold
+BGP-learned routes — just not in the table this packet uses:
+
+```bash
+oc debug node/worker2 --quiet -- chroot /host ip route show table main | grep bgp
+# 10.220.1.0/24 via 192.168.140.36 dev enp8s0 proto bgp
+# 10.221.0.0/24 via 192.168.140.34 dev enp8s0 proto bgp
+```
+
+Those are in `main`. Pod egress is routed in table 1117. The two never meet.
+
+Which is the difference between phase 1 and phase 2 in one sentence: **the
+default pod network's egress lands in `main`, where BGP-learned routes live, so
+BGP can decide its next hop — a UDN's egress lands in the tenant's own table,
+where FRR-K8s installs nothing, so BGP decides nothing.** `targetVRF` is unset
+in this phase, meaning learned routes go to the default VRF only. Giving the
+tenant VRF its own BGP session, and therefore its own learned routes, is
+phase 3.
+
 #### In — an external client to a pod
 
 | # | Where | What decides the next hop |
