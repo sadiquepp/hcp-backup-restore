@@ -1752,6 +1752,37 @@ answered on-link.
 
 Blue will still fail, for the reason in the rule table above.
 
+#### Testing every tenant at once
+
+```bash
+scripts/udn-reachability.sh 192.168.122.60
+```
+
+Pings the target from every `udn-test` pod and prints a **tenant x node**
+matrix. The layout is the point — failures in this lab are almost always
+shaped like a whole row or a whole column, and the two mean entirely different
+things:
+
+```
+tenant   worker1   worker2   worker3
+blue     FAIL      FAIL      FAIL        <- a row: this tenant's config
+red      FAIL      ok        ok
+orange   FAIL      no-udn    ok          <- a cell: this pod
+green    FAIL      ok        ok
+         ^^^^ a column: this node
+```
+
+| Shape | Means | Look at |
+| --- | --- | --- |
+| A row | One tenant, every node | That network: a missing `ip rule`, an unrealised CUDN, no NAD |
+| A column | Every tenant, one node | That node: strict `rp_filter`, forwarding off, fabric NIC unaddressed |
+| One cell | That pod | The pod, or its node's slice of that network |
+| `no-udn` | The pod has no `ovn-udn1` at all | The primary UDN never attached — see the namespace label, above |
+
+Both failures this lab was debugged through are one glance in this layout, and
+neither was obvious one ping at a time: blue missing its rule on all three
+nodes, and a single node left with strict reverse-path filtering.
+
 #### Making it symmetric instead
 
 One route on the node removes every rp_filter problem at once, by sending the
