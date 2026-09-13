@@ -117,6 +117,27 @@
     timeout: 300
     delay: 10
 
+# Registered as a named host rather than delegated to by bare IP, so it can
+# carry its own connection settings.
+#
+# StrictHostKeyChecking is the one that matters. This VM is brand new, so its
+# host key is not in root's known_hosts, and the ssh prompt does not fail the
+# task - it hangs the play waiting for a "yes" that Ansible will never type.
+# Every host in inventory/hosts carries the same -o argument for this reason;
+# a delegated host that is not in inventory inherits nothing and needs its own.
+#
+# ansible_user and the key are deliberately left alone: whatever reaches the
+# clab VM at .{{ ip_list.clab }} reaches this one, since both are the same base
+# image created the same way.
+- name: Register the client VM as an Ansible host
+  ansible.builtin.add_host:
+    name: "{{ udn_client_vm_name }}"
+    ansible_host: "{{ lab_network_prefix }}.{{ ip_list[udn_client_vm_name] }}"
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    groups: udn_client
+  changed_when: false
+
 # The reply from a UDN pod arrives here from the node's default gateway with a
 # source the host has no route to, and is forwarded back out the same bridge to
 # the client. Strict reverse-path filtering rejects exactly that. The effective
