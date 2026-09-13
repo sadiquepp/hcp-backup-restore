@@ -67,9 +67,19 @@ spec:
 {% if udn_bgp_loose_rp_filter | bool %}
         # Loose reverse-path filtering. Off by default: the untagged fabric
         # session is symmetric, so strict filtering passes. Turn it on if
-        # VRF-Lite or EVPN shows traffic arriving on one interface with the
-        # route back pointing at another - that is asymmetry, and strict RPF
-        # drops it silently.
+        # traffic arrives on one interface with the route back pointing at
+        # another - that is asymmetry, and strict RPF drops it silently.
+        #
+        # Two cases need it. VRF-Lite or EVPN showing one-way traffic is the
+        # obvious one. The other is phase 2 with an external client
+        # (--tags clabclient): the request arrives over the fabric and the
+        # reply leaves by the node's default gateway, so every node the client
+        # talks to needs this. A node that has it and one that does not look
+        # identical from the cluster - only that node's pods stop answering.
+        #
+        # conf.all alone is enough, despite the usual advice to set both: the
+        # kernel uses max(conf.all, conf.<iface>) and there is no value above
+        # 2, so 2 here is loose everywhere regardless of per-interface values.
         net.ipv4.conf.all.rp_filter=2
 {% endif %}
   recommend:
