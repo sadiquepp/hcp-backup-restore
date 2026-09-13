@@ -1623,6 +1623,55 @@ redirects it into the tenant's VRF, where the pod's subnet is connected.
 Without it the packet falls through to `main`, finds nothing, and leaves again
 by the default route — and the fabric side looks perfect while it happens.
 
+#### What a healthy rule table looks like
+
+Every tenant gets **three** rules at priority 2000 on every node. Read them as
+two greps, because they answer different questions:
+
+```bash
+oc debug node/worker1 --quiet -- chroot /host ip rule show | grep fwmark
+```
+```
+30:    from all fwmark 0x1745ec lookup 7        <- not ours, OVN's own
+2000:  from all fwmark 0x1006 lookup 1093
+2000:  from all fwmark 0x1008 lookup 1098
+2000:  from all fwmark 0x1007 lookup 1101
+2000:  from all fwmark 0x1009 lookup 1110
+5999:  from all fwmark 0x3f0 lookup main        <- not ours
+```
+
+```bash
+oc debug node/worker1 --quiet -- chroot /host ip rule show | grep 'to 10\.'
+```
+```
+2000:  from all to 10.221.0.0/16 lookup 1093     <- red
+2000:  from all to 10.223.0.0/16 lookup 1098     <- green
+2000:  from all to 10.222.0.0/16 lookup 1101     <- orange
+2000:  from all to 10.220.0.0/16 lookup 1110     <- blue
+```
+
+There is a third per tenant, `to 169.254.0.x lookup <table>`, for the
+masquerade address. So **four tenants means twelve rules at priority 2000** —
+counting them is the fastest health check there is.
+
+| Rule | Carries |
+| --- | --- |
+| `fwmark 0x10NN → table` | Traffic OVN has already marked as belonging to that network |
+| `to 169.254.0.x → table` | The network's masquerade address |
+| `to <subnet> → table` | **Fabric-inbound traffic.** This is the one that matters for an external client, and the one that goes missing |
+
+Three things to know when reading this:
+
+- **Table ids are per node.** worker1 uses 1093/1098/1101/1110 for
+  red/green/orange/blue; worker2 uses 1117/1123/1124/1125 for
+  blue/green/orange/red. OVN-Kubernetes allocates them per node in creation
+  order. Never carry a number between nodes, and never derive one — read it.
+- **The low byte of the fwmark is the network id.** `0x1006` is network 6.
+  Nothing in the rule says which tenant that is; the subnet rule and the
+  management port's address are what tie an id to a name.
+- **The id changes if a network is recreated and reallocated**, which is more
+  than a curiosity — see below.
+
 **If one tenant's rule is missing on every node while its siblings have
 theirs**, that tenant carries stale node-side state. On the cluster this was
 built against, blue had been created once with its namespace missing the
@@ -1638,9 +1687,20 @@ oc apply -f <manifest dir>/cudn-blue.yaml
 oc apply -f <manifest dir>/workload-blue.yaml
 ```
 
+The network id is the evidence that this is what happened. Before the
+recreation blue was network 5 (`fwmark 0x1005`); afterwards it was network 9
+(`0x1009`, table 1110), while red, orange and green kept 6, 7 and 8 and their
+original tables. Blue was allocated a **fresh id**, and the rule appeared with
+it — so the stale state was tied to the old id, not to the object. That also
+explains why the playbook's own delete-and-recreate never cleared it: recreated
+promptly under the same name, the network got its old id back and the old state
+with it.
+
 Worth knowing the shape rather than the specific case: a **row** of failures in
 the reachability matrix below, with the fabric and the advertisement both
-healthy, is this. Check the rule before anything else.
+healthy, is this. Check the rule before anything else, then compare fwmarks
+before and after any recreation — an id that did not move means the state did
+not either.
 
 Set the client up on the clab VM, which is on both networks. Note the address
 on `br-fabric`, which the fabric bridge does not otherwise have:
