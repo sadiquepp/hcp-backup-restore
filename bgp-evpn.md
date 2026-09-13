@@ -1755,10 +1755,12 @@ Blue will still fail, for the reason in the rule table above.
 #### Testing every tenant at once
 
 ```bash
-scripts/udn-reachability.sh 192.168.122.60
+scripts/udn-reachability.sh              # pods -> client
+scripts/udn-reachability.sh --reverse    # client -> pods
+scripts/udn-reachability.sh --both       # both, and it names any disagreement
 ```
 
-Pings the target from every `udn-test` pod and prints a **tenant x node**
+Pings between the pods and the client, and prints a **tenant x node**
 matrix. The layout is the point — failures in this lab are almost always
 shaped like a whole row or a whole column, and the two mean entirely different
 things:
@@ -1782,6 +1784,22 @@ green    FAIL      ok        ok
 Both failures this lab was debugged through are one glance in this layout, and
 neither was obvious one ping at a time: blue missing its rule on all three
 nodes, and a single node left with strict reverse-path filtering.
+
+`--both` earns its place in phase 2 specifically, because the two directions
+are **not** equivalent here — inbound is decided by leaf1 from BGP, outbound by
+the node from the tenant VRF's own table. They can disagree, so the script says
+so rather than leaving two matrices for you to diff by eye:
+
+```
+  ASYMMETRIC  red/worker1: pod->client ok, client->pod FAIL
+```
+
+A cell like that is one direction's mechanism broken while the other's works,
+and the two have entirely separate causes. Reverse only is the `ip rule` and
+the node's inbound path; forward only is the VRF's route out.
+
+It reaches the client over ssh as `root` with `~/.ssh/lab_rsa`; override with
+`UDN_CLIENT_SSH_USER` and `UDN_CLIENT_SSH_KEY`.
 
 #### Making it symmetric instead
 
