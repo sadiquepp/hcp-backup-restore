@@ -58,6 +58,26 @@
     success_msg: >-
       Base image {{ udn_client_base_image }} found.
 
+# The client's traffic is asymmetric by construction - request over the fabric,
+# reply out the node's default gateway - so every node it talks to must accept
+# packets whose reverse path points elsewhere. Warned about here rather than
+# left to be discovered, because the failure is per-node and looks like nothing:
+# the pods on nodes that have it answer, the pods on nodes that do not are
+# silent, and every control-plane signal is identical either way.
+- name: Warn if the nodes still have strict reverse-path filtering
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['udn_bgp_loose_rp_filter is false, so the nodes are running strict'
+          ' reverse-path filtering and will silently drop this client'
+          ' traffic.',
+          'Set udn_bgp_loose_rp_filter: true in vars.yaml and re-run'
+          ' --tags shared. That applies it to every worker through the Tuned'
+          ' profile and survives a reboot, which `sysctl -w` on one node does'
+          ' not.',
+          'Symptom if you skip it: pods on some nodes answer and pods on'
+          ' others do not, with nothing to distinguish them.'] }}
+  when: not (udn_bgp_loose_rp_filter | default(false) | bool)
+
 - name: Check whether the client VM disk already exists
   ansible.builtin.stat:
     path: "{{ udn_client_vm_disk_path }}"
