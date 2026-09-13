@@ -38,6 +38,9 @@ where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
 - [Phase 2: UDNs in the default VRF](#phase-2-udns-in-the-default-vrf)
   - [What phase 2 can and cannot reach](#what-phase-2-can-and-cannot-reach)
   - [Reaching a UDN pod from outside the cluster](#reaching-a-udn-pod-from-outside-the-cluster)
+  - [Following one packet in phase 2](#following-one-packet-in-phase-2)
+  - [Why the two directions differ](#why-the-two-directions-differ)
+  - [Is this how it works in production?](#is-this-how-it-works-in-production)
 - [Phase 3: VRF-Lite](#phase-3-vrf-lite)
 - [Phase 4: EVPN](#phase-4-evpn)
 - [Live migration on the Layer2 tenant](#live-migration-on-the-layer2-tenant)
@@ -1681,12 +1684,17 @@ When it works:
 64 bytes from 10.221.2.3: icmp_seq=327 ttl=61 time=0.369 ms
 ```
 
-**Read the TTL.** 64 minus three: leaf1, worker3, and the lab host. That is the
-proof the packet was routed rather than delivered on-link — and it is worth
-checking, because the clab VM shares a broadcast domain with all three workers.
-A plain unsourced `ping` gets an ICMP redirect from leaf1 (`Redirect Host, new
-nexthop 192.168.140.36`) and thereafter goes straight to the node, testing
-nothing about BGP at all.
+**Read the TTL.** 64 minus three — and the three are worth naming, because they
+are *not* the hops the request took. The reply never touches leaf1. It is
+decremented by **OVN's logical router**, then by **worker3's kernel** forwarding
+it from the management port out `br-ex`, then by **the lab host** forwarding it
+back out virbr0 to the client. Three routers, none of them on the fabric.
+
+That is the whole asymmetry in one number, and it is worth checking anyway,
+because the clab VM shares a broadcast domain with all three workers: a plain
+unsourced `ping` gets an ICMP redirect from leaf1 (`Redirect Host, new nexthop
+192.168.140.36`) and thereafter goes straight to the node, testing nothing
+about BGP at all.
 
 #### A dedicated client VM
 
@@ -1764,6 +1772,128 @@ something true, and every part of making it work is something phase 3 does
 properly: the tenant VRF gets its own fabric interface, its own connected
 route and its own BGP session, both directions use it, and none of the above
 is needed.
+
+### Following one packet in phase 2
+
+Phase 1's [walkthrough](#following-one-packet) had one routing table in it. This
+one has two, and everything surprising about phase 2 comes from which packets
+land in which.
+
+Worked with a **red** pod, `10.221.2.3`, on **worker3**, and the client at
+`192.168.122.60`.
+
+> One trap before the tables: worker2's **blue** VRF is table 1117 and
+> worker3's **red** VRF is *also* table 1117. Table ids are allocated per node
+> by OVN-Kubernetes, in creation order. Never carry a number between nodes —
+> read it from `ip -d link show type vrf` on the node you are on.
+
+#### Out — a pod to anything outside the cluster
+
+| # | Where | What decides the next hop |
+| --- | --- | --- |
+| 1 | Pod netns | `default via 10.221.2.1 dev ovn-udn1`. A logical router port, not a device on any host. Note it is `ovn-udn1`, not `eth0` — `eth0` is still the cluster network |
+| 2 | veth → `br-int` | The pod's logical switch port. Inside OVN until step 4 |
+| 3 | The UDN's cluster router | **Local gateway mode**: a logical router policy redirects egress at this network's management port. **No SNAT** — the network is advertised, so the pod's own address survives |
+| 4 | `ovn-k8s-mp6` | Leaves OVN, enters the host kernel, still sourced `10.221.2.3` |
+| 5 | **`ip rule` 1000, l3mdev** | The management port is enslaved to VRF `red`, so the lookup goes to **table 1117 — not `main`**. This is the fork phase 1 does not have, and everything below follows from it |
+| 6 | Table 1117 | `default via 192.168.122.1 dev br-ex`. There is **no** `192.168.140.0/24` here. That prefix is a *connected* route on `enp8s0`, and `enp8s0` is in the default VRF, so `main` has it and this table does not |
+| 7 | `br-ex` → the node's primary NIC | Out the **management** network |
+| 8 | virbr0 | Wherever the management network reaches |
+
+Step 6 is the entire story. In phase 1 the equivalent lookup landed in `main`,
+where a connected `192.168.140.0/24` beat the default route and the packet went
+out the fabric. Here it lands in a table that has never heard of the fabric.
+
+#### In — an external client to a pod
+
+| # | Where | What decides the next hop |
+| --- | --- | --- |
+| 1 | Client | Static: `10.221.0.0/16 via 192.168.122.40` |
+| 2 | clab VM | `10.221.0.0/16 via 192.168.140.1` out `br-fabric`, and forwards |
+| 3 | **leaf1** | `10.221.2.0/24 via 192.168.140.36` — **learned over BGP from worker3**. This hop, and only this hop, is what the RouteAdvertisements bought |
+| 4 | worker3 `enp8s0` | Arrives in the **default VRF**. `main` has no `10.221.2.0/24` — it is in red's table |
+| 5 | **`ip rule` 2000** | `from all to 10.221.0.0/16 lookup 1117`. Installed by OVN-Kubernetes; without it the packet falls through to `main` and leaves again by the default route. **This is exactly blue's situation** |
+| 6 | Table 1117 | `10.221.2.0/24 dev ovn-k8s-mp6 proto kernel scope link` → back into OVN |
+| 7 | `br-int` → logical switch → veth | Delivered to the pod by MAC |
+
+#### Back — the pod's reply
+
+**Identical to Out.** Steps 1–8 again, unchanged. The reply does not retrace In,
+does not know In happened, and never sees leaf1.
+
+```
+in:    client -> clab VM -> leaf1 -> worker3 enp8s0 -> rule 2000 -> red VRF -> pod
+back:  pod -> red VRF -> default route -> br-ex -> virbr0 -> lab host -> client
+```
+
+### Why the two directions differ
+
+Because **they are decided by different routers, using different information.**
+
+- **Inbound is decided by leaf1**, from BGP. The advertisement told the fabric
+  where the pods are, so leaf1 sends the packet over the fabric to the node
+  holding that slice.
+- **Outbound is decided by the node**, from the tenant VRF's table. That table
+  contains the tenant's own subnets and the node's default gateway. Nothing
+  put the fabric in it.
+
+Which exposes what a route advertisement actually is: **one-way information.**
+It tells the fabric how to reach the pods. It does not tell the node how to
+reach the fabric, and it was never meant to — in the topology this feature is
+designed for, the node already knows, because there is only one way out.
+
+### Is this how it works in production?
+
+**No.** This asymmetry is a property of this lab, not of UDN-over-BGP.
+
+In a production deployment the BGP fabric is **what `br-ex` faces**. One data
+NIC or bond, attached to `br-ex`, and the ToR at the other end is both the
+node's default gateway *and* its BGP peer. The tenant VRF still gets
+`default via <the node's default gateway>` — but now that gateway **is** the
+fabric. Both directions use the same link, the flow is symmetric, and none of
+the reverse-path filtering in the section above is needed.
+
+This lab deliberately does something else. The fabric is a **second** NIC
+(`enp8s0` on virbr1) with no gateway, no DNS and no default route — see
+[Part 5](#part-5-address-the-fabric-nics), which is explicit that this is what
+makes the change safe to apply to a working cluster. The node keeps reaching
+everything it already reached via virbr0, and the only traffic that ever uses
+the fabric is traffic something has a specific route for. That safety property
+and phase 2's symmetry are the same trade-off seen from two sides.
+
+### Can the return path be forced to match?
+
+**Not in any way worth running.** Three options, and the first two are not real:
+
+1. **Write a route into the tenant VRF's table.** It works —
+   `ip route add 192.168.122.60/32 via 192.168.140.50 dev enp8s0 table 1117` —
+   and every reverse-path check then passes on its own merits. But table 1117
+   is allocated and owned by **OVN-Kubernetes**, which reconciles that VRF on
+   its own schedule and will remove anything it did not put there, with no
+   event and no warning. It is also a cross-VRF next hop: the table is the
+   tenant's, `enp8s0` is the default VRF's. Fine for a demonstration you are
+   watching; not a configuration.
+
+2. **Make the fabric the node's default route.** This would work *properly* —
+   the tenant VRF inherits the node's default gateway, so pointing that at the
+   fabric fixes every tenant at once, with nothing hand-written. It is also
+   exactly the production shape. But in this lab virbr1 is an isolated bridge
+   with no upstream and no NAT, so the moment it carries the default route the
+   nodes lose the API, the registry and DNS. Making it viable means giving
+   leaf1 an upstream and NAT — at which point you have rebuilt the lab as a
+   production topology and thrown away the property that made Part 5 safe.
+
+3. **Phase 3.** The supported answer, and the reason phase 3 exists. A VLAN
+   subinterface enslaved into the *same* VRF gives that VRF a connected route to
+   the fabric and its own BGP session. Outbound then matches inbound because
+   both are the tenant's own link, and no sysctl anywhere needs relaxing.
+
+OVN-Kubernetes exposes no field for this. There is no `targetVRF` value, no CR
+and no annotation that adds a fabric route to a tenant VRF while leaving the
+node's default gateway alone. **In phase 2, on this topology, the return path
+cannot be made symmetric.** Read phase 2 for what it proves — the advertisement
+is real, the prefixes are real, the un-SNAT is real, and the fabric can reach
+the pods — and go to phase 3 for a data path you would actually deploy.
 
 ---
 
