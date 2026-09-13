@@ -1610,8 +1610,8 @@ BGP told it.
 It also takes four separate pieces of hand-holding, which is the argument for
 phase 3 better than any prose.
 
-**Use red, orange or green — not blue.** Inbound works because of a rule
-OVN-Kubernetes installs on each node:
+**Inbound depends on one `ip rule` per tenant**, installed by
+OVN-Kubernetes on every node:
 
 ```bash
 oc debug node/worker3 --quiet -- chroot /host ip rule show | grep 10.22
@@ -1619,10 +1619,28 @@ oc debug node/worker3 --quiet -- chroot /host ip rule show | grep 10.22
 ```
 
 That is what catches a packet arriving in the default VRF on `enp8s0` and
-redirects it into the tenant's VRF, where the pod's subnet is connected. On
-the cluster this was built against, **blue has no such rule on any node**
-while the other three do. Nothing explains it yet; blue simply fails at the
-node and the fabric side looks perfect while it does.
+redirects it into the tenant's VRF, where the pod's subnet is connected.
+Without it the packet falls through to `main`, finds nothing, and leaves again
+by the default route — and the fabric side looks perfect while it happens.
+
+**If one tenant's rule is missing on every node while its siblings have
+theirs**, that tenant carries stale node-side state. On the cluster this was
+built against, blue had been created once with its namespace missing the
+`k8s.ovn.org/primary-user-defined-network` label, so its network was never
+realised; the rule was never installed, and later recreations by the playbook
+did not add it. Deleting the CUDN and its namespace by hand and recreating
+them did:
+
+```bash
+oc delete namespace udn-blue --wait
+oc delete clusteruserdefinednetwork blue --wait
+oc apply -f <manifest dir>/cudn-blue.yaml
+oc apply -f <manifest dir>/workload-blue.yaml
+```
+
+Worth knowing the shape rather than the specific case: a **row** of failures in
+the reachability matrix below, with the fabric and the advertisement both
+healthy, is this. Check the rule before anything else.
 
 Set the client up on the clab VM, which is on both networks. Note the address
 on `br-fabric`, which the fabric bridge does not otherwise have:
@@ -1757,7 +1775,8 @@ point of giving it a single NIC. Check `ttl=61` on the replies: three routed
 hops, so the packet really went via leaf1 and the node rather than being
 answered on-link.
 
-Blue will still fail, for the reason in the rule table above.
+If one tenant fails while the others pass, check its `ip rule` first — see
+above.
 
 #### Testing every tenant at once
 
