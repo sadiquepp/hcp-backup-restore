@@ -135,13 +135,18 @@
 # Every host in inventory/hosts carries the same -o argument for this reason;
 # a delegated host that is not in inventory inherits nothing and needs its own.
 #
-# ansible_user and the key are deliberately left alone: whatever reaches the
-# clab VM at .{{ ip_list.clab }} reaches this one, since both are the same base
-# image created the same way.
+# The key has to be named too. setup-bm-host builds the base image with
+# `virt-customize --ssh-inject "root:file:/root/.ssh/lab_rsa.pub"`, so lab_rsa
+# is the ONLY key in a fresh guest's authorized_keys - which is why every VM in
+# inventory/hosts carries ansible_ssh_private_key_file. Relying on ssh to find
+# it by itself works only where root has it in an agent or an ~/.ssh/config
+# entry, and silently does not on a host that has neither.
 - name: Register the client VM as an Ansible host
   ansible.builtin.add_host:
     name: "{{ udn_client_vm_name }}"
     ansible_host: "{{ lab_network_prefix }}.{{ ip_list[udn_client_vm_name] }}"
+    ansible_user: "{{ udn_client_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ udn_client_ssh_key }}"
     ansible_ssh_common_args: >-
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
     groups: udn_client
