@@ -36,6 +36,8 @@ where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
   - [Following one packet](#following-one-packet)
   - [Seeing it yourself](#seeing-it-yourself)
 - [Phase 2: UDNs in the default VRF](#phase-2-udns-in-the-default-vrf)
+  - [What phase 2 can and cannot reach](#what-phase-2-can-and-cannot-reach)
+  - [Reaching a UDN pod from outside the cluster](#reaching-a-udn-pod-from-outside-the-cluster)
 - [Phase 3: VRF-Lite](#phase-3-vrf-lite)
 - [Phase 4: EVPN](#phase-4-evpn)
 - [Live migration on the Layer2 tenant](#live-migration-on-the-layer2-tenant)
@@ -1587,6 +1589,125 @@ Giving the tenant VRF its own way out is exactly what phase 3 adds: a VLAN
 subinterface enslaved into that same VRF, with its own connected route and its
 own BGP session. So read phase 2 as: *the advertisement works, the prefixes
 are real, the un-SNAT is real* — and treat pod-to-fabric as a phase 3 result.
+
+### Reaching a UDN pod from outside the cluster
+
+The *inbound* direction does work in phase 2, and it is worth doing once
+because it proves the advertised prefixes are real routes and not just entries
+in a table. An external client can reach a UDN pod, routed by leaf1 using what
+BGP told it.
+
+It also takes four separate pieces of hand-holding, which is the argument for
+phase 3 better than any prose.
+
+**Use red, orange or green — not blue.** Inbound works because of a rule
+OVN-Kubernetes installs on each node:
+
+```bash
+oc debug node/worker3 --quiet -- chroot /host ip rule show | grep 10.22
+# 2000:  from all to 10.221.0.0/16 lookup 1117
+```
+
+That is what catches a packet arriving in the default VRF on `enp8s0` and
+redirects it into the tenant's VRF, where the pod's subnet is connected. On
+the cluster this was built against, **blue has no such rule on any node**
+while the other three do. Nothing explains it yet; blue simply fails at the
+node and the fabric side looks perfect while it does.
+
+Set the client up on the clab VM, which is on both networks. Note the address
+on `br-fabric`, which the fabric bridge does not otherwise have:
+
+```bash
+ip link set br-fabric up
+ip addr add 192.168.140.50/24 dev br-fabric
+ping -c2 192.168.140.1                          # leaf1 - must work first
+ip route add 10.221.0.0/16 via 192.168.140.1
+```
+
+Then ping **sourced from the management address**, not the fabric one:
+
+```bash
+ping -I 192.168.122.40 10.221.2.3
+```
+
+The source matters completely. The pod's reply is routed in the tenant VRF,
+whose only external route is `default via 192.168.122.1 dev br-ex` — so the
+reply leaves by the **management** network regardless of where the request
+came from. Source it from `192.168.140.50` and the reply goes to the lab host,
+which has no address on the fabric bridge, and dies there.
+
+So the flow is deliberately asymmetric:
+
+```
+request:  clab VM -> br-fabric -> leaf1 -> worker3 enp8s0 -> rule -> red VRF -> pod
+reply:    pod -> red VRF -> default route -> br-ex -> virbr0 -> lab host -> clab VM
+```
+
+Every host on that path performs a reverse-path check the asymmetry fails.
+
+Check it before changing it, because **the effective value is
+`max(all, <iface>)`** and the `all` value on its own is misleading. On the lab
+host that was dropping every reply:
+
+```
+net.ipv4.conf.all.rp_filter = 0        <- looks permissive
+net.ipv4.conf.virbr0.rp_filter = 1     <- and yet strict, because max() wins
+```
+
+Setting only `all` changes nothing. Set both, wherever the ping stops:
+
+```bash
+# the lab host - this is the one that was demonstrably dropping
+sysctl -w net.ipv4.conf.all.rp_filter=2
+sysctl -w net.ipv4.conf.virbr0.rp_filter=2
+
+# the clab VM - its route to 10.221.0.0/16 points at br-fabric, but the
+# reply arrives on eth0
+sysctl -w net.ipv4.conf.all.rp_filter=2
+sysctl -w net.ipv4.conf.eth0.rp_filter=2
+
+# the node, if the request never reaches the management port
+oc debug node/worker3 --quiet -- chroot /host sysctl -w net.ipv4.conf.all.rp_filter=2
+oc debug node/worker3 --quiet -- chroot /host sysctl -w net.ipv4.conf.enp8s0.rp_filter=2
+```
+
+`udn_bgp_loose_rp_filter: true` in `vars.yaml` makes the node's half permanent
+through the Tuned profile. The other two are outside the cluster and outside
+the playbook.
+
+When it works:
+
+```
+64 bytes from 10.221.2.3: icmp_seq=327 ttl=61 time=0.369 ms
+```
+
+**Read the TTL.** 64 minus three: leaf1, worker3, and the lab host. That is the
+proof the packet was routed rather than delivered on-link — and it is worth
+checking, because the clab VM shares a broadcast domain with all three workers.
+A plain unsourced `ping` gets an ICMP redirect from leaf1 (`Redirect Host, new
+nexthop 192.168.140.36`) and thereafter goes straight to the node, testing
+nothing about BGP at all.
+
+#### Making it symmetric instead
+
+One route on the node removes every rp_filter problem at once, by sending the
+reply back the way the request came:
+
+```bash
+ip route add 192.168.122.40/32 via 192.168.140.50 dev enp8s0 table 1117
+```
+
+Forward and reverse paths then agree and each check passes on its own merits.
+Two caveats: `enp8s0` is in the default VRF while the route lives in a tenant
+table, so it is a cross-VRF nexthop; and **table 1117 belongs to
+OVN-Kubernetes**, so a hand-added route there lasts until the controller next
+reconciles that VRF, with no warning when it goes.
+
+Which is the summary of this whole section. It works, it demonstrates
+something true, and every part of making it work is something phase 3 does
+properly: the tenant VRF gets its own fabric interface, its own connected
+route and its own BGP session, both directions use it, and none of the above
+is needed.
 
 ---
 
