@@ -74,19 +74,28 @@
 # template is only rendered when the network is (re)defined - and redefining it
 # on a running lab drops every guest's lease. net-update adds the one host
 # entry live instead.
+#
+# `net-update ... add` is not idempotent: a second run fails with "there is an
+# existing dhcp host entry in network 'default' that matches ...". Read the
+# network and skip, rather than running it and forgiving the error - matching
+# on libvirt's wording is the kind of guard that silently stops working when
+# the wording changes, and an earlier version of this task got that string
+# wrong and failed every re-run.
+- name: Read the default network's current definition
+  ansible.builtin.command:
+    cmd: "virsh net-dumpxml default"
+  register: udn_client_net_xml
+  changed_when: false
+
 - name: Reserve the client VM's management address
   ansible.builtin.command:
     cmd: >-
       virsh net-update default add ip-dhcp-host
-      "<host mac='52:54:00:e2:54:{{ ip_list[udn_client_vm_name] }}'
+      "<host mac='{{ udn_client_mac }}'
              name='{{ udn_client_vm_name }}'
              ip='{{ lab_network_prefix }}.{{ ip_list[udn_client_vm_name] }}'/>"
       --live --config
-  register: udn_client_dhcp
-  changed_when: udn_client_dhcp.rc == 0
-  failed_when:
-    - udn_client_dhcp.rc != 0
-    - "'already exists' not in udn_client_dhcp.stderr"
+  when: udn_client_mac | lower not in udn_client_net_xml.stdout | lower
 
 - name: Check whether the client VM is already defined
   ansible.builtin.shell:
@@ -107,7 +116,7 @@
       --memballoon model=virtio,freePageReporting=on \
       --noautoconsole \
       --cpu host-passthrough \
-      --network network:default,mac=52:54:00:e2:54:{{ ip_list[udn_client_vm_name] }}
+      --network network:default,mac={{ udn_client_mac }}
   when: udn_client_vm_state.stdout == ''
 
 - name: Wait for the client VM to accept ssh

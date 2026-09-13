@@ -47,3 +47,9 @@ clab_fabric_client_gw_octet: 50
 
 udn_client_vm_disk_path: "{{ download_dir | regex_replace('/+$', '') }}/{{ udn_client_vm_disk }}"
 udn_client_base_image_path: "{{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_client_base_image }}"
+
+## The client VM's management MAC. Same 52:54:00:e2:54:<octet> scheme the lab's
+## other guests use, which is what the default network's DHCP reservations are
+## keyed on - so this is the contract between virt-install and the reservation,
+## and both read it from here.
+udn_client_mac: "52:54:00:e2:54:{{ ip_list[udn_client_vm_name] }}"
