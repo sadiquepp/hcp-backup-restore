@@ -12,11 +12,51 @@
 # expansion the other VMs use. This VM runs ping and tcpdump; it has no use for
 # a grown root filesystem, and the copy is seconds rather than minutes.
 
-- name: Fail if the base image for the client VM is missing
+# This file builds a VM. It has to run ON the libvirt host, which for this lab
+# means running the playbook there rather than from a workstation - the play is
+# `hosts: localhost`, so there is no delegation to fall back on. The cluster-
+# side tags are only `oc` against a kubeconfig and run anywhere; anything that
+# touches libvirt does not.
+#
+# Checked explicitly because the failure otherwise surfaces as whatever the
+# workstation's sudo says - on a Mac, "sudo: a password is required" from the
+# first task that tries to become, which says nothing about the real problem.
+- name: Check for libvirt tooling
+  ansible.builtin.command:
+    cmd: "which virsh qemu-img virt-install"
+  register: udn_client_virsh
+  changed_when: false
+  failed_when: false
+
+- name: Fail if this is not the libvirt host
+  ansible.builtin.assert:
+    that: udn_client_virsh.rc == 0
+    fail_msg: >-
+      virsh, qemu-img or virt-install is missing, so this is not the lab's
+      libvirt host. --tags clabclient builds a VM and must run ON the
+      hypervisor ({{ ansible_hostname | default('the lab host') }} is what
+      Ansible sees), not from a workstation - the play is `hosts: localhost`
+      and has nothing to delegate to. The cluster-side tags (preflight,
+      default, shared, vrflite, evpn) are only `oc` calls and do run anywhere.
+    success_msg: >-
+      libvirt tooling is present.
+
+- name: Look for the base image for the client VM
   ansible.builtin.stat:
     path: "{{ udn_client_base_image_path }}"
   register: udn_client_base
-  failed_when: not udn_client_base.stat.exists
+
+- name: Fail if the base image is missing
+  ansible.builtin.assert:
+    that: udn_client_base.stat.exists
+    fail_msg: >-
+      No base image at {{ udn_client_base_image_path }}. The client VM is a
+      plain copy of it - there is no download step, deliberately, because every
+      other VM in this lab expects the image to be staged already. Put a qcow2
+      there and set udn_client_base_image to its filename (and
+      udn_client_os_variant to match: rhel9.5, rhel8.10, ...).
+    success_msg: >-
+      Base image {{ udn_client_base_image }} found.
 
 - name: Check whether the client VM disk already exists
   ansible.builtin.stat:
