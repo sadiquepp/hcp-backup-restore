@@ -7,8 +7,17 @@
 #   2. and no other tenant's                                 (off-diagonal: FAIL)
 #   3. blue and red keep their IDENTICAL subnets apart       (identity check)
 #
-#   scripts/udn-vrf-isolation.sh
+#   scripts/udn-vrf-isolation.sh              # matrices 1 and 2, from the pods
 #   scripts/udn-vrf-isolation.sh --count 3
+#
+# Matrix 3 adds real clients behind leaf1, and the flag picks WHICH clients:
+#
+#   --vms          the five per-tenant client VMs   (--tags clabtenantclients)
+#   --netns        the one VM's per-tenant namespaces (--tags clabnsclient)
+#   --vms --netns  both sets, side by side, to compare the two rigs
+#
+# The flags are additive and neither implies the other: --netns alone runs the
+# namespaces INSTEAD OF the VMs. Ask for both explicitly to get both.
 #
 # Run it after --tags vrflite. In phase 2 every tenant is in leaf1's default
 # VRF and every cell is reachable, so the off-diagonal "failures" this looks
@@ -53,12 +62,19 @@ CLIENTS_ENV="${UDN_CLIENTS_ENV:-$(dirname "$0")/../udn-bgp/tenant-clients.env}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --count|-c) COUNT="$2"; shift 2 ;;
-        --vms|-v)   WITH_VMS=1; shift ;;
-        --netns)    WITH_VMS=1; WITH_NETNS=1; shift ;;
-        -h|--help)  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        # Additive: --vms --netns runs both. Neither implies the other, which
+        # is the whole correction - --netns used to drag the VMs in with it.
+        --vms|-v|--vms-only)   WITH_VMS=1; shift ;;
+        --netns|--netns-only)  WITH_NETNS=1; shift ;;
+        -h|--help)  sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+# WITH_VMS and WITH_NETNS say WHO is in matrix 3; RUN_CLIENTS says whether to
+# run it at all. They were one variable until --netns had to mean "namespaces
+# instead of the VMs" rather than "namespaces as well".
+RUN_CLIENTS=$(( WITH_VMS || WITH_NETNS ))
 
 command -v oc >/dev/null || { echo "oc not found in PATH" >&2; exit 1; }
 if (( BASH_VERSINFO[0] < 4 )); then
@@ -273,7 +289,7 @@ verdict() {
 }
 
 # ---------------------------------------------------------------------------
-# Matrix 3: the per-tenant client VMs (--vms)
+# Matrix 3: the per-tenant clients (--vms, --netns, or --both)
 # ---------------------------------------------------------------------------
 # Three real machines behind leaf1, each on the client VLAN(s) for the tenants
 # it serves and on no others. Same finding as matrix 2, from hosts rather than
@@ -287,15 +303,20 @@ verdict() {
 # from the manifest the role renders, not guessed here.
 probe_from_vms() {
     echo
-    echo "Pinging one pod of every tenant from every per-tenant client VM"
+    echo "Pinging one pod of every tenant from every per-tenant client"
     echo
-    if [[ ! -r "$CLIENTS_ENV" ]] && { (( ! WITH_NETNS )) || [[ ! -r "$NETNS_ENV" ]]; }; then
+    if (( WITH_VMS )) && [[ ! -r "$CLIENTS_ENV" ]]; then
         echo "  No client manifest at $CLIENTS_ENV." >&2
         echo "  Build the VMs with --tags clabtenantclients, or set UDN_CLIENTS_ENV." >&2
-        return 1
+        (( WITH_NETNS )) || return 1
+    fi
+    if (( WITH_NETNS )) && [[ ! -r "$NETNS_ENV" ]]; then
+        echo "  No namespace-client manifest at $NETNS_ENV." >&2
+        echo "  Build it with --tags clabnsclient, or set UDN_NETNS_ENV." >&2
+        (( WITH_VMS )) || return 1
     fi
     local name ip tenants ns
-    if [[ -r "$CLIENTS_ENV" ]]; then
+    if (( WITH_VMS )) && [[ -r "$CLIENTS_ENV" ]]; then
         while IFS='|' read -r name ip tenants; do
             [[ -n "${name:-}" && "$name" != \#* ]] || continue
             add_unique clients "$name"
@@ -358,7 +379,7 @@ probe_from_vms() {
 
 print_vm_matrix() {
     echo
-    echo "client VM -> pod   (expect ok only for the tenants each VM serves)"
+    echo "client -> pod   (expect ok only for the tenants each client serves)"
     printf '%-16s' 'client'
     for c in "${tenants_all[@]}"; do printf ' %-10s' "$c"; done
     echo
@@ -385,7 +406,7 @@ vm_verdict() {
             fi
         done
     done
-    (( bad == 0 )) && echo "  clean: every client VM reached exactly the tenants it serves"
+    (( bad == 0 )) && echo "  clean: every client reached exactly the tenants it serves"
     return $bad
 }
 
@@ -483,10 +504,10 @@ tenants_all=("${tenants[@]}")
 
 probe_pods_to_ext
 probe_ext_to_pods
-(( WITH_VMS )) && probe_from_vms
+(( RUN_CLIENTS )) && probe_from_vms
 print_matrix "pod -> external endpoint   (expect ok on the diagonal only)" M1 "pod tenant"
 print_matrix "external endpoint -> pod   (expect ok on the diagonal only)" M2 "ext tenant"
-(( WITH_VMS )) && print_vm_matrix
+(( RUN_CLIENTS )) && print_vm_matrix
 
 echo
 ambig=0
@@ -508,7 +529,7 @@ echo " pod -> ext:"
 verdict M1 "external network" || rc=$?
 echo " ext -> pod:"
 verdict M2 "pods" || rc=$?
-(( WITH_VMS )) && { echo " client VM -> pod:"; vm_verdict || rc=$?; }
+(( RUN_CLIENTS )) && { echo " client -> pod:"; vm_verdict || rc=$?; }
 identity_check || rc=$?
 
 echo

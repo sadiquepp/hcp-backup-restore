@@ -3,7 +3,12 @@
 # Curl every tenant's web pod from every per-tenant client VM, and print what
 # came back.
 #
-#   scripts/udn-web-demo.sh
+#   scripts/udn-web-demo.sh                  # the five per-tenant client VMs
+#   scripts/udn-web-demo.sh --netns          # the one VM's per-tenant namespaces
+#   scripts/udn-web-demo.sh --vms --netns    # both sets, side by side
+#
+# The flags are additive and neither implies the other: --netns alone runs the
+# namespaces INSTEAD OF the VMs. Ask for both explicitly to get both.
 #
 # This is the demo the matrices in udn-vrf-isolation.sh imply but cannot show.
 # A ping tells you something answered; it cannot tell you WHAT. Once blue and
@@ -25,12 +30,15 @@ CLIENTS_ENV="${UDN_CLIENTS_ENV:-$(dirname "$0")/../udn-bgp/tenant-clients.env}"
 NETNS_ENV="${UDN_NETNS_ENV:-$(dirname "$0")/../udn-bgp/netns-client.env}"
 WITH_NETNS=0
 WITH_VMS=1
+EXPLICIT=0
 for arg in "$@"; do
     case "$arg" in
-        --netns)      WITH_NETNS=1 ;;
-        --netns-only) WITH_NETNS=1; WITH_VMS=0 ;;
-        --vms-only)   WITH_NETNS=0; WITH_VMS=1 ;;
-        -h|--help)    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        # Additive once the default is out of the way: --vms --netns runs both.
+        # WITH_VMS defaults to 1, so the first explicit choice has to clear it,
+        # otherwise --netns would silently keep the VMs - the bug this fixes.
+        --netns|--netns-only) (( EXPLICIT )) || WITH_VMS=0; EXPLICIT=1; WITH_NETNS=1 ;;
+        --vms|--vms-only)     (( EXPLICIT )) || WITH_NETNS=0; EXPLICIT=1; WITH_VMS=1 ;;
+        -h|--help)    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
     esac
 done
