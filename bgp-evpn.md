@@ -2779,19 +2779,31 @@ Two mechanics worth knowing if you read the script:
   silently. Same for `net.ipv4.*` sysctls, which are per-namespace: setting
   `rp_filter` in root does nothing for `blue`.
 
-Both test scripts take `--netns`, which adds one pseudo-client per namespace
-alongside the VM clients — same address, different command prefix. Everything
-downstream is unchanged, because the only question either script asks of a
-client is which tenants it serves.
+Both test scripts take `--netns`, which builds one pseudo-client per namespace
+— same address, different command prefix. Everything downstream is unchanged,
+because the only question either script asks of a client is which tenants it
+serves.
 
-Drive them with:
+The flag picks *which* clients populate the matrix. The flags are additive and
+neither implies the other, so `--netns` alone runs the namespaces **instead
+of** the VMs; ask for both explicitly to get the side-by-side view, which is
+what you want while deciding between the two rigs and not after.
 
 ```bash
-scripts/udn-vrf-isolation.sh --vms          # the per-tenant VMs
-scripts/udn-vrf-isolation.sh --netns        # both, side by side
-scripts/udn-web-demo.sh --netns             # both
-scripts/udn-web-demo.sh --netns-only        # namespaces alone
+scripts/udn-vrf-isolation.sh --vms           # the five per-tenant VMs
+scripts/udn-vrf-isolation.sh --netns         # the namespaces alone
+scripts/udn-vrf-isolation.sh --vms --netns   # both, side by side
+scripts/udn-web-demo.sh                      # VMs (the default)
+scripts/udn-web-demo.sh --netns              # the namespaces alone
+scripts/udn-web-demo.sh --vms --netns        # both, side by side
 ```
+
+`--netns` used to mean *add* the namespaces to the VM run, which reads as
+*use* them and produced a nine-row table when five were wanted. `--netns-only`
+and `--vms-only` survive as aliases. Note `--both` is deliberately **not** a
+synonym here: `udn-reachability.sh --both` already means both *directions*,
+and one flag meaning two things across sibling scripts is the same trap in a
+different place.
 
 ```
 client VM -> pod   (expect ok only for the tenants each VM serves)
