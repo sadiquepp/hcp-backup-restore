@@ -38,6 +38,7 @@ where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
 - [Phase 2: UDNs in the default VRF](#phase-2-udns-in-the-default-vrf)
   - [What phase 2 can and cannot reach](#what-phase-2-can-and-cannot-reach)
   - [Reaching a UDN pod from outside the cluster](#reaching-a-udn-pod-from-outside-the-cluster)
+  - [The Layer2 tenant gets ECMP](#the-layer2-tenant-gets-ecmp-and-the-layer3-tenants-cannot)
   - [Following one packet in phase 2](#following-one-packet-in-phase-2)
   - [Why the two directions differ](#why-the-two-directions-differ)
   - [Is this how it works in production?](#is-this-how-it-works-in-production)
@@ -135,8 +136,11 @@ migration. See
 
 green differs on the wire too: every node advertises its whole prefix, so the
 leaf sees one prefix with several paths rather than a distinct per-node prefix
-from each. And under EVPN it takes a **macVRF** — an L2VNI carrying MAC
-reachability — where the Layer3 tenants take an ipVRF carrying prefixes.
+from each — and it installs all of them, giving green three-way ECMP into the
+cluster that the Layer3 tenants cannot have. See
+[The Layer2 tenant gets ECMP](#the-layer2-tenant-gets-ecmp-and-the-layer3-tenants-cannot).
+And under EVPN it takes a **macVRF** — an L2VNI carrying MAC reachability —
+where the Layer3 tenants take an ipVRF carrying prefixes.
 
 Phase 2 uses a distinct subnet for all four: that phase leaks every UDN into
 the one default VRF, where a prefix cannot belong to two networks.
@@ -1957,6 +1961,104 @@ than reading the CUDN.
 mechanisms are working: the `ip rule` carrying fabric-inbound traffic into the
 tenant VRF, and the VRF's route back out. A tenant can pass one and fail the
 other, and the script names it when that happens.
+
+#### The Layer2 tenant gets ECMP, and the Layer3 tenants cannot
+
+Green's flat subnet has a consequence on the fabric that is easy to state and
+worth confirming: **every node advertises the whole prefix, so the leaf gets
+three paths to one destination** — and it uses all of them.
+
+```bash
+docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp ipv4 unicast 10.223.0.0/16'
+```
+```
+Paths: (3 available, best #1, table default)
+  64512
+    192.168.140.34(worker1) ... valid, external, multipath, bestpath-from-AS 64512, best
+  64512
+    192.168.140.36(worker3) ... valid, external, multipath
+  64512
+    192.168.140.35(worker2) ... valid, external, multipath
+```
+
+All three marked **`multipath`** — but the BGP table selecting them is not the
+same as the kernel using them, and the two are worth checking separately:
+
+```bash
+docker exec clab-udnbgp-leaf1 vtysh -c 'show ip route 10.223.0.0/16'
+```
+```
+Routing entry for 10.223.0.0/16
+  Known via "bgp", distance 20, metric 0, best
+  * 192.168.140.34, via eth1, weight 1
+  * 192.168.140.35, via eth1, weight 1
+  * 192.168.140.36, via eth1, weight 1
+```
+
+Three `*` — all installed, all active. This is genuine three-way ECMP into the
+cluster, and **it needs no configuration**: FRR enables eBGP multipath by
+default. Worth knowing if you swap FRR for another NOS in this topology, since
+Cisco IOS and older Quagga default `maximum-paths` to 1 and would install one
+path from the same BGP table.
+
+Now the Layer3 comparison, which is the point:
+
+```bash
+docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp ipv4 unicast 10.222.0.0/16 longer-prefixes'
+```
+```
+ *>  10.222.1.0/24    192.168.140.36(worker3)
+ *>  10.222.3.0/24    192.168.140.34(worker1)
+ *>  10.222.5.0/24    192.168.140.35(worker2)
+```
+
+Three prefixes, one path each, no `=` anywhere. **Layer3 cannot have ECMP into
+a tenant** — each node advertises only its own slice, so for any given pod
+there is exactly one correct node and the path must be right. A misrouted
+packet for orange has nowhere to go.
+
+##### ECMP here is distribution, not reachability
+
+This is the part that inverts the usual intuition. For a Layer2 tenant, **any
+node can deliver to any pod**: the subnet is one flat domain, so a packet for
+`10.223.0.5` arriving at worker1 is handed into the green network and tunnelled
+over geneve to worker2 where the pod actually lives.
+
+So green would work with no ECMP at all — one best path, every inbound packet
+entering through one node, everything still reachable, and nothing in any test
+distinguishing it. ECMP buys load distribution and failure tolerance, not
+correctness. For the Layer3 tenants it is the reverse: there is no ECMP to have,
+and correctness depends entirely on the path being right.
+
+##### Seeing the distribution
+
+A single ping will not show it. Linux hashes ECMP on source and destination
+address (`net.ipv4.fib_multipath_hash_policy=0` by default), so every packet of
+one flow picks the same next hop. Vary the destination instead — the three
+green pods hash differently:
+
+```bash
+# on each node, while pinging all three green pods from the client
+oc debug node/worker1 --quiet -- chroot /host timeout 20 tcpdump -nni enp8s0 icmp
+```
+
+Different pods arrive at different nodes, and each is delivered regardless of
+which node received it.
+
+##### Why this is the right shape for VMs
+
+Put the two properties together — one prefix from every node, and any node able
+to deliver — and **a live migration is invisible to the fabric**. The prefix
+does not change, the path set does not change, the leaf's forwarding table is
+untouched. Traffic may already be arriving at the target node, or arriving at
+the old one and being tunnelled; both work, throughout, with no BGP
+reconvergence at all.
+
+A Layer3 workload that moves node changes address, and therefore changes
+prefix, and therefore requires a withdraw and a re-announce. That is the real
+reason the VM tenant is Layer2 — not the flat subnet for its own sake, but that
+the fabric never has to learn anything when the workload moves. See
+[Live migration on the Layer2 tenant](#live-migration-on-the-layer2-tenant).
 
 #### Making it symmetric instead
 
