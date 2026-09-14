@@ -67,3 +67,130 @@
   ansible.builtin.include_tasks: wait-ra.yml
   vars:
     udn_bgp_ra_name: udn-vrflite
+
+# ---------------------------------------------------------------------------
+# Phase 3c - make bgpd bind to the tenant VRFs
+# ---------------------------------------------------------------------------
+# FRR's bgpd resolves 'router bgp <asn> vrf <name>' to a kernel VRF device when
+# it parses that stanza. If the device is replaced afterwards the instance is
+# left holding VRF_UNKNOWN and goes inert - and phase 3 replaces every one of
+# them, because recreating the CUDNs on the new subnets makes OVN-Kubernetes
+# tear down each tenant VRF and build a new one with a new table id.
+#
+# Nothing reports this. frr.conf is correct and contains all four routers, the
+# FRRConfigurations are accepted, the RouteAdvertisements CR is Accepted,
+# OVN-Kubernetes generates its additive configs, NMState is Available on every
+# policy, and 'show vrf' lists every VRF with the right table. The only trace
+# is in 'show bgp vrf all summary':
+#
+#     BGP router identifier 0.0.0.0 ... VRF blue vrf-id -1
+#     192.168.141.1 ... 0  0  never  Idle
+#
+# router-id 0.0.0.0 because bgpd cannot see into the VRF to find an address,
+# and zero messages in either direction because it never attempts the
+# connection. The leaf shows its side as Active/never and looks like a
+# connectivity fault, which is what sent the first three hours of diagnosis
+# down the wrong layer. Connectivity is fine: the leaf can ping the node's
+# VLAN address through the VRF the whole time.
+#
+# 'show bgp summary' does NOT show this - it is scoped to the default VRF,
+# which keeps working throughout. Only 'vrf all' reveals it.
+#
+# Restarting frr-k8s fixes it permanently: bgpd starts with the VRFs already
+# present and binds normally. Done conditionally so a re-run against a healthy
+# cluster changes nothing - a restart drops each node's default-VRF session for
+# a few seconds, which is harmless but not worth doing for free.
+- name: List the frr-k8s pods
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} get pods -l component=frr-k8s
+      -o name
+  register: udn_bgp_frrk8s_pods
+  changed_when: false
+
+- name: Read each node's per-VRF BGP instances
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} exec {{ item }} -c frr --
+      vtysh -c "show bgp vrf all summary"
+  loop: "{{ udn_bgp_frrk8s_pods.stdout_lines }}"
+  register: udn_bgp_vrf_bgp
+  changed_when: false
+  failed_when: false
+
+- name: Note whether any tenant VRF failed to bind
+  ansible.builtin.set_fact:
+    udn_bgp_needs_rebind: >-
+      {{ udn_bgp_vrf_bgp.results
+         | map(attribute='stdout', default='')
+         | select('search', 'vrf-id -1')
+         | list | length > 0 }}
+
+- name: Report the binding state
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'At least one bgpd VRF instance is unbound (vrf-id -1). Restarting
+      frr-k8s so bgpd binds to the tenant VRFs.'
+      if udn_bgp_needs_rebind | bool else
+      'Every bgpd VRF instance is bound to its kernel VRF. No restart needed.' }}
+
+- name: Restart frr-k8s so bgpd binds to the tenant VRFs
+  ansible.builtin.command:
+    cmd: "oc -n {{ udn_bgp_frrk8s_namespace }} rollout restart daemonset/frr-k8s"
+  when: udn_bgp_needs_rebind | bool
+
+- name: Wait for frr-k8s to come back
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} rollout status daemonset/frr-k8s
+      --timeout=300s
+  when: udn_bgp_needs_rebind | bool
+  changed_when: false
+
+# The pod names change on a restart, so this cannot reuse the list above.
+- name: List the frr-k8s pods again
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} get pods -l component=frr-k8s
+      -o name
+  register: udn_bgp_frrk8s_pods_after
+  when: udn_bgp_needs_rebind | bool
+  changed_when: false
+
+# Sessions need a few seconds after the restart. The timers are 3s/9s, so
+# retrying for a minute is generous rather than optimistic.
+- name: Confirm every tenant VRF is bound and peering
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} exec {{ item }} -c frr --
+      vtysh -c "show bgp vrf all summary"
+  loop: "{{ udn_bgp_frrk8s_pods_after.stdout_lines }}"
+  register: udn_bgp_vrf_bgp_after
+  when: udn_bgp_needs_rebind | bool
+  changed_when: false
+  retries: 12
+  delay: 5
+  until: "'vrf-id -1' not in (udn_bgp_vrf_bgp_after.stdout | default('vrf-id -1', true))"
+  failed_when: false
+
+- name: Fail if a tenant VRF is still unbound
+  vars:
+    udn_bgp_final: >-
+      {{ (udn_bgp_vrf_bgp_after if udn_bgp_needs_rebind | bool
+          else udn_bgp_vrf_bgp).results | default([], true) }}
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_final | map(attribute='stdout', default='')
+        | select('search', 'vrf-id -1') | list | length == 0
+    fail_msg: >-
+      At least one node's bgpd still reports 'vrf-id -1' after restarting
+      frr-k8s, so a tenant's BGP instance is not attached to its kernel VRF
+      and that tenant can never peer. Read it with:
+        oc -n {{ udn_bgp_frrk8s_namespace }} exec <frr-k8s pod> -c frr --
+          vtysh -c 'show bgp vrf all summary'
+      and compare the VRF names there against 'show vrf'. Note that
+      'show bgp summary' without 'vrf all' shows only the default VRF and
+      will look healthy regardless.
+    success_msg: >-
+      Every tenant VRF has a bound bgpd instance on every node
+      ({{ udn_bgp_tenants | map(attribute='name') | join(', ') }}).
