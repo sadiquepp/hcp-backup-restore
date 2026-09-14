@@ -1410,23 +1410,21 @@ udn_bgp_tenants:
   ## udn_subnet as green.
   ##
   ## blue and red also share a subnet, but on Layer3 that never produced two
-  ## pods on one address: Layer3 slices the prefix per node, and OVN-Kubernetes
-  ## handed the six slices out pairwise disjoint (blue got 10.200.4/5/0.0/24,
-  ## red got 10.200.1/2/3.0/24) - which independent per-network allocation from
-  ## the base of the CIDR would not do. So the identity check could never fire
-  ## and "same address, different pod" stayed unproven.
+  ## pods on one address: Layer3 slices the prefix per node, and with 256
+  ## slices to spread across, two networks rarely put a pod on the same one. So
+  ## the identity check stayed dead and "same address, different pod" stayed
+  ## unproven.
   ##
   ## Layer2 removes the slicing. The whole prefix exists on every node, and
   ## IPAM allocates from the base of it, so green's first pod and purple's
   ## first pod should both land on the same low address. Then one URL returns
   ## two different pages depending only on which VRF the request entered.
   ##
-  ## The experiment is worth running either way. If the addresses collide, the
-  ## claim is demonstrated outright. If they do NOT, that is the stronger
-  ## finding: it means OVN-Kubernetes coordinates allocation across networks
-  ## sharing a CIDR even when there is no per-node slicing to coordinate, and
-  ## two pods on one address is simply not obtainable - which would settle a
-  ## question this lab has only been able to infer.
+  ## CONFIRMED: they collide. green and purple both came up on 10.204.0.12,
+  ## and curling that one URL from two clients returns "I am green" and
+  ## "I am purple". So OVN-Kubernetes does NOT coordinate allocation across
+  ## networks sharing a CIDR - the Layer3 tenants only looked coordinated
+  ## because 256 node slices are a lot of room to miss in.
   - name: purple
     topology: Layer2
     vlan: 150
