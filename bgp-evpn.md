@@ -2791,6 +2791,53 @@ addressing argument: orange and green do not collide, so one host serves both
 with two routes and no VRFs of its own. blue and red each need their own
 machine for the same reason that row is possible.
 
+#### Curl it instead: a page that names the responder
+
+```bash
+ansible-playbook setup_udn_bgp_lab.yaml -i inventory/hosts --tags web --ask-vault-pass
+scripts/udn-web-demo.sh
+```
+
+One pod per tenant, serving a page built at start-up from what the running pod
+knows:
+
+```
+I am blue
+
+tenant:   blue
+pod:      udn-web-6c9f4d7b8-x2klm
+node:     worker1
+udn:      10.200.4.5/24
+subnet:   10.200.0.0/16
+```
+
+`scripts/udn-web-demo.sh` curls every tenant's pod from every client VM:
+
+```
+What answered
+client           blue           red
+udnclient-blue   I am blue      (no answer)
+udnclient-red    (no answer)    I am red
+```
+
+Both addresses are inside `10.200.0.0/16`. The only difference between those
+two machines is the VLAN tag on their fabric interface, and that is what
+decided which document came back.
+
+Two details worth knowing:
+
+- **The address comes off `ovn-udn1`, not `status.podIP`.** For a primary UDN,
+  `podIP` is the *cluster* network address on `eth0` — printing it would show
+  an address with nothing to do with what was curled.
+- **This pod needs no privileged SCC**, unlike the ping DaemonSet. It listens
+  on 8080 as a non-root user, which `restricted-v2` allows; the DaemonSet needs
+  `NET_RAW` and therefore a ServiceAccount bound to `system:openshift:scc:privileged`.
+  Listening above 1024 is the whole difference.
+
+Where blue and red pods *do* land on the same address, this replaces the
+counter check below outright: same URL, two machines, two answers, each naming
+itself.
+
 #### A successful ping does not prove isolation
 
 This is the part 3e cannot cover and no amount of extra clients would fix.
