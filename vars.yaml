@@ -1454,9 +1454,16 @@ udn_nsclient_segment_host_octet: 21
 ## curling two addresses in that subnet from two client VMs returns two
 ## different documents and there is nothing left to infer.
 ##
-## Default is blue and red because they are the pair that overlaps. Add orange
-## or green if you want a page on them too; nothing here assumes two.
-udn_web_tenants: [blue, red, green, purple]
+## Every tenant, including the ones that overlap with nothing. The overlapping
+## pairs - blue/red and green/purple - are why the demo exists, but a tenant
+## with no pod produces a row of blanks, and a row of blanks is exactly what a
+## dead client produces too. Orange was left out on the reasoning that a page
+## proves nothing a ping cannot for a subnet nobody shares; that confuses what
+## the POSITIVE cell proves with what the row as a whole proves. Orange's one
+## answer is what licenses reading its four blanks as isolation rather than as
+## breakage - and with orange/worker1 among the sessions currently stuck in
+## Active, the blank row was hiding a real failure, not demonstrating one.
+udn_web_tenants: [blue, red, orange, green, purple]
 
 ## UBI, not registry.redhat.io: this needs no entitlement, and unlike the ping
 ## DaemonSet it needs no privileged SCC either - httpd-24 listens on 8080 as a
