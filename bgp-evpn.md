@@ -2263,7 +2263,8 @@ What to look for in that diff, in rough order of how much it says:
 
 | File | Phase 2 | Phase 3 |
 | --- | --- | --- |
-| `egress-decisions.txt` | `via 192.168.122.1 dev br-ex` — the node's default gateway | via the tenant's own VLAN subinterface |
+| `egress-decisions.txt` — tenant destinations | no route | **via the tenant's own VLAN subinterface** |
+| `egress-decisions.txt` — `192.168.140.1`, `192.168.122.60` | `via 192.168.122.1 dev br-ex` — the node's default gateway | no route |
 | `node-*-routes-all-tables.txt` | tenant table holds its subnets and a default route | plus a connected route to its handoff subnet and its own BGP-learned routes |
 | `leaf1-bgp-default-vrf.txt` | every tenant's prefixes | tenant prefixes gone |
 | `leaf1-bgp-all-vrfs.txt` | nothing per-tenant | every tenant's prefixes, **blue and red carrying the same one** in different VRFs |
@@ -2272,8 +2273,23 @@ What to look for in that diff, in rough order of how much it says:
 | `pod-networks.txt` | distinct subnets per tenant | blue and red identical |
 
 `egress-decisions.txt` is the one to read first. It asks the kernel directly
-where a given tenant's egress goes, per node, and it is the whole point of
-phase 3 in one line per tenant.
+where a given tenant's egress goes, per node, for two sets of destinations —
+and **both directions of the change matter**:
+
+- **The tenant's own destinations** — leaf1's addresses inside that tenant's
+  VRF: its handoff VLAN subinterface, the `<tenant>-ext` gateway, and the
+  phase-3 client segment gateway. These are unreachable in phase 2 and routed
+  in phase 3. They are read off leaf1 live (`ip -o -4 addr show master
+  <tenant>`) rather than listed in the script, so they cannot drift from the
+  topology.
+- **`192.168.140.1` and `192.168.122.60`** — leaf1's untagged default-VRF
+  address and the phase-2 client. Routed in phase 2 via the node's default
+  gateway; **`No route to host` in phase 3**, because the tenant table has no
+  default route and the tenant is no longer in the default VRF.
+
+A phase-3 capture showing nothing but `No route to host` is reporting the
+second half correctly and missing the first. If you see that, the snapshot
+predates this and was only probing the phase-2 destinations — re-run it.
 
 **Expect the reachability matrix to go red, and expect that.** The client sits
 in leaf1's *default* VRF, and phase 3 moves every tenant into its own — so the

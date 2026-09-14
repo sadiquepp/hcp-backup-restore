@@ -32,6 +32,12 @@ leaf() {  # vtysh command -> file
         "docker exec clab-${LAB_NAME}-leaf1 vtysh -c '$1'" 2>&1
 }
 
+clab_exec() {  # container-suffix, command -> stdout (non-vtysh)
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=10 "${SSH_USER}@${CLAB}" \
+        "docker exec clab-${LAB_NAME}-$1 ${*:2}" 2>&1
+}
+
 node() {  # node, command -> stdout
     oc debug "node/$1" --quiet -- chroot /host sh -c "$2" 2>&1
 }
@@ -48,6 +54,8 @@ leaf 'show bgp summary'               > "$OUT/leaf1-bgp-summary.txt"
 leaf 'show bgp vrf all summary'       > "$OUT/leaf1-bgp-all-vrf-summary.txt"
 leaf 'show ip route'                  > "$OUT/leaf1-route-default-vrf.txt"
 leaf 'show ip route vrf all'          > "$OUT/leaf1-route-all-vrfs.txt"
+clab_exec leaf1 'ip -o -4 addr show'  > "$OUT/leaf1-addrs.txt"
+clab_exec leaf1 'ip -d link show type vrf' > "$OUT/leaf1-vrfs.txt"
 leaf 'show running-config'            > "$OUT/leaf1-running-config.txt"
 
 # ---------------------------------------------------------------------------
@@ -94,11 +102,34 @@ done
 
 # ---------------------------------------------------------------------------
 # The kernel's own verdict on where a tenant's egress goes. One line per
-# (tenant, node), and the single clearest before/after in the whole snapshot:
-# phase 2 answers "via <node default gateway> dev br-ex", phase 3 should answer
-# via the tenant's own VLAN subinterface.
+# (tenant, node, destination), and the clearest before/after in the snapshot.
+#
+# Two sets of destinations, and BOTH directions of the change matter:
+#
+#   the tenant's own       phase 2: no route (they live in leaf1's tenant VRFs,
+#   (leaf1's addresses              which phase 2 never peers with)
+#    inside that VRF)      phase 3: via the tenant's own VLAN subinterface
+#
+#   192.168.140.1          phase 2: via the node's default gateway, dev br-ex
+#   192.168.122.60         phase 3: no route - the tenant table has no default
+#                                   route and is not in the default VRF
+#
+# An earlier version probed only the second set, so a healthy phase 3 printed
+# nothing but "No route to host" twelve times: correct, and useless. The
+# per-tenant destinations are read off leaf1 rather than listed here, so they
+# cannot drift from the topology.
 # ---------------------------------------------------------------------------
+# Addresses leaf1 holds inside one tenant's VRF: its handoff VLAN subinterface,
+# the <tenant>-ext gateway, and (phase 3 clients) the client segment gateway.
+# 'master' rather than 'vrf' because the alias is newer than some iproute2
+# builds and this has to work inside whatever the FRR image ships.
+leaf_vrf_addrs() {
+    clab_exec leaf1 "ip -o -4 addr show master $1" 2>/dev/null \
+        | awk '{split($4, a, "/"); print a[1]}' | tr '\n' ' '
+}
+
 echo "  egress decisions ..."
+declare -A VRFDEST
 {
     for ns in $(oc get ns -l udn-tenant -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
         tenant=$(oc get ns "$ns" -o jsonpath='{.metadata.labels.udn-tenant}')
@@ -113,7 +144,11 @@ echo "  egress decisions ..."
             mp=$(node "$node_name" "ip -o -4 addr show | awk '/ $pfx\./ {print \$2}' | head -1")
             mp="${mp//[$'\r\n']/}"
             echo "=== $tenant on $node_name: pod $ip via ${mp:-?} ==="
-            for dest in "${@:2}" 192.168.122.60 192.168.140.1; do
+            # Cached per tenant - one ssh per tenant, not per pod.
+            if [[ -z "${VRFDEST[$tenant]+set}" ]]; then
+                VRFDEST["$tenant"]=$(leaf_vrf_addrs "$tenant")
+            fi
+            for dest in ${VRFDEST[$tenant]} "${@:2}" 192.168.122.60 192.168.140.1; do
                 [[ -n "$dest" ]] || continue
                 printf '  -> %-18s ' "$dest"
                 node "$node_name" "ip route get $dest from $ip iif ${mp:-lo} 2>&1 | head -2 | tr '\n' ' '"
