@@ -98,6 +98,23 @@
   register: udn_tc_net_xml
   changed_when: false
 
+# So scripts/udn-vrf-isolation.sh --vms can find the clients and know which
+# tenants each one is supposed to reach, without parsing vars.yaml in bash.
+# Rendered from the same list the VMs are built from, so the two cannot drift.
+- name: Make sure the manifest directory exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/udn-bgp"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+
+- name: Record which client serves which tenants
+  ansible.builtin.template:
+    src: tenant-clients.env.j2
+    dest: "{{ playbook_dir }}/udn-bgp/tenant-clients.env"
+    mode: '0644'
+  delegate_to: localhost
+
 - name: Build each per-tenant client VM
   ansible.builtin.include_tasks: tenant-client-one.yml
   loop: "{{ udn_tenant_clients }}"

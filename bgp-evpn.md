@@ -2636,13 +2636,13 @@ lab keeps producing (strict `rp_filter`, a missing NNCP) stay visible. Off the
 diagonal a single node getting through is already a leak, so any success wins
 and the cell reads `ok(1/3)`.
 
-#### Why there is no client VM for this
+#### Where the clients are, and why not anywhere else
 
-Phase 2 needed one: the question was whether a real machine outside the
+Phase 2 needed a client VM: the question was whether a real machine outside the
 cluster could reach a pod, and the `*-ext` containers sat behind leaf1 rather
 than in front of it.
 
-Phase 3 asks a different question, and the answer is already built. The
+Phase 3 asks a different question, and the containers already answer it. The
 topology enslaves each tenant's external link to that tenant's VRF on leaf1:
 
 ```yaml
@@ -2650,12 +2650,88 @@ topology enslaves each tenant's external link to that tenant's VRF on leaf1:
 - ip link set blue-ext master blue          # ← the client link is IN the VRF
 ```
 
-So the four `*-ext` containers *are* four clients, each already in its own
-VRF. A VM would have to be plumbed onto leaf1 identically to prove anything —
-it would be `blue-ext` with more RAM. And a single VM holding all four tenants
-would need four VRFs of its own, which is worse than useless here: a VRF bug
-on the client is indistinguishable from a VRF bug on leaf1, and leaf1 is the
-thing under test. The client wants to be dumb.
+So the four `*-ext` containers *are* four clients, each already in its own VRF,
+and nothing about the network is proven by replacing them with VMs — the
+packets take a byte-identical path. A netns with its own routing table is a
+host for an L3 test.
+
+There are still per-tenant client **VMs** (`--tags clabtenantclients`), for two
+reasons that are worth being honest about. Neither is correctness:
+
+1. **Demonstration.** Two machines you can `ssh` into, pinging addresses out of
+   the same `10.200.0.0/16` and reaching different pods, is a better thing to
+   show someone than a counter diff inside a container.
+2. **No second path.** Every `*-ext` container has `eth0` on
+   `clab-udnbgp-mgmt`, a route between them that exists outside the fabric. It
+   cannot produce a false pass — the tests ping tenant addresses and default is
+   via `external_gw` — but a VM with one fabric NIC has no such thing to
+   explain away.
+
+Where they attach matters far more than whether they are VMs, and the two
+obvious spots are both wrong:
+
+| Attachment | Why not |
+| --- | --- |
+| The tenant handoff VLAN (110–140) | The client shares a broadcast domain with all three workers, so leaf1 answers with an ICMP redirect and traffic goes direct. Worse, the client has no VLAN 120 interface at all — so blue-cannot-reach-red is proven by **802.1Q**, not by the VRF. Nobody doubts two VLANs don't mix. |
+| The tenant's existing `external_prefix` | That subnet is already connected on leaf1 through the `<tenant>-ext` veth. A second interface carrying it gives the VRF two ambiguous paths to one network. |
+
+So each client gets **its own segment**, a VLAN on the same fabric bridge with
+leaf1 holding the gateway inside the tenant VRF:
+
+| Tenant | Client VLAN | Segment | leaf1 | client |
+| --- | --- | --- | --- | --- |
+| blue | 210 | `10.215.10.0/24` | `.1` in VRF blue | `.20` |
+| red | 220 | `10.216.10.0/24` | `.1` in VRF red | `.20` |
+| orange | 230 | `10.217.10.0/24` | `.1` in VRF orange | `.20` |
+| green | 240 | `10.218.10.0/24` | `.1` in VRF green | `.20` |
+
+Off-segment from the nodes, so leaf1 genuinely routes. Reachable only from the
+VLAN that lands in that VRF. leaf1 originates each segment into its VRF so the
+cluster learns the **return** path over BGP — without that the pods can be
+reached but cannot answer, which presents as a one-way fabric fault.
+
+#### Why three VMs and not one, or four
+
+```yaml
+udnclient-blue: [blue]        # 10.200.0.0/16
+udnclient-red:  [red]         # 10.200.0.0/16  - same prefix, must be separate
+udnclient-og:   [orange, green]   # 10.202.0.0/16 and 10.204.0.0/16 - distinct
+```
+
+The grouping is forced by the addressing, not chosen for tidiness. Blue and red
+carry the **same** pod subnet in phase 3, and one host has one routing table: a
+single VM serving both would hold one route to `10.200.0.0/16`, reach one
+tenant, and silently never reach the other. Orange and green don't collide, so
+one VM with two VLAN subinterfaces and two routes serves both — **and needs no
+VRFs of its own to do it.**
+
+That last point is why the clients are not one multi-VRF machine. A client-side
+VRF fault would be indistinguishable from the leaf-side VRF fault under test,
+and leaf1 is the thing being tested. The clients stay dumb. `tenant-client-vms.yml`
+asserts the no-overlap rule rather than trusting it, so adding a fifth tenant
+later cannot quietly produce a meaningless result.
+
+Drive them with:
+
+```bash
+scripts/udn-vrf-isolation.sh --vms
+```
+
+```
+client VM -> pod   (expect ok only for the tenants each VM serves)
+client           blue       green      orange     red
+udnclient-blue   ok         FAIL       FAIL       FAIL
+udnclient-red    FAIL       FAIL       FAIL       ok
+udnclient-og     FAIL       ok         ok         FAIL
+```
+
+`udnclient-blue` and `udnclient-red` pinging the same `/16` and landing on
+different pods is the phase-3 result in one line.
+
+These need the topology **redeployed** (`--tags clabdeploy`) after
+`udn_client_segments` was added — leaf1 builds the client VLAN subinterfaces in
+its `exec` block at container start, so an already-running leaf1 has none of
+them and every client fails at its gateway.
 
 #### A successful ping does not prove isolation
 
