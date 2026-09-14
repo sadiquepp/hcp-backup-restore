@@ -1,0 +1,77 @@
+# Tenant ingress for overlapping UDN segments.
+# Rendered by setup-clab-fabric for {{ udn_nsclient_vm_name }}. Do not edit here.
+#
+# The whole point is in the backends: two of them can name the SAME address and
+# port and reach different pods, because 'namespace <name>' makes HAProxy open
+# that connection inside that network namespace, against that namespace's
+# routing table. Nothing else about this config is unusual.
+
+global
+    log         /dev/log local0
+    maxconn     2048
+    # Root, because a backend with 'namespace' calls setns(), which needs
+    # CAP_SYS_ADMIN. The distro's own haproxy.service runs as the haproxy user
+    # and is left alone - this is a separate unit with a separate config.
+    user        root
+    group       root
+
+defaults
+    mode        http
+    log         global
+    option      httplog
+    option      dontlognull
+    timeout connect 5s
+    timeout client  30s
+    timeout server  30s
+    retries     2
+
+frontend tenants
+    bind {{ udn_proxy_bind_addr }}:{{ udn_proxy_port }}
+
+    # Host-based. host_only strips any :port before comparing, so a request to
+    # green.{{ udn_proxy_domain }}:{{ udn_proxy_port }} matches the same acl as one to the bare name.
+{% for t in udn_proxy_tenants %}
+    acl host_{{ t }}  req.hdr(host),host_only -i {{ t }}.{{ udn_proxy_domain }}
+{% endfor %}
+
+    # Path-based, so the demo works with no DNS at all: http://<vm>/{{ udn_proxy_tenants | first }}/
+{% for t in udn_proxy_tenants %}
+    acl path_{{ t }}  path /{{ t }}
+    acl path_{{ t }}  path_beg /{{ t }}/
+{% endfor %}
+
+{% for t in udn_proxy_tenants %}
+    use_backend be_{{ t }} if host_{{ t }} || path_{{ t }}
+{% endfor %}
+    default_backend be_unrouted
+
+{% for t in udn_proxy_tenants %}
+{# Sharers of this tenant's BACKEND ADDRESS, not of its subnet. Blue and red
+   share 10.200.0.0/16 but hold different addresses in it, and a proxy does not
+   care about the subnet - it dials one address. Only an identical address is
+   the case 'namespace' is load-bearing for. #}
+{% set sharers = [] %}
+{% for o in udn_proxy_tenants if o != t and udn_proxy_backend_addrs[o] == udn_proxy_backend_addrs[t] %}
+{% set _ = sharers.append(o) %}
+{% endfor %}
+backend be_{{ t }}
+    # Strip the /{{ t }} prefix when the path form was used; a Host-routed
+    # request has no prefix to strip and is unaffected.
+    http-request replace-path /{{ t }}/?(.*) /\1
+    http-request set-header X-UDN-Tenant {{ t }}
+{% if sharers %}
+    # {{ udn_proxy_backend_addrs[t] }} is ALSO {{ sharers | join(' and ') }}'s pod address, character for
+    # character. Without 'namespace' this server line and {{ sharers | join('/') }}'s would be
+    # the same instruction, and one routing table would answer both.
+{% endif %}
+    server {{ t }}1 {{ udn_proxy_backend_addrs[t] }}:{{ udn_web_port }} namespace {{ t }} check
+
+{% endfor %}
+backend be_unrouted
+    http-request return status 404 content-type "text/plain" string "no tenant matched this request.\nUse http://<host>/<tenant>/ or Host: <tenant>.{{ udn_proxy_domain }}\ntenants: {{ udn_proxy_tenants | join(' ') }}\n"
+
+listen stats
+    bind {{ udn_proxy_bind_addr }}:{{ udn_proxy_stats_port }}
+    stats enable
+    stats uri /
+    stats refresh 10s
