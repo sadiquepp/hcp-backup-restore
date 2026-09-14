@@ -1,0 +1,87 @@
+---
+# Build one per-tenant client VM. Included per entry in udn_tenant_clients,
+# with `client` as the loop variable.
+#
+# Two NICs: management on virbr0 so Ansible and ssh can reach it, and one on
+# the fabric network. The fabric NIC is attached UNTAGGED - every VLAN this
+# client uses is created inside the guest by udn-tenant-client-routes.sh, which
+# is what lets one VM serve two tenants on two VLANs without libvirt needing to
+# know anything about them.
+
+- name: Check whether {{ client.name }}'s disk already exists
+  ansible.builtin.stat:
+    path: "{{ download_dir | regex_replace('/+$', '') }}/{{ client.name }}_disk.qcow2"
+  register: udn_tc_disk
+
+# --sparse=always: the base image is mostly holes and a plain cp writes every
+# zero out.
+- name: Copy the base image to {{ client.name }}'s disk
+  ansible.builtin.command:
+    cmd: >-
+      cp --sparse=always {{ udn_tenant_client_base_image_path }}
+      {{ download_dir | regex_replace('/+$', '') }}/{{ client.name }}_disk.qcow2
+  when: not udn_tc_disk.stat.exists
+
+# net-update add is not idempotent - a second run fails with "there is an
+# existing dhcp host entry". Read the network and skip rather than forgiving
+# the error: matching on libvirt's wording is a guard that stops working
+# silently when the wording changes.
+- name: Reserve {{ client.name }}'s management address
+  ansible.builtin.command:
+    cmd: >-
+      virsh net-update default add ip-dhcp-host
+      "<host mac='{{ udn_tenant_client_mgmt_mac_prefix }}:{{ ip_list[client.name] }}'
+             name='{{ client.name }}'
+             ip='{{ lab_network_prefix }}.{{ ip_list[client.name] }}'/>"
+      --live --config
+  when: >-
+    (udn_tenant_client_mgmt_mac_prefix ~ ':' ~ ip_list[client.name]) | lower
+    not in udn_tc_net_xml.stdout | lower
+
+- name: Check whether {{ client.name }} is already defined
+  ansible.builtin.shell:
+    cmd: "virsh dominfo {{ client.name }} 2>/dev/null | awk '/State/ {print $2}'"
+  register: udn_tc_vm_state
+  changed_when: false
+
+- name: Define {{ client.name }}
+  ansible.builtin.shell:
+    cmd: |
+      virt-install \
+      --import \
+      --name "{{ client.name }}" \
+      --memory "{{ udn_tenant_client_memory }}" \
+      --vcpus "{{ udn_tenant_client_vcpus }}" \
+      --disk "{{ download_dir | regex_replace('/+$', '') }}/{{ client.name }}_disk.qcow2",format=qcow2,cache=none,bus=virtio \
+      --os-variant={{ udn_tenant_client_os_variant }} \
+      --memballoon model=virtio,freePageReporting=on \
+      --noautoconsole \
+      --cpu host-passthrough \
+      --network network:default,mac={{ udn_tenant_client_mgmt_mac_prefix }}:{{ ip_list[client.name] }} \
+      --network network:{{ clab_fabric_network }},mac={{ clab_fabric_mac_prefix }}:{{ ip_list[client.name] }},model=virtio
+  when: udn_tc_vm_state.stdout == ''
+
+- name: Wait for {{ client.name }} to accept ssh
+  ansible.builtin.wait_for:
+    host: "{{ lab_network_prefix }}.{{ ip_list[client.name] }}"
+    port: 22
+    timeout: 300
+    delay: 10
+
+# Named host rather than a bare IP so it carries its own connection settings.
+# StrictHostKeyChecking is the one that matters: a brand new VM's host key is
+# not in known_hosts and the ssh prompt does not fail the task, it hangs the
+# play. The key has to be named too - setup-bm-host injects only lab_rsa into
+# the base image, so a delegated host that is not in inventory has no other way
+# to find it.
+- name: Register {{ client.name }} as an Ansible host
+  ansible.builtin.add_host:
+    name: "{{ client.name }}"
+    ansible_host: "{{ lab_network_prefix }}.{{ ip_list[client.name] }}"
+    ansible_user: "{{ udn_client_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ udn_client_ssh_key }}"
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    udn_tc_tenants: "{{ client.tenants }}"
+    groups: udn_tenant_clients
+  changed_when: false

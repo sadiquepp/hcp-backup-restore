@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Fabric plumbing for {{ client.name }}, the phase-3 client for
+# {{ client.tenants | join(' and ') }}. Rendered by setup-clab-fabric.
+#
+# One untagged NIC on the fabric bridge, and one VLAN subinterface per tenant
+# this client serves. The VLAN is what selects the VRF: a frame tagged
+{% for t in client.tenants %}
+#   {{ '%-6s' | format(t) }} VLAN {{ udn_client_segments[t].vlan }} -> leaf1's {{ t }} VRF -> {{ t }}'s pods
+{% endfor %}
+# and nothing else. There is no VRF in this guest and there must not be: a
+# client-side VRF fault would be indistinguishable from the leaf-side VRF fault
+# under test, and leaf1 is the thing being tested. This host stays dumb.
+#
+# Note these VLANs are NOT the tenant handoff VLANs the nodes use. A client on
+# those would share a broadcast domain with all three workers, so leaf1 would
+# answer with an ICMP redirect and the traffic would go direct - and
+# blue-cannot-reach-red would then be proven by 802.1Q rather than by the VRF.
+# Off-segment, every packet is genuinely routed by leaf1 out of the tenant's
+# own routing table, which is the claim worth proving.
+set -euo pipefail
+trap 'echo "udn-tenant-client-routes.sh: failed at line $LINENO with status $?" >&2' ERR
+
+MAC="{{ (clab_fabric_mac_prefix ~ ':' ~ ip_list[client.name]) | lower }}"
+MTU={{ clab_fabric_mtu }}
+
+# No `exit` in the awk program: exiting on the first match closes the pipe
+# while `ip` is still writing, `ip` takes SIGPIPE, and with `set -o pipefail`
+# plus `set -e` that harmless signal becomes a fatal error. Reading the whole
+# list costs nothing.
+find_nic() {
+    ip -o link show | awk -v mac="$MAC" \
+        'tolower($0) ~ mac && !found { gsub(":","",$2); print $2; found = 1 }'
+}
+
+# virtio NICs appear early at boot, but 'early' is not 'before network-pre'.
+NIC=""
+for _ in $(seq 1 30); do
+    NIC=$(find_nic)
+    [ -n "$NIC" ] && break
+    sleep 1
+done
+
+if [ -z "$NIC" ]; then
+    echo "no interface with MAC $MAC in this VM - the fabric NIC is missing." >&2
+    echo "Attach it with: virsh attach-interface {{ client.name }} --type network" >&2
+    echo "  --source {{ clab_fabric_network }} --model virtio --mac $MAC --live --config" >&2
+    exit 1
+fi
+
+ip link set "$NIC" mtu "$MTU" up
+
+# Reverse-path filtering. Phase 3 should not need this: the request goes out
+# the tenant VLAN and the reply comes back the same way, because leaf1 routes
+# both directions inside one VRF - unlike phase 2, where the request crossed
+# the fabric and the reply came back via the node's default gateway. Set loose
+# anyway so a genuine isolation result is never confused with an rp_filter
+# drop. If you want to see the symmetry for yourself, set these to 1 and the
+# tests should still pass.
+sysctl -qw net.ipv4.conf.all.rp_filter=2
+for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 2 > "$i"; done
+
+{% for t in client.tenants %}
+{% set seg = udn_client_segments[t] %}
+{% set tenant = udn_bgp_tenants | selectattr('name', 'equalto', t) | first %}
+# --- {{ t }} : VLAN {{ seg.vlan }} ---------------------------------------------------
+VLAN{{ seg.vlan }}="$NIC.{{ seg.vlan }}"
+ip link show "$VLAN{{ seg.vlan }}" >/dev/null 2>&1 || \
+    ip link add link "$NIC" name "$VLAN{{ seg.vlan }}" type vlan id {{ seg.vlan }}
+ip link set "$VLAN{{ seg.vlan }}" mtu "$MTU" up
+ip addr replace {{ seg.prefix }}.{{ udn_client_segment_host_octet }}/{{ clab_fabric_netmask_bits }} dev "$VLAN{{ seg.vlan }}"
+
+# {{ t }}'s pod network. In phase 3 this prefix is {{ tenant.udn_subnet }}, which
+{% if (udn_bgp_tenants | selectattr('udn_subnet', 'equalto', tenant.udn_subnet) | list | length) > 1 %}
+# is ALSO {{ udn_bgp_tenants | selectattr('udn_subnet', 'equalto', tenant.udn_subnet) | map(attribute='name') | reject('equalto', t) | join(' and ') }}'s. That is why {{ t }} gets its own client VM:
+# this route can exist once per host, so a host holding both would reach one
+# tenant and silently never reach the other.
+{% else %}
+# is unique to {{ t }}, so a failure to reach it can only be the VRF.
+{% endif %}
+ip route replace {{ tenant.udn_subnet }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$VLAN{{ seg.vlan }}"
+
+# {{ t }}'s external network, where {{ t }}-ext lives. Reachable from here only
+# because leaf1 routes it inside the {{ t }} VRF - the same VRF, a second way in.
+ip route replace {{ tenant.external_prefix }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$VLAN{{ seg.vlan }}"
+
+{% endfor %}
+echo "udn-tenant-client-routes.sh: $NIC up, {{ client.tenants | length }} tenant VLAN(s): {% for t in client.tenants %}{{ t }}={{ udn_client_segments[t].vlan }} {% endfor %}"

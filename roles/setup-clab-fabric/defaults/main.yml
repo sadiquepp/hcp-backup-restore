@@ -60,3 +60,9 @@ udn_client_mac: "52:54:00:e2:54:{{ ip_list[udn_client_vm_name] }}"
 ## it is injected for. Same pair every VM in inventory/hosts names explicitly.
 udn_client_ssh_user: root
 udn_client_ssh_key: "~/.ssh/lab_rsa"
+
+## Phase 3 per-tenant client VMs (--tags clabtenantclients).
+udn_tenant_client_base_image_path: "{{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_tenant_client_base_image }}"
+## Same management-NIC OUI as the phase-2 client, so the two schemes do not
+## collide: mgmt is ...:e2:54:<octet>, fabric is clab_fabric_mac_prefix:<octet>.
+udn_tenant_client_mgmt_mac_prefix: "52:54:00:e2:54"

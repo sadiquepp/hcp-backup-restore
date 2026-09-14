@@ -45,10 +45,13 @@ LAB_NAME="${CLAB_LAB_NAME:-udnbgp}"
 SSH_KEY="${UDN_CLIENT_SSH_KEY:-$HOME/.ssh/lab_rsa}"
 SSH_USER="${UDN_CLIENT_SSH_USER:-root}"
 COUNT=2
+WITH_VMS=0
+CLIENTS_ENV="${UDN_CLIENTS_ENV:-$(dirname "$0")/../udn-bgp/tenant-clients.env}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --count|-c) COUNT="$2"; shift 2 ;;
+        --vms|-v)   WITH_VMS=1; shift ;;
         -h|--help)  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "unknown option: $1" >&2; exit 1 ;;
     esac
@@ -71,7 +74,8 @@ ext_exec() {  # tenant, then command
 }
 
 declare -A EXTHOST POD PODNS PODADDR
-declare -A M1 M2 OKC TOT
+declare -A M1 M2 OKC TOT VM SERVES CLIENTIP
+clients=()
 tenants=()
 records=()
 
@@ -236,6 +240,97 @@ verdict() {
 }
 
 # ---------------------------------------------------------------------------
+# Matrix 3: the per-tenant client VMs (--vms)
+# ---------------------------------------------------------------------------
+# Three real machines behind leaf1, each on the client VLAN(s) for the tenants
+# it serves and on no others. Same finding as matrix 2, from hosts rather than
+# containers - and with one path to the fabric each, so there is no management
+# network alongside as a second route between them.
+#
+# udnclient-blue and udnclient-red are separate machines because blue and red
+# share 10.200.0.0/16: one routing table holds one route to that prefix, so a
+# single host could reach one of them and never the other. udnclient-og serves
+# orange and green from one host because theirs differ. The grouping is read
+# from the manifest the role renders, not guessed here.
+probe_from_vms() {
+    echo
+    echo "Pinging one pod of every tenant from every per-tenant client VM"
+    echo
+    if [[ ! -r "$CLIENTS_ENV" ]]; then
+        echo "  No client manifest at $CLIENTS_ENV." >&2
+        echo "  Build the VMs with --tags clabtenantclients, or set UDN_CLIENTS_ENV." >&2
+        return 1
+    fi
+    local name ip tenants
+    while IFS='|' read -r name ip tenants; do
+        [[ -n "${name:-}" && "$name" != \#* ]] || continue
+        add_unique clients "$name"
+        CLIENTIP["$name"]="$ip"
+        SERVES["$name"]="${tenants//,/ }"
+    done < "$CLIENTS_ENV"
+
+    local src dest n rc
+    for src in "${clients[@]}"; do
+        if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                 -o LogLevel=ERROR -o ConnectTimeout=10 "${SSH_USER}@${CLIENTIP[$src]}" true 2>/dev/null; then
+            echo "  Cannot ssh to ${src} at ${CLIENTIP[$src]} - skipping." >&2
+            for dest in "${tenants_all[@]}"; do VM["$src,$dest"]="NO-SSH"; done
+            continue
+        fi
+        for dest in "${tenants_all[@]}"; do
+            if [[ -z "${PODADDR[$dest]:-}" ]]; then VM["$src,$dest"]="NO-UDN"; continue; fi
+            # A cell this client is supposed to reach gets the full count; one
+            # it must not reach gets a single packet, since one answered packet
+            # is already a leak.
+            case " ${SERVES[$src]} " in *" $dest "*) n="$COUNT" ;; *) n=1 ;; esac
+            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o LogLevel=ERROR -o ConnectTimeout=10 "${SSH_USER}@${CLIENTIP[$src]}" \
+                "ping -c$n -W2 ${PODADDR[$dest]}" >/dev/null 2>&1; rc=$?
+            if (( rc == 0 )); then
+                VM["$src,$dest"]="ok"
+                printf '  %-16s -> %-8s %-16s ok\n' "$src" "$dest" "${PODADDR[$dest]}"
+            else
+                VM["$src,$dest"]="FAIL"
+                printf '  %-16s -> %-8s %-16s FAIL\n' "$src" "$dest" "${PODADDR[$dest]}"
+            fi
+        done
+    done
+}
+
+print_vm_matrix() {
+    echo
+    echo "client VM -> pod   (expect ok only for the tenants each VM serves)"
+    printf '%-16s' 'client'
+    for c in "${tenants_all[@]}"; do printf ' %-10s' "$c"; done
+    echo
+    for r in "${clients[@]}"; do
+        printf '%-16s' "$r"
+        for c in "${tenants_all[@]}"; do printf ' %-10s' "${VM["$r,$c"]:--}"; done
+        echo
+    done
+}
+
+vm_verdict() {
+    local r c v expected bad=0
+    for r in "${clients[@]}"; do
+        for c in "${tenants_all[@]}"; do
+            v="${VM["$r,$c"]:-}"
+            [[ "$v" == "NO-SSH" || "$v" == "NO-UDN" ]] && continue
+            case " ${SERVES[$r]} " in *" $c "*) expected=ok ;; *) expected=FAIL ;; esac
+            if [[ "$expected" == "ok" && "$v" != "ok" ]]; then
+                echo "  BROKEN  $r serves $c but cannot reach its pods"
+                bad=$((bad + 1))
+            elif [[ "$expected" == "FAIL" && "$v" == "ok" ]]; then
+                echo "  LEAK    $r reached $c, which it has no VLAN for"
+                bad=$((bad + 1))
+            fi
+        done
+    done
+    (( bad == 0 )) && echo "  clean: every client VM reached exactly the tenants it serves"
+    return $bad
+}
+
+# ---------------------------------------------------------------------------
 # Identity check: where two tenants hold the SAME pod address, which one answers?
 # ---------------------------------------------------------------------------
 # This is the only part of the script that proves isolation rather than
@@ -325,10 +420,14 @@ identity_check() {
 }
 
 # ---------------------------------------------------------------------------
+tenants_all=("${tenants[@]}")
+
 probe_pods_to_ext
 probe_ext_to_pods
+(( WITH_VMS )) && probe_from_vms
 print_matrix "pod -> external endpoint   (expect ok on the diagonal only)" M1 "pod tenant"
 print_matrix "external endpoint -> pod   (expect ok on the diagonal only)" M2 "ext tenant"
+(( WITH_VMS )) && print_vm_matrix
 
 echo
 echo "Verdict"
@@ -337,6 +436,7 @@ echo " pod -> ext:"
 verdict M1 "external network" || rc=$?
 echo " ext -> pod:"
 verdict M2 "pods" || rc=$?
+(( WITH_VMS )) && { echo " client VM -> pod:"; vm_verdict || rc=$?; }
 identity_check || rc=$?
 
 echo

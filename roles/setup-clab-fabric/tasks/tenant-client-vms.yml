@@ -1,0 +1,123 @@
+---
+# Phase 3 per-tenant client VMs - real machines behind leaf1, one per
+# isolation domain.
+#
+# The *-ext containers already prove VRF-Lite works; these prove it to an
+# audience. Two machines you can ssh into, pinging addresses out of the same
+# 10.200.0.0/16 and reaching different clusters of pods, is a better
+# demonstration than a counter diff inside a container - and each VM has ONE
+# path to the fabric, so unlike the ext containers there is no management
+# network sitting alongside as a second route between them.
+#
+# The grouping in udn_tenant_clients is forced by the addressing: blue and red
+# share a pod subnet in phase 3, so no single host can route to both. See
+# vars.yaml.
+
+# Same precondition as --tags clabclient: this builds VMs, so it has to run ON
+# the hypervisor. The play is `hosts: localhost` and has nothing to delegate
+# to, and without this check the failure surfaces as whatever the workstation's
+# sudo says, which describes nothing.
+- name: Check for libvirt tooling
+  ansible.builtin.command:
+    cmd: "which virsh qemu-img virt-install"
+  register: udn_tc_virsh
+  changed_when: false
+  failed_when: false
+
+- name: Fail if this is not the libvirt host
+  ansible.builtin.assert:
+    that: udn_tc_virsh.rc == 0
+    fail_msg: >-
+      virsh, qemu-img or virt-install is missing, so this is not the lab's
+      libvirt host. --tags clabtenantclients builds VMs and must run ON the
+      hypervisor. The cluster-side tags (preflight, default, shared, vrflite,
+      evpn) are only `oc` calls and do run anywhere.
+    success_msg: "libvirt tooling is present."
+
+- name: Look for the base image for the client VMs
+  ansible.builtin.stat:
+    path: "{{ udn_tenant_client_base_image_path }}"
+  register: udn_tc_base
+
+- name: Fail if the base image is missing
+  ansible.builtin.assert:
+    that: udn_tc_base.stat.exists
+    fail_msg: >-
+      No base image at {{ udn_tenant_client_base_image_path }}. These VMs are
+      plain copies of it - there is no download step. Put a qcow2 there and set
+      udn_tenant_client_base_image to its filename, with
+      udn_tenant_client_os_variant to match.
+    success_msg: "Base image {{ udn_tenant_client_base_image }} found."
+
+# Every tenant a client serves must have a segment defined, or the VM comes up
+# with a NIC and no way to use it. Checked here rather than letting the
+# template render an empty VLAN id.
+- name: Fail if a client serves a tenant with no client segment
+  ansible.builtin.assert:
+    that:
+      - udn_tenant_clients | map(attribute='tenants') | flatten | unique
+        | difference(udn_client_segments.keys() | list) | length == 0
+      - udn_tenant_clients | map(attribute='tenants') | flatten | unique
+        | difference(udn_bgp_tenants | map(attribute='name') | list) | length == 0
+    fail_msg: >-
+      udn_tenant_clients references a tenant that has no entry in
+      udn_client_segments, or no matching tenant in udn_bgp_tenants.
+      Clients serve {{ udn_tenant_clients | map(attribute='tenants') | flatten | unique | list }};
+      segments exist for {{ udn_client_segments.keys() | list }};
+      tenants are {{ udn_bgp_tenants | map(attribute='name') | list }}.
+    success_msg: >-
+      Every client's tenants have a segment and a tenant definition.
+
+# Two tenants on one VM is only safe while their pod subnets differ - one
+# routing table cannot hold a route to each of two identical prefixes. This is
+# the check that would have caught "just put all four on one VM".
+- name: Fail if one client serves two tenants with the same pod subnet
+  vars:
+    udn_tc_subnets: >-
+      {{ client.tenants | map('extract', udn_bgp_tenants | items2dict(key_name='name', value_name='udn_subnet')) | list }}
+  ansible.builtin.assert:
+    that: udn_tc_subnets | unique | length == udn_tc_subnets | length
+    fail_msg: >-
+      {{ client.name }} serves {{ client.tenants | join(', ') }}, whose pod
+      subnets are {{ udn_tc_subnets }} - and two of those are identical. One
+      host has one routing table, so it can hold a route to that prefix once:
+      one of the tenants would be unreachable by construction and the
+      isolation result would be meaningless. Overlapping tenants need separate
+      VMs. That is the point of the phase, not a limitation to work around.
+    success_msg: >-
+      {{ client.name }} serves {{ client.tenants | join(', ') }} with distinct
+      pod subnets {{ udn_tc_subnets }}.
+  loop: "{{ udn_tenant_clients }}"
+  loop_control:
+    loop_var: client
+    label: "{{ client.name }}"
+
+- name: Read the default network's current definition
+  ansible.builtin.command:
+    cmd: "virsh net-dumpxml default"
+  register: udn_tc_net_xml
+  changed_when: false
+
+# So scripts/udn-vrf-isolation.sh --vms can find the clients and know which
+# tenants each one is supposed to reach, without parsing vars.yaml in bash.
+# Rendered from the same list the VMs are built from, so the two cannot drift.
+- name: Make sure the manifest directory exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/udn-bgp"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+
+- name: Record which client serves which tenants
+  ansible.builtin.template:
+    src: tenant-clients.env.j2
+    dest: "{{ playbook_dir }}/udn-bgp/tenant-clients.env"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: Build each per-tenant client VM
+  ansible.builtin.include_tasks: tenant-client-one.yml
+  loop: "{{ udn_tenant_clients }}"
+  loop_control:
+    loop_var: client
+    label: "{{ client.name }} ({{ client.tenants | join('+') }})"

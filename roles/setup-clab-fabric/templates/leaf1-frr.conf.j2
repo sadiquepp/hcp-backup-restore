@@ -117,6 +117,13 @@ router bgp {{ clab_leaf1_asn }} vrf {{ t.name }}
   ! The tenant's external network is originated here, so the cluster learns a
   ! route to it over the {{ t.name }} VLAN and only over the {{ t.name }} VLAN.
   network {{ t.external_prefix }}
+{% if t.name in (udn_client_segments | default({})) %}
+  ! Same for the client segment (VLAN {{ udn_client_segments[t.name].vlan }}), where the phase-3 client
+  ! VM lives. Originated rather than left connected so the cluster learns the
+  ! RETURN path over BGP: without this the pods can be reached from the client
+  ! but cannot answer, which looks like a one-way fabric fault.
+  network {{ udn_client_segments[t.name].prefix }}.0/{{ clab_fabric_netmask_bits }}
+{% endif %}
 {% for n in clab_fabric_nodes %}
   neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} activate
   neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} route-map FROM-CLUSTER in
