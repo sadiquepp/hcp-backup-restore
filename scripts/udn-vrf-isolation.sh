@@ -192,10 +192,10 @@ probe_ext_to_pods() {
             out=$(ext_exec "$src" ping -c"$n" -W2 "${PODADDR[$dest]}"); rc=$?
             if (( rc == 0 )); then
                 M2["$src,$dest"]="ok"
-                printf '  %-8s-ext -> %-8s %-16s ok\n' "$src" "$dest" "${PODADDR[$dest]}"
+                printf '  %-12s -> %-8s %-16s ok\n' "${src}-ext" "$dest" "${PODADDR[$dest]}"
             else
                 M2["$src,$dest"]="FAIL"
-                printf '  %-8s-ext -> %-8s %-16s FAIL\n' "$src" "$dest" "${PODADDR[$dest]}"
+                printf '  %-12s -> %-8s %-16s FAIL\n' "${src}-ext" "$dest" "${PODADDR[$dest]}"
             fi
         done
     done
