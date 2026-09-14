@@ -2269,6 +2269,7 @@ What to look for in that diff, in rough order of how much it says:
 | `leaf1-bgp-default-vrf.txt` | every tenant's prefixes | tenant prefixes gone |
 | `leaf1-bgp-all-vrfs.txt` | nothing per-tenant | every tenant's prefixes, **blue and red carrying the same one** in different VRFs |
 | `node-*-link.txt` | no VLAN subinterfaces | `enp8s0.110`, `.120`, `.130`, `.140`, each enslaved to its VRF |
+| `node-*-ip-rule.txt` | three rules per tenant at priority 2000, including `to <subnet>` | no rule references a tenant subnet; l3mdev at 1000 does the steering |
 | `cluster-frrconfig.yaml` | one peering CR | plus one router per tenant VRF |
 | `pod-networks.txt` | distinct subnets per tenant | blue and red identical |
 
@@ -2883,11 +2884,22 @@ Overlapping-address identity check
 `WRONG TENANT` there is the finding the two matrices would have reported as a
 clean pass.
 
-If OVN happened to hand blue and red distinct addresses out of their identical
-subnets there is no collision to disambiguate, and the script says so rather
-than inventing a result. The subnets are still identical and the matrices still
-carry the isolation finding — you just don't get this particular proof on that
-run.
+If OVN hands blue and red distinct addresses out of their identical subnets
+there is no collision to disambiguate, and the script says so rather than
+inventing a result.
+
+**Expect that to be the normal case, and possibly the only one.** On this lab
+the six node slices came out pairwise disjoint — blue got `10.200.4/5/0.0/24`
+and red got `10.200.1/2/3.0/24`, covering 0–5 with no repeats. Independent
+per-network allocation starting at the base of the CIDR would have produced
+three *identical* pairs, so something is handing these out from one sequence
+across both networks. It is not a correctness requirement — no `ip rule`
+references the subnet in phase 3, so identical addresses would be unambiguous —
+which makes it a property of OVN-Kubernetes' allocator rather than of the data
+path.
+
+So treat this check as a bonus that may never fire, and the web demo
+(§3f, *Curl it instead*) as the reliable proof of identity.
 
 ---
 
@@ -2956,6 +2968,43 @@ was settled at step 3 by the VLAN the frame arrived on.
 
 That is the entire mechanism of VRF-Lite, and it is why the demo works: the
 destination address does not select the path.
+
+#### Why no `ip rule` mentions the tenant subnet any more
+
+Phase 2 needed three rules per tenant at priority 2000 — fwmark, masquerade,
+and **subnet**:
+
+```
+2000:  from all to 10.221.0.0/16 lookup 1117
+```
+
+That subnet rule was load-bearing. Fabric traffic arrived on `br-ex`, which
+lives in the **default** VRF, so something had to redirect it into the tenant's
+table *by destination address* — and a tenant missing that one rule was
+unreachable on every node while every control-plane signal stayed green. It
+cost a debugging session.
+
+Phase 3 has no such rule:
+
+```bash
+oc debug node/worker1 -- chroot /host ip rule show | grep -E '10\.200|l3mdev'
+# 1000:	from all lookup [l3mdev-table]
+```
+
+Nothing references `10.200.0.0/16` at all. It does not need to: the fabric
+interface `enp8s0.110` is itself **inside** the blue VRF, so l3mdev at priority
+1000 picks the table from the interface the frame arrived on, before any
+priority-2000 rule is reached. The destination address never enters the
+steering decision.
+
+Two consequences worth having:
+
+- **The phase-2 missing-rule failure cannot happen here.** There is no rule to
+  be missing. If a tenant is unreachable in phase 3, look at VRF membership and
+  BGP, not at `ip rule`.
+- **Identical pod addresses between blue and red would be unambiguous.** The
+  concern would have been two `to 10.200.0.0/16` rules pointing at different
+  tables with order deciding. There are none, so nothing compares them.
 
 #### Why phase 3 is symmetric and phase 2 was not
 
