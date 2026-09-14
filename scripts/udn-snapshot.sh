@@ -111,7 +111,7 @@ done
 #    inside that VRF)      phase 3: via the tenant's own VLAN subinterface
 #
 #   192.168.140.1          phase 2: via the node's default gateway, dev br-ex
-#   192.168.122.60         phase 3: no route - the tenant table has no default
+#   192.168.122.47         phase 3: no route - the tenant table has no default
 #                                   route and is not in the default VRF
 #
 # An earlier version probed only the second set, so a healthy phase 3 printed
@@ -148,7 +148,7 @@ declare -A VRFDEST
             if [[ -z "${VRFDEST[$tenant]+set}" ]]; then
                 VRFDEST["$tenant"]=$(leaf_vrf_addrs "$tenant")
             fi
-            for dest in ${VRFDEST[$tenant]} "${@:2}" 192.168.122.60 192.168.140.1; do
+            for dest in ${VRFDEST[$tenant]} "${@:2}" 192.168.122.47 192.168.140.1; do
                 [[ -n "$dest" ]] || continue
                 printf '  -> %-18s ' "$dest"
                 node "$node_name" "ip route get $dest from $ip iif ${mp:-lo} 2>&1 | head -2 | tr '\n' ' '"

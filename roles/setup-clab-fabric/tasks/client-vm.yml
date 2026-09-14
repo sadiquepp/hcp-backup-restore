@@ -41,6 +41,11 @@
     success_msg: >-
       libvirt tooling is present.
 
+- name: Refuse to build on an address MetalLB owns
+  ansible.builtin.include_tasks: client-ip-check.yml
+  vars:
+    udn_client_names: ["{{ udn_client_vm_name }}"]
+
 - name: Look for the base image for the client VM
   ansible.builtin.stat:
     path: "{{ udn_client_base_image_path }}"

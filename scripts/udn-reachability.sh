@@ -6,7 +6,7 @@
 #   scripts/udn-reachability.sh                    # pods -> client
 #   scripts/udn-reachability.sh --reverse          # client -> pods
 #   scripts/udn-reachability.sh --both             # both, two matrices
-#   scripts/udn-reachability.sh --both 192.168.122.60 5
+#   scripts/udn-reachability.sh --both 192.168.122.47 5
 #
 # The matrix is the point. A failure in this lab is almost always shaped like
 # a whole ROW or a whole COLUMN, and the two mean completely different things:
@@ -34,7 +34,7 @@
 # honest than the annotation - it is what the interface actually has.
 set -uo pipefail
 
-CLIENT="192.168.122.60"
+CLIENT="192.168.122.47"
 COUNT=3
 MODE="pods"
 SSH_KEY="${UDN_CLIENT_SSH_KEY:-$HOME/.ssh/lab_rsa}"
