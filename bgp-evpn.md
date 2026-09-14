@@ -3090,14 +3090,31 @@ Phase 2's walkthrough followed a ping. This follows a `curl`, because TCP
 carries a request *and* an identified response, and identity is the whole
 question once blue and red share a subnet.
 
-The sharpest case is the one the lab actually produced. Both web pods landed on
-**worker1**: `10.200.4.0/24` is blue's worker1 slice and `10.200.1.0/24` is
-red's, so `10.200.4.4` and `10.200.1.5` are served by two pods on one node,
-reached over one physical NIC. Confirm with:
+The sharpest case is the one the lab actually produced, and it got sharper the
+second time. Every web pod lands on **worker1** — confirmed:
+
+```
+udn-blue     udn-web-6f95f64b66-64n9r   worker1   Running
+udn-green    udn-web-785df8998-crr8c    worker1   Running
+udn-purple   udn-web-7f54fdf98-pdc89    worker1   Running
+udn-red      udn-web-dc6b8646b-5jrpz    worker1   Running
+```
+
+So one kernel simultaneously holds `10.204.0.12` **twice** — green's pod and
+purple's pod, the identical IPv4 address on one node — and blue at
+`10.200.0.3` beside red at `10.200.0.5`, two host addresses apart inside one
+`/24`. Not one prefix in the system separates any of them. Confirm with:
 
 ```bash
 oc get pods -A -l app=udn-web -o wide
 ```
+
+The walkthrough below uses an earlier run's addresses, `10.200.4.4` for blue
+and `10.200.1.5` for red, where the two landed in *different* worker1 slices.
+That version is kept deliberately: distinct prefixes make steps 4 and 5 legible,
+because you can see which route was consulted by reading it. What changes when
+they share a `/24` is set out after the comparison table — and it is the more
+interesting case precisely because the routes stop being distinguishable.
 
 #### Out — `udnclient-blue` to blue's page
 
@@ -3149,6 +3166,32 @@ was settled at step 3 by the VLAN the frame arrived on.
 
 That is the entire mechanism of VRF-Lite, and it is why the demo works: the
 destination address does not select the path.
+
+##### When blue and red share a `/24`
+
+In the run above the two differ at step 4 by prefix: table 1110 holds
+`10.200.4.0/24` and table 1120 holds `10.200.1.0/24`, so an observer could
+still tell the two paths apart by reading the routes. A later run removed even
+that, putting blue on `10.200.0.3` and red on `10.200.0.5` — one `/24`, both
+on worker1:
+
+```
+leaf1: ip route show vrf blue | grep 10.200
+  10.200.0.0/24 via 192.168.141.34 dev eth1.110 proto bgp
+leaf1: ip route show vrf red  | grep 10.200
+  10.200.0.0/24 via 192.168.142.34 dev eth1.120 proto bgp
+```
+
+Same destination prefix, same node behind it, character-for-character
+identical but for the next hop and the egress VLAN. Nothing in either route
+entry identifies the tenant; the *table it is in* does, and that was chosen at
+step 3. Concatenate the two tables and the information is gone — which is
+exactly what happens in the default VRF, and exactly why phase 2 needed the
+priority-2000 subnet rules described next.
+
+Green and purple go one step further: not a shared prefix but the same
+`10.204.0.12`, two pods, one node. There the routes are identical including
+the prefix length, and only the ingress VLAN has ever distinguished them.
 
 #### Why no `ip rule` mentions the tenant subnet any more
 
