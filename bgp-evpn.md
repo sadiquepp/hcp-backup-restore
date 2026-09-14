@@ -2910,6 +2910,19 @@ the same fabric bridge with VLANs for orange and green and none for blue or
 red, and it gets nothing from either. So the pages are not reachable from
 anywhere; they are reachable from exactly one VRF each.
 
+It closes the argument only once that row also contains an answer, which is
+why `udn_web_tenants` now lists all five tenants rather than only the
+overlapping pairs. In the two-tenant output above the row is blank end to end,
+and a blank row is what a *dead client* produces too — an unplugged VM, a VLAN
+that never came up, a BGP session stuck in `Active` — so on its own it cannot
+distinguish "reached nothing because it is isolated" from "reached nothing
+because it is broken". The reasoning for leaving orange out was that a page
+proves nothing a ping cannot for a subnet nobody shares. That is true of the
+positive cell and false of the row: orange's one answer is what licenses
+reading its four blanks as isolation. It was not hypothetical — orange/worker1
+was among the BGP sessions stuck in `Active` while its row of blanks read as a
+clean pass.
+
 Two details worth knowing:
 
 - **The address comes off `ovn-udn1`, not `status.podIP`.** For a primary UDN,
