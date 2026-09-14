@@ -2741,13 +2741,55 @@ udnclient-red    FAIL       FAIL       FAIL       ok
 udnclient-og     FAIL       ok         ok         FAIL
 ```
 
-`udnclient-blue` and `udnclient-red` pinging the same `/16` and landing on
-different pods is the phase-3 result in one line.
+The two rows to read together are the per-destination lines behind that
+matrix, not the matrix itself:
+
+```
+udnclient-blue   -> red   10.200.2.3   FAIL
+udnclient-red    -> red   10.200.2.3   ok
+```
+
+**Two separate machines, the same destination address, opposite results.**
+`10.200.2.3` is inside the `/16` that blue and red both carry, and the only
+thing deciding whether it resolves is which VRF the packet entered leaf1 on.
+Nothing in either VM differs but the VLAN tag.
+
+That is worth stating because it is a *different* proof from the identity check
+further down, and it does not depend on OVN having allocated a colliding
+address. It is available on every run.
 
 These need the topology **redeployed** (`--tags clabdeploy`) after
 `udn_client_segments` was added — leaf1 builds the client VLAN subinterfaces in
 its `exec` block at container start, so an already-running leaf1 has none of
 them and every client fails at its gateway.
+
+#### A healthy phase 3, in full
+
+Confirmed on a 4.22 hub with three workers, four tenants and three client VMs.
+All three matrices, every cell:
+
+```
+pod -> external endpoint      external endpoint -> pod      client VM -> pod
+pod tenant blue  grn  org  red    ext     blue  grn  org  red    client          blue grn  org  red
+blue       ok    FAIL FAIL FAIL   blue    ok    FAIL FAIL FAIL   udnclient-blue  ok   FAIL FAIL FAIL
+green      FAIL  ok   FAIL FAIL   green   FAIL  ok   FAIL FAIL   udnclient-red   FAIL FAIL FAIL ok
+orange     FAIL  FAIL ok   FAIL   orange  FAIL  FAIL ok   FAIL   udnclient-og    FAIL ok   ok   FAIL
+red        FAIL  FAIL FAIL ok     red     FAIL  FAIL FAIL ok
+```
+
+```
+Verdict
+ pod -> ext:       clean: every tenant reached its own external network and nobody else's
+ ext -> pod:       clean: every tenant reached its own pods and nobody else's
+ client VM -> pod: clean: every client VM reached exactly the tenants it serves
+
+PASS - phase 3 isolation holds in both directions.
+```
+
+`udnclient-og` holding **both** `ok` cells on one row is the other half of the
+addressing argument: orange and green do not collide, so one host serves both
+with two routes and no VRFs of its own. blue and red each need their own
+machine for the same reason that row is possible.
 
 #### A successful ping does not prove isolation
 
