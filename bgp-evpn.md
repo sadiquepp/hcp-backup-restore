@@ -39,6 +39,7 @@ where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
   - [What phase 2 can and cannot reach](#what-phase-2-can-and-cannot-reach)
   - [Reaching a UDN pod from outside the cluster](#reaching-a-udn-pod-from-outside-the-cluster)
   - [The Layer2 tenant gets ECMP](#the-layer2-tenant-gets-ecmp-and-the-layer3-tenants-cannot)
+  - [Snapshot phase 2 before moving on](#snapshot-phase-2-before-moving-on)
   - [Following one packet in phase 2](#following-one-packet-in-phase-2)
   - [Why the two directions differ](#why-the-two-directions-differ)
   - [Is this how it works in production?](#is-this-how-it-works-in-production)
@@ -2238,6 +2239,49 @@ node's default gateway alone. **In phase 2, on this topology, the return path
 cannot be made symmetric.** Read phase 2 for what it proves — the advertisement
 is real, the prefixes are real, the un-SNAT is real, and the fabric can reach
 the pods — and go to phase 3 for a data path you would actually deploy.
+
+### Snapshot phase 2 before moving on
+
+```bash
+scripts/udn-snapshot.sh phase2
+```
+
+**Do this before `--tags vrflite`, not after.** That phase deletes the
+namespaces and the CUDNs and changes every tenant's subnet — blue and red both
+become `10.200.0.0/16` — so phase 2's state is not recoverable once it runs,
+and the phase 2 against phase 3 difference is most of what this lab exists to
+show.
+
+Everything it collects is read-only. Run it again after phase 3 and diff:
+
+```bash
+scripts/udn-snapshot.sh phase3
+diff -ru snapshots/phase2-* snapshots/phase3-*
+```
+
+What to look for in that diff, in rough order of how much it says:
+
+| File | Phase 2 | Phase 3 |
+| --- | --- | --- |
+| `egress-decisions.txt` | `via 192.168.122.1 dev br-ex` — the node's default gateway | via the tenant's own VLAN subinterface |
+| `node-*-routes-all-tables.txt` | tenant table holds its subnets and a default route | plus a connected route to its handoff subnet and its own BGP-learned routes |
+| `leaf1-bgp-default-vrf.txt` | every tenant's prefixes | tenant prefixes gone |
+| `leaf1-bgp-all-vrfs.txt` | nothing per-tenant | every tenant's prefixes, **blue and red carrying the same one** in different VRFs |
+| `node-*-link.txt` | no VLAN subinterfaces | `enp8s0.110`, `.120`, `.130`, `.140`, each enslaved to its VRF |
+| `cluster-frrconfig.yaml` | one peering CR | plus one router per tenant VRF |
+| `pod-networks.txt` | distinct subnets per tenant | blue and red identical |
+
+`egress-decisions.txt` is the one to read first. It asks the kernel directly
+where a given tenant's egress goes, per node, and it is the whole point of
+phase 3 in one line per tenant.
+
+**Expect the reachability matrix to go red, and expect that.** The client sits
+in leaf1's *default* VRF, and phase 3 moves every tenant into its own — so the
+client should stop reaching the tenants entirely. That is the isolation
+working, not a regression. Phase 3's test is each tenant reaching **its own**
+`<tenant>-ext` container and no other, which is a different measurement; see
+[3e](#3e-the-test-that-must-fail).
+
 
 ---
 
