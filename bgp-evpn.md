@@ -2947,26 +2947,32 @@ If OVN hands blue and red distinct addresses out of their identical subnets
 there is no collision to disambiguate, and the script says so rather than
 inventing a result.
 
-**Expect that to be the normal case, and possibly the only one.** On this lab
-the six node slices came out pairwise disjoint — blue got `10.200.4/5/0.0/24`
-and red got `10.200.1/2/3.0/24`, covering 0–5 with no repeats. Independent
-per-network allocation starting at the base of the CIDR would have produced
-three *identical* pairs, so something is handing these out from one sequence
-across both networks. It is not a correctness requirement — no `ip rule`
-references the subnet in phase 3, so identical addresses would be unambiguous —
-which makes it a property of OVN-Kubernetes' allocator rather than of the data
-path.
+**It fires on Layer2, and purple is what made it possible.** The check sat dead
+through every Layer3 run: blue and red share `10.200.0.0/16` and never landed
+two pods on one address. With green and purple both Layer2 on
+`10.204.0.0/16`, the pods came up on `10.204.0.12` — the same address, on two
+networks, on one cluster.
 
-So treat this check as a bonus that may never fire, and the web demo
-(§3f, *Curl it instead*) as the reliable proof of identity.
+Do not read the Layer3 behaviour as a rule. An earlier run had blue and red on
+pairwise disjoint node slices, which looked like coordination; a later run put
+both of their web pods inside `10.200.0.0/24` (`10.200.0.3` and `10.200.0.5`).
+So the allocator does not coordinate across networks sharing a CIDR — Layer3
+simply has 256 slices to spread across and usually does, while Layer2 allocates
+from the base of one flat prefix and collides readily.
+
+Both proofs are now live. The counter check names the responder from the
+kernel's own accounting; the web demo names it from the document. Prefer the
+web demo — it needs no inference and reads in one line — but the counter check
+no longer depends on luck.
 
 ---
 
 ### 3f-bis. purple: the same address on two networks
 
 blue and red share `10.200.0.0/16` and never produced two pods on one address.
-Layer3 slices the prefix per node, and OVN-Kubernetes handed the six slices out
-pairwise disjoint — so "same IP, different pod" stayed a claim.
+Layer3 slices the prefix per node, and with 256 slices to spread across, two
+networks rarely put a pod on the same one — so "same IP, different pod" stayed
+a claim.
 
 **purple** is a Layer2 tenant carrying green's subnet exactly:
 
@@ -3024,8 +3030,34 @@ udnclient-og       I am green
 udnclient-purple   I am purple
 ```
 
+Confirmed:
+
+```
+Web pods
+  blue     http://10.200.0.3:8080/
+  green    http://10.204.0.12:8080/
+  purple   http://10.204.0.12:8080/     <- the same address
+  red      http://10.200.0.5:8080/
+
+  *** 10.204.0.12 is served by green purple - ONE address, two pods.
+
+What answered
+client             10.200.0.3     10.204.0.12    10.200.0.5
+(served by)        blue           green purple   red
+udnclient-blue     I am blue      (no answer)    (no answer)
+udnclient-red      (no answer)    (no answer)    I am red
+udnclient-og       (no answer)    I am green     (no answer)
+udnclient-purple   (no answer)    I am purple    (no answer)
+```
+
 One address. Two machines. Two pages. That is the claim, demonstrated rather
-than argued.
+than argued — and no ping-based test in this repo could have told those two
+rows apart, which is why the web workload exists.
+
+Note `10.200.0.3` and `10.200.0.5` in the same run: blue and red landed inside
+one `/24` too. Their pods differ by host address rather than colliding
+outright, but it disposes of the idea that OVN-Kubernetes keeps networks
+sharing a CIDR apart on purpose.
 
 ### 3g. Following one curl in phase 3
 

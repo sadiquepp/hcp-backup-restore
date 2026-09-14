@@ -83,11 +83,21 @@ for ns in $(oc get ns -l udn-tenant -o jsonpath='{range .items[*]}{.metadata.nam
     # land on the same one - which is the entire point of green and purple. A
     # loop over tenants would then curl one URL twice and judge the second
     # answer against the wrong tenant.
-    case " ${ADDR_TENANTS[$a]:-} " in
-        *" $tenant "*) ;;
-        *) ADDR_TENANTS["$a"]="${ADDR_TENANTS[$a]:-}${ADDR_TENANTS[$a]:+ }$tenant"
-           addrs+=("$a") ;;
-    esac
+    # Two separate questions, and conflating them listed a shared address
+    # twice: "is this ADDRESS new" decides whether it joins the probe list,
+    # "is this TENANT already recorded against it" decides whether to extend
+    # the owner list. The old single case matched on the tenant, so the second
+    # tenant on one address appended the address again - one extra column, one
+    # duplicated banner, and every client curling that URL twice.
+    if [[ -z "${ADDR_TENANTS[$a]:-}" ]]; then
+        addrs+=("$a")
+        ADDR_TENANTS["$a"]="$tenant"
+    else
+        case " ${ADDR_TENANTS[$a]} " in
+            *" $tenant "*) ;;
+            *) ADDR_TENANTS["$a"]+=" $tenant" ;;
+        esac
+    fi
 done
 
 (( ${#tenants[@]} )) || { echo "No udn-web pods found. Run --tags web first." >&2; exit 1; }
