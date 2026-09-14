@@ -2497,6 +2497,82 @@ oc get routeadvertisements udn-vrflite -o jsonpath='{.status.status}'; echo
 Applying before deleting (rather than the reverse) means a half-finished run
 leaves at least one advertisement in place.
 
+### 3d-bis. Make bgpd bind to the tenant VRFs
+
+Before testing anything, check this. It is the one failure in phase 3 that
+every other layer reports as success.
+
+```bash
+POD=$(oc -n openshift-frr-k8s get pods -l component=frr-k8s \
+        --field-selector spec.nodeName=worker1 -o name | head -1)
+oc -n openshift-frr-k8s exec $POD -c frr -- vtysh -c 'show bgp vrf all summary'
+```
+
+**`vrf all` matters.** Plain `show bgp summary` is scoped to the default VRF,
+which keeps working throughout phase 3 — it will look perfectly healthy while
+every tenant is dead.
+
+Broken looks like this:
+
+```
+BGP router identifier 0.0.0.0, local AS number 64512 VRF blue vrf-id -1
+Neighbor        V   AS  MsgRcvd MsgSent  Up/Down State/PfxRcd
+192.168.141.1   4 64513       0       0    never         Idle
+```
+
+`vrf-id -1` is FRR's `VRF_UNKNOWN`. bgpd resolves `router bgp <asn> vrf <name>`
+to a kernel VRF device when it parses that stanza; if the device is replaced
+afterwards, the instance is left unattached and goes inert. Phase 3 replaces
+every one of them — recreating the CUDNs on the new subnets makes
+OVN-Kubernetes tear down each tenant VRF and build a new one with a new table
+id. The two tells are `0.0.0.0` (bgpd cannot see into the VRF to find an
+address) and zero messages in **both** columns: it never attempts the
+connection.
+
+Healthy is the same command showing a real router-id and a real table id:
+
+```
+BGP router identifier 192.168.141.34, local AS number 64512 VRF blue vrf-id 118
+192.168.141.1   4 64513      27      25 00:00:55            2       1
+```
+
+Fix it by restarting frr-k8s, which starts bgpd with the VRFs already present:
+
+```bash
+oc -n openshift-frr-k8s rollout restart daemonset/frr-k8s
+oc -n openshift-frr-k8s rollout status daemonset/frr-k8s --timeout=300s
+```
+
+Each node's default-VRF session drops for a few seconds. That is the whole
+cost. The role now does this automatically at the end of phase 3, and only
+when some instance actually reports `vrf-id -1`.
+
+#### Why this one is worth knowing by name
+
+Every layer above it reports success, and each one is telling the truth about
+its own job:
+
+| Check | Says | And is right |
+| --- | --- | --- |
+| `oc get nncp` | `Available` | the VLAN subinterfaces exist and are in the VRFs |
+| `oc get routeadvertisements` | `Accepted` | OVN-K read the config and generated its own |
+| `oc get frrconfiguration` | present | including six `ovnk-generated-*` |
+| `grep 'router bgp' frr.conf` | four VRF routers | frr-k8s rendered it correctly |
+| `vtysh -c 'show vrf'` | `blue id 118 table 1116` | zebra sees every VRF |
+| `show bgp summary` | one session, up 1d22h | the *default* VRF is fine |
+| leaf1 `ip vrf exec blue ping <node>` | 0.38ms, ARP `REACHABLE` | the wire is fine |
+
+Only `show bgp vrf all summary` disagrees. The leaf's own view —
+`Active`/`never` — reads like a connectivity fault and points at the wrong
+layer, which is where the time goes: the tempting moves are to suspect the
+VRF port list, 802.1Q across the bridge chain, or an frr-k8s merge conflict,
+and all three are answered by checks that pass.
+
+The lab's containerlab topology already works around the same hazard on the
+leaf: `udnbgp.clab.yml.j2` reloads FRR *after* the VRFs and subinterfaces are
+built, with the comment "so bgpd sees every VRF at startup". That is this bug,
+on the other end of the wire. The node side never had the equivalent.
+
 ### 3e. The test that must fail
 
 ```bash
