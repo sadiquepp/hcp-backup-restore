@@ -5,3 +5,4 @@ roles/.DS_Store
 ceph-odf/
 __pycache__/
 *.pyc
+snapshots/
