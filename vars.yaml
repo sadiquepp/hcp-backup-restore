@@ -341,6 +341,7 @@ ip_list:
   udnclient-blue: 50
   udnclient-red: 57
   udnclient-og: 70
+  udnclient-purple: 87
 
 helper_name: helper
 helper_disk: helper_disk.qcow2
@@ -1404,6 +1405,46 @@ udn_bgp_tenants:
     evpn_mac_vni: 400
     evpn_ip_vni: 401
 
+  ## The collision tenant. Layer2, and deliberately carrying the SAME
+  ## udn_subnet as green.
+  ##
+  ## blue and red also share a subnet, but on Layer3 that never produced two
+  ## pods on one address: Layer3 slices the prefix per node, and OVN-Kubernetes
+  ## handed the six slices out pairwise disjoint (blue got 10.200.4/5/0.0/24,
+  ## red got 10.200.1/2/3.0/24) - which independent per-network allocation from
+  ## the base of the CIDR would not do. So the identity check could never fire
+  ## and "same address, different pod" stayed unproven.
+  ##
+  ## Layer2 removes the slicing. The whole prefix exists on every node, and
+  ## IPAM allocates from the base of it, so green's first pod and purple's
+  ## first pod should both land on the same low address. Then one URL returns
+  ## two different pages depending only on which VRF the request entered.
+  ##
+  ## The experiment is worth running either way. If the addresses collide, the
+  ## claim is demonstrated outright. If they do NOT, that is the stronger
+  ## finding: it means OVN-Kubernetes coordinates allocation across networks
+  ## sharing a CIDR even when there is no per-node slicing to coordinate, and
+  ## two pods on one address is simply not obtainable - which would settle a
+  ## question this lab has only been able to infer.
+  - name: purple
+    topology: Layer2
+    vlan: 150
+    vrf_prefix: "192.168.145"
+    ## Identical to green's, on purpose. This is the whole point of the tenant.
+    udn_subnet: "10.204.0.0/16"
+    ## Phase 2 has no VRFs to keep them apart, so this one must be unique like
+    ## every other - the assert in setup-udn-bgp/tasks/main.yml enforces it.
+    udn_subnet_shared: "10.224.0.0/16"
+    ## Ignored for Layer2. Kept so every tenant has the same shape.
+    udn_host_subnet: 24
+    external_prefix: "10.214.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.214.10.1"
+    external_host: "10.214.10.10"
+    ## Layer2, so this takes a macVRF on the L2VNI like green does.
+    evpn_mac_vni: 500
+    evpn_ip_vni: 501
+
 ## Where the rendered containerlab topology and FRR configs are staged, on
 ## whichever host clab_deploy_mode selected.
 clab_lab_dir: /root/udn-bgp-fabric
@@ -1516,6 +1557,7 @@ udn_client_segments:
   red:    {vlan: 220, prefix: "10.216.10"}
   orange: {vlan: 230, prefix: "10.217.10"}
   green:  {vlan: 240, prefix: "10.218.10"}
+  purple: {vlan: 250, prefix: "10.219.10"}
 
 udn_client_segment_gw_octet: 1
 udn_client_segment_host_octet: 20
@@ -1537,6 +1579,12 @@ udn_tenant_clients:
     tenants: [red]
   - name: udnclient-og
     tenants: [orange, green]
+  ## purple carries green's subnet, so it cannot share green's machine - one
+  ## routing table holds one route to 10.204.0.0/16. That is the same rule that
+  ## forces blue and red apart, and tenant-client-vms.yml asserts it rather
+  ## than trusting it.
+  - name: udnclient-purple
+    tenants: [purple]
 
 udn_tenant_client_memory: 2048
 udn_tenant_client_vcpus: 2
@@ -1555,7 +1603,7 @@ udn_tenant_client_base_image: "{{ rhel9_kvm_image }}"
 ##
 ## Default is blue and red because they are the pair that overlaps. Add orange
 ## or green if you want a page on them too; nothing here assumes two.
-udn_web_tenants: [blue, red]
+udn_web_tenants: [blue, red, green, purple]
 
 ## UBI, not registry.redhat.io: this needs no entitlement, and unlike the ping
 ## DaemonSet it needs no privileged SCC either - httpd-24 listens on 8080 as a

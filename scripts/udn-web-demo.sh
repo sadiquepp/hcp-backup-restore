@@ -33,8 +33,8 @@ fi
     exit 1
 }
 
-declare -A WEBADDR RESULT SERVES CLIENTIP
-tenants=(); clients=()
+declare -A WEBADDR RESULT SERVES CLIENTIP ADDR_TENANTS
+tenants=(); clients=(); addrs=()
 
 on_client() {  # client-ip, command
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -56,7 +56,17 @@ for ns in $(oc get ns -l udn-tenant -o jsonpath='{range .items[*]}{.metadata.nam
              | awk '/^udn:/ {print $2}')
     [[ -n "$addr" && "$addr" != "(no"* ]] || continue
     tenants+=("$tenant")
-    WEBADDR["$tenant"]="${addr%%/*}"
+    a="${addr%%/*}"
+    WEBADDR["$tenant"]="$a"
+    # Keyed by ADDRESS, not by tenant, because two tenants sharing a subnet can
+    # land on the same one - which is the entire point of green and purple. A
+    # loop over tenants would then curl one URL twice and judge the second
+    # answer against the wrong tenant.
+    case " ${ADDR_TENANTS[$a]:-} " in
+        *" $tenant "*) ;;
+        *) ADDR_TENANTS["$a"]="${ADDR_TENANTS[$a]:-}${ADDR_TENANTS[$a]:+ }$tenant"
+           addrs+=("$a") ;;
+    esac
 done
 
 (( ${#tenants[@]} )) || { echo "No udn-web pods found. Run --tags web first." >&2; exit 1; }
@@ -70,6 +80,13 @@ echo "Web pods"
 for t in "${tenants[@]}"; do
     printf '  %-8s http://%s:%s/\n' "$t" "${WEBADDR[$t]}" "$PORT"
 done
+for a in "${addrs[@]}"; do
+    if [[ "${ADDR_TENANTS[$a]}" == *" "* ]]; then
+        echo
+        echo "  *** ${a} is served by ${ADDR_TENANTS[$a]} - ONE address, two pods."
+        echo "      This is the case a ping cannot resolve and a page can."
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Curl each from each, and print the first line of whatever came back.
@@ -77,15 +94,15 @@ done
 for c in "${clients[@]}"; do
     echo
     echo "=== from ${c} (${CLIENTIP[$c]}), serves ${SERVES[$c]} ==="
-    for t in "${tenants[@]}"; do
-        printf '  curl http://%-16s ' "${WEBADDR[$t]}:${PORT}/"
+    for a in "${addrs[@]}"; do
+        printf '  curl http://%-22s ' "${a}:${PORT}/"
         out=$(on_client "${CLIENTIP[$c]}" \
-                "curl -s --max-time 5 http://${WEBADDR[$t]}:${PORT}/")
+                "curl -s --max-time 5 http://${a}:${PORT}/")
         if [[ -n "$out" && "$out" == I\ am\ * ]]; then
-            RESULT["$c,$t"]="${out%%$'\n'*}"
-            echo "-> ${RESULT[$c,$t]}"
+            RESULT["$c,$a"]="${out%%$'\n'*}"
+            echo "-> ${RESULT[$c,$a]}   [${ADDR_TENANTS[$a]}]"
         else
-            RESULT["$c,$t"]="(no answer)"
+            RESULT["$c,$a"]="(no answer)"
             echo "-> (no answer)"
         fi
     done
@@ -94,12 +111,15 @@ done
 # ---------------------------------------------------------------------------
 echo
 echo "What answered"
-printf '%-16s' 'client'
-for t in "${tenants[@]}"; do printf ' %-14s' "$t"; done
+printf '%-18s' 'client'
+for a in "${addrs[@]}"; do printf ' %-14s' "$a"; done
+echo
+printf '%-18s' '(served by)'
+for a in "${addrs[@]}"; do printf ' %-14s' "${ADDR_TENANTS[$a]}"; done
 echo
 for c in "${clients[@]}"; do
-    printf '%-16s' "$c"
-    for t in "${tenants[@]}"; do printf ' %-14s' "${RESULT[$c,$t]:--}"; done
+    printf '%-18s' "$c"
+    for a in "${addrs[@]}"; do printf ' %-14s' "${RESULT[$c,$a]:--}"; done
     echo
 done
 
@@ -108,18 +128,25 @@ done
 echo
 bad=0
 for c in "${clients[@]}"; do
-    for t in "${tenants[@]}"; do
-        got="${RESULT[$c,$t]:-}"
-        case " ${SERVES[$c]} " in
-            *" $t "*)
-                if [[ "$got" != "I am $t" ]]; then
-                    echo "  BROKEN  $c serves $t but got: $got"; bad=$((bad+1))
-                fi ;;
-            *)
-                if [[ "$got" != "(no answer)" ]]; then
-                    echo "  LEAK    $c has no VLAN for $t but got: $got"; bad=$((bad+1))
-                fi ;;
-        esac
+    for a in "${addrs[@]}"; do
+        got="${RESULT[$c,$a]:-}"
+        # Which tenant on this address does this client actually serve? At most
+        # one - two tenants sharing an address can never share a client, since
+        # one host holds one route to the prefix.
+        expect=""
+        for t in ${ADDR_TENANTS[$a]}; do
+            case " ${SERVES[$c]} " in *" $t "*) expect="$t" ;; esac
+        done
+        if [[ -n "$expect" ]]; then
+            if [[ "$got" != "I am $expect" ]]; then
+                echo "  BROKEN  $c serves $expect at $a but got: $got"; bad=$((bad+1))
+            fi
+        else
+            if [[ "$got" != "(no answer)" ]]; then
+                echo "  LEAK    $c serves none of [${ADDR_TENANTS[$a]}] but $a answered: $got"
+                bad=$((bad+1))
+            fi
+        fi
     done
 done
 if (( bad == 0 )); then
@@ -129,5 +156,13 @@ if (( bad == 0 )); then
     echo "  Note every address curled above is inside one subnet. The only"
     echo "  difference between these machines is the VLAN tag on their fabric"
     echo "  interface, and that is what decided which document came back."
+    for a in "${addrs[@]}"; do
+        if [[ "${ADDR_TENANTS[$a]}" == *" "* ]]; then
+            echo
+            echo "  And ${a} is ONE address serving ${ADDR_TENANTS[$a]}: the same URL"
+            echo "  returned a different document to each client. No ping-based test"
+            echo "  can distinguish those two cases - both would simply answer."
+        fi
+    done
 fi
 exit $(( bad > 0 ? 1 : 0 ))
