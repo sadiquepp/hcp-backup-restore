@@ -46,12 +46,15 @@ SSH_KEY="${UDN_CLIENT_SSH_KEY:-$HOME/.ssh/lab_rsa}"
 SSH_USER="${UDN_CLIENT_SSH_USER:-root}"
 COUNT=2
 WITH_VMS=0
+WITH_NETNS=0
+NETNS_ENV="${UDN_NETNS_ENV:-$(dirname "$0")/../udn-bgp/netns-client.env}"
 CLIENTS_ENV="${UDN_CLIENTS_ENV:-$(dirname "$0")/../udn-bgp/tenant-clients.env}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --count|-c) COUNT="$2"; shift 2 ;;
         --vms|-v)   WITH_VMS=1; shift ;;
+        --netns)    WITH_VMS=1; WITH_NETNS=1; shift ;;
         -h|--help)  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "unknown option: $1" >&2; exit 1 ;;
     esac
@@ -74,7 +77,7 @@ ext_exec() {  # tenant, then command
 }
 
 declare -A EXTHOST POD PODNS PODADDR
-declare -A M1 M2 OKC TOT VM SERVES CLIENTIP ADDR_OWNERS
+declare -A M1 M2 OKC TOT VM SERVES CLIENTIP ADDR_OWNERS PREFIX
 clients=()
 tenants=()
 records=()
@@ -286,18 +289,35 @@ probe_from_vms() {
     echo
     echo "Pinging one pod of every tenant from every per-tenant client VM"
     echo
-    if [[ ! -r "$CLIENTS_ENV" ]]; then
+    if [[ ! -r "$CLIENTS_ENV" ]] && { (( ! WITH_NETNS )) || [[ ! -r "$NETNS_ENV" ]]; }; then
         echo "  No client manifest at $CLIENTS_ENV." >&2
         echo "  Build the VMs with --tags clabtenantclients, or set UDN_CLIENTS_ENV." >&2
         return 1
     fi
-    local name ip tenants
-    while IFS='|' read -r name ip tenants; do
-        [[ -n "${name:-}" && "$name" != \#* ]] || continue
-        add_unique clients "$name"
-        CLIENTIP["$name"]="$ip"
-        SERVES["$name"]="${tenants//,/ }"
-    done < "$CLIENTS_ENV"
+    local name ip tenants ns
+    if [[ -r "$CLIENTS_ENV" ]]; then
+        while IFS='|' read -r name ip tenants; do
+            [[ -n "${name:-}" && "$name" != \#* ]] || continue
+            add_unique clients "$name"
+            CLIENTIP["$name"]="$ip"
+            SERVES["$name"]="${tenants//,/ }"
+            PREFIX["$name"]=""
+        done < "$CLIENTS_ENV"
+    fi
+
+    # One machine, one namespace per tenant: one pseudo-client each, same
+    # address, different command prefix.
+    if (( WITH_NETNS )) && [[ -r "$NETNS_ENV" ]]; then
+        while IFS='|' read -r name ip tenants; do
+            [[ -n "${name:-}" && "$name" != \#* ]] || continue
+            for ns in ${tenants//,/ }; do
+                add_unique clients "netns/${ns}"
+                CLIENTIP["netns/${ns}"]="$ip"
+                SERVES["netns/${ns}"]="$ns"
+                PREFIX["netns/${ns}"]="ip netns exec ${ns} "
+            done
+        done < "$NETNS_ENV"
+    fi
 
     local src dest n rc
     for src in "${clients[@]}"; do
@@ -324,7 +344,7 @@ probe_from_vms() {
             case " ${SERVES[$src]} " in *" $dest "*) n="$COUNT" ;; *) n=1 ;; esac
             ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                 -o LogLevel=ERROR -o ConnectTimeout=10 "${SSH_USER}@${CLIENTIP[$src]}" \
-                "ping -c$n -W2 ${PODADDR[$dest]}" >/dev/null 2>&1; rc=$?
+                "${PREFIX[$src]}ping -c$n -W2 ${PODADDR[$dest]}" >/dev/null 2>&1; rc=$?
             if (( rc == 0 )); then
                 VM["$src,$dest"]="ok"
                 printf '  %-16s -> %-8s %-16s ok\n' "$src" "$dest" "${PODADDR[$dest]}"

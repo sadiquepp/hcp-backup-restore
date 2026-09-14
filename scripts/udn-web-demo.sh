@@ -22,18 +22,39 @@ PORT="${UDN_WEB_PORT:-8080}"
 SSH_KEY="${UDN_CLIENT_SSH_KEY:-$HOME/.ssh/lab_rsa}"
 SSH_USER="${UDN_CLIENT_SSH_USER:-root}"
 CLIENTS_ENV="${UDN_CLIENTS_ENV:-$(dirname "$0")/../udn-bgp/tenant-clients.env}"
+NETNS_ENV="${UDN_NETNS_ENV:-$(dirname "$0")/../udn-bgp/netns-client.env}"
+WITH_NETNS=0
+WITH_VMS=1
+for arg in "$@"; do
+    case "$arg" in
+        --netns)      WITH_NETNS=1 ;;
+        --netns-only) WITH_NETNS=1; WITH_VMS=0 ;;
+        --vms-only)   WITH_NETNS=0; WITH_VMS=1 ;;
+        -h|--help)    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
 
 command -v oc >/dev/null || { echo "oc not found in PATH" >&2; exit 1; }
 if (( BASH_VERSINFO[0] < 4 )); then
     echo "This needs bash 4+; found ${BASH_VERSION}." >&2; exit 1
 fi
-[[ -r "$CLIENTS_ENV" ]] || {
-    echo "No client manifest at $CLIENTS_ENV." >&2
-    echo "Build the VMs with --tags clabtenantclients, or set UDN_CLIENTS_ENV." >&2
+if (( WITH_VMS )) && [[ ! -r "$CLIENTS_ENV" ]]; then
+    echo "No per-tenant client manifest at $CLIENTS_ENV; continuing without it." >&2
+    echo "Build them with --tags clabtenantclients, or set UDN_CLIENTS_ENV." >&2
+    WITH_VMS=0
+fi
+if (( WITH_NETNS )) && [[ ! -r "$NETNS_ENV" ]]; then
+    echo "No namespace-client manifest at $NETNS_ENV." >&2
+    echo "Build it with --tags clabnsclient, or set UDN_NETNS_ENV." >&2
     exit 1
-}
+fi
+if (( ! WITH_VMS && ! WITH_NETNS )); then
+    echo "No clients to test. Build --tags clabtenantclients or --tags clabnsclient." >&2
+    exit 1
+fi
 
-declare -A WEBADDR RESULT SERVES CLIENTIP ADDR_TENANTS
+declare -A WEBADDR RESULT SERVES CLIENTIP ADDR_TENANTS PREFIX
 tenants=(); clients=(); addrs=()
 
 on_client() {  # client-ip, command
@@ -71,10 +92,28 @@ done
 
 (( ${#tenants[@]} )) || { echo "No udn-web pods found. Run --tags web first." >&2; exit 1; }
 
-while IFS='|' read -r name ip serves; do
-    [[ -n "${name:-}" && "$name" != \#* ]] || continue
-    clients+=("$name"); CLIENTIP["$name"]="$ip"; SERVES["$name"]="${serves//,/ }"
-done < "$CLIENTS_ENV"
+if (( WITH_VMS )); then
+    while IFS='|' read -r name ip serves; do
+        [[ -n "${name:-}" && "$name" != \#* ]] || continue
+        clients+=("$name"); CLIENTIP["$name"]="$ip"
+        SERVES["$name"]="${serves//,/ }"; PREFIX["$name"]=""
+    done < "$CLIENTS_ENV"
+fi
+
+# The namespace client is one machine with one namespace per tenant, so it
+# contributes one pseudo-client per namespace: same address, different command
+# prefix. Everything downstream - the address-keyed probing, the matrix, the
+# verdict - is identical, because "which tenants does this client serve" is the
+# only thing any of it asks.
+if (( WITH_NETNS )); then
+    while IFS='|' read -r name ip nslist; do
+        [[ -n "${name:-}" && "$name" != \#* ]] || continue
+        for ns in ${nslist//,/ }; do
+            clients+=("netns/${ns}"); CLIENTIP["netns/${ns}"]="$ip"
+            SERVES["netns/${ns}"]="$ns"; PREFIX["netns/${ns}"]="ip netns exec ${ns} "
+        done
+    done < "$NETNS_ENV"
+fi
 
 echo "Web pods"
 for t in "${tenants[@]}"; do
@@ -97,7 +136,7 @@ for c in "${clients[@]}"; do
     for a in "${addrs[@]}"; do
         printf '  curl http://%-22s ' "${a}:${PORT}/"
         out=$(on_client "${CLIENTIP[$c]}" \
-                "curl -s --max-time 5 http://${a}:${PORT}/")
+                "${PREFIX[$c]}curl -s --max-time 5 http://${a}:${PORT}/")
         if [[ -n "$out" && "$out" == I\ am\ * ]]; then
             RESULT["$c,$a"]="${out%%$'\n'*}"
             echo "-> ${RESULT[$c,$a]}   [${ADDR_TENANTS[$a]}]"

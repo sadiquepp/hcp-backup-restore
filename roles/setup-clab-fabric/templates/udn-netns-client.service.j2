@@ -1,0 +1,16 @@
+[Unit]
+Description=Per-tenant network namespaces for {{ udn_nsclient_vm_name }}
+# The fabric NIC has no NetworkManager configuration - the script finds it by
+# MAC - so this waits for the network generally, not for a named device.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Namespaces do not survive a reboot, so this recreates them rather than
+# assuming them. RemainAfterExit keeps the unit "active" once they exist.
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/udn-netns-client.sh
+
+[Install]
+WantedBy=multi-user.target

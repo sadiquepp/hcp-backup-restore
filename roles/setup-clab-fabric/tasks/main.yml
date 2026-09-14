@@ -274,3 +274,50 @@
     loop_var: client
     label: "{{ client.name }} ({{ client.tenants | join('+') }})"
   tags: [clabtenantclients]
+
+# ---------------------------------------------------------------------------
+# Alternative: one VM, one network namespace per tenant.
+#
+#   --tags clabnsclient
+#
+# Built alongside --tags clabtenantclients rather than replacing it, so both
+# designs can be exercised on the same fabric. They coexist only because the
+# namespaces take .21 on each client segment and the VMs take .20; an assert in
+# nsclient-vm.yml enforces that.
+#
+# Same prerequisite as the per-tenant VMs: the topology must have been
+# redeployed (--tags clabdeploy) after udn_client_segments changed, because
+# leaf1 builds the client VLAN subinterfaces in its exec block at start.
+# ---------------------------------------------------------------------------
+- name: Build the namespace client VM
+  ansible.builtin.include_tasks:
+    file: nsclient-vm.yml
+    apply:
+      tags: [clabnsclient]
+  tags: [clabnsclient]
+
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml - needed to register the
+      namespace client with subscription-manager, same as every other guest.
+  tags: [clabnsclient]
+
+- name: Register the namespace client with subscription-manager
+  ansible.builtin.include_role:
+    name: setup-rhsm
+    apply:
+      delegate_to: "{{ udn_nsclient_vm_name }}"
+      tags: [clabnsclient]
+  tags: [clabnsclient]
+
+- name: Configure the namespace client
+  ansible.builtin.include_tasks:
+    file: nsclient-config.yml
+    apply:
+      delegate_to: "{{ udn_nsclient_vm_name }}"
+      tags: [clabnsclient]
+  tags: [clabnsclient]
