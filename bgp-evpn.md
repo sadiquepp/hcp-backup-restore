@@ -2891,6 +2891,110 @@ run.
 
 ---
 
+### 3g. Following one curl in phase 3
+
+Phase 2's walkthrough followed a ping. This follows a `curl`, because TCP
+carries a request *and* an identified response, and identity is the whole
+question once blue and red share a subnet.
+
+The sharpest case is the one the lab actually produced. Both web pods landed on
+**worker1**: `10.200.4.0/24` is blue's worker1 slice and `10.200.1.0/24` is
+red's, so `10.200.4.4` and `10.200.1.5` are served by two pods on one node,
+reached over one physical NIC. Confirm with:
+
+```bash
+oc get pods -A -l app=udn-web -o wide
+```
+
+#### Out — `udnclient-blue` to blue's page
+
+`curl http://10.200.4.4:8080/`
+
+| # | Where | What happens |
+| --- | --- | --- |
+| 1 | the client VM | One routing table, one matching route: `10.200.0.0/16 via 10.215.10.1 dev <nic>.210`. The frame leaves **tagged VLAN 210**. |
+| 2 | virbr1 → clab VM → `br-fabric` | Carried untouched. `vlan_filtering` is 0 on the guest bridge, which is why a tag survives the chain at all. |
+| 3 | **leaf1 `eth1.210`** | **The decision point.** That interface is enslaved to VRF `blue`, so the lookup happens in **table 1110** — not in `main`. Nothing about the destination address chose this; the *ingress interface* did. |
+| 4 | leaf1 table 1110 | `10.200.4.0/24` was learned over BGP from worker1 at `192.168.141.34`, out `eth1.110` — also in VRF blue. Frame leaves **tagged VLAN 110**. |
+| 5 | worker1 `enp8s0.110` | In VRF blue, **table 1116**. `10.200.4.0/24 dev ovn-k8s-mp10`. |
+| 6 | OVN | Into the pod. httpd answers on 8080. |
+
+#### Back — the pod to the client
+
+| # | Where | What happens |
+| --- | --- | --- |
+| 7 | the pod | Replies to `10.215.10.20`. Out `ovn-udn1`, to `ovn-k8s-mp10`. |
+| 8 | worker1 | The l3mdev rule sends it to the tenant VRF, **table 1116**. |
+| 9 | table 1116 | `10.215.10.0/24 via 192.168.141.1 dev enp8s0.110`, learned over BGP — because leaf1 carries `network 10.215.10.0/24` **inside the blue VRF**. Out **tagged VLAN 110**. |
+| 10 | leaf1 `eth1.110` | VRF blue again, table 1110. `10.215.10.0/24` is connected on `eth1.210`. Out **tagged VLAN 210**. |
+| 11 | the client VM | Reply arrives on the same interface the request left. |
+
+**Step 9 is the one to keep.** That `network` statement in leaf1's per-VRF
+stanza is not decoration — without it the pod is reachable and cannot answer,
+and the symptom is a one-way fabric that looks like a drop somewhere in the
+middle. It exists so the *return* path is learned, not the forward one.
+
+#### The same curl from `udnclient-red`
+
+`curl http://10.200.1.5:8080/` — every step is identical in shape:
+
+| Step | blue | red |
+| --- | --- | --- |
+| client's route | `10.200.0.0/16 via 10.215.10.1` | `10.200.0.0/16 via 10.216.10.1` |
+| leaves on | VLAN 210 | VLAN 220 |
+| leaf1 ingress | `eth1.210`, VRF blue | `eth1.220`, VRF red |
+| leaf1 table | 1110 | 1120 |
+| next hop | `192.168.141.34` | `192.168.142.34` |
+| toward worker1 on | VLAN 110 | VLAN 120 |
+| node table | 1116 | 1117 |
+| management port | `ovn-k8s-mp10` | `ovn-k8s-mp11` |
+
+**`10.200.0.0/16` exists in both of leaf1's tables, with different next hops.**
+Two routes to the same prefix, and no tiebreak is ever needed because they are
+never compared — they live in different tables, and which table gets consulted
+was settled at step 3 by the VLAN the frame arrived on.
+
+That is the entire mechanism of VRF-Lite, and it is why the demo works: the
+destination address does not select the path.
+
+#### Why phase 3 is symmetric and phase 2 was not
+
+Phase 2's request crossed the fabric and its reply came back via the node's
+*default gateway* on a different interface — asymmetric by construction, which
+is why it needed loose `rp_filter` on the nodes, on the lab host and on the
+client, and why one node left strict silently swallowed a whole column of the
+matrix.
+
+Here, steps 1–6 and 7–11 traverse the same two VLANs in reverse, in the same
+VRF, on the same interfaces. Nothing is asymmetric, so nothing needs
+`rp_filter` relaxed. `udn-tenant-client-routes.sh` sets it loose anyway, so
+that a real isolation result is never mistaken for an rp_filter drop — set it
+to `1` and the tests should still pass. That difference is worth naming in the
+phase 2 / phase 3 comparison: VRF-Lite did not only isolate the tenants, it
+made the path symmetric.
+
+#### Watching it
+
+Three points, while `scripts/udn-web-demo.sh` runs:
+
+```bash
+# on the client VM - the request leaving, tagged
+tcpdump -nei <nic>.210 tcp port 8080
+
+# on leaf1 - the same frame arriving in the blue VRF, then leaving on VLAN 110
+ssh root@192.168.122.40 \
+  "docker exec clab-udnbgp-leaf1 tcpdump -nei eth1 'vlan 210 or vlan 110' and tcp port 8080"
+
+# on worker1 - arriving in the tenant VRF
+oc debug node/worker1 -- chroot /host timeout 10 tcpdump -nei enp8s0.110 tcp port 8080
+```
+
+The leaf1 capture is the one that shows the mechanism: the same TCP stream
+appears twice, once tagged 210 and once tagged 110, with the VRF lookup in
+between.
+
+---
+
 ## Phase 4: EVPN
 
 > **Automate this step**
