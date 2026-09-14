@@ -215,3 +215,62 @@
       delegate_to: "{{ udn_client_vm_name }}"
       tags: [clabclient]
   tags: [clabclient]
+
+# ---------------------------------------------------------------------------
+# Optional: per-tenant client VMs for phase 3 (VRF-Lite) isolation testing.
+#
+#   --tags clabtenantclients
+#
+# Separate from --tags clabclient, which builds the single phase-2 client. Both
+# can coexist: the phase-2 client keeps working as the phase-2 baseline, and
+# these are useless until --tags vrflite has run.
+#
+# REQUIRES the topology to have been redeployed after udn_client_segments was
+# added, because leaf1 builds the client VLAN subinterfaces in its exec block
+# at container start (--tags clabdeploy).
+# ---------------------------------------------------------------------------
+- name: Build the per-tenant client VMs
+  ansible.builtin.include_tasks:
+    file: tenant-client-vms.yml
+    apply:
+      tags: [clabtenantclients]
+  tags: [clabtenantclients]
+
+# Same ordering rule as the containerlab VM and the phase-2 client: a bare copy
+# of the base image has no entitlement, so the first dnf on a guest created
+# seconds ago fails with "No package ... available". Register between creating
+# and using, in one ordered sequence.
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml (ansible-vault edit
+      vault.yaml) - needed to register the per-tenant client VMs with
+      subscription-manager, same as every other guest in this lab.
+  tags: [clabtenantclients]
+
+- name: Register each per-tenant client with subscription-manager
+  ansible.builtin.include_role:
+    name: setup-rhsm
+    apply:
+      delegate_to: "{{ client.name }}"
+      tags: [clabtenantclients]
+  loop: "{{ udn_tenant_clients }}"
+  loop_control:
+    loop_var: client
+    label: "{{ client.name }}"
+  tags: [clabtenantclients]
+
+- name: Configure each per-tenant client
+  ansible.builtin.include_tasks:
+    file: tenant-client-config.yml
+    apply:
+      delegate_to: "{{ client.name }}"
+      tags: [clabtenantclients]
+  loop: "{{ udn_tenant_clients }}"
+  loop_control:
+    loop_var: client
+    label: "{{ client.name }} ({{ client.tenants | join('+') }})"
+  tags: [clabtenantclients]

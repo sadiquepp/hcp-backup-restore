@@ -1,0 +1,15 @@
+[Unit]
+Description=Fabric VLANs and tenant routes for {{ client.name }} ({{ client.tenants | join(', ') }})
+# The fabric NIC has no NetworkManager configuration - the script finds it by
+# MAC and configures it directly - so this waits for the network to be up
+# rather than for any particular device.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/udn-tenant-client-routes.sh
+
+[Install]
+WantedBy=multi-user.target

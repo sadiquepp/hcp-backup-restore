@@ -118,6 +118,12 @@ ip_list:
   # second NIC gets clab_fabric_prefix.40 there, same last octet.
   clab: 40
   udnclient: 60
+  ## Phase 3 per-tenant client VMs (--tags clabtenantclients). One per
+  ## isolation domain: blue and red need separate machines because they carry
+  ## the same pod subnet, orange and green can share one because theirs differ.
+  udnclient-blue: 61
+  udnclient-red: 62
+  udnclient-og: 63
 
 helper_name: helper
 helper_disk: helper_disk.qcow2
@@ -1279,3 +1285,64 @@ udn_client_os_variant: rhel9.5
 ## and tcpdump and has no use for a grown root filesystem. Point it at whatever
 ## base image you have; rhel8 works as well as rhel9, adjust os_variant to match.
 udn_client_base_image: "{{ rhel9_kvm_image }}"
+
+
+## ---------------------------------------------------------------------------
+## Phase 3 per-tenant client VMs (--tags clabtenantclients)
+## ---------------------------------------------------------------------------
+## Real machines behind leaf1, one per isolation domain, for demonstrating
+## VRF-Lite with something you can ssh into rather than `docker exec` into.
+##
+## Each client segment is a VLAN on the SAME fabric bridge the nodes use, with
+## leaf1 holding the gateway inside that tenant's VRF. That placement is the
+## whole design:
+##
+##   * NOT on the tenant's handoff VLAN (110-140). A client there shares a
+##     broadcast domain with all three workers, so leaf1 answers with an ICMP
+##     redirect and the traffic goes direct - and worse, blue-cannot-reach-red
+##     would be proven by 802.1Q rather than by the VRF. Nobody doubts that two
+##     VLANs do not mix; the claim worth proving is that leaf1 keeps two
+##     ROUTING TABLES apart.
+##
+##   * NOT on the tenant's existing external_prefix either. That subnet is
+##     already connected on leaf1 through the <tenant>-ext veth, and a second
+##     interface carrying it would give the VRF two ambiguous paths to the same
+##     network. A separate segment per tenant is unambiguous, and it models a
+##     tenant VRF with two attached customer sites, which is realistic.
+##
+## So: off-segment from the nodes, routed by leaf1 inside the tenant VRF,
+## reachable only from the VLAN that lands in that VRF. leaf1 originates each
+## of these into its VRF so the cluster learns the return path over BGP.
+udn_client_segments:
+  ## vlan: the client segment's 802.1Q id, distinct from the handoff VLANs.
+  ## prefix: first three octets; leaf1 takes .1 and the VM takes .20.
+  blue:   {vlan: 210, prefix: "10.215.10"}
+  red:    {vlan: 220, prefix: "10.216.10"}
+  orange: {vlan: 230, prefix: "10.217.10"}
+  green:  {vlan: 240, prefix: "10.218.10"}
+
+udn_client_segment_gw_octet: 1
+udn_client_segment_host_octet: 20
+
+## Which VM serves which tenants. The grouping is forced by the addressing, not
+## chosen for convenience: blue and red both use 10.200.0.0/16 in phase 3, so a
+## single host cannot hold a route to each - one routing table, one entry, one
+## winner. orange (10.202.0.0/16) and green (10.204.0.0/16) do not collide, so
+## one VM with two VLAN subinterfaces and two routes serves both, and needs no
+## VRFs of its own to do it.
+##
+## Keeping the clients dumb is deliberate. A client-side VRF fault would be
+## indistinguishable from the leaf-side VRF fault under test, and leaf1 is the
+## thing being tested.
+udn_tenant_clients:
+  - name: udnclient-blue
+    tenants: [blue]
+  - name: udnclient-red
+    tenants: [red]
+  - name: udnclient-og
+    tenants: [orange, green]
+
+udn_tenant_client_memory: 2048
+udn_tenant_client_vcpus: 2
+udn_tenant_client_os_variant: rhel9.5
+udn_tenant_client_base_image: "{{ rhel9_kvm_image }}"

@@ -78,6 +78,17 @@ topology:
         - ip link set {{ t.name }}-ext master {{ t.name }}
         - ip addr add {{ t.external_gw }}/{{ t.external_prefix_bits }} dev {{ t.name }}-ext
         - ip link set {{ t.name }}-ext up
+{% if t.name in (udn_client_segments | default({})) %}
+        ## Client segment for {{ t.name }}: VLAN {{ udn_client_segments[t.name].vlan }} on the same fabric
+        ## bridge, gateway held inside the {{ t.name }} VRF. A client VM tagging
+        ## this VLAN lands in this VRF and no other - and it is off-segment
+        ## from the nodes, which are on VLAN {{ t.vlan }}, so leaf1 genuinely
+        ## routes for it instead of issuing an ICMP redirect.
+        - ip link add link eth1 name eth1.{{ udn_client_segments[t.name].vlan }} type vlan id {{ udn_client_segments[t.name].vlan }}
+        - ip link set eth1.{{ udn_client_segments[t.name].vlan }} master {{ t.name }}
+        - ip link set eth1.{{ udn_client_segments[t.name].vlan }} mtu {{ clab_fabric_mtu }} up
+        - ip addr add {{ udn_client_segments[t.name].prefix }}.{{ udn_client_segment_gw_octet }}/{{ clab_fabric_netmask_bits }} dev eth1.{{ udn_client_segments[t.name].vlan }}
+{% endif %}
 {% endfor %}
         ## Re-read the config now that every VRF and subinterface exists.
         ##

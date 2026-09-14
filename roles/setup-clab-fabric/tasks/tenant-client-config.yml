@@ -1,0 +1,66 @@
+---
+# In-guest configuration for one per-tenant client VM. Delegated to it.
+# `client` is the loop variable from tenant-client-vms.yml.
+
+- name: Install test tooling on {{ client.name }}
+  ansible.builtin.dnf:
+    name:
+      - iproute
+      - tcpdump
+    state: present
+
+- name: Install the tenant client routing script on {{ client.name }}
+  ansible.builtin.template:
+    src: udn-tenant-client-routes.sh.j2
+    dest: /usr/local/sbin/udn-tenant-client-routes.sh
+    mode: "0755"
+  register: udn_tc_script
+
+- name: Install the tenant client routing unit on {{ client.name }}
+  ansible.builtin.template:
+    src: udn-tenant-client-routes.service.j2
+    dest: /etc/systemd/system/udn-tenant-client-routes.service
+    mode: "0644"
+  register: udn_tc_unit
+
+- name: Enable and run the tenant client routing unit on {{ client.name }}
+  ansible.builtin.systemd:
+    name: udn-tenant-client-routes.service
+    enabled: true
+    state: "{{ 'restarted' if (udn_tc_script is changed or udn_tc_unit is changed) else 'started' }}"
+    daemon_reload: true
+
+# The gateway is leaf1's address inside the tenant VRF. If this fails, nothing
+# routed through it can work, and the failure is worth naming here rather than
+# leaving it to surface as a confusing isolation result later - a client that
+# cannot reach its own gateway produces the same all-FAIL row as a genuine
+# VRF problem.
+- name: Confirm {{ client.name }} reaches each tenant's gateway
+  ansible.builtin.command:
+    cmd: >-
+      ping -c2 -W2
+      {{ udn_client_segments[tenant_name].prefix }}.{{ udn_client_segment_gw_octet }}
+  loop: "{{ client.tenants }}"
+  loop_control:
+    loop_var: tenant_name
+  register: udn_tc_gw_ping
+  changed_when: false
+  failed_when: false
+
+- name: Fail if a tenant gateway is unreachable from {{ client.name }}
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      {{ client.name }} cannot reach leaf1 at
+      {{ udn_client_segments[item.tenant_name].prefix }}.{{ udn_client_segment_gw_octet }}
+      on VLAN {{ udn_client_segments[item.tenant_name].vlan }}. Check that leaf1
+      has eth1.{{ udn_client_segments[item.tenant_name].vlan }} in the
+      {{ item.tenant_name }} VRF - the topology has to be redeployed
+      (--tags clabdeploy) after adding udn_client_segments, because the
+      subinterfaces are built by leaf1's exec block at container start.
+    success_msg: >-
+      {{ client.name }} reaches {{ item.tenant_name }}'s gateway on VLAN
+      {{ udn_client_segments[item.tenant_name].vlan }}.
+  loop: "{{ udn_tc_gw_ping.results }}"
+  loop_control:
+    label: "{{ item.tenant_name }}"
