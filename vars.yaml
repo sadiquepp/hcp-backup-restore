@@ -1656,3 +1656,56 @@ udn_web_tenants: [blue, red, orange, green, purple]
 udn_web_image: "registry.access.redhat.com/ubi9/httpd-24:latest"
 udn_web_init_image: "registry.redhat.io/rhel9/support-tools:latest"
 udn_web_port: 8080
+
+
+## ---------------------------------------------------------------------------
+## Tenant ingress on the namespace client (--tags clabnsproxy)
+## ---------------------------------------------------------------------------
+## The question this answers is the one the isolation matrix provokes: if two
+## tenants genuinely hold the same address, how does an end user reach either?
+##
+## The answer is a proxy that is itself multi-homed into every tenant, and on
+## this VM that is possible because HAProxy can open a backend connection
+## INSIDE a named network namespace ('namespace <name>' on a server line). Two
+## backends can then name the identical address and port and reach different
+## pods, because each connect() happens in a different namespace and therefore
+## against a different routing table:
+##
+##     backend be_green    server g1 10.204.0.12:8080 namespace green
+##     backend be_purple   server p1 10.204.0.12:8080 namespace purple
+##
+## No other single-process arrangement gets that. A proxy in the root namespace
+## has no fabric presence at all here - udn-netns-client.sh deliberately leaves
+## root holding the NIC and no address - and even given one, root has a single
+## routing table and so a single route to 10.204.0.12.
+##
+## WHAT THIS COSTS, stated plainly: this machine can now reach every tenant.
+## That is a deliberate hole in the property the rest of phase 3 demonstrates.
+## Everywhere else a misconfiguration CANNOT cross-connect tenants because no
+## path exists; here the Host-to-namespace mapping is the only thing keeping
+## them apart, and a wrong 'namespace' keyword would serve purple's page on
+## green's hostname with nothing in the fabric objecting. That is exactly what
+## a real tenant-facing ingress is, which is why it is worth building on
+## purpose rather than meeting by accident. It changes nothing for the other
+## tests: those run inside the namespaces, which this does not touch.
+udn_proxy_tenants: "{{ udn_web_tenants }}"
+
+## Hostnames are <tenant>.<domain>, pointed at the namespace client's
+## management address in whatever resolver the lab uses. No DNS? The proxy also
+## routes on path, so http://<vm>/green/ works with no name resolution at all,
+## and a Host header works without either.
+udn_proxy_domain: "hub.mylab.com"
+udn_proxy_port: 80
+udn_proxy_stats_port: 8404
+
+## HAProxy must be built with USE_NS=1 for the namespace keyword to exist. The
+## role checks and fails with the verification command rather than rendering a
+## config the binary cannot parse.
+##
+## SELinux: haproxy_t carries no rule permitting setns() into another
+## namespace, so backends can fail with EPERM on a config that is perfectly
+## valid. The role reaches for this only if verification fails AND an AVC
+## denial is actually present, and it makes ONE domain permissive rather than
+## the system - this is a disposable lab client VM. Set false to have it fail
+## and leave the policy alone.
+udn_proxy_selinux_permissive_fallback: true

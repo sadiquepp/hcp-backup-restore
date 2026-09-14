@@ -321,3 +321,25 @@
       delegate_to: "{{ udn_nsclient_vm_name }}"
       tags: [clabnsclient]
   tags: [clabnsclient]
+
+# ---------------------------------------------------------------------------
+# Tenant ingress on that same VM.
+#
+#   --tags clabnsproxy
+#
+# Separate tag from clabnsclient on purpose. The namespaces are the isolation
+# demonstration; the proxy is a deliberate hole through it, and one that has to
+# be re-run whenever the web pods are replaced, because it proxies to pod
+# addresses that change. Needs --tags clabnsclient for the namespaces and
+# --tags web for something to proxy to.
+#
+# Backend discovery runs on localhost (it needs oc); the rest is delegated to
+# the VM by nsproxy.yml's own tasks, so this include is not blanket-delegated.
+# ---------------------------------------------------------------------------
+- name: Build the tenant ingress on the namespace client
+  ansible.builtin.include_tasks:
+    file: nsproxy.yml
+    apply:
+      delegate_to: "{{ udn_nsclient_vm_name }}"
+      tags: [clabnsproxy]
+  tags: [clabnsproxy]

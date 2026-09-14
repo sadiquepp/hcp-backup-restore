@@ -1,0 +1,232 @@
+---
+# Tenant ingress on the namespace client (--tags clabnsproxy).
+#
+# Answers the question the isolation matrix provokes: if green and purple
+# genuinely hold the same address, how does an end user reach either? With a
+# proxy that is multi-homed into every tenant and picks the namespace by Host.
+#
+# Runs in two places. Backend discovery needs `oc` and so runs on localhost;
+# everything after it is delegated to the VM by the caller in main.yml.
+
+# ---------------------------------------------------------------------------
+# What to proxy to. The pod addresses are not stable - any --tags web re-run
+# replaces the pods and changes them - so they are read now and recorded in
+# the manifest, and the demo compares the two to tell a stale config from a
+# routing fault.
+# ---------------------------------------------------------------------------
+- name: Read each tenant's web pod address
+  ansible.builtin.shell:
+    cmd: >-
+      pod=$(oc -n udn-{{ item }} get pods -l app=udn-web
+            -o jsonpath='{.items[0].metadata.name}') &&
+      oc -n udn-{{ item }} exec "$pod" -c httpd --
+        cat /var/www/html/index.html 2>/dev/null |
+        awk '/^udn:/ {split($2, a, "/"); print a[1]}'
+  loop: "{{ udn_proxy_tenants }}"
+  register: udn_proxy_addr_probe
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+
+- name: Fail if a tenant has no web pod to proxy to
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout | trim | length > 0
+    fail_msg: >-
+      No web pod address for tenant {{ item.item }}. The ingress proxies to the
+      per-tenant web workload, it does not create one - run --tags web first.
+      Note udn_proxy_tenants defaults to udn_web_tenants, so a tenant listed in
+      one and not deployed by the other cannot work.
+    success_msg: "{{ item.item }} -> {{ item.stdout | trim }}"
+  loop: "{{ udn_proxy_addr_probe.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  delegate_to: localhost
+
+- name: Record the backend address of each tenant
+  ansible.builtin.set_fact:
+    udn_proxy_backend_addrs: >-
+      {{ dict(udn_proxy_addr_probe.results | map(attribute='item') | list
+              | zip(udn_proxy_addr_probe.results
+                    | map(attribute='stdout') | map('trim') | list)) }}
+    udn_proxy_bind_addr: "{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}"
+
+- name: Record the ingress for the demo script
+  ansible.builtin.template:
+    src: tenant-proxy.env.j2
+    dest: "{{ playbook_dir }}/udn-bgp/tenant-proxy.env"
+    mode: "0644"
+  delegate_to: localhost
+
+# Two tenants SHARING a backend address is the case this exists for, so it is
+# not an error - but a tenant whose address is shared and whose namespace is
+# wrong would be undetectable by reading the config, so say it out loud.
+- name: Report which tenants share a backend address
+  ansible.builtin.debug:
+    msg: >-
+      {{ udn_proxy_backend_addrs }}
+      {{ 'Two or more tenants share one address - this is the case the proxy
+      exists for, and the only way to catch a wrong namespace keyword is to
+      check that each hostname returns the page naming the tenant that was
+      asked for. Verification below does exactly that.'
+      if (udn_proxy_backend_addrs.values() | list | length)
+         != (udn_proxy_backend_addrs.values() | list | unique | length)
+      else 'No two tenants currently share a backend address. The proxy still
+      works; it is just not proving anything a single routing table could
+      not.' }}
+  delegate_to: localhost
+
+# ---------------------------------------------------------------------------
+# On the VM
+# ---------------------------------------------------------------------------
+- name: Install haproxy and the SELinux tooling the fallback may need
+  ansible.builtin.dnf:
+    name:
+      - haproxy
+      - policycoreutils-python-utils
+    state: present
+
+# The namespace keyword is a compile-time option. Without it haproxy rejects
+# the config outright, so check the binary before rendering one it cannot read.
+- name: Check that haproxy was built with network namespace support
+  ansible.builtin.command:
+    cmd: haproxy -vv
+  register: udn_proxy_haproxy_vv
+  changed_when: false
+
+- name: Fail if haproxy has no namespace support
+  ansible.builtin.assert:
+    that: udn_proxy_haproxy_vv.stdout is search('(?i)USE_NS\s*=\s*1|namespace')
+    fail_msg: >-
+      This haproxy was not built with USE_NS=1, so 'namespace <name>' on a
+      server line does not exist and the config would not parse. Confirm with:
+        haproxy -vv | grep -i -E 'USE_NS|namespace'
+      Without it a single haproxy cannot reach two tenants that share a pod
+      address, because it would resolve both backends in one routing table.
+      The fallback is one haproxy INSIDE each namespace plus a dispatcher in
+      root, joined by a veth pair per tenant on unique link addresses - more
+      moving parts, no compile-time requirement.
+    success_msg: "haproxy supports network namespaces."
+
+- name: Install the tenant ingress config
+  ansible.builtin.template:
+    src: haproxy-tenants.cfg.j2
+    dest: /etc/haproxy/udn-tenants.cfg
+    mode: "0644"
+    validate: "/usr/sbin/haproxy -c -f %s"
+  register: udn_proxy_cfg
+
+- name: Install the tenant ingress unit
+  ansible.builtin.template:
+    src: udn-tenant-proxy.service.j2
+    dest: /etc/systemd/system/udn-tenant-proxy.service
+    mode: "0644"
+  register: udn_proxy_unit
+
+- name: Enable and start the tenant ingress
+  ansible.builtin.systemd:
+    name: udn-tenant-proxy.service
+    enabled: true
+    state: "{{ 'restarted' if (udn_proxy_cfg is changed or udn_proxy_unit is changed) else 'started' }}"
+    daemon_reload: true
+
+# ---------------------------------------------------------------------------
+# Verify by identity, not by reachability. A 200 from the wrong tenant is the
+# failure this design can produce and a health check cannot see.
+# ---------------------------------------------------------------------------
+- name: Curl every tenant hostname through the proxy
+  ansible.builtin.command:
+    cmd: >-
+      curl -sS --max-time 10 -H "Host: {{ item }}.{{ udn_proxy_domain }}"
+      http://{{ udn_proxy_bind_addr }}:{{ udn_proxy_port }}/
+  loop: "{{ udn_proxy_tenants }}"
+  register: udn_proxy_probe
+  changed_when: false
+  failed_when: false
+  retries: 6
+  delay: 5
+  until: udn_proxy_probe.stdout is defined and ('I am ' ~ item) in udn_proxy_probe.stdout
+
+# A page from the WRONG tenant is the failure this design can produce, so the
+# test is "did green's hostname return green's page", not "did it return 200".
+- name: Start the verification result empty
+  ansible.builtin.set_fact:
+    udn_proxy_wrong: []
+
+- name: Note which hostnames did not serve their own tenant
+  ansible.builtin.set_fact:
+    udn_proxy_wrong: >-
+      {{ (udn_proxy_wrong | default([]))
+         + ([item.item] if ('I am ' ~ item.item) not in (item.stdout | default(''))
+            else []) }}
+  loop: "{{ udn_proxy_probe.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Gather SELinux denials if any hostname failed
+  ansible.builtin.shell:
+    cmd: "ausearch -m avc -ts recent 2>/dev/null | grep -i haproxy | tail -20 || true"
+  register: udn_proxy_avc
+  changed_when: false
+  when: udn_proxy_wrong | length > 0
+
+# haproxy_t has no rule permitting setns(), so a valid config can still fail
+# with EPERM on every namespace backend. Scoped to the one domain, and only
+# when a denial is actually present - not applied speculatively.
+- name: Make the haproxy domain permissive and retry
+  when:
+    - udn_proxy_wrong | length > 0
+    - udn_proxy_avc.stdout | default('') | length > 0
+    - udn_proxy_selinux_permissive_fallback | bool
+  block:
+    - name: Report the denial
+      ansible.builtin.debug:
+        msg: >-
+          SELinux denied haproxy the namespace entry it needs. Making the
+          haproxy_t domain permissive on this lab VM - the system stays
+          enforcing. Denial:
+          {{ udn_proxy_avc.stdout_lines | default([]) | join(' | ') }}
+
+    - name: Set haproxy_t permissive
+      ansible.builtin.command:
+        cmd: semanage permissive -a haproxy_t
+      changed_when: true
+
+    - name: Restart the tenant ingress
+      ansible.builtin.systemd:
+        name: udn-tenant-proxy.service
+        state: restarted
+
+    - name: Curl every tenant hostname again
+      ansible.builtin.command:
+        cmd: >-
+          curl -sS --max-time 10 -H "Host: {{ item }}.{{ udn_proxy_domain }}"
+          http://{{ udn_proxy_bind_addr }}:{{ udn_proxy_port }}/
+      loop: "{{ udn_proxy_tenants }}"
+      register: udn_proxy_probe
+      changed_when: false
+      failed_when: false
+      retries: 6
+      delay: 5
+      until: udn_proxy_probe.stdout is defined and ('I am ' ~ item) in udn_proxy_probe.stdout
+
+- name: Fail unless every hostname served its own tenant
+  ansible.builtin.assert:
+    that: ('I am ' ~ item.item) in (item.stdout | default(''))
+    fail_msg: >-
+      http://{{ item.item }}.{{ udn_proxy_domain }}/ did not return
+      {{ item.item }}'s page. It returned:
+      {{ (item.stdout | default('') | truncate(200)) or '(nothing)' }}
+      Three things produce this. The pod moved and the recorded backend
+      address is stale - re-run --tags clabnsproxy after any --tags web.
+      The namespace keyword names the wrong tenant, which is the failure mode
+      this design introduces and which returns the WRONG page rather than no
+      page. Or setns() was refused - check
+        ausearch -m avc -ts recent | grep haproxy
+      Read the backend state with:
+        curl -s http://{{ udn_proxy_bind_addr }}:{{ udn_proxy_stats_port }}/
+    success_msg: "{{ item.item }}.{{ udn_proxy_domain }} -> its own page."
+  loop: "{{ udn_proxy_probe.results }}"
+  loop_control:
+    label: "{{ item.item }}"

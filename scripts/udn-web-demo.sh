@@ -6,9 +6,15 @@
 #   scripts/udn-web-demo.sh                  # the five per-tenant client VMs
 #   scripts/udn-web-demo.sh --netns          # the one VM's per-tenant namespaces
 #   scripts/udn-web-demo.sh --vms --netns    # both sets, side by side
+#   scripts/udn-web-demo.sh --proxy          # the tenant ingress, by hostname
 #
-# The flags are additive and neither implies the other: --netns alone runs the
-# namespaces INSTEAD OF the VMs. Ask for both explicitly to get both.
+# The flags are additive and none implies another: --netns alone runs the
+# namespaces INSTEAD OF the VMs. Ask for several explicitly to get several.
+#
+# --proxy is a different axis from the other two. They ask "can a machine on
+# tenant X reach anything but X"; it asks how an end user reaches EITHER of two
+# tenants that share an address, which is the question the first answer
+# provokes. Needs --tags clabnsproxy.
 #
 # This is the demo the matrices in udn-vrf-isolation.sh imply but cannot show.
 # A ping tells you something answered; it cannot tell you WHAT. Once blue and
@@ -28,8 +34,10 @@ SSH_KEY="${UDN_CLIENT_SSH_KEY:-$HOME/.ssh/lab_rsa}"
 SSH_USER="${UDN_CLIENT_SSH_USER:-root}"
 CLIENTS_ENV="${UDN_CLIENTS_ENV:-$(dirname "$0")/../udn-bgp/tenant-clients.env}"
 NETNS_ENV="${UDN_NETNS_ENV:-$(dirname "$0")/../udn-bgp/netns-client.env}"
+PROXY_ENV="${UDN_PROXY_ENV:-$(dirname "$0")/../udn-bgp/tenant-proxy.env}"
 WITH_NETNS=0
 WITH_VMS=1
+WITH_PROXY=0
 EXPLICIT=0
 for arg in "$@"; do
     case "$arg" in
@@ -38,7 +46,8 @@ for arg in "$@"; do
         # otherwise --netns would silently keep the VMs - the bug this fixes.
         --netns|--netns-only) (( EXPLICIT )) || WITH_VMS=0; EXPLICIT=1; WITH_NETNS=1 ;;
         --vms|--vms-only)     (( EXPLICIT )) || WITH_NETNS=0; EXPLICIT=1; WITH_VMS=1 ;;
-        -h|--help)    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --proxy)              (( EXPLICIT )) || { WITH_VMS=0; WITH_NETNS=0; }; EXPLICIT=1; WITH_PROXY=1 ;;
+        -h|--help)    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
     esac
 done
@@ -57,8 +66,14 @@ if (( WITH_NETNS )) && [[ ! -r "$NETNS_ENV" ]]; then
     echo "Build it with --tags clabnsclient, or set UDN_NETNS_ENV." >&2
     exit 1
 fi
-if (( ! WITH_VMS && ! WITH_NETNS )); then
-    echo "No clients to test. Build --tags clabtenantclients or --tags clabnsclient." >&2
+if (( WITH_PROXY )) && [[ ! -r "$PROXY_ENV" ]]; then
+    echo "No tenant-ingress manifest at $PROXY_ENV." >&2
+    echo "Build it with --tags clabnsproxy, or set UDN_PROXY_ENV." >&2
+    exit 1
+fi
+if (( ! WITH_VMS && ! WITH_NETNS && ! WITH_PROXY )); then
+    echo "Nothing to test. Build --tags clabtenantclients, --tags clabnsclient" >&2
+    echo "or --tags clabnsproxy." >&2
     exit 1
 fi
 
@@ -110,6 +125,100 @@ done
 
 (( ${#tenants[@]} )) || { echo "No udn-web pods found. Run --tags web first." >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# The tenant ingress (--proxy)
+#
+# A different axis from the client matrix. The clients answer "can a machine on
+# tenant X reach anything but X"; this answers the question that provokes:
+# given that green and purple really do share an address, how does an end user
+# reach either? One hostname each, one proxy, one backend address - and the
+# namespace keyword picks which pod serves it.
+#
+# Judged the same way as everything else here: by WHICH page came back. A proxy
+# that returns 200 from the wrong tenant is this design's characteristic
+# failure, and it is invisible to a health check.
+# ---------------------------------------------------------------------------
+declare -A PROXY_RECORDED PROXY_HOST_PAGE PROXY_PATH_PAGE
+PROXY_IP=""; PROXY_PORT=""; PROXY_DOMAIN=""; PROXY_VM=""
+proxy_tenants=()
+
+read_proxy_manifest() {
+    local vm ip port domain pairs pair t a
+    while IFS='|' read -r vm ip port domain pairs; do
+        [[ -n "${vm:-}" && "$vm" != \#* ]] || continue
+        PROXY_VM="$vm"; PROXY_IP="$ip"; PROXY_PORT="$port"; PROXY_DOMAIN="$domain"
+        for pair in ${pairs//,/ }; do
+            t="${pair%%:*}"; a="${pair##*:}"
+            proxy_tenants+=("$t"); PROXY_RECORDED["$t"]="$a"
+        done
+    done < "$PROXY_ENV"
+}
+
+probe_proxy() {
+    local t
+    for t in "${proxy_tenants[@]}"; do
+        PROXY_HOST_PAGE["$t"]=$(curl -sS --max-time 10 -H "Host: ${t}.${PROXY_DOMAIN}" \
+            "http://${PROXY_IP}:${PROXY_PORT}/" 2>/dev/null \
+            | awk "/I am/ {print; exit}")
+        PROXY_PATH_PAGE["$t"]=$(curl -sS --max-time 10 \
+            "http://${PROXY_IP}:${PROXY_PORT}/${t}/" 2>/dev/null \
+            | awk "/I am/ {print; exit}")
+        : "${PROXY_HOST_PAGE[$t]:=(no answer)}"
+        : "${PROXY_PATH_PAGE[$t]:=(no answer)}"
+    done
+}
+
+print_proxy() {
+    local t stale=0 rc=0 got live
+    echo
+    echo "Tenant ingress on ${PROXY_VM} (${PROXY_IP}:${PROXY_PORT})"
+    echo
+    printf '  %-26s %-14s %-16s %s\n' "hostname" "backend" "via Host:" "via /path/"
+    for t in "${proxy_tenants[@]}"; do
+        printf '  %-26s %-14s %-16s %s\n' \
+            "${t}.${PROXY_DOMAIN}" "${PROXY_RECORDED[$t]}" \
+            "${PROXY_HOST_PAGE[$t]}" "${PROXY_PATH_PAGE[$t]}"
+    done
+
+    # One backend address serving two hostnames is the thing worth naming.
+    local a seen_dup=0
+    for a in $(printf '%s\n' "${PROXY_RECORDED[@]}" | sort | uniq -d); do
+        seen_dup=1
+        echo
+        echo "  *** ${a} is the backend for more than one hostname above."
+        echo "      Same address, same port, different pages - the namespace"
+        echo "      keyword on each server line is what separates them."
+    done
+
+    echo
+    for t in "${proxy_tenants[@]}"; do
+        got="${PROXY_HOST_PAGE[$t]}"
+        live="${WEBADDR[$t]:-}"
+        if [[ -n "$live" && "$live" != "${PROXY_RECORDED[$t]}" ]]; then
+            echo "  STALE   ${t}: proxy points at ${PROXY_RECORDED[$t]}, the pod is now ${live}."
+            echo "          Re-run --tags clabnsproxy; any --tags web replaces the pods."
+            stale=1; rc=1
+        fi
+        if [[ "$got" != *"I am $t"* ]]; then
+            if (( stale )); then
+                echo "  BROKEN  ${t}.${PROXY_DOMAIN} returned: ${got}  (see STALE above)"
+            else
+                echo "  BROKEN  ${t}.${PROXY_DOMAIN} returned: ${got}"
+                echo "          A page naming ANOTHER tenant means the wrong"
+                echo "          'namespace' keyword on that backend - the failure"
+                echo "          this design introduces and the fabric cannot catch."
+            fi
+            rc=1
+        fi
+        stale=0
+    done
+    (( rc == 0 )) && {
+        echo "  clean: every hostname returned its own tenant's page."
+        (( seen_dup )) && echo "         including the two sharing one backend address."
+    }
+    return $rc
+}
+
 if (( WITH_VMS )); then
     while IFS='|' read -r name ip serves; do
         [[ -n "${name:-}" && "$name" != \#* ]] || continue
@@ -144,6 +253,17 @@ for a in "${addrs[@]}"; do
         echo "      This is the case a ping cannot resolve and a page can."
     fi
 done
+
+proxy_rc=0
+if (( WITH_PROXY )); then
+    read_proxy_manifest
+    probe_proxy
+    print_proxy || proxy_rc=1
+fi
+
+if (( ! ${#clients[@]} )); then
+    exit $proxy_rc
+fi
 
 # ---------------------------------------------------------------------------
 # Curl each from each, and print the first line of whatever came back.
@@ -222,4 +342,4 @@ if (( bad == 0 )); then
         fi
     done
 fi
-exit $(( bad > 0 ? 1 : 0 ))
+exit $(( (bad > 0 || proxy_rc > 0) ? 1 : 0 ))
