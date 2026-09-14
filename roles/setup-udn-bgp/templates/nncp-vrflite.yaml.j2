@@ -52,7 +52,30 @@ spec:
         vrf:
           route-table-id: {{ vrf_fact.table }}
           port:
-{% for p in vrf_fact.ports %}
+{#
+  The discovered list MINUS this tenant's own VLAN subinterface, then that
+  subinterface added back explicitly.
+
+  Dropping it first is what makes the policy idempotent. On a first run the VRF
+  holds only ovn-k8s-mpN, so the discovered list and the appended VLAN do not
+  overlap. On a RE-RUN the VLAN is already enslaved, discovery returns it like
+  any other port, and restating it alongside the append gives NMState the same
+  interface twice:
+
+      NmstateError: InvalidArgument: Controller blue (vrf) has multiple ports
+      pointing to the same kernel interface enp8s0.110
+
+  which fails the whole policy. The symptom is confusing because a NEW tenant
+  applies cleanly in the same run - it has no VLAN yet - so the failure looks
+  tenant-specific rather than like the re-run it is.
+
+  Matching on the '.<vlan>' suffix rather than on the full name because the
+  appended entry is an NMState capture expression, resolved to the real device
+  name at apply time and not comparable here. OVN-Kubernetes' own ports are
+  ovn-k8s-mpN and carry no dot, so nothing else can match.
+#}
+{% set vlan_suffix = '.' ~ vrf_fact.vlan %}
+{% for p in vrf_fact.ports if not p.endswith(vlan_suffix) %}
             ## Pre-existing port, owned by OVN-Kubernetes - restated so
             ## NMState does not remove it.
             - {{ p }}
