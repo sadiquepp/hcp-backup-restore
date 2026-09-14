@@ -1,0 +1,142 @@
+---
+# One VM holding one network namespace per tenant.
+#
+# Built ALONGSIDE the per-tenant client VMs, not instead of them, so both
+# designs can be exercised on the same fabric before either is dropped. The
+# only thing that makes coexistence possible is the host octet: these
+# namespaces take .21 on each client segment where the VMs take .20. Reusing
+# .20 would put two machines on one address in one broadcast domain.
+
+- name: Check for libvirt tooling
+  ansible.builtin.command:
+    cmd: "which virsh qemu-img virt-install"
+  register: udn_ns_virsh
+  changed_when: false
+  failed_when: false
+
+- name: Fail if this is not the libvirt host
+  ansible.builtin.assert:
+    that: udn_ns_virsh.rc == 0
+    fail_msg: >-
+      virsh, qemu-img or virt-install is missing, so this is not the lab's
+      libvirt host. --tags clabnsclient builds a VM and must run ON the
+      hypervisor.
+    success_msg: "libvirt tooling is present."
+
+- name: Refuse to build on an address MetalLB owns
+  ansible.builtin.include_tasks: client-ip-check.yml
+  vars:
+    udn_client_names: ["{{ udn_nsclient_vm_name }}"]
+
+# The whole point of the separate octet. Checked rather than commented,
+# because the symptom of getting it wrong is an intermittent ARP fight that
+# presents as a flaky isolation result.
+- name: Fail if the namespace client would collide with the per-tenant VMs
+  ansible.builtin.assert:
+    that: udn_nsclient_segment_host_octet | int != udn_client_segment_host_octet | int
+    fail_msg: >-
+      udn_nsclient_segment_host_octet and udn_client_segment_host_octet are
+      both {{ udn_client_segment_host_octet }}. Both designs put a host on
+      every client segment, on the same VLANs on the same bridge, so identical
+      octets mean two machines on one address in one broadcast domain. They
+      would answer each other's ARP intermittently and the isolation tests
+      would look flaky rather than wrong.
+    success_msg: >-
+      Namespace client takes .{{ udn_nsclient_segment_host_octet }} on each
+      client segment; the per-tenant VMs keep
+      .{{ udn_client_segment_host_octet }}.
+
+- name: Look for the base image
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_nsclient_base_image }}"
+  register: udn_ns_base
+
+- name: Fail if the base image is missing
+  ansible.builtin.assert:
+    that: udn_ns_base.stat.exists
+    fail_msg: >-
+      No base image at
+      {{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_nsclient_base_image }}.
+    success_msg: "Base image {{ udn_nsclient_base_image }} found."
+
+- name: Record the namespace client for the test scripts
+  ansible.builtin.template:
+    src: netns-client.env.j2
+    dest: "{{ playbook_dir }}/udn-bgp/netns-client.env"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: Check whether the disk already exists
+  ansible.builtin.stat:
+    path: "{{ download_dir | regex_replace('/+$', '') }}/{{ udn_nsclient_vm_name }}_disk.qcow2"
+  register: udn_ns_disk
+
+- name: Copy the base image to the namespace client's disk
+  ansible.builtin.command:
+    cmd: >-
+      cp --sparse=always
+      {{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_nsclient_base_image }}
+      {{ download_dir | regex_replace('/+$', '') }}/{{ udn_nsclient_vm_name }}_disk.qcow2
+  when: not udn_ns_disk.stat.exists
+
+- name: Read the default network's current definition
+  ansible.builtin.command:
+    cmd: "virsh net-dumpxml default"
+  register: udn_ns_net_xml
+  changed_when: false
+
+- name: Reserve the namespace client's management address
+  ansible.builtin.command:
+    cmd: >-
+      virsh net-update default add ip-dhcp-host
+      "<host mac='{{ udn_tenant_client_mgmt_mac_prefix }}:{{ ip_list[udn_nsclient_vm_name] }}'
+             name='{{ udn_nsclient_vm_name }}'
+             ip='{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}'/>"
+      --live --config
+  when: >-
+    (udn_tenant_client_mgmt_mac_prefix ~ ':' ~ ip_list[udn_nsclient_vm_name]) | lower
+    not in udn_ns_net_xml.stdout | lower
+
+- name: Check whether the namespace client is already defined
+  ansible.builtin.shell:
+    cmd: "virsh dominfo {{ udn_nsclient_vm_name }} 2>/dev/null | awk '/State/ {print $2}'"
+  register: udn_ns_vm_state
+  changed_when: false
+
+# One untagged fabric NIC. Every VLAN is created in the guest and moved into a
+# namespace, so libvirt needs to know about none of them - which is what lets
+# one NIC feed five namespaces.
+- name: Define the namespace client
+  ansible.builtin.shell:
+    cmd: |
+      virt-install \
+      --import \
+      --name "{{ udn_nsclient_vm_name }}" \
+      --memory "{{ udn_nsclient_memory }}" \
+      --vcpus "{{ udn_nsclient_vcpus }}" \
+      --disk "{{ download_dir | regex_replace('/+$', '') }}/{{ udn_nsclient_vm_name }}_disk.qcow2",format=qcow2,cache=none,bus=virtio \
+      --os-variant={{ udn_nsclient_os_variant }} \
+      --memballoon model=virtio,freePageReporting=on \
+      --noautoconsole \
+      --cpu host-passthrough \
+      --network network:default,mac={{ udn_tenant_client_mgmt_mac_prefix }}:{{ ip_list[udn_nsclient_vm_name] }} \
+      --network network:{{ clab_fabric_network }},mac={{ clab_fabric_mac_prefix }}:{{ ip_list[udn_nsclient_vm_name] }},model=virtio
+  when: udn_ns_vm_state.stdout == ''
+
+- name: Wait for the namespace client to accept ssh
+  ansible.builtin.wait_for:
+    host: "{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}"
+    port: 22
+    timeout: 300
+    delay: 10
+
+- name: Register the namespace client as an Ansible host
+  ansible.builtin.add_host:
+    name: "{{ udn_nsclient_vm_name }}"
+    ansible_host: "{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}"
+    ansible_user: "{{ udn_client_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ udn_client_ssh_key }}"
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    groups: udn_nsclient
+  changed_when: false

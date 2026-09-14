@@ -2728,10 +2728,69 @@ and leaf1 is the thing being tested. The clients stay dumb. `tenant-client-vms.y
 asserts the no-overlap rule rather than trusting it, so adding a fifth tenant
 later cannot quietly produce a meaningless result.
 
+#### Or one VM with a namespace per tenant
+
+```bash
+ansible-playbook setup_udn_bgp_lab.yaml -i inventory/hosts --tags clabnsclient --ask-vault-pass
+scripts/udn-web-demo.sh --netns
+```
+
+`--tags clabnsclient` builds a single VM holding one network namespace per
+tenant, each with that tenant's client VLAN and nothing else:
+
+```bash
+ip netns exec green  curl http://10.204.0.3:8080/    # -> I am green
+ip netns exec purple curl http://10.204.0.3:8080/    # -> I am purple
+```
+
+One terminal, one URL, two answers.
+
+It is built **alongside** the per-tenant VMs rather than replacing them, so
+both can be exercised on the same fabric. They coexist only because the
+namespaces take `.21` on each client segment and the VMs take `.20` — identical
+octets would put two machines on one address in one broadcast domain, and the
+ARP fight would present as a flaky isolation result rather than a wrong one.
+`nsclient-vm.yml` asserts it instead of trusting the comment.
+
+**Why a namespace is not the multi-VRF host this doc argued against.** The
+objection to one host serving every tenant was that a client-side fault would
+be indistinguishable from the leaf-side fault under test. That is true of VRFs:
+one rule table, l3mdev priorities, a mis-ordered rule that quietly steers the
+wrong way. A namespace has none of it — no visibility of another namespace's
+interfaces or routes, and no shared rule table to misconfigure. A packet in
+`blue` can only leave through an interface that is *in* `blue`.
+
+It is also cleaner than the `*-ext` containers, which each carry an `eth0` on
+the containerlab management network. A namespace here holds its VLAN
+subinterface and `lo`, and nothing else.
+
+And it removes the grouping arithmetic. `blue` and `red` need separate *hosts*
+because one routing table holds one route to `10.200.0.0/16`; with one
+namespace per tenant that constraint does not exist, so every tenant gets its
+own unconditionally — no pairing rules, no assert, no fourth VM for purple.
+
+Two mechanics worth knowing if you read the script:
+
+- The VLAN device is created in the **root** namespace and then moved
+  (`ip link set eth1.210 netns blue`). The parent NIC stays in root, which is
+  what lets one physical interface feed every namespace.
+- **Addressing happens after the move.** Moving an interface between namespaces
+  flushes its addresses and routes, so configuring first loses everything
+  silently. Same for `net.ipv4.*` sysctls, which are per-namespace: setting
+  `rp_filter` in root does nothing for `blue`.
+
+Both test scripts take `--netns`, which adds one pseudo-client per namespace
+alongside the VM clients — same address, different command prefix. Everything
+downstream is unchanged, because the only question either script asks of a
+client is which tenants it serves.
+
 Drive them with:
 
 ```bash
-scripts/udn-vrf-isolation.sh --vms
+scripts/udn-vrf-isolation.sh --vms          # the per-tenant VMs
+scripts/udn-vrf-isolation.sh --netns        # both, side by side
+scripts/udn-web-demo.sh --netns             # both
+scripts/udn-web-demo.sh --netns-only        # namespaces alone
 ```
 
 ```

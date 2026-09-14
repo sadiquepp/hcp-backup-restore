@@ -1,0 +1,73 @@
+---
+# In-guest configuration for the namespace client. Delegated to it.
+
+- name: Install test tooling on the namespace client
+  ansible.builtin.dnf:
+    name:
+      - iproute
+      - tcpdump
+      - curl
+    state: present
+
+- name: Install the namespace script
+  ansible.builtin.template:
+    src: udn-netns-client.sh.j2
+    dest: /usr/local/sbin/udn-netns-client.sh
+    mode: "0755"
+  register: udn_ns_script
+
+- name: Install the namespace unit
+  ansible.builtin.template:
+    src: udn-netns-client.service.j2
+    dest: /etc/systemd/system/udn-netns-client.service
+    mode: "0644"
+  register: udn_ns_unit
+
+- name: Enable and run the namespace unit
+  ansible.builtin.systemd:
+    name: udn-netns-client.service
+    enabled: true
+    state: "{{ 'restarted' if (udn_ns_script is changed or udn_ns_unit is changed) else 'started' }}"
+    daemon_reload: true
+
+- name: Show the namespaces that exist
+  ansible.builtin.command:
+    cmd: "ip netns list"
+  register: udn_ns_list
+  changed_when: false
+
+- name: Report the namespaces
+  ansible.builtin.debug:
+    var: udn_ns_list.stdout_lines
+
+# Each namespace must reach leaf1 inside its own tenant VRF. A namespace that
+# cannot is indistinguishable, later, from a genuine isolation result - so it
+# is worth failing here, where the cause is unambiguous.
+- name: Confirm each namespace reaches its tenant's gateway
+  ansible.builtin.command:
+    cmd: >-
+      ip netns exec {{ tenant_name }} ping -c2 -W2
+      {{ udn_client_segments[tenant_name].prefix }}.{{ udn_client_segment_gw_octet }}
+  loop: "{{ udn_bgp_tenants | map(attribute='name') | select('in', udn_client_segments.keys() | list) | list }}"
+  loop_control:
+    loop_var: tenant_name
+  register: udn_ns_gw_ping
+  changed_when: false
+  failed_when: false
+
+- name: Fail if a namespace cannot reach its gateway
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      Namespace {{ item.tenant_name }} cannot reach leaf1 at
+      {{ udn_client_segments[item.tenant_name].prefix }}.{{ udn_client_segment_gw_octet }}
+      on VLAN {{ udn_client_segments[item.tenant_name].vlan }}. Check leaf1 has
+      eth1.{{ udn_client_segments[item.tenant_name].vlan }} in the
+      {{ item.tenant_name }} VRF - the topology has to be redeployed
+      (--tags clabdeploy) after a tenant or a client segment is added.
+    success_msg: >-
+      Namespace {{ item.tenant_name }} reaches its gateway on VLAN
+      {{ udn_client_segments[item.tenant_name].vlan }}.
+  loop: "{{ udn_ns_gw_ping.results }}"
+  loop_control:
+    label: "{{ item.tenant_name }}"

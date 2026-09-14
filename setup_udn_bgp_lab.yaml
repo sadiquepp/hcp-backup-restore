@@ -35,6 +35,12 @@
 ## And one optional extra, outside the phase sequence:
 ##
 ##   --tags clabclient  an external client VM for phase 2 reachability tests.
+##   --tags clabtenantclients  one client VM per phase 3 isolation domain.
+##   --tags clabnsclient       one client VM holding one network namespace per
+##                             tenant - the same test with a fifth of the RAM.
+##                             Built alongside clabtenantclients, not instead
+##                             of it; they coexist because the namespaces take
+##                             .21 on each client segment and the VMs take .20.
 ##                      Builds a VM and edits the lab host's sysctls, so it is
 ##                      deliberately not part of --tags fabric. Meaningful in
 ##                      phase 2 only - in phase 3 each tenant has its own VRF
@@ -43,7 +49,8 @@
 ## WHERE TO RUN IT. Both plays are `hosts: localhost`, so there is no
 ## delegation to fall back on and the tag decides which machine you must be on:
 ##
-##   fabric, clabinstall, clabdeploy, clabverify, clabclient
+##   fabric, clabinstall, clabdeploy, clabverify, clabclient,
+##   clabtenantclients, clabnsclient
 ##       ON THE LAB HOST. These drive libvirt - virsh, qemu-img, virt-install,
 ##       the bridges - and the clab VM over ssh from there.
 ##

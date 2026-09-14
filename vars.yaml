@@ -342,6 +342,7 @@ ip_list:
   udnclient-red: 57
   udnclient-og: 70
   udnclient-purple: 87
+  udnnsclient: 88
 
 helper_name: helper
 helper_disk: helper_disk.qcow2
@@ -1590,6 +1591,44 @@ udn_tenant_client_memory: 2048
 udn_tenant_client_vcpus: 2
 udn_tenant_client_os_variant: rhel9.5
 udn_tenant_client_base_image: "{{ rhel9_kvm_image }}"
+
+
+## ---------------------------------------------------------------------------
+## The namespace client (--tags clabnsclient)
+## ---------------------------------------------------------------------------
+## One VM holding one network namespace per tenant, as an alternative to the
+## per-tenant client VMs above. Built alongside them, not instead of them, so
+## the two approaches can be compared on the same fabric before either is
+## dropped.
+##
+## A netns is a stronger client-side isolation than a VRF and closer to a
+## separate machine: it has no visibility of another namespace's interfaces or
+## routes at all, so there is no shared rule table to mis-order. That matters,
+## because the objection to putting every tenant on ONE host was that a
+## client-side fault would be indistinguishable from the leaf-side fault under
+## test - true of VRFs, not true of namespaces.
+##
+## It is also cleaner than the *-ext containers, which each carry an eth0 on
+## the containerlab management network - a path between them outside the
+## fabric. A namespace here holds its VLAN subinterface and lo, and nothing
+## else.
+##
+## And it removes the grouping arithmetic entirely. The per-VM design needs
+## blue and red on separate hosts because one routing table holds one route to
+## 10.200.0.0/16; with one namespace per tenant that constraint does not exist,
+## so every tenant gets its own namespace unconditionally.
+udn_nsclient_vm_name: udnnsclient
+udn_nsclient_memory: 2048
+udn_nsclient_vcpus: 2
+udn_nsclient_os_variant: rhel9.5
+udn_nsclient_base_image: "{{ rhel9_kvm_image }}"
+
+## MUST differ from udn_client_segment_host_octet. The per-tenant client VMs
+## hold .20 on these same VLANs on this same bridge, so reusing it would put
+## two machines on one address in one broadcast domain - an ARP fight that
+## would look like an intermittent isolation failure and would be miserable to
+## attribute. This is the single thing that lets both designs run at once.
+udn_nsclient_segment_host_octet: 21
 
 
 ## ---------------------------------------------------------------------------

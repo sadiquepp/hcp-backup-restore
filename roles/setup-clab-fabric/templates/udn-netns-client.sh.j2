@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# One network namespace per tenant on a single client VM.
+# Rendered by setup-clab-fabric for {{ udn_nsclient_vm_name }}.
+#
+# Each namespace holds exactly one VLAN subinterface and lo. Nothing else - no
+# management interface, no second path, no route it was not given. A packet in
+# namespace 'blue' can only leave through blue's VLAN, because blue cannot see
+# any other interface on this machine.
+#
+# That is why one host can serve tenants with IDENTICAL subnets here and could
+# not with VRFs. There is no shared routing-rule table to mis-order: each
+# namespace has its own routing table, full stop, and 10.204.0.0/16 can exist
+# in green's and in purple's without them ever being compared.
+#
+# The root namespace keeps the fabric NIC itself and gives it no address. All
+# tenant traffic happens inside the namespaces; root has no fabric presence.
+set -euo pipefail
+trap 'echo "udn-netns-client.sh: failed at line $LINENO with status $?" >&2' ERR
+
+MAC="{{ (clab_fabric_mac_prefix ~ ':' ~ ip_list[udn_nsclient_vm_name]) | lower }}"
+MTU={{ clab_fabric_mtu }}
+
+# No `exit` in the awk program - it closes the pipe while `ip` is still
+# writing, `ip` takes SIGPIPE, and with pipefail plus -e that is fatal.
+find_nic() {
+    ip -o link show | awk -v mac="$MAC" \
+        'tolower($0) ~ mac && !found { gsub(":","",$2); print $2; found = 1 }'
+}
+
+NIC=""
+for _ in $(seq 1 30); do
+    NIC=$(find_nic)
+    [ -n "$NIC" ] && break
+    sleep 1
+done
+
+if [ -z "$NIC" ]; then
+    echo "no interface with MAC $MAC in this VM - the fabric NIC is missing." >&2
+    echo "Attach it with: virsh attach-interface {{ udn_nsclient_vm_name }} --type network" >&2
+    echo "  --source {{ clab_fabric_network }} --model virtio --mac $MAC --live --config" >&2
+    exit 1
+fi
+
+ip link set "$NIC" mtu "$MTU" up
+
+{% for t in udn_bgp_tenants %}
+{% if t.name in (udn_client_segments | default({})) %}
+{% set seg = udn_client_segments[t.name] %}
+# --- {{ t.name }} : namespace "{{ t.name }}", VLAN {{ seg.vlan }} ---------------------------
+NS="{{ t.name }}"
+DEV="$NIC.{{ seg.vlan }}"
+
+ip netns list | grep -qx "$NS" || ip netns add "$NS"
+
+# Create the VLAN device in the ROOT namespace, then move it. The parent NIC
+# stays in root - only the subinterface moves, which is what lets one physical
+# NIC feed every namespace.
+if ! ip netns exec "$NS" ip link show "$DEV" >/dev/null 2>&1; then
+    ip link show "$DEV" >/dev/null 2>&1 || \
+        ip link add link "$NIC" name "$DEV" type vlan id {{ seg.vlan }}
+    ip link set "$DEV" netns "$NS"
+fi
+
+# Addressing comes AFTER the move, always: moving an interface between
+# namespaces flushes its addresses and routes. Configuring before the move
+# silently loses everything.
+ip netns exec "$NS" ip link set lo up
+ip netns exec "$NS" ip link set "$DEV" mtu "$MTU" up
+ip netns exec "$NS" ip addr replace {{ seg.prefix }}.{{ udn_nsclient_segment_host_octet }}/{{ clab_fabric_netmask_bits }} dev "$DEV"
+
+# net.ipv4.* sysctls are per-namespace, so this has to be set inside each one -
+# setting it in root does nothing here. Phase 3 is symmetric and should not
+# need it; set loose so a real isolation result is never mistaken for an
+# rp_filter drop.
+ip netns exec "$NS" sh -c 'for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 2 > "$i"; done'
+
+# {{ t.name }}'s pod network.
+{% set sharers = udn_bgp_tenants | selectattr('udn_subnet', 'equalto', t.udn_subnet) | map(attribute='name') | reject('equalto', t.name) | list %}
+{% if sharers %}
+# {{ t.udn_subnet }} is ALSO {{ sharers | join(' and ') }}'s. On a single routing table that
+# would be a conflict; here it is simply a different table in a different
+# namespace, and the two are never compared.
+{% endif %}
+ip netns exec "$NS" ip route replace {{ t.udn_subnet }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$DEV"
+ip netns exec "$NS" ip route replace {{ t.external_prefix }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$DEV"
+
+{% endif %}
+{% endfor %}
+echo "udn-netns-client.sh: $NIC up, namespaces:{% for t in udn_bgp_tenants %}{% if t.name in (udn_client_segments | default({})) %} {{ t.name }}(vlan {{ udn_client_segments[t.name].vlan }}){% endif %}{% endfor %}"
