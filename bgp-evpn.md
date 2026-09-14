@@ -2903,6 +2903,71 @@ So treat this check as a bonus that may never fire, and the web demo
 
 ---
 
+### 3f-bis. purple: the same address on two networks
+
+blue and red share `10.200.0.0/16` and never produced two pods on one address.
+Layer3 slices the prefix per node, and OVN-Kubernetes handed the six slices out
+pairwise disjoint — so "same IP, different pod" stayed a claim.
+
+**purple** is a Layer2 tenant carrying green's subnet exactly:
+
+| | green | purple |
+| --- | --- | --- |
+| topology | Layer2 | Layer2 |
+| `udn_subnet` | `10.204.0.0/16` | `10.204.0.0/16` |
+| handoff VLAN | 140 | 150 |
+| client VLAN | 240 | 250 |
+| client VM | `udnclient-og` | `udnclient-purple` |
+
+Layer2 has no per-node slicing — the whole prefix exists on every node and IPAM
+allocates from the base of it — so green's first pod and purple's first pod
+should land on the *same* address.
+
+**The experiment is worth running whichever way it goes.** A collision
+demonstrates the claim outright. No collision is the stronger result: it means
+OVN-Kubernetes coordinates allocation across networks sharing a CIDR even with
+no slicing to coordinate, and two pods on one address is simply not obtainable
+— which settles a question this lab has otherwise only been able to infer.
+
+purple needs **its own client VM**. One host holds one route to
+`10.204.0.0/16`, so a machine serving both green and purple would reach one and
+silently never reach the other. That is the same rule that forces blue and red
+apart, and `tenant-client-vms.yml` asserts it rather than trusting it.
+
+#### What a ping can no longer tell you
+
+Once two tenants share a pod address, a ping to it answers for **both**, and
+ICMP carries nothing to say which replied. `udn-vrf-isolation.sh` marks those
+cells `AMBIG` and excludes them from the verdict rather than calling them
+`ok` — which it would otherwise report as a leak:
+
+```
+  green-ext    -> purple   10.204.0.3       AMBIG (address shared with green purple)
+  udnclient-og -> purple   10.204.0.3       AMBIG (address shared with green purple)
+```
+
+Note which cells stay judged. `blue-ext -> purple` is *not* ambiguous: blue owns
+nothing on that address, so an answer there really would be a leak. Only a
+source that already owns one of the tenants sharing the address is excluded.
+
+Two things do resolve it:
+
+- **The identity check** — `InEchos` in `/proc/net/snmp` on both candidate pods,
+  either side of one ping. This is the case it was written for, and purple is
+  what finally makes it fire.
+- **The web demo** — the page names its own tenant, so one URL returning two
+  documents needs no inference at all.
+
+```
+client             10.204.0.3
+(served by)        green purple
+udnclient-og       I am green
+udnclient-purple   I am purple
+```
+
+One address. Two machines. Two pages. That is the claim, demonstrated rather
+than argued.
+
 ### 3g. Following one curl in phase 3
 
 Phase 2's walkthrough followed a ping. This follows a `curl`, because TCP

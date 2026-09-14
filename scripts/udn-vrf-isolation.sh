@@ -74,7 +74,7 @@ ext_exec() {  # tenant, then command
 }
 
 declare -A EXTHOST POD PODNS PODADDR
-declare -A M1 M2 OKC TOT VM SERVES CLIENTIP
+declare -A M1 M2 OKC TOT VM SERVES CLIENTIP ADDR_OWNERS
 clients=()
 tenants=()
 records=()
@@ -120,6 +120,29 @@ for ns in $namespaces; do
         [[ -n "${POD[$tenant]:-}" ]] || { POD["$tenant"]="$pod"; PODNS["$tenant"]="$ns"; PODADDR["$tenant"]="$paddr"; }
     done <<< "$pods"
 done
+
+# Which tenants share a pod address. Layer2 tenants on one subnet can land on
+# the same one - green and purple are in the lab to make that happen - and once
+# they do, a ping to that address answers for BOTH of them. ICMP carries no
+# identity, so those cells are not "ok" or "FAIL", they are unanswerable, and
+# calling them either would be a lie in the direction of a false leak.
+for t in "${tenants[@]}"; do
+    a="${PODADDR[$t]:-}"
+    [[ -n "$a" ]] || continue
+    ADDR_OWNERS["$a"]="${ADDR_OWNERS[$a]:-}${ADDR_OWNERS[$a]:+ }$t"
+done
+
+# does $1 (a source tenant or client) own any tenant sharing $2's pod address,
+# other than $2 itself? if so a ping to it is indeterminate.
+shared_with_owned() {  # owned-list, target-tenant
+    local owned="$1" target="$2" a="${PODADDR[$2]:-}" t
+    [[ -n "$a" && "${ADDR_OWNERS[$a]}" == *" "* ]] || return 1
+    for t in ${ADDR_OWNERS[$a]}; do
+        [[ "$t" == "$target" ]] && continue
+        case " $owned " in *" $t "*) return 0 ;; esac
+    done
+    return 1
+}
 
 echo
 printf '  %-8s %-16s %-16s %s\n' tenant ext-endpoint pod-address pod
@@ -192,6 +215,12 @@ probe_ext_to_pods() {
     for src in "${tenants[@]}"; do
         for dest in "${tenants[@]}"; do
             if [[ -z "${PODADDR[$dest]:-}" ]]; then M2["$src,$dest"]="NO-UDN"; continue; fi
+            if [[ "$src" != "$dest" ]] && shared_with_owned "$src" "$dest"; then
+                M2["$src,$dest"]="AMBIG"
+                printf '  %-12s -> %-8s %-16s AMBIG (address shared with %s)\n' \
+                    "${src}-ext" "$dest" "${PODADDR[$dest]}" "${ADDR_OWNERS[${PODADDR[$dest]}]}"
+                continue
+            fi
             [[ "$src" == "$dest" ]] && n="$COUNT" || n=1
             out=$(ext_exec "$src" ping -c"$n" -W2 "${PODADDR[$dest]}"); rc=$?
             if (( rc == 0 )); then
@@ -226,6 +255,7 @@ verdict() {
     for r in "${tenants[@]}"; do
         for c in "${tenants[@]}"; do
             v="${res["$r,$c"]:-}"
+            [[ "$v" == "AMBIG" ]] && continue
             if [[ "$r" == "$c" && "$v" != "ok" ]]; then
                 echo "  BROKEN  $r cannot reach its own $what ($v)"
                 broken=$((broken + 1))
@@ -279,6 +309,15 @@ probe_from_vms() {
         fi
         for dest in "${tenants_all[@]}"; do
             if [[ -z "${PODADDR[$dest]:-}" ]]; then VM["$src,$dest"]="NO-UDN"; continue; fi
+            case " ${SERVES[$src]} " in
+                *" $dest "*) ;;
+                *) if shared_with_owned "${SERVES[$src]}" "$dest"; then
+                       VM["$src,$dest"]="AMBIG"
+                       printf '  %-16s -> %-8s %-16s AMBIG (address shared with %s)\n' \
+                           "$src" "$dest" "${PODADDR[$dest]}" "${ADDR_OWNERS[${PODADDR[$dest]}]}"
+                       continue
+                   fi ;;
+            esac
             # A cell this client is supposed to reach gets the full count; one
             # it must not reach gets a single packet, since one answered packet
             # is already a leak.
@@ -315,7 +354,7 @@ vm_verdict() {
     for r in "${clients[@]}"; do
         for c in "${tenants_all[@]}"; do
             v="${VM["$r,$c"]:-}"
-            [[ "$v" == "NO-SSH" || "$v" == "NO-UDN" ]] && continue
+            [[ "$v" == "NO-SSH" || "$v" == "NO-UDN" || "$v" == "AMBIG" ]] && continue
             case " ${SERVES[$r]} " in *" $c "*) expected=ok ;; *) expected=FAIL ;; esac
             if [[ "$expected" == "ok" && "$v" != "ok" ]]; then
                 echo "  BROKEN  $r serves $c but cannot reach its pods"
@@ -430,6 +469,19 @@ print_matrix "external endpoint -> pod   (expect ok on the diagonal only)" M2 "e
 (( WITH_VMS )) && print_vm_matrix
 
 echo
+ambig=0
+for a in "${!ADDR_OWNERS[@]}"; do
+    [[ "${ADDR_OWNERS[$a]}" == *" "* ]] || continue
+    ambig=1
+    echo "NOTE  ${a} is a pod address in BOTH ${ADDR_OWNERS[$a]}."
+    echo "      Cells marked AMBIG above are excluded from the verdict: a ping"
+    echo "      to that address answers for either tenant and ICMP cannot say"
+    echo "      which. The identity check below settles it from the pods'"
+    echo "      own counters, and scripts/udn-web-demo.sh settles it from the"
+    echo "      page each pod serves."
+done
+(( ambig )) && echo
+
 echo "Verdict"
 rc=0
 echo " pod -> ext:"
