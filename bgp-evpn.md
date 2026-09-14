@@ -2590,6 +2590,77 @@ leaf: `udnbgp.clab.yml.j2` reloads FRR *after* the VRFs and subinterfaces are
 built, with the comment "so bgpd sees every VRF at startup". That is this bug,
 on the other end of the wire. The node side never had the equivalent.
 
+#### The second one: a bound VRF whose peer never comes up
+
+`vrf-id -1` is not the only way FRR comes out of an interface replacement
+broken, and the other way passes a check that only looks for `vrf-id -1`. It
+surfaced after adding purple, which re-applied every NNCP and so replaced
+every VLAN subinterface: four sessions — orange/worker1, red/worker2,
+green/worker2, purple/worker2 — sat in `Active` with correct vrf-ids.
+
+The peer's own diagnosis:
+
+```
+# vtysh -c 'show bgp vrf green neighbors 192.168.144.1'
+  BGP state = Active
+  Connections established 5; dropped 5
+  Last reset 01:12:35,  No path to specified Neighbor
+```
+
+"No path to specified Neighbor" invites you to go looking at the network. The
+network is fine — the kernel has the route and the neighbour:
+
+```
+# ip route show vrf green | grep 192.168.144
+192.168.144.0/24 dev enp8s0.140 proto kernel scope link src 192.168.144.35
+# ip neigh show vrf green
+192.168.144.1 dev enp8s0.140 lladdr aa:c1:ab:ad:13:49 REACHABLE
+```
+
+It is also tempting to blame zebra, and that is wrong too. zebra has the route
+and calls it `best`. **bgpd is the one holding a stale cache:**
+
+```
+# vtysh -c 'show ip route vrf green 192.168.144.1'
+Routing entry for 192.168.144.0/24
+  Known via "kernel", distance 0, metric 422, vrf green, best
+  * directly connected, enp8s0.140, weight 1
+
+# vtysh -c 'show bgp vrf green nexthop'
+ 192.168.144.1 invalid, #paths 0, peer 192.168.144.1
+  Must be Connected
+  Last update: Mon Sep 14 14:02:19 2026
+
+# vtysh -c 'show interface enp8s0.140 vrf green'
+  Link ups:       3    last: 2026/09/14 14:02:19.66
+  Link downs:     2    last: 2026/09/14 14:02:19.66
+```
+
+The three timestamps are the same event. bgpd invalidated its nexthop-cache
+entry when the VLAN went down and never re-validated it when the VLAN came
+back, so `Must be Connected` is unsatisfiable from an entry nobody refreshes.
+The session then cannot start, forever, on a link that works.
+
+Same remedy as `vrf-id -1` — restart frr-k8s — and the role now checks for
+both. What makes this one worse is how well it hides:
+
+| Check | Said | While |
+| --- | --- | --- |
+| `oc get nncp` | `Available` | four sessions were down |
+| the `vrf-id -1` gate | bound, no restart needed | four sessions were down |
+| `scripts/udn-web-demo.sh` | every page correct | four sessions were down |
+
+The web demo read clean because every web pod happened to land on worker1,
+where those four VRFs were healthy — the broken paths were the ones nothing
+was testing. Only `scripts/udn-vrf-isolation.sh` saw it, as `2/3` on the
+diagonal, and even that named no cause. Adding a web pod to *every* tenant is
+what finally made it self-reporting: orange's pod is on worker1, whose orange
+session was the down one, so the demo now prints
+
+```
+BROKEN  netns/orange serves orange at 10.202.5.4 but got: (no answer)
+```
+
 ### 3e. The test that must fail
 
 ```bash
@@ -3055,34 +3126,47 @@ udnclient-og       I am green
 udnclient-purple   I am purple
 ```
 
-Confirmed:
+Confirmed, all five tenants, from one VM's five namespaces
+(`scripts/udn-web-demo.sh --netns`):
 
 ```
 Web pods
   blue     http://10.200.0.3:8080/
   green    http://10.204.0.12:8080/
-  purple   http://10.204.0.12:8080/     <- the same address
+  orange   http://10.202.5.4:8080/
+  purple   http://10.204.0.12:8080/     <- the same address as green
   red      http://10.200.0.5:8080/
 
   *** 10.204.0.12 is served by green purple - ONE address, two pods.
 
 What answered
-client             10.200.0.3     10.204.0.12    10.200.0.5
-(served by)        blue           green purple   red
-udnclient-blue     I am blue      (no answer)    (no answer)
-udnclient-red      (no answer)    (no answer)    I am red
-udnclient-og       (no answer)    I am green     (no answer)
-udnclient-purple   (no answer)    I am purple    (no answer)
+client             10.200.0.3     10.204.0.12    10.202.5.4     10.200.0.5
+(served by)        blue           green purple   orange         red
+netns/blue         I am blue      (no answer)    (no answer)    (no answer)
+netns/red          (no answer)    (no answer)    (no answer)    I am red
+netns/orange       (no answer)    (no answer)    I am orange    (no answer)
+netns/green        (no answer)    I am green     (no answer)    (no answer)
+netns/purple       (no answer)    I am purple    (no answer)    (no answer)
 ```
 
-One address. Two machines. Two pages. That is the claim, demonstrated rather
+One address. Two clients. Two pages. That is the claim, demonstrated rather
 than argued — and no ping-based test in this repo could have told those two
 rows apart, which is why the web workload exists.
 
-Note `10.200.0.3` and `10.200.0.5` in the same run: blue and red landed inside
-one `/24` too. Their pods differ by host address rather than colliding
-outright, but it disposes of the idea that OVN-Kubernetes keeps networks
-sharing a CIDR apart on purpose.
+Three things to read off it:
+
+- **`10.200.0.3` and `10.200.0.5` are in one `/24`.** Blue and red differ by
+  host address rather than colliding outright, which disposes of the idea that
+  OVN-Kubernetes keeps networks sharing a CIDR apart on purpose. Green and
+  purple, on one address, dispose of it completely.
+- **Orange earns its row.** It overlaps with nothing, so its page proves
+  nothing the ping did not — but its one *answer* is what licenses reading its
+  three blanks as isolation. A tenant with no pod produces the same row as a
+  tenant that is broken, and that is not a hypothetical: the run before this
+  one had orange's session down and its all-blank row read as a clean pass.
+- **Five clients, one VM.** These rows are five network namespaces on
+  `192.168.122.88`, not five machines. The only difference between them is the
+  VLAN tag on each namespace's interface.
 
 ### 3g. Following one curl in phase 3
 
