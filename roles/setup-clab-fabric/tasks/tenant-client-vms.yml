@@ -34,6 +34,11 @@
       evpn) are only `oc` calls and do run anywhere.
     success_msg: "libvirt tooling is present."
 
+- name: Refuse to build on an address MetalLB owns
+  ansible.builtin.include_tasks: client-ip-check.yml
+  vars:
+    udn_client_names: "{{ udn_tenant_clients | map(attribute='name') | list }}"
+
 - name: Look for the base image for the client VMs
   ansible.builtin.stat:
     path: "{{ udn_tenant_client_base_image_path }}"

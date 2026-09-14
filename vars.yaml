@@ -236,7 +236,11 @@ ip_list:
   # is free, deliberately avoiding 60-69 and 90-99 where the hosted clusters'
   # MetalLB pool addresses live (hosted_cluster_metallb_pools) - .63 in
   # particular is left alone because it is already spoken for elsewhere.
-  # Remaining free octets after these: 47, 50, 57, 64-66, 70, 87, 88.
+  # Remaining free octets after these: 64-66, 87, 88.
+  # (47, 50, 57 and 70 are now the UDN-over-BGP lab's clients, added below;
+  #  64-66 are left alone deliberately - they are legal, but they sit between
+  #  the hub MetalLB band at 60-62 and the hubd band at 67-69, so they are a
+  #  poor place to put anything that must never collide with a pool.)
   # (40 is now taken by the containerlab VM, added below.)
   c1dworker1: 44
   c1dworker2: 45
@@ -322,13 +326,21 @@ ip_list:
   # for ssh/management; the fabric itself lives on virbr1 and this VM's
   # second NIC gets clab_fabric_prefix.40 there, same last octet.
   clab: 40
-  udnclient: 60
+  ## UDN-over-BGP lab clients. Kept OUT of 60-69 and 90-99 entirely: those are
+  ## the hosted clusters' MetalLB pool bands (hosted_cluster_metallb_pools),
+  ## and .60/.61/.62 in particular are the hcp-cluster1/2/3 API addresses on
+  ## hub1. MetalLB L2 mode ARPs for its pool addresses itself, so a VM holding
+  ## one does not fail cleanly - it fights the API VIP for the address and
+  ## whichever answers first wins, intermittently. An earlier version of this
+  ## file put udnclient on .60 and the tenant clients on .61-.63, straight
+  ## through hcp-cluster1, 2 and 3.
+  udnclient: 47
   ## Phase 3 per-tenant client VMs (--tags clabtenantclients). One per
   ## isolation domain: blue and red need separate machines because they carry
   ## the same pod subnet, orange and green can share one because theirs differ.
-  udnclient-blue: 61
-  udnclient-red: 62
-  udnclient-og: 63
+  udnclient-blue: 50
+  udnclient-red: 57
+  udnclient-og: 70
 
 helper_name: helper
 helper_disk: helper_disk.qcow2

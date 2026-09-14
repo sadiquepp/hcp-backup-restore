@@ -1899,7 +1899,7 @@ directions:
 
 ```
 # scripts/udn-reachability.sh --both
-Pinging 192.168.122.60 from every udn-test pod (3 packets each)
+Pinging 192.168.122.47 from every udn-test pod (3 packets each)
 
   blue     worker3   10.220.2.3       ok   ttl=61 1.877 ms
   blue     worker1   10.220.0.3       ok   ttl=61 1.717 ms
@@ -1914,7 +1914,7 @@ Pinging 192.168.122.60 from every udn-test pod (3 packets each)
   red      worker1   10.221.0.3       ok   ttl=61 1.496 ms
   red      worker2   10.221.1.3       ok   ttl=61 2.138 ms
 
-Pinging every udn-test pod from 192.168.122.60 (3 packets each)
+Pinging every udn-test pod from 192.168.122.47 (3 packets each)
 
   blue     worker3   10.220.2.3       ok   ttl=61 1.492 ms
   blue     worker1   10.220.0.3       ok   ttl=61 1.538 ms
@@ -1929,14 +1929,14 @@ Pinging every udn-test pod from 192.168.122.60 (3 packets each)
   red      worker1   10.221.0.3       ok   ttl=61 1.558 ms
   red      worker2   10.221.1.3       ok   ttl=61 1.745 ms
 
-pod -> 192.168.122.60
+pod -> 192.168.122.47
 tenant   worker3   worker1   worker2
 blue     ok        ok        ok
 green    ok        ok        ok
 orange   ok        ok        ok
 red      ok        ok        ok
 
-192.168.122.60 -> pod
+192.168.122.47 -> pod
 tenant   worker3   worker1   worker2
 blue     ok        ok        ok
 green    ok        ok        ok
@@ -2089,7 +2089,7 @@ one has two, and everything surprising about phase 2 comes from which packets
 land in which.
 
 Worked with a **red** pod, `10.221.2.3`, on **worker3**, and the client at
-`192.168.122.60`.
+`192.168.122.47`.
 
 > One trap before the tables: worker2's **blue** VRF is table 1117 and
 > worker3's **red** VRF is *also* table 1117. Table ids are allocated per node
@@ -2127,7 +2127,7 @@ advertisement leaves on the way out, and it is why watching the management port
 is the proof the advertisement reached the data plane:
 
 ```
-IP 10.221.2.3 > 192.168.122.60: ICMP echo request     <- the pod's own address
+IP 10.221.2.3 > 192.168.122.47: ICMP echo request     <- the pod's own address
 ```
 
 It is worth being precise about this, because the node **does** hold
@@ -2211,7 +2211,7 @@ and phase 2's symmetry are the same trade-off seen from two sides.
 **Not in any way worth running.** Three options, and the first two are not real:
 
 1. **Write a route into the tenant VRF's table.** It works —
-   `ip route add 192.168.122.60/32 via 192.168.140.50 dev enp8s0 table 1117` —
+   `ip route add 192.168.122.47/32 via 192.168.140.50 dev enp8s0 table 1117` —
    and every reverse-path check then passes on its own merits. But table 1117
    is allocated and owned by **OVN-Kubernetes**, which reconciles that VRF on
    its own schedule and will remove anything it did not put there, with no
@@ -2264,7 +2264,7 @@ What to look for in that diff, in rough order of how much it says:
 | File | Phase 2 | Phase 3 |
 | --- | --- | --- |
 | `egress-decisions.txt` — tenant destinations | no route | **via the tenant's own VLAN subinterface** |
-| `egress-decisions.txt` — `192.168.140.1`, `192.168.122.60` | `via 192.168.122.1 dev br-ex` — the node's default gateway | no route |
+| `egress-decisions.txt` — `192.168.140.1`, `192.168.122.47` | `via 192.168.122.1 dev br-ex` — the node's default gateway | no route |
 | `node-*-routes-all-tables.txt` | tenant table holds its subnets and a default route | plus a connected route to its handoff subnet and its own BGP-learned routes |
 | `leaf1-bgp-default-vrf.txt` | every tenant's prefixes | tenant prefixes gone |
 | `leaf1-bgp-all-vrfs.txt` | nothing per-tenant | every tenant's prefixes, **blue and red carrying the same one** in different VRFs |
@@ -2282,7 +2282,7 @@ and **both directions of the change matter**:
   in phase 3. They are read off leaf1 live (`ip -o -4 addr show master
   <tenant>`) rather than listed in the script, so they cannot drift from the
   topology.
-- **`192.168.140.1` and `192.168.122.60`** — leaf1's untagged default-VRF
+- **`192.168.140.1` and `192.168.122.47`** — leaf1's untagged default-VRF
   address and the phase-2 client. Routed in phase 2 via the node's default
   gateway; **`No route to host` in phase 3**, because the tenant table has no
   default route and the tenant is no longer in the default VRF.
