@@ -142,3 +142,13 @@
       vars:
         udn_phase: evpn
       tags: [evpn, never]
+
+    # Additive, and independent of which transport phase is in place: it
+    # attaches to whatever primary UDN the tenant already has. Its point is
+    # that an HTTP response says which pod answered, where a ping cannot.
+    - name: A web server per tenant, so the answer identifies the responder
+      ansible.builtin.import_role:
+        name: setup-udn-bgp
+      vars:
+        udn_phase: web
+      tags: [web, never]

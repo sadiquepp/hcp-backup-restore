@@ -1542,3 +1542,25 @@ udn_tenant_client_memory: 2048
 udn_tenant_client_vcpus: 2
 udn_tenant_client_os_variant: rhel9.5
 udn_tenant_client_base_image: "{{ rhel9_kvm_image }}"
+
+
+## ---------------------------------------------------------------------------
+## Per-tenant web workload (--tags web)
+## ---------------------------------------------------------------------------
+## One pod per tenant serving a page that names its own tenant, pod, node and
+## UDN address. The point is that an HTTP response identifies the responder and
+## an ICMP echo reply does not - so once blue and red carry the same subnet,
+## curling two addresses in that subnet from two client VMs returns two
+## different documents and there is nothing left to infer.
+##
+## Default is blue and red because they are the pair that overlaps. Add orange
+## or green if you want a page on them too; nothing here assumes two.
+udn_web_tenants: [blue, red]
+
+## UBI, not registry.redhat.io: this needs no entitlement, and unlike the ping
+## DaemonSet it needs no privileged SCC either - httpd-24 listens on 8080 as a
+## non-root user, which restricted-v2 allows. The init container is the same
+## support-tools image the ping workload uses, for `ip` only.
+udn_web_image: "registry.access.redhat.com/ubi9/httpd-24:latest"
+udn_web_init_image: "registry.redhat.io/rhel9/support-tools:latest"
+udn_web_port: 8080

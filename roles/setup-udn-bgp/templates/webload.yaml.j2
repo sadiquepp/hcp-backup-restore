@@ -1,0 +1,111 @@
+{#
+  A one-pod web server per tenant, so the isolation result can be *read*
+  rather than inferred from whether a ping came back.
+
+  This is the answer to the problem the identity check works around. Once blue
+  and red carry the same subnet, a reply to a ping proves something answered,
+  not WHICH pod answered - and ICMP has no way to say. An HTTP response does:
+  the page names its own tenant, pod and address, so `curl` from two client VMs
+  to two addresses in the same /16 returns two different documents, and there
+  is nothing left to infer.
+
+  Where a collision does occur - blue and red pods allocated the same address -
+  this supersedes the /proc/net/snmp counter check entirely. Same URL, two
+  machines, two answers, each naming itself.
+
+  Note what this pod does NOT need. The ping DaemonSet needs NET_RAW, so it
+  needs a ServiceAccount bound to the privileged SCC. This serves on {{ udn_web_port }}
+  as a non-root user and runs happily under restricted-v2 - no SCC work, no
+  RoleBinding. Listening above 1024 is the whole reason.
+#}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: udn-web-banner
+  namespace: udn-{{ tenant.name }}
+data:
+  ## Rendered into the page by the init container, which adds the parts only
+  ## the running pod knows.
+  banner: "I am {{ tenant.name }}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udn-web
+  namespace: udn-{{ tenant.name }}
+  labels:
+    app: udn-web
+    udn-tenant: {{ tenant.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: udn-web
+  template:
+    metadata:
+      labels:
+        app: udn-web
+        udn-tenant: {{ tenant.name }}
+    spec:
+      ## The page is built at start-up rather than baked into the ConfigMap,
+      ## because the two facts that make it worth reading - which pod answered
+      ## and on what address - are not known until the pod is running.
+      ##
+      ## The address is read from ovn-udn1 rather than from status.podIP: for a
+      ## primary UDN, podIP is the CLUSTER network address on eth0, not the
+      ## tenant address the fabric routes to. Printing podIP here would show an
+      ## address that has nothing to do with what was curled.
+      initContainers:
+        - name: render-page
+          image: {{ udn_web_init_image }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              udn=$(ip -o -4 addr show ovn-udn1 2>/dev/null | awk '{print $4}')
+              {
+                  echo "${BANNER}"
+                  echo
+                  printf '%-9s %s\n' 'tenant:' '{{ tenant.name }}'
+                  printf '%-9s %s\n' 'pod:'    "${POD_NAME}"
+                  printf '%-9s %s\n' 'node:'   "${NODE_NAME}"
+                  printf '%-9s %s\n' 'udn:'    "${udn:-(no ovn-udn1 - this pod is not on its UDN)}"
+                  printf '%-9s %s\n' 'subnet:' '{{ tenant.udn_subnet }}'
+              } > /page/index.html
+              cat /page/index.html
+          env:
+            - name: BANNER
+              valueFrom:
+                configMapKeyRef:
+                  name: udn-web-banner
+                  key: banner
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: page
+              mountPath: /page
+      containers:
+        - name: httpd
+          image: {{ udn_web_image }}
+          ports:
+            - containerPort: {{ udn_web_port }}
+              protocol: TCP
+          volumeMounts:
+            - name: page
+              mountPath: /var/www/html
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ udn_web_port }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: page
+          emptyDir: {}

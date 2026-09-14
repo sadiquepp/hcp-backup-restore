@@ -1,0 +1,86 @@
+---
+# Deploy a one-pod web server per tenant, so the isolation result can be read
+# instead of inferred.
+#
+# Separate phase from the ping workload: it is additive, it is opt-in, and it
+# is the only part of this lab that produces a demo rather than a measurement.
+# The namespaces must already exist with their primary-UDN label, so run it
+# after --tags shared or --tags vrflite.
+
+- name: Fail if a web tenant has no namespace
+  ansible.builtin.command:
+    cmd: "oc get ns udn-{{ item }} -o jsonpath={.metadata.name}"
+  loop: "{{ udn_web_tenants }}"
+  register: udn_web_ns
+  changed_when: false
+  failed_when: false
+
+- name: Report which namespaces are missing
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      Namespace udn-{{ item.item }} does not exist. The web workload attaches
+      to a tenant's existing primary UDN; it does not create one. Run
+      --tags shared or --tags vrflite first. Note the namespace must carry
+      k8s.ovn.org/primary-user-defined-network from creation - a namespace
+      made by hand here will take the pod onto the cluster network instead,
+      silently, and the demo will show two pages that are both reachable from
+      everywhere.
+    success_msg: "udn-{{ item.item }} exists."
+  loop: "{{ udn_web_ns.results }}"
+  loop_control:
+    label: "udn-{{ item.item }}"
+
+- name: Render the web workload for each tenant
+  ansible.builtin.template:
+    src: webload.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/webload-{{ tenant.name }}.yaml"
+    mode: '0644'
+  vars:
+    tenant: "{{ udn_bgp_tenants | selectattr('name', 'equalto', item) | first }}"
+  loop: "{{ udn_web_tenants }}"
+  delegate_to: localhost
+
+- name: Apply the web workload
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/webload-{{ item }}.yaml"
+  loop: "{{ udn_web_tenants }}"
+
+- name: Wait for each web pod to be ready
+  ansible.builtin.command:
+    cmd: >-
+      oc -n udn-{{ item }} rollout status deployment/udn-web --timeout=180s
+  loop: "{{ udn_web_tenants }}"
+  changed_when: false
+
+# Read the address off the interface rather than out of the annotation - it is
+# what the interface actually has, and it is what has to be curled.
+- name: Read each web pod's UDN address
+  ansible.builtin.shell:
+    cmd: >-
+      pod=$(oc -n udn-{{ item }} get pods -l app=udn-web
+            -o jsonpath='{.items[0].metadata.name}') &&
+      oc -n udn-{{ item }} exec "$pod" -c httpd --
+        cat /var/www/html/index.html 2>/dev/null |
+        awk '/^udn:/ {split($2, a, "/"); print a[1]}'
+  loop: "{{ udn_web_tenants }}"
+  register: udn_web_addrs
+  changed_when: false
+
+- name: Say what to curl
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['Web workload up. Each page names its own tenant, pod, node and'
+          ' address, so the answer identifies the responder - which a ping'
+          ' cannot.',
+          ''] +
+         (udn_web_addrs.results | map(attribute='item') | zip(
+          udn_web_addrs.results | map(attribute='stdout'))
+          | map('join', '  ->  ') | list) +
+         ['',
+          'From the per-tenant client VMs (--tags clabtenantclients), curl'
+          ' BOTH addresses from EACH VM. Every address below is inside'
+          ' ' ~ (udn_bgp_tenants | selectattr('name', 'equalto', udn_web_tenants | first)
+                 | map(attribute='udn_subnet') | first) ~ ', and each VM'
+          ' should reach exactly one of them:',
+          '  scripts/udn-web-demo.sh'] }}

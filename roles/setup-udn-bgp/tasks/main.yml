@@ -20,10 +20,10 @@
 
 - name: Validate udn_phase
   ansible.builtin.assert:
-    that: udn_phase in ['preflight', 'enable', 'default', 'shared', 'vrflite', 'evpn']
+    that: udn_phase in ['preflight', 'enable', 'default', 'shared', 'vrflite', 'evpn', 'web']
     fail_msg: >-
       udn_phase must be one of preflight, enable, default, shared, vrflite,
-      evpn - got '{{ udn_phase | default("(unset)") }}'.
+      evpn, web - got '{{ udn_phase | default("(unset)") }}'.
 
 - name: Resolve where the containerlab fabric can be reached
   ansible.builtin.set_fact:
@@ -35,17 +35,17 @@
 
 - name: Enable FRR and route advertisements
   ansible.builtin.include_tasks: enable.yml
-  when: udn_phase != 'preflight'
+  when: udn_phase not in ['preflight', 'web']
 
 # Must precede apply.yml: the NNCP templates select nodes by name, and the
 # only name that works is the one the cluster actually registered.
 - name: Resolve the fabric nodes' Kubernetes node names
   ansible.builtin.include_tasks: node-names.yml
-  when: udn_phase != 'preflight'
+  when: udn_phase not in ['preflight', 'web']
 
 - name: Render the manifests for this phase
   ansible.builtin.include_tasks: apply.yml
-  when: udn_phase != 'preflight'
+  when: udn_phase not in ['preflight', 'web']
 
 # Must precede the first NodeNetworkConfigurationPolicy below. Without the
 # NMState operator, `oc apply` of an NNCP fails with "no matches for kind
@@ -54,7 +54,7 @@
 # ever reconcile it.
 - name: Make sure the NodeNetworkConfigurationPolicy API exists
   ansible.builtin.include_tasks: nmstate.yml
-  when: udn_phase != 'preflight'
+  when: udn_phase not in ['preflight', 'web']
 
 # ---------------------------------------------------------------------------
 # Fabric NIC addressing + base peering. Needed by every phase from 'default'
@@ -69,7 +69,7 @@
 - name: Enable IP forwarding on the fabric nodes
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/tuned-forwarding.yaml"
-  when: udn_phase != 'preflight'
+  when: udn_phase not in ['preflight', 'web']
 
 - name: Address the fabric NICs
   ansible.builtin.command:
@@ -77,7 +77,7 @@
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
-  when: udn_phase != 'preflight'
+  when: udn_phase not in ['preflight', 'web']
 
 - name: Wait for the fabric NIC policies to be applied
   ansible.builtin.command:
@@ -87,13 +87,13 @@
   loop: "{{ clab_fabric_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
-  when: udn_phase != 'preflight'
+  when: udn_phase not in ['preflight', 'web']
   changed_when: false
 
 - name: Create the base BGP peering in the default VRF
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/frrconfiguration-default.yaml"
-  when: udn_phase != 'preflight'
+  when: udn_phase not in ['preflight', 'web']
 
 # ---------------------------------------------------------------------------
 # Phase: default - advertise the cluster default pod network
@@ -378,6 +378,17 @@
   ansible.builtin.include_tasks: evpn.yml
   when: udn_phase == 'evpn'
 
+# ---------------------------------------------------------------------------
+# Phase: web
+# ---------------------------------------------------------------------------
+# Additive and opt-in. Attaches a one-pod web server to tenants that already
+# have a primary UDN, so `curl` from two client VMs to two addresses in the
+# same /16 returns two documents that name themselves. It creates no network
+# objects and changes no routing, which is why it skips everything above.
+- name: Deploy the per-tenant web workload
+  ansible.builtin.include_tasks: webload.yml
+  when: udn_phase == 'web'
+
 - name: Verify
   ansible.builtin.include_tasks: verify.yml
-  when: udn_phase != 'preflight'
+  when: udn_phase not in ['preflight', 'web']
