@@ -2811,18 +2811,32 @@ udn:      10.200.4.5/24
 subnet:   10.200.0.0/16
 ```
 
-`scripts/udn-web-demo.sh` curls every tenant's pod from every client VM:
+`scripts/udn-web-demo.sh` curls every tenant's pod from every client VM.
+Confirmed output:
 
 ```
+Web pods
+  blue     http://10.200.4.4:8080/
+  red      http://10.200.1.5:8080/
+
 What answered
 client           blue           red
 udnclient-blue   I am blue      (no answer)
 udnclient-red    (no answer)    I am red
+udnclient-og     (no answer)    (no answer)
 ```
 
-Both addresses are inside `10.200.0.0/16`. The only difference between those
-two machines is the VLAN tag on their fabric interface, and that is what
-decided which document came back.
+Both addresses are inside `10.200.0.0/16` — `10.200.4.0/24` is blue's slice on
+its node, `10.200.1.0/24` is red's. The only difference between those machines
+is the VLAN tag on their fabric interface, and that is what decided which
+document came back.
+
+**The third row is the one that closes the argument.** Two machines each
+reaching "their" page is consistent with a weaker story — that both pages are
+reachable from anywhere and each VM simply found one. `udnclient-og` sits on
+the same fabric bridge with VLANs for orange and green and none for blue or
+red, and it gets nothing from either. So the pages are not reachable from
+anywhere; they are reachable from exactly one VRF each.
 
 Two details worth knowing:
 
