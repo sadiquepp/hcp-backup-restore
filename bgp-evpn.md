@@ -2528,6 +2528,96 @@ oc debug node/worker1 -- chroot /host ip route show vrf blue
 docker exec clab-udnbgp-leaf1 vtysh -c 'show ip route vrf blue'
 ```
 
+### 3f. The whole matrix at once, and the thing ping cannot tell you
+
+The tests in 3e are one cell each. There are sixteen, in two directions, and
+the interesting ones are the failures — so running them by hand means reading
+a lot of timeouts and deciding by eye which were supposed to time out.
+
+```bash
+scripts/udn-vrf-isolation.sh
+```
+
+Two matrices, a verdict, and an identity check. Expect `ok` on the diagonal
+and `FAIL` everywhere else, in *both* directions:
+
+```
+pod tenant   blue       red        orange     green
+blue         ok         FAIL       FAIL       FAIL
+red          FAIL       ok         FAIL       FAIL
+orange       FAIL       FAIL       ok         FAIL
+green        FAIL       FAIL       FAIL       ok
+```
+
+A whole row of `FAIL` including the diagonal is that tenant's handoff, not
+isolation. Everything `ok` is not success — it means `targetVRF` never took
+effect and you are still looking at phase 2.
+
+The diagonal is collapsed strictly and the off-diagonal loosely, which is
+deliberate: on the diagonal every node must reach its own endpoint, so a cell
+reads `2/3` rather than `ok` when one node fails and the per-node faults this
+lab keeps producing (strict `rp_filter`, a missing NNCP) stay visible. Off the
+diagonal a single node getting through is already a leak, so any success wins
+and the cell reads `ok(1/3)`.
+
+#### Why there is no client VM for this
+
+Phase 2 needed one: the question was whether a real machine outside the
+cluster could reach a pod, and the `*-ext` containers sat behind leaf1 rather
+than in front of it.
+
+Phase 3 asks a different question, and the answer is already built. The
+topology enslaves each tenant's external link to that tenant's VRF on leaf1:
+
+```yaml
+- ip link add blue type vrf table 1110
+- ip link set blue-ext master blue          # ← the client link is IN the VRF
+```
+
+So the four `*-ext` containers *are* four clients, each already in its own
+VRF. A VM would have to be plumbed onto leaf1 identically to prove anything —
+it would be `blue-ext` with more RAM. And a single VM holding all four tenants
+would need four VRFs of its own, which is worse than useless here: a VRF bug
+on the client is indistinguishable from a VRF bug on leaf1, and leaf1 is the
+thing under test. The client wants to be dumb.
+
+#### A successful ping does not prove isolation
+
+This is the part 3e cannot cover and no amount of extra clients would fix.
+
+Blue and red both use `10.200.0.0/16`. When `blue-ext` pings `10.200.0.5` and
+gets a reply, that reply proves *something* answered. It does not prove
+**which pod** answered — and "the wrong tenant's pod replied to the right
+address" is precisely the failure VRF-Lite exists to prevent. ICMP carries no
+identity, so a reachability test is structurally incapable of detecting the
+one leak that matters most.
+
+The script closes that by counting instead of pinging. `InEchos` in
+`/proc/net/snmp` is incremented by the kernel of the pod that actually
+received the echo request, so reading it on *both* candidate pods either side
+of a single ping names the responder:
+
+```
+Overlapping-address identity check
+
+  10.200.0.5 is held by: blue red
+    blue-ext   pinged 10.200.0.5      answered by blue(+3)   correct
+    red-ext    pinged 10.200.0.5      answered by red(+3)    correct
+
+  Every ext container reached its OWN tenant's pod at the shared
+  address. Same destination IP, different VRF, different pod -
+  which is the whole claim of VRF-Lite, measured rather than assumed.
+```
+
+`WRONG TENANT` there is the finding the two matrices would have reported as a
+clean pass.
+
+If OVN happened to hand blue and red distinct addresses out of their identical
+subnets there is no collision to disambiguate, and the script says so rather
+than inventing a result. The subnets are still identical and the matrices still
+carry the isolation finding — you just don't get this particular proof on that
+run.
+
 ---
 
 ## Phase 4: EVPN
@@ -2977,6 +3067,9 @@ That is another full `ovnkube-node` rollout.
 | Phase 4 | `tasks/evpn.yml`, `templates/nncp-vtep.yaml.j2`, `templates/vtep.yaml.j2`, `templates/cudn-evpn.yaml.j2`, `templates/frrconfiguration-evpn.yaml.j2`, `templates/routeadvertisements-udn-evpn.yaml.j2` |
 | Every "confirm it took" | `tasks/wait-ra.yml`, `tasks/verify.yml` |
 | Rendering, ordering | `tasks/main.yml`, `tasks/apply.yml` |
+| Phase 2 reachability, by hand | `scripts/udn-reachability.sh` |
+| Phase 3 isolation, by hand | `scripts/udn-vrf-isolation.sh` |
+| Capturing a phase to diff against the next | `scripts/udn-snapshot.sh` |
 
 The role renders every manifest to `udn-bgp/` beside the playbook before
 applying it, so after any run the exact YAML that was sent is on disk to read,

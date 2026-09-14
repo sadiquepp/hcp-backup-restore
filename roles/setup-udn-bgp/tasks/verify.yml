@@ -332,6 +332,18 @@
       {% endfor %}
          All of these MUST succeed. A run where everything times out is not
          isolation, it is a broken phase.
+      {% set ns.step = ns.step + 1 %}
+
+      {{ ns.step }}. Or run all of the above at once, in both directions:
+           scripts/udn-vrf-isolation.sh
+         Two matrices - pod to endpoint and endpoint to pod - expecting ok on
+         the diagonal and FAIL everywhere else, plus the one check ping alone
+         cannot make. {{ udn_bgp_tenants[0].name }} and {{ udn_bgp_tenants[1].name }} share a subnet, so a reply to a
+         ping proves something answered, not which pod answered - and the
+         wrong tenant answering is the leak VRF-Lite exists to prevent. Where
+         two tenants hold the same pod address it reads ICMP InEchos from
+         /proc/net/snmp on both pods either side of one ping and names the
+         responder.
       {% endif %}
       {% set ns.step = ns.step + 1 %}
 
