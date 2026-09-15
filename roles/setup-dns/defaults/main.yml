@@ -24,3 +24,17 @@
 # Set target_hub (vars.yaml, or -e) rather than these.
 setup_dns_hub_connected: "{{ target_hub | default('hub') }}"
 setup_dns_hub_disconnected: hubd
+
+# Upstream resolvers for everything the helper is not authoritative for.
+#
+# Defaults to libvirt's dnsmasq on the lab network, which forwards to the
+# hypervisor's own resolvers - correct for this lab and, unlike a real
+# resolver address, safe to commit. Override in vault.yaml to send queries
+# straight to site resolvers instead.
+#
+# Whatever this is set to must actually answer: named returns SERVFAIL for
+# every external name when its forwarder does not, and the lab zones keep
+# working meanwhile, so the failure is invisible until something needs an
+# outside name.
+dns_forwarders:
+  - "{{ lab_network_prefix }}.1"

@@ -1,7 +1,8 @@
 # Lab-wide Ansible variables. Loaded by most playbooks via vars_files.
 #
-# Secrets (pull_secret, activation_key, org_id, oadp_aws_*) belong in
-# vault.yaml, not here. Values below override role defaults when the
+# Secrets (pull_secret, activation_key, org_id, oadp_aws_*) and anything that
+# names internal infrastructure (dns_forwarders) belong in vault.yaml, not
+# here. Values below override role defaults when the
 # same name is used.
 #
 # Optional role-default overrides are documented at the bottom of this file
@@ -398,23 +399,20 @@ dns_packages:
 
 ## Where the helper's named sends everything it is NOT authoritative for.
 ##
-## This used to be hardcoded to 8.8.8.8, which does not resolve from this lab -
+## SET THIS IN vault.yaml, not here - resolver addresses are internal
+## infrastructure and this file is committed. The role defaults to
+## <lab_network_prefix>.1 (libvirt's dnsmasq, which forwards to the
+## hypervisor's own resolvers), which works without naming anything private.
+##
+##   dns_forwarders:
+##     - 10.x.x.x
+##     - 10.x.x.x
+##
+## It used to be hardcoded to 8.8.8.8, which does not resolve from this lab -
 ## it times out, named answers SERVFAIL, and every external name fails from any
-## host that uses the helper as its resolver. It surfaced as an agent installer
-## refusing to start a CONNECTED single-node install:
-##
-##   nslookup failure:  Server: 192.168.122.21
-##   ** server can't find quay.io: SERVFAIL
-##
-## but it was never specific to that - anything on the helper needing an
-## external name was broken the same way.
-##
-## Site-specific, hence a variable rather than a literal in named.conf.j2.
-## 192.168.122.1 (libvirt's dnsmasq, which forwards to the hypervisor's own
-## resolvers) also works and is a reasonable fallback if these change again.
-dns_forwarders:
-  - REDACTED-RESOLVER
-  - REDACTED-RESOLVER
+## host using the helper as its resolver. That surfaced as an agent installer
+## refusing to start a connected single-node install (quay.io: SERVFAIL), but
+## nothing about it was specific to that.
 
 ## Every domain in this file is <label>.<base_domain>, so base_domain (defined
 ## further down, with the cluster names) is the single place the lab's DNS

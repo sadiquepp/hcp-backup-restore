@@ -7,6 +7,22 @@
   register: result
   until: result.rc == 0
 
+# An empty list renders `forwarders { };` and named then SERVFAILs every
+# external name, while the zones it is authoritative for keep answering - so
+# nothing looks wrong until something needs an outside name. That exact failure
+# (8.8.8.8, unreachable from this lab) went unnoticed until an agent installer
+# refused to start. Cheap to check here, expensive to find later.
+- name: Fail if no upstream resolver is configured
+  ansible.builtin.assert:
+    that: (dns_forwarders | default([])) | length > 0
+    fail_msg: >-
+      dns_forwarders is empty. named would forward to nothing and answer
+      SERVFAIL for every name it is not authoritative for. Set it in
+      vault.yaml, or leave it unset to use the role default
+      ({{ lab_network_prefix }}.1, libvirt's dnsmasq).
+    success_msg: >-
+      Forwarding to {{ dns_forwarders | join(', ') }}.
+
 - name: Install DNS Packages
   dnf:
     name: "{{ dns_packages }}"
