@@ -23,3 +23,18 @@ cephadmin		A	{{ lab_network_prefix }}.{{ ip_list.cephadmin}}
 api		A	{{ lab_network_prefix }}.{{ ip_list.hublb}}
 api-int		A	{{ lab_network_prefix }}.{{ ip_list.hublb}}
 *.apps		A	{{ lab_network_prefix }}.{{ ip_list.hublb}}
+{% if (udn_proxy_tenants | default([])) and ip_list.get(udn_nsclient_vm_name | default('')) %}
+;
+; Tenant ingress for the UDN lab (--tags clabnsproxy). One name per tenant,
+; every one of them the same address: the proxy picks the tenant from the Host
+; header, not from where the name points. That is the whole trick - green and
+; purple resolve to one address AND dial one backend address (10.204.0.12) and
+; still return different pages, because haproxy makes each connection inside a
+; different network namespace.
+;
+; Generated from udn_proxy_tenants so the zone cannot drift from the tenant
+; list, and skipped entirely when the UDN lab vars are not loaded.
+{% for t in udn_proxy_tenants %}
+{{ "%-15s" | format(t) }}A	{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}
+{% endfor %}
+{% endif %}
