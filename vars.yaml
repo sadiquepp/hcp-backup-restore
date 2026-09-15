@@ -1766,6 +1766,14 @@ udn_proxy_selinux_permissive_fallback: true
 ## back, which presents as a fabric fault rather than a configuration choice -
 ## the same trap as leaving out the client segment's `network` statement.
 ##
+## WHAT THIS CANNOT DO, established on the running lab: a pod still cannot
+## reach another tenant's POD. OVN-Kubernetes installs an ACL named
+## advertised-network-subnets that drops traffic whose source AND destination
+## are both advertised UDN subnets - so BGP advertisement cannot be used to
+## defeat UDN isolation. The leak is real for everything else: a pod reaches
+## the other tenant's external network, and is reachable from its clients,
+## because those addresses are not advertised UDN subnets. See doc section 3i.
+##
 ## Set to [] to have the tenants fully isolated again.
 udn_vrf_leaks:
   - [blue, green]
