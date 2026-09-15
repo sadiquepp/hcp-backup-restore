@@ -132,6 +132,73 @@
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/vtep.yaml"
 
+# The annotation is what the CR is actually waiting on, and it only appears
+# AFTER the CR exists: ovnkube-node has no way to know which of a node's
+# addresses is a VTEP until something tells it the CIDRs. So this cannot be
+# checked before creating the CR - the order here is the only one that works.
+#
+# Polled per node rather than left to `oc wait` on the CR, because the CR
+# reports one aggregate AllocationFailed however many nodes are short, and
+# that message is the same whether the address is missing or merely
+# unnoticed. Naming the nodes turns a five-minute timeout into a fact.
+- name: Wait for OVN-Kubernetes to annotate every node with its VTEP address
+  ansible.builtin.shell:
+    cmd: |
+      oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.k8s\.ovn\.org/vteps}{"\n"}{end}' |
+        awk -F'\t' '$2 == "" { print $1 }'
+  register: udn_bgp_vtep_unannotated
+  changed_when: false
+  failed_when: false
+  until: (udn_bgp_vtep_unannotated.stdout | default("", true) | trim) == ""
+  retries: 30
+  delay: 10
+
+# Only for the nodes that did not make it, and only to answer the one
+# question the CR's own message cannot: is the address actually on the node?
+#
+#   vtep0 present with an address  -> nmstate did its job and ovnkube-node
+#                                     has not picked it up; restarting that
+#                                     node's ovnkube-node is the usual cure.
+#   vtep0 absent or empty          -> the NNCP reported Available without
+#                                     applying, so the problem is nmstate on
+#                                     that node, not OVN-Kubernetes.
+- name: Ask the unannotated nodes whether they have the address at all
+  ansible.builtin.command:
+    cmd: >-
+      oc debug node/{{ item }} --quiet --
+      chroot /host ip -br addr show {{ udn_bgp_vtep_iface }}
+  loop: "{{ udn_bgp_vtep_unannotated.stdout_lines | default([], true) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: udn_bgp_vtep_iface_state
+  changed_when: false
+  failed_when: false
+  when: (udn_bgp_vtep_unannotated.stdout | default('', true) | trim) != ""
+
+- name: Fail naming the nodes that never got the annotation
+  ansible.builtin.assert:
+    that: (udn_bgp_vtep_unannotated.stdout | default('', true) | trim) == ""
+    fail_msg: |-
+      These nodes never received the k8s.ovn.org/vteps annotation, so the
+      VTEP CR cannot be accepted and the tenant CUDNs cannot be realised:
+        {{ udn_bgp_vtep_unannotated.stdout_lines | default([], true) | join(', ') }}
+
+      What {{ udn_bgp_vtep_iface }} looks like on each of them:
+      {% for r in udn_bgp_vtep_iface_state.results | default([], true) %}
+        {{ r.item }}: {{ (r.stdout | default(r.stderr, true) | trim) or '(no output)' }}
+      {% endfor %}
+
+      If the address IS there, nmstate has done its part and ovnkube-node has
+      not noticed it. Restart that node's agent and it will annotate:
+        oc -n openshift-ovn-kubernetes delete pod -l app=ovnkube-node \
+          --field-selector spec.nodeName=<node>
+
+      If the address is NOT there, the NNCP reported Available without
+      applying - look at `oc get nncp vtep-<node> -o yaml` and the nmstate
+      handler on that node, not at OVN-Kubernetes.
+    success_msg: >-
+      Every node carries a k8s.ovn.org/vteps annotation.
+
 - name: Wait for the VTEP to be accepted
   ansible.builtin.command:
     cmd: >-
