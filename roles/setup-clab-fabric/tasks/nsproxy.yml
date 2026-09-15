@@ -7,6 +7,15 @@
 #
 # Runs in two places. Backend discovery needs `oc` and so runs on localhost;
 # everything after it is delegated to the VM by the caller in main.yml.
+#
+# Phase-independent, and deliberately so. Nothing here names a leaf, a VRF, a
+# VLAN or a topology: the proxy discovers each tenant's pod address with `oc`
+# and dials it from inside that tenant's network namespace. Whatever carries
+# the namespace to the pod - leaf1's VRF under VRF-Lite, leaf2's VRF or L2VNI
+# under EVPN - is somebody else's problem by the time this runs. So it works
+# unchanged in phase 4, and the same property is why it answers the overlapping
+# -address question at all: the proxy never needs one routing table to hold two
+# routes to the same prefix, because each backend is resolved in its own.
 
 # ---------------------------------------------------------------------------
 # What to proxy to. The pod addresses are not stable - any --tags web re-run
