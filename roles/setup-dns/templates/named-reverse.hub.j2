@@ -50,3 +50,14 @@ $TTL    600
 {{ ip_list.ceph2 }} 		IN PTR 		ceph2.{{ hub_domain }}.
 {{ ip_list.ceph3 }} 		IN PTR 		ceph3.{{ hub_domain }}.
 {{ ip_list.cephadmin }} 		IN PTR 		cephadmin.{{ hub_domain }}.
+{# The single-node cluster. Its hostname is 'sno' inside its own zone
+   sno.mylab.com, so the PTR is sno.sno.<base_domain> - which looks odd and is
+   right: it matches the A record sno_domain.j2 renders, and a PTR pointing at
+   a name with no A record is worse than no PTR at all.
+
+   Guarded on the ip_list entry like every other optional block here, so a lab
+   without a single-node cluster renders a valid zone rather than a PTR to
+   an address that belongs to nothing. #}
+{% if (sno_name | default('')) and (ip_list[sno_name] is defined) %}
+{{ ip_list[sno_name] }} 		IN PTR 		{{ sno_name }}.{{ sno_name }}.{{ base_domain }}.
+{% endif %}
