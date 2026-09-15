@@ -90,6 +90,14 @@ router bgp {{ clab_leaf2_asn }} vrf {{ t.name }}
   ! The tenant's external network is originated here now, not on leaf1 - so
   ! the cluster can only learn it across the EVPN fabric.
   network {{ t.external_prefix }}
+{% if t.name in (udn_client_segments | default({})) %}
+  ! And the client segment, for the same reason. Without this the client can
+  ! send to a pod and the pod has no route back: the request crosses the
+  ! fabric, the reply is dropped at the node for want of a destination, and it
+  ! fails exactly like a working isolation boundary. Originated per VRF, so
+  ! {{ t.name }}'s client prefix is only ever resolvable inside {{ t.name }}.
+  network {{ udn_client_segments[t.name].prefix }}.0/{{ clab_fabric_netmask_bits }}
+{% endif %}
  exit-address-family
  !
  address-family l2vpn evpn

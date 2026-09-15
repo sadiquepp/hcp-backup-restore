@@ -41,11 +41,18 @@
 # so the check reports an unreachable gateway that is reachable seconds later.
 # The first run after any change to the routes script is exactly when the
 # script changes, so this is the common case, not the rare one.
-- name: Confirm {{ client.name }} reaches each tenant's gateway
+#
+# What counts as "the other end of this segment" depends on the tenant's
+# transport. A routed segment has a gateway on the leaf. A macVRF segment has
+# none - it is one stretched broadcast domain, so the nearest thing to probe is
+# the tenant's external endpoint, which sits in the same domain on-link.
+- name: Confirm {{ client.name }} reaches each tenant's segment
+  vars:
+    tc_t: "{{ udn_bgp_tenants | selectattr('name', 'equalto', tenant_name) | first }}"
+    tc_l2: "{{ (clab_topology | default('bgp') == 'evpn') and ((tc_t.topology | default('Layer3')) == 'Layer2') }}"
+    tc_target: "{{ tc_t.evpn_l2_external_host if (tc_l2 | bool) else (udn_client_segments[tenant_name].prefix ~ '.' ~ udn_client_segment_gw_octet) }}"
   ansible.builtin.command:
-    cmd: >-
-      ping -c2 -W2
-      {{ udn_client_segments[tenant_name].prefix }}.{{ udn_client_segment_gw_octet }}
+    cmd: "ping -c2 -W2 {{ tc_target }}"
   loop: "{{ client.tenants }}"
   loop_control:
     loop_var: tenant_name
@@ -56,23 +63,33 @@
   delay: 3
   until: udn_tc_gw_ping.rc == 0
 
-- name: Fail if a tenant gateway is unreachable from {{ client.name }}
+- name: Fail if a tenant's segment is unreachable from {{ client.name }}
+  vars:
+    tc_t: "{{ udn_bgp_tenants | selectattr('name', 'equalto', item.tenant_name) | first }}"
+    tc_l2: "{{ (clab_topology | default('bgp') == 'evpn') and ((tc_t.topology | default('Layer3')) == 'Layer2') }}"
+    tc_leaf: "{{ 'leaf2' if (clab_topology | default('bgp') == 'evpn') else 'leaf1' }}"
+    tc_target: "{{ tc_t.evpn_l2_external_host if (tc_l2 | bool) else (udn_client_segments[item.tenant_name].prefix ~ '.' ~ udn_client_segment_gw_octet) }}"
   ansible.builtin.assert:
     that: item.rc == 0
     fail_msg: >-
-      {{ client.name }} cannot reach leaf1 at
-      {{ udn_client_segments[item.tenant_name].prefix }}.{{ udn_client_segment_gw_octet }}
-      on VLAN {{ udn_client_segments[item.tenant_name].vlan }}. Check that leaf1
-      has eth1.{{ udn_client_segments[item.tenant_name].vlan }} in the
-      {{ item.tenant_name }} VRF - the topology has to be redeployed
+      {{ client.name }} cannot reach {{ tc_target }} on VLAN
+      {{ udn_client_segments[item.tenant_name].vlan }}.
+      {% if tc_l2 | bool %}That is {{ item.tenant_name }}-ext, on-link in
+      {{ tc_t.udn_subnet }} across the L2VNI - check {{ tc_leaf }} has
+      eth1.{{ udn_client_segments[item.tenant_name].vlan }} as a port on
+      br{{ tc_t.evpn_mac_vni }}.
+      {% else %}Check that {{ tc_leaf }} has
+      eth1.{{ udn_client_segments[item.tenant_name].vlan }} in the
+      {{ item.tenant_name }} VRF.
+      {% endif %}The topology has to be redeployed
       (--tags clabdeploy) after adding udn_client_segments, because the
-      subinterfaces are built by leaf1's exec block at container start.
+      subinterfaces are built by {{ tc_leaf }}'s exec block at container start.
       This was retried for 30s, so it is not the interfaces still settling
-      after this play rebuilt them. Confirm from leaf1 with:
+      after this play rebuilt them. Confirm with:
         docker exec clab-udnbgp-leaf1 ip -br -4 addr show | grep eth1
-        docker exec clab-udnbgp-leaf1 ip -d link show master {{ item.tenant_name }}
+        docker exec clab-{{ clab_lab_name }}-{{ tc_leaf }} ip -d link show eth1.{{ udn_client_segments[item.tenant_name].vlan }}
     success_msg: >-
-      {{ client.name }} reaches {{ item.tenant_name }}'s gateway on VLAN
+      {{ client.name }} reaches {{ item.tenant_name }} at {{ tc_target }} on VLAN
       {{ udn_client_segments[item.tenant_name].vlan }}.
   loop: "{{ udn_tc_gw_ping.results }}"
   loop_control:

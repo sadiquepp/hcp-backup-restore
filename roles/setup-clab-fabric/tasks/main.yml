@@ -279,8 +279,10 @@
 # these are useless until --tags vrflite has run.
 #
 # REQUIRES the topology to have been redeployed after udn_client_segments was
-# added, because leaf1 builds the client VLAN subinterfaces in its exec block
-# at container start (--tags clabdeploy).
+# added, because the client VLAN subinterfaces are built in a leaf's exec block
+# at container start (--tags clabdeploy). Which leaf depends on the phase:
+# leaf1 under VRF-Lite, leaf2 under EVPN, where leaf1 holds no tenant VRFs at
+# all and the client attaches behind the far leaf instead.
 # ---------------------------------------------------------------------------
 - name: Build the per-tenant client VMs
   ansible.builtin.include_tasks:
@@ -339,8 +341,9 @@
 # nsclient-vm.yml enforces that.
 #
 # Same prerequisite as the per-tenant VMs: the topology must have been
-# redeployed (--tags clabdeploy) after udn_client_segments changed, because
-# leaf1 builds the client VLAN subinterfaces in its exec block at start.
+# redeployed (--tags clabdeploy) after udn_client_segments changed, because the
+# client VLAN subinterfaces are built in a leaf's exec block at start - leaf1
+# under VRF-Lite, leaf2 under EVPN.
 # ---------------------------------------------------------------------------
 - name: Build the namespace client VM
   ansible.builtin.include_tasks:

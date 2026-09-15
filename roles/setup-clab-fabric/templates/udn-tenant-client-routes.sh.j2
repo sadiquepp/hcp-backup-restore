@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
-# Fabric plumbing for {{ client.name }}, the phase-3 client for
+{% set leaf = 'leaf2' if (clab_topology | default('bgp') == 'evpn') else 'leaf1' %}
+# Fabric plumbing for {{ client.name }}, the client for
 # {{ client.tenants | join(' and ') }}. Rendered by setup-clab-fabric.
 #
 # One untagged NIC on the fabric bridge, and one VLAN subinterface per tenant
-# this client serves. The VLAN is what selects the VRF: a frame tagged
+# this client serves. The VLAN is what selects the tenant: a frame tagged
 {% for t in client.tenants %}
-#   {{ '%-6s' | format(t) }} VLAN {{ udn_client_segments[t].vlan }} -> leaf1's {{ t }} VRF -> {{ t }}'s pods
+{% set _t = udn_bgp_tenants | selectattr('name', 'equalto', t) | first %}
+{% if (clab_topology | default('bgp') == 'evpn') and ((_t.topology | default('Layer3')) == 'Layer2') %}
+#   {{ '%-6s' | format(t) }} VLAN {{ udn_client_segments[t].vlan }} -> leaf2's L2VNI {{ _t.evpn_mac_vni }} -> {{ t }}'s pods, on-link
+{% else %}
+#   {{ '%-6s' | format(t) }} VLAN {{ udn_client_segments[t].vlan }} -> {{ leaf }}'s {{ t }} VRF -> {{ t }}'s pods
+{% endif %}
 {% endfor %}
 # and nothing else. There is no VRF in this guest and there must not be: a
 # client-side VRF fault would be indistinguishable from the leaf-side VRF fault
-# under test, and leaf1 is the thing being tested. This host stays dumb.
+# under test, and {{ leaf }} is the thing being tested. This host stays dumb.
 #
 # Note these VLANs are NOT the tenant handoff VLANs the nodes use. A client on
-# those would share a broadcast domain with all three workers, so leaf1 would
+# those would share a broadcast domain with all three workers, so {{ leaf }} would
 # answer with an ICMP redirect and the traffic would go direct - and
 # blue-cannot-reach-red would then be proven by 802.1Q rather than by the VRF.
-# Off-segment, every packet is genuinely routed by leaf1 out of the tenant's
+# Off-segment, every packet is genuinely routed by {{ leaf }} out of the tenant's
 # own routing table, which is the claim worth proving.
 set -euo pipefail
 trap 'echo "udn-tenant-client-routes.sh: failed at line $LINENO with status $?" >&2' ERR
@@ -67,6 +73,16 @@ VLAN{{ seg.vlan }}="$NIC.{{ seg.vlan }}"
 ip link show "$VLAN{{ seg.vlan }}" >/dev/null 2>&1 || \
     ip link add link "$NIC" name "$VLAN{{ seg.vlan }}" type vlan id {{ seg.vlan }}
 ip link set "$VLAN{{ seg.vlan }}" mtu "$MTU" up
+{% set l2 = (clab_topology | default('bgp') == 'evpn') and ((tenant.topology | default('Layer3')) == 'Layer2') %}
+{% if l2 %}
+# {{ t }}'s transport is a macVRF, so this VLAN is not a routed segment with a
+# gateway at the far end - it is an access port on the L2VNI, and this client
+# is a host in {{ tenant.udn_subnet }} alongside {{ t }}'s pods and {{ t }}-ext.
+# There is nothing to route: every pod is on-link, reached by ARP answered out
+# of type-2 routes. So one address and no routes at all, which is why the
+# gateway and the two ip route lines the other tenants get are absent here.
+ip addr replace {{ tenant.evpn_l2_client_host }}/{{ tenant.udn_subnet.split('/')[1] }} dev "$VLAN{{ seg.vlan }}"
+{% else %}
 ip addr replace {{ seg.prefix }}.{{ udn_client_segment_host_octet }}/{{ clab_fabric_netmask_bits }} dev "$VLAN{{ seg.vlan }}"
 
 # {{ t }}'s pod network. In phase 3 this prefix is {{ tenant.udn_subnet }}, which
@@ -80,16 +96,22 @@ ip addr replace {{ seg.prefix }}.{{ udn_client_segment_host_octet }}/{{ clab_fab
 ip route replace {{ tenant.udn_subnet }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$VLAN{{ seg.vlan }}"
 
 # {{ t }}'s external network, where {{ t }}-ext lives. Reachable from here only
-# because leaf1 routes it inside the {{ t }} VRF - the same VRF, a second way in.
+# because {{ leaf }} routes it inside the {{ t }} VRF - the same VRF, a second way in.
 ip route replace {{ tenant.external_prefix }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$VLAN{{ seg.vlan }}"
+{% endif %}
 
 {% set leak_partners = [] %}
-{% for pair in udn_vrf_leaks | default([]) %}
+{# Leaking is a phase-3 construct: it is leaf1's `import vrf <other>`, and
+   leaf1-frr-evpn.conf.j2 has no equivalent - under EVPN leaf1 holds no tenant
+   VRFs at all. Rendering these routes anyway would point a client at a
+   destination the fabric never resolves, which fails identically to a working
+   isolation boundary and so proves nothing either way. #}
+{% for pair in (udn_vrf_leaks | default([])) if clab_topology | default('bgp') != 'evpn' %}
 {% if pair[0] == t %}{% set _ = leak_partners.append(pair[1]) %}
 {% elif pair[1] == t %}{% set _ = leak_partners.append(pair[0]) %}
 {% endif %}
 {% endfor %}
-{% for other in leak_partners %}
+{% for other in leak_partners if not l2 %}
 {% set otenant = udn_bgp_tenants | selectattr('name', 'equalto', other) | first %}
 # {{ other }}'s pods, reached THROUGH {{ t }}. leaf1 has `import vrf {{ other }}` inside the
 # {{ t }} VRF, so {{ otenant.udn_subnet }} is resolvable in {{ t }}'s table - one more
