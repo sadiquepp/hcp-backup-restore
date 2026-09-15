@@ -40,11 +40,18 @@ spec:
             port: 179
             toReceive:
               allowed:
-                # Accept the tenant's external prefix from the leaf. 'all'
-                # is safe inside a tenant VRF in a way it would not be in
-                # the default VRF: the only thing that can inject here is
-                # the leaf's {{ t.name }} VRF, which originates exactly
-                # {{ t.external_prefix }}.
+                # Accept what the leaf sends in this tenant's VRF. 'all' is
+                # safe inside a tenant VRF in a way it would not be in the
+                # default VRF: the only thing that can inject here is the
+                # leaf's {{ t.name }} VRF.
+                #
+                # That used to mean exactly {{ t.external_prefix }}. With
+                # udn_vrf_leaks it also means whatever {{ t.name }} imports -
+                # leaf1's `import vrf <other>` puts another tenant's prefixes
+                # into this VRF's table, and they arrive here over this same
+                # session. 'all' is what lets that work without a second
+                # change; a prefix list here would have to be kept in step
+                # with the leaks, which is a coupling worth not having.
                 mode: all
             toAdvertise:
               allowed:
