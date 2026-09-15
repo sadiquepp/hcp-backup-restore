@@ -75,6 +75,14 @@ fi
 # silently loses everything.
 ip netns exec "$NS" ip link set lo up
 ip netns exec "$NS" ip link set "$DEV" mtu "$MTU" up
+{% set l2 = (clab_topology | default('bgp') == 'evpn') and ((t.topology | default('Layer3')) == 'Layer2') %}
+{% if l2 %}
+# {{ t.name }}'s transport is a macVRF, so this namespace is a host INSIDE
+# {{ t.udn_subnet }} - an access port on the L2VNI, in the same broadcast domain
+# as the pods. No gateway and no routes: every pod is on-link, reached by ARP
+# answered out of type-2 routes.
+ip netns exec "$NS" ip addr replace {{ t.evpn_l2_client_host }}/{{ t.udn_subnet.split('/')[1] }} dev "$DEV"
+{% else %}
 ip netns exec "$NS" ip addr replace {{ seg.prefix }}.{{ udn_nsclient_segment_host_octet }}/{{ clab_fabric_netmask_bits }} dev "$DEV"
 
 # net.ipv4.* sysctls are per-namespace, so this has to be set inside each one -
@@ -92,13 +100,19 @@ ip netns exec "$NS" sh -c 'for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo
 {% endif %}
 ip netns exec "$NS" ip route replace {{ t.udn_subnet }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$DEV"
 ip netns exec "$NS" ip route replace {{ t.external_prefix }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$DEV"
+{% endif %}
 {% set leak_partners = [] %}
-{% for pair in udn_vrf_leaks | default([]) %}
+{# Leaking is a phase-3 construct: it is leaf1's `import vrf <other>`, and
+   leaf1-frr-evpn.conf.j2 has no equivalent - under EVPN leaf1 holds no tenant
+   VRFs at all. Rendering these routes anyway would point a client at a
+   destination the fabric never resolves, which fails identically to a working
+   isolation boundary and so proves nothing either way. #}
+{% for pair in (udn_vrf_leaks | default([])) if clab_topology | default('bgp') != 'evpn' %}
 {% if pair[0] == t.name %}{% set _ = leak_partners.append(pair[1]) %}
 {% elif pair[1] == t.name %}{% set _ = leak_partners.append(pair[0]) %}
 {% endif %}
 {% endfor %}
-{% for other in leak_partners %}
+{% for other in leak_partners if not l2 %}
 {% set otenant = udn_bgp_tenants | selectattr('name', 'equalto', other) | first %}
 # {{ other }}'s pods, through {{ t.name }}: leaf1 has `import vrf {{ other }}` in the {{ t.name }}
 # VRF, so {{ otenant.udn_subnet }} resolves in {{ t.name }}'s table. Still one VLAN in this

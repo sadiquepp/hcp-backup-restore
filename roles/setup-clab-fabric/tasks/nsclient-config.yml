@@ -49,11 +49,17 @@
 # so the check reports an unreachable gateway that is reachable seconds later.
 # The first run after any change to the routes script is exactly when the
 # script changes, so this is the common case, not the rare one.
-- name: Confirm each namespace reaches its tenant's gateway
+#
+# A routed segment has a gateway on the leaf; a macVRF segment has none, being
+# one stretched broadcast domain, so the nearest end to probe is the tenant's
+# external endpoint, on-link in the same domain.
+- name: Confirm each namespace reaches its tenant's segment
+  vars:
+    ns_t: "{{ udn_bgp_tenants | selectattr('name', 'equalto', tenant_name) | first }}"
+    ns_l2: "{{ (clab_topology | default('bgp') == 'evpn') and ((ns_t.topology | default('Layer3')) == 'Layer2') }}"
+    ns_target: "{{ ns_t.evpn_l2_external_host if (ns_l2 | bool) else (udn_client_segments[tenant_name].prefix ~ '.' ~ udn_client_segment_gw_octet) }}"
   ansible.builtin.command:
-    cmd: >-
-      ip netns exec {{ tenant_name }} ping -c2 -W2
-      {{ udn_client_segments[tenant_name].prefix }}.{{ udn_client_segment_gw_octet }}
+    cmd: "ip netns exec {{ tenant_name }} ping -c2 -W2 {{ ns_target }}"
   loop: "{{ udn_bgp_tenants | map(attribute='name') | select('in', udn_client_segments.keys() | list) | list }}"
   loop_control:
     loop_var: tenant_name
@@ -64,18 +70,28 @@
   delay: 3
   until: udn_ns_gw_ping.rc == 0
 
-- name: Fail if a namespace cannot reach its gateway
+- name: Fail if a namespace cannot reach its segment
+  vars:
+    ns_t: "{{ udn_bgp_tenants | selectattr('name', 'equalto', item.tenant_name) | first }}"
+    ns_l2: "{{ (clab_topology | default('bgp') == 'evpn') and ((ns_t.topology | default('Layer3')) == 'Layer2') }}"
+    ns_leaf: "{{ 'leaf2' if (clab_topology | default('bgp') == 'evpn') else 'leaf1' }}"
+    ns_target: "{{ ns_t.evpn_l2_external_host if (ns_l2 | bool) else (udn_client_segments[item.tenant_name].prefix ~ '.' ~ udn_client_segment_gw_octet) }}"
   ansible.builtin.assert:
     that: item.rc == 0
     fail_msg: >-
-      Namespace {{ item.tenant_name }} cannot reach leaf1 at
-      {{ udn_client_segments[item.tenant_name].prefix }}.{{ udn_client_segment_gw_octet }}
-      on VLAN {{ udn_client_segments[item.tenant_name].vlan }}. Check leaf1 has
+      Namespace {{ item.tenant_name }} cannot reach {{ ns_target }} on VLAN
+      {{ udn_client_segments[item.tenant_name].vlan }}.
+      {% if ns_l2 | bool %}That is {{ item.tenant_name }}-ext, on-link in
+      {{ ns_t.udn_subnet }} across the L2VNI - check {{ ns_leaf }} has
+      eth1.{{ udn_client_segments[item.tenant_name].vlan }} as a port on
+      br{{ ns_t.evpn_mac_vni }}.
+      {% else %}Check {{ ns_leaf }} has
       eth1.{{ udn_client_segments[item.tenant_name].vlan }} in the
-      {{ item.tenant_name }} VRF - the topology has to be redeployed
+      {{ item.tenant_name }} VRF.
+      {% endif %}The topology has to be redeployed
       (--tags clabdeploy) after a tenant or a client segment is added.
     success_msg: >-
-      Namespace {{ item.tenant_name }} reaches its gateway on VLAN
+      Namespace {{ item.tenant_name }} reaches {{ ns_target }} on VLAN
       {{ udn_client_segments[item.tenant_name].vlan }}.
   loop: "{{ udn_ns_gw_ping.results }}"
   loop_control:

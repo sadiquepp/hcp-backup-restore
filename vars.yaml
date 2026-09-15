@@ -1413,6 +1413,13 @@ udn_bgp_tenants:
     ## Must sit inside udn_subnet and outside anything OVN might allocate,
     ## which evpn_l2_exclude below reserves.
     evpn_l2_external_host: "10.204.255.10"
+    ## The client segment's address on this tenant, phase 4 only. Same logic as
+    ## evpn_l2_external_host: a macVRF carries MACs, not prefixes, so a client
+    ## cannot sit on a routed segment behind a gateway the way it does for a
+    ## Layer3 tenant. It joins the stretched L2 domain instead and reaches the
+    ## pods on-link. Distinct from purple's for the same reason the ext hosts
+    ## are distinct - see the note there.
+    evpn_l2_client_host: "10.204.255.30"
     evpn_l2_exclude: "10.204.255.0/24"
     evpn_ip_vni: 401
 
@@ -1460,6 +1467,7 @@ udn_bgp_tenants:
     ## the overlap point; this would cost a second round of script work to say
     ## it again. Set them equal once EXTHOST is address-keyed like ADDR_OWNERS.
     evpn_l2_external_host: "10.204.255.20"
+    evpn_l2_client_host: "10.204.255.40"
     evpn_l2_exclude: "10.204.255.0/24"
     evpn_ip_vni: 501
 

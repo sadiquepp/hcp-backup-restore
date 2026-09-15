@@ -127,6 +127,15 @@ topology:
         - ip link set lo0 up
         - ip link set eth10 mtu {{ clab_fabric_mtu }} up
         - ip addr add 10.1.0.6/30 dev eth10
+{% if udn_client_segments | default({}) %}
+        ## Trunk onto the fabric bridge, for the client segments below. No
+        ## address: leaf2 is not on the nodes' untagged fabric network and must
+        ## not be - the only thing it does with this link is terminate the
+        ## per-tenant client VLANs. leaf1 is on the same bridge, which is
+        ## harmless because neither leaf bridges eth1 to anything the other can
+        ## reach: the client VLANs exist on leaf2 alone.
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+{% endif %}
 {% for t in udn_bgp_tenants %}
 {% if t.topology | default('Layer3') == 'Layer2' %}
         ## macVRF / L2VNI. The cluster declares this tenant with
@@ -170,6 +179,39 @@ topology:
         - ip link set {{ t.name }}-ext up
 {% endif %}
 {% endfor %}
+{% for t in udn_bgp_tenants if t.name in (udn_client_segments | default({})) %}
+{% set seg = udn_client_segments[t.name] %}
+{% if t.topology | default('Layer3') == 'Layer2' %}
+        ## Client segment for {{ t.name }}: VLAN {{ seg.vlan }}, an access port on the
+        ## L2VNI rather than a routed subinterface. This tenant's transport is a
+        ## macVRF - MAC reachability, no prefixes - so there is no VRF to put a
+        ## gateway in and nothing to route. The client joins the same stretched
+        ## broadcast domain as the pods and {{ t.name }}-ext, and reaches them
+        ## on-link by ARP answered out of type-2 routes.
+        ##
+        ## So this port carries NO address, and the client addresses itself
+        ## inside {{ t.udn_subnet }} from evpn_l2_client_host.
+        - ip link add link eth1 name eth1.{{ seg.vlan }} type vlan id {{ seg.vlan }}
+        - ip link set eth1.{{ seg.vlan }} master br{{ t.evpn_mac_vni }}
+        - ip link set eth1.{{ seg.vlan }} mtu {{ clab_fabric_mtu }} up
+{% else %}
+        ## Client segment for {{ t.name }}: VLAN {{ seg.vlan }}, enslaved to the {{ t.name }} VRF
+        ## on THIS leaf. In phase 3 the same segment hangs off leaf1; under EVPN
+        ## leaf1 holds no tenant VRFs at all - the nodes are VTEPs and the VRFs
+        ## live here - so the client attaches behind the far leaf, exactly as
+        ## {{ t.name }}-ext does.
+        ##
+        ## A frame tagged {{ seg.vlan }} therefore enters the {{ t.name }} VRF and no other, and
+        ## reaching a pod from here means crossing the EVPN fabric: VRF ->
+        ## L3VNI {{ t.evpn_ip_vni }} -> VXLAN -> the node holding the pod. That is a longer
+        ## and more honest path than phase 3's, where leaf1 was directly
+        ## adjacent to the nodes.
+        - ip link add link eth1 name eth1.{{ seg.vlan }} type vlan id {{ seg.vlan }}
+        - ip link set eth1.{{ seg.vlan }} master {{ t.name }}
+        - ip link set eth1.{{ seg.vlan }} mtu {{ clab_fabric_mtu }} up
+        - ip addr add {{ seg.prefix }}.{{ udn_client_segment_gw_octet }}/{{ clab_fabric_netmask_bits }} dev eth1.{{ seg.vlan }}
+{% endif %}
+{% endfor %}
         ## vtysh -b, never frrinit.sh restart - see leaf1 above.
         - vtysh -b
 
@@ -196,6 +238,11 @@ topology:
     - endpoints: ["leaf1:eth1", "{{ clab_bridge_for_topology }}:leaf1-fab"]
     - endpoints: ["leaf1:eth10", "spine:eth1"]
     - endpoints: ["leaf2:eth10", "spine:eth2"]
+{% if udn_client_segments | default({}) %}
+    ## leaf2 onto the fabric bridge, so the client VMs' tagged frames reach the
+    ## tenant VRFs and L2VNIs that live on this leaf under EVPN.
+    - endpoints: ["leaf2:eth1", "{{ clab_bridge_for_topology }}:leaf2-fab"]
+{% endif %}
 {% for t in udn_bgp_tenants %}
     - endpoints: ["leaf2:{{ t.name }}-ext", "{{ t.name }}-ext:eth1"]
 {% endfor %}
