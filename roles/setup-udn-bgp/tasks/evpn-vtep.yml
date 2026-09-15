@@ -1,0 +1,117 @@
+---
+# Phase 4, first half - the VTEP the tenant CUDNs are about to reference.
+#
+# Split out of evpn.yml for an ordering reason that is not obvious from
+# either file. A phase-4 CUDN carries `network.evpn.vtep: evpn-vtep`, and
+# OVN-Kubernetes resolves that reference at admission: with no VTEP CR the
+# CUDN is created but its network is not, with
+#
+#   TransportAccepted  False  VTEPNotFound
+#   NetworkCreated     False  VTEPNotFound
+#
+# and it stays there. It is not a race that settles - nothing retries the
+# reference on a timer - so the wait for the CUDNs to be realised into NADs
+# spends every one of its retries on a network that will never be created.
+#
+# The rest of phase 4 - the EVPN peering, the advertisements, the teardown
+# of phase 3's plumbing - still runs in evpn.yml, after the CUDNs exist.
+# Only the VTEP has to come first.
+
+- name: Stop with an explanation if this cluster is too old for EVPN
+  ansible.builtin.fail:
+    msg: |
+      This cluster is {{ udn_bgp_cluster_version.stdout }}, and EVPN for
+      cluster user-defined networks is GA in OpenShift
+      {{ udn_bgp_evpn_min_version }}. The VTEP API and the CUDN
+      network.transport / network.evpn fields do not exist before that.
+
+      vars.yaml sets ocp_major_version to {{ ocp_major_version }}. If that is
+      already {{ udn_bgp_evpn_min_version }} and you are still seeing this,
+      the CLUSTER predates the variable change - the version that matters is
+      the one reported above, not the one in vars.yaml. Rebuild or upgrade
+      it.
+
+      Alternatively, build the EVPN fabric and hand off to it with VRF-Lite:
+        ansible-playbook ... setup_udn_bgp_lab.yaml --tags fabric \
+          -e clab_topology=evpn
+      then run --tags vrflite. The cluster peers per-tenant VLANs with leaf1
+      exactly as in phase 3, and leaf1 maps each VRF into an EVPN VNI carried
+      over VXLAN to leaf2. That is a normal production design - plenty of
+      real clusters hand off at a border leaf rather than running VTEPs on
+      the nodes - and it exercises the VNI and route-target mapping either
+      way. What it does not exercise is node-level VTEPs.
+  # `| bool` is load-bearing: udn_bgp_has_evpn comes out of a folded scalar in
+  # preflight.yml, so it is the STRING "False" on a cluster without EVPN, and
+  # a non-empty string is truthy. Tested bare, this gate never fires on the
+  # clusters it exists for, and the run fails later on a missing CRD instead.
+  when: not (udn_bgp_has_evpn | bool)
+
+- name: Render the VTEP CR
+  ansible.builtin.template:
+    src: vtep.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/vtep.yaml"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: Render a VTEP address policy per node
+  ansible.builtin.template:
+    src: nncp-vtep.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/nncp-vtep-{{ node_entry.ip_key }}.yaml"
+    mode: '0644'
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    loop_var: node_entry
+    label: "{{ node_entry.ip_key }}"
+  delegate_to: localhost
+
+# Order matters here. The addresses have to be on the nodes before the VTEP
+# CR is created: in Unmanaged mode the CR's job is to discover what is
+# already there, and a CR created against nodes with no matching address goes
+# straight to a failed status.
+- name: Put each node's VTEP address in place
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-vtep-{{ item.ip_key }}.yaml"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+
+- name: Wait for the VTEP address policies to be applied
+  ansible.builtin.command:
+    cmd: "oc wait nncp/vtep-{{ item.ip_key }} --for=condition=Available --timeout=300s"
+  loop: "{{ clab_fabric_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  changed_when: false
+
+- name: Create the VTEP
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/vtep.yaml"
+
+- name: Wait for the VTEP to be accepted
+  ansible.builtin.command:
+    cmd: >-
+      oc wait vtep/evpn-vtep --for=condition=Accepted=True --timeout=300s
+  register: udn_bgp_vtep_accept
+  failed_when: false
+  changed_when: false
+
+- name: Report the VTEP status
+  ansible.builtin.command:
+    cmd: oc get vtep evpn-vtep -o wide
+  register: udn_bgp_vtep_status
+  changed_when: false
+
+- name: Fail with the VTEP's own reason if it was not accepted
+  ansible.builtin.assert:
+    that: udn_bgp_vtep_accept.rc == 0
+    fail_msg: >-
+      The VTEP CR was not accepted: {{ udn_bgp_vtep_status.stdout }}.
+      In Unmanaged mode the usual causes are that a node has no address
+      inside {{ udn_bgp_vtep_prefix }}.0/24, or that it has more than one -
+      an ambiguous match is a failure, not a choice. Check with
+      `oc get vtep evpn-vtep -o yaml` and
+      `oc debug node/<node> -- chroot /host ip -br addr show {{ udn_bgp_vtep_iface }}`.
+      The tenant CUDNs reference this VTEP by name, so they cannot be
+      realised until it is accepted.
+    success_msg: >-
+      VTEP evpn-vtep accepted; the tenant CUDNs can reference it.

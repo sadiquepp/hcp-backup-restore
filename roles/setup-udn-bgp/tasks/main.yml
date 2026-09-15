@@ -196,6 +196,14 @@
     label: "{{ item.name }}"
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
+# Before the CUDNs, not with the rest of phase 4. A phase-4 CUDN names a VTEP
+# in network.evpn.vtep, and OVN-Kubernetes will not create the network until
+# that VTEP exists - it reports VTEPNotFound and stays there, so the wait for
+# the NADs below burns every retry on a network that is never coming.
+- name: Create the VTEP the tenant CUDNs will reference
+  ansible.builtin.include_tasks: evpn-vtep.yml
+  when: udn_phase == 'evpn'
+
 - name: Create the tenant CUDNs
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/cudn-{{ item.name }}.yaml"
