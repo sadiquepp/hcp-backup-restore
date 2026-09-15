@@ -83,6 +83,19 @@ ip netns exec "$NS" sh -c 'for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo
 {% endif %}
 ip netns exec "$NS" ip route replace {{ t.udn_subnet }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$DEV"
 ip netns exec "$NS" ip route replace {{ t.external_prefix }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$DEV"
+{% set leak_partners = [] %}
+{% for pair in udn_vrf_leaks | default([]) %}
+{% if pair[0] == t.name %}{% set _ = leak_partners.append(pair[1]) %}
+{% elif pair[1] == t.name %}{% set _ = leak_partners.append(pair[0]) %}
+{% endif %}
+{% endfor %}
+{% for other in leak_partners %}
+{% set otenant = udn_bgp_tenants | selectattr('name', 'equalto', other) | first %}
+# {{ other }}'s pods, through {{ t.name }}: leaf1 has `import vrf {{ other }}` in the {{ t.name }}
+# VRF, so {{ otenant.udn_subnet }} resolves in {{ t.name }}'s table. Still one VLAN in this
+# namespace - the opening is leaf1's, not this machine's.
+ip netns exec "$NS" ip route replace {{ otenant.udn_subnet }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$DEV"
+{% endfor %}
 
 {% endif %}
 {% endfor %}

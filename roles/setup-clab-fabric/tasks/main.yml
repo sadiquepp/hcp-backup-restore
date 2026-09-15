@@ -43,6 +43,59 @@
       must not.
   tags: [always]
 
+# Route leaking (udn_vrf_leaks) is the controlled exception to VRF-Lite, and
+# the constraint on it is arithmetic: a table holds one route per destination,
+# so a VRF may only import tenants whose subnets are disjoint from its own and
+# from each other. Import two tenants that share a subnet and one of them
+# becomes silently unreachable - a winner-takes-all with no error anywhere,
+# which is exactly the phase-2 failure VRF-Lite exists to remove. Refused here
+# rather than discovered later as an unexplained FAIL in a matrix.
+- name: Work out which tenants each VRF would import
+  ansible.builtin.set_fact:
+    udn_vrf_leak_partners: >-
+      {{ (udn_vrf_leak_partners | default({})) | combine({
+           item: (udn_vrf_leaks | default([]) | selectattr('0', 'equalto', item) | map(attribute='1') | list)
+               + (udn_vrf_leaks | default([]) | selectattr('1', 'equalto', item) | map(attribute='0') | list) }) }}
+  loop: "{{ udn_bgp_tenants | map(attribute='name') | list }}"
+  tags: [always]
+
+- name: Note any VRF that would end up holding two routes for one subnet
+  ansible.builtin.set_fact:
+    udn_vrf_leak_clashes: >-
+      {{ (udn_vrf_leak_clashes | default([]))
+         + ([ item ~ ' would import ' ~ (udn_vrf_leak_partners[item] | join(', '))
+              ~ ', and the subnets in its table (' ~ (leak_tables | join(', '))
+              ~ ') are not all distinct' ]
+            if (leak_tables | unique | length) != (leak_tables | length) else []) }}
+  vars:
+    subnet_of: >-
+      {{ dict(udn_bgp_tenants | map(attribute='name')
+              | zip(udn_bgp_tenants | map(attribute='udn_subnet'))) }}
+    leak_tables: >-
+      {{ [subnet_of[item]] + (udn_vrf_leak_partners[item] | map('extract', subnet_of) | list) }}
+  loop: "{{ udn_bgp_tenants | map(attribute='name') | list }}"
+  tags: [always]
+
+- name: Validate that every VRF leak is between disjoint subnets
+  ansible.builtin.assert:
+    that:
+      - ((udn_vrf_leaks | default([]) | map('first') | list)
+         + (udn_vrf_leaks | default([]) | map('last') | list))
+        | difference(udn_bgp_tenants | map(attribute='name') | list) | length == 0
+      - (udn_vrf_leak_clashes | default([]) | length) == 0
+    fail_msg: >-
+      udn_vrf_leaks is not satisfiable.
+      {{ (udn_vrf_leak_clashes | default([])) | join('; ') }}
+      A VRF's routing table holds one route per destination, so a tenant can
+      only import others whose subnets are disjoint from its own and from each
+      other. blue/red and green/purple share a subnet by design, so neither
+      pair can ever be leaked - and no single VRF can import both members of
+      either pair. Any name used must also be a real tenant in udn_bgp_tenants.
+    success_msg: >-
+      {{ (udn_vrf_leaks | default([]) | length) }} VRF leak pair(s), all
+      between disjoint subnets.
+  tags: [always]
+
 # Layer2 and Layer3 take different CUDN fields, different EVPN VRF types and
 # behave differently on the wire, so an unrecognised value here renders a
 # manifest the API rejects - late, and with a message about a missing field
