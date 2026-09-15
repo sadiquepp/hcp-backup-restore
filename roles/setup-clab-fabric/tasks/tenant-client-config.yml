@@ -35,6 +35,12 @@
 # leaving it to surface as a confusing isolation result later - a client that
 # cannot reach its own gateway produces the same all-FAIL row as a genuine
 # VRF problem.
+# Retried, because this runs moments after the unit above rebuilt the VLAN
+# subinterfaces. ARP into that gap fails, Linux caches the FAILED neighbour
+# entry, and two probes two seconds apart both land inside the cached window -
+# so the check reports an unreachable gateway that is reachable seconds later.
+# The first run after any change to the routes script is exactly when the
+# script changes, so this is the common case, not the rare one.
 - name: Confirm {{ client.name }} reaches each tenant's gateway
   ansible.builtin.command:
     cmd: >-
@@ -46,6 +52,9 @@
   register: udn_tc_gw_ping
   changed_when: false
   failed_when: false
+  retries: 10
+  delay: 3
+  until: udn_tc_gw_ping.rc == 0
 
 - name: Fail if a tenant gateway is unreachable from {{ client.name }}
   ansible.builtin.assert:
@@ -58,6 +67,10 @@
       {{ item.tenant_name }} VRF - the topology has to be redeployed
       (--tags clabdeploy) after adding udn_client_segments, because the
       subinterfaces are built by leaf1's exec block at container start.
+      This was retried for 30s, so it is not the interfaces still settling
+      after this play rebuilt them. Confirm from leaf1 with:
+        docker exec clab-udnbgp-leaf1 ip -br -4 addr show | grep eth1
+        docker exec clab-udnbgp-leaf1 ip -d link show master {{ item.tenant_name }}
     success_msg: >-
       {{ client.name }} reaches {{ item.tenant_name }}'s gateway on VLAN
       {{ udn_client_segments[item.tenant_name].vlan }}.

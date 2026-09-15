@@ -43,6 +43,12 @@
 # Each namespace must reach leaf1 inside its own tenant VRF. A namespace that
 # cannot is indistinguishable, later, from a genuine isolation result - so it
 # is worth failing here, where the cause is unambiguous.
+# Retried, because this runs moments after the unit above rebuilt the VLAN
+# subinterfaces. ARP into that gap fails, Linux caches the FAILED neighbour
+# entry, and two probes two seconds apart both land inside the cached window -
+# so the check reports an unreachable gateway that is reachable seconds later.
+# The first run after any change to the routes script is exactly when the
+# script changes, so this is the common case, not the rare one.
 - name: Confirm each namespace reaches its tenant's gateway
   ansible.builtin.command:
     cmd: >-
@@ -54,6 +60,9 @@
   register: udn_ns_gw_ping
   changed_when: false
   failed_when: false
+  retries: 10
+  delay: 3
+  until: udn_ns_gw_ping.rc == 0
 
 - name: Fail if a namespace cannot reach its gateway
   ansible.builtin.assert:
