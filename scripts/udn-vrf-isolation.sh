@@ -182,6 +182,26 @@ done
 
 # does $1 (a source tenant or client) own any tenant sharing $2's pod address,
 # other than $2 itself? if so a ping to it is indeterminate.
+# Every tenant a source can actually be answered by: the ones it owns, plus
+# whatever those are leaked to. A leak widens AMBIGUITY as much as it widens
+# reachability, and that is not obvious.
+#
+# blue is leaked to green. So blue's table sends 10.204.0.0/16 to green - and
+# green and purple share that subnet. blue-ext pinging PURPLE's pod address
+# therefore goes to GREEN, and if green holds that address too, green answers.
+# The cell reads ok for purple on a reply that purple never sent. Judging by
+# owned tenants alone misses it, because blue owns neither green nor purple.
+reach_set() {  # tenant-list -> that list plus every tenant it is leaked to
+    local t p out=""
+    for t in $1; do
+        out="$out $t"
+        for p in "${tenants[@]}"; do
+            [[ -n "${LEAKED[$t,$p]:-}" ]] && out="$out $p"
+        done
+    done
+    printf '%s' "$out"
+}
+
 shared_with_owned() {  # owned-list, target-tenant
     local owned="$1" target="$2" a="${PODADDR[$2]:-}" t
     [[ -n "$a" && "${ADDR_OWNERS[$a]}" == *" "* ]] || return 1
@@ -273,7 +293,7 @@ probe_ext_to_pods() {
     for src in "${tenants[@]}"; do
         for dest in "${tenants[@]}"; do
             if [[ -z "${PODADDR[$dest]:-}" ]]; then M2["$src,$dest"]="NO-UDN"; continue; fi
-            if [[ "$src" != "$dest" ]] && shared_with_owned "$src" "$dest"; then
+            if [[ "$src" != "$dest" ]] && shared_with_owned "$(reach_set "$src")" "$dest"; then
                 M2["$src,$dest"]="AMBIG"
                 printf '  %-12s -> %-8s %-16s AMBIG (address shared with %s)\n' \
                     "${src}-ext" "$dest" "${PODADDR[$dest]}" "${ADDR_OWNERS[${PODADDR[$dest]}]}"
@@ -417,7 +437,7 @@ probe_from_vms() {
             if [[ -z "${PODADDR[$dest]:-}" ]]; then VM["$src,$dest"]="NO-UDN"; continue; fi
             case " ${SERVES[$src]} " in
                 *" $dest "*) ;;
-                *) if shared_with_owned "${SERVES[$src]}" "$dest"; then
+                *) if shared_with_owned "$(reach_set "${SERVES[$src]}")" "$dest"; then
                        VM["$src,$dest"]="AMBIG"
                        printf '  %-16s -> %-8s %-16s AMBIG (address shared with %s)\n' \
                            "$src" "$dest" "${PODADDR[$dest]}" "${ADDR_OWNERS[${PODADDR[$dest]}]}"
