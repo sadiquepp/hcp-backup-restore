@@ -38,3 +38,15 @@ setup_dns_hub_disconnected: hubd
 # outside name.
 dns_forwarders:
   - "{{ lab_network_prefix }}.1"
+
+# Whether named validates DNSSEC on what its forwarders return.
+#
+# 'no', because this lab's upstream resolvers do not return usable DNSSEC data:
+# named then answers SERVFAIL for every external name while the zones it is
+# authoritative for keep working, which looks exactly like an unreachable
+# forwarder from the client side.
+#
+# The distinguishing test is `dig +cd` (checking disabled) against the helper -
+# NOERROR there with SERVFAIL on the plain query means validation, not
+# reachability. Set to 'yes' where the resolvers serve DNSSEC properly.
+dns_dnssec_validation: "no"

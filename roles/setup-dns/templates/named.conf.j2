@@ -31,7 +31,22 @@ options {
 	*/
 	recursion yes;
 
-	dnssec-validation yes;
+{# Off by default, because this lab's upstream resolvers do not return usable
+   DNSSEC data and named answers SERVFAIL for every external name when
+   validation fails. Measured, not assumed:
+
+     dig quay.io     @192.168.122.21   -> SERVFAIL
+     dig +cd quay.io @192.168.122.21   -> NOERROR
+
+   +cd is "checking disabled" - the same query with validation switched off -
+   so the answer is reachable and it is the validation that fails. The
+   forwarders themselves are fine: quay.io resolves directly against them.
+
+   That failure is indistinguishable from an unreachable forwarder seen from a
+   client, which is what made it take two rounds to find. Set
+   dns_dnssec_validation: yes in vault.yaml where the resolvers serve DNSSEC
+   properly. #}
+	dnssec-validation {{ dns_dnssec_validation | default('no') }};
 
 	managed-keys-directory "/var/named/dynamic";
 	geoip-directory "/usr/share/GeoIP";
