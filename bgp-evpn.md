@@ -3459,6 +3459,141 @@ scripts/udn-web-demo.sh --proxy
 That check is also why every tenant has a web pod rather than only the
 overlapping pairs — a tenant with no page cannot be verified this way at all.
 
+### 3i. Routing *between* tenants, and where that stops
+
+VRF-Lite separates tenants. The obvious next question is whether the fabric can
+be told to connect two of them again — and the answer has a hard arithmetic
+limit, a working middle, and a boundary enforced somewhere most people would
+not look for it.
+
+#### What is possible at all
+
+Route leaking copies one VRF's routes into another's table. A table holds one
+route per destination, so a VRF may import only tenants whose subnets are
+disjoint from its own and from each other:
+
+| | blue | red | orange | green | purple |
+| --- | --- | --- | --- | --- | --- |
+| | `10.200/16` | `10.200/16` | `10.202/16` | `10.204/16` | `10.204/16` |
+| **blue** | — | ✗ same | ✓ | ✓ | ✓ |
+| **red** | ✗ same | — | ✓ | ✓ | ✓ |
+| **green** | ✓ | ✓ | ✓ | — | ✗ same |
+
+blue↔red and green↔purple can never be leaked; they are the pairs built to
+collide. And the limit is per-VRF, not per-pair: blue may import green **or**
+purple, never both, or its table would hold two routes for `10.204.0.0/16`.
+`udn_vrf_leaks` configures the pairs and an assert refuses anything that would
+put one prefix in a table twice — checked against blue↔red, green↔purple and
+blue-importing-both, all refused, while an orange-as-shared-service shape stays
+legal.
+
+Configured here as blue↔green and red↔purple, which says something the rest of
+phase 3 does not:
+
+```
+blue's table:  10.204.0.0/16 = green
+red's table:   10.204.0.0/16 = purple
+```
+
+The same prefix, in two tables, meaning two different tenants. On leaf1 it is
+four lines, both directions per pair — a one-way import gives a path out and
+none back, which presents as a fabric fault rather than a choice:
+
+```
+router bgp 64512 vrf blue
+ address-family ipv4 unicast
+  import vrf green
+```
+
+#### What works
+
+Verified on the running lab — `ok+` marks a cell a leak is supposed to open:
+
+```
+pod -> external endpoint                    external endpoint -> pod
+pod tenant   blue  green orange purple red  ext tenant   blue  green orange purple red
+blue         ok    ok+   FAIL   FAIL   FAIL blue         ok    ok+   FAIL   AMBIG  FAIL
+green        ok+   ok    FAIL   FAIL   FAIL green        ok+   ok    FAIL   AMBIG  FAIL
+orange       FAIL  FAIL  ok     FAIL   FAIL orange       FAIL  FAIL  ok     FAIL   FAIL
+purple       FAIL  FAIL  FAIL   ok     ok+  purple       AMBIG AMBIG FAIL   ok     ok+
+red          FAIL  FAIL  FAIL   ok+    ok   red          AMBIG AMBIG FAIL   ok+    ok
+```
+
+A pod reaches the other tenant's external network, is reachable from it, and is
+reachable from its clients. The fabric half is entirely real: leaf1 installs
+the leaked route in the *kernel* table with a cross-VRF nexthop —
+`10.200.1.0/24 via 192.168.141.35 dev eth1.110`, an interface belonging to
+**blue**, inside **green's** table — and the nodes learn it over BGP.
+
+#### What never works: pod to pod
+
+A green pod cannot ping a blue pod, and no fabric configuration will change
+that. Everything above the drop is correct; the packet does not even leave OVN.
+`ovn-trace` against the working and failing destinations, from the same pod:
+
+```
+dst 10.213.10.10   ip.ttl--; eth.dst = ...:02; output("k8s-cluster_udn_green_worker1")
+dst 10.200.1.3     ct_next(...);            <- nothing further
+```
+
+It dies in the *ingress ACL* stage, before any routing decision — which is why
+no route, policy or interface capture explained it:
+
+```
+ls_in_acl_after_lb_eval, priority 2050
+  (ip4.src == $a10109792604843350142 && ip4.dst == $a10109792604843350142)
+  ct_commit { ct_mark.blocked = 1; }
+```
+
+The ACL names itself:
+
+```
+action       : drop
+direction    : from-lport
+external_ids : {"k8s.ovn.org/name"=advertised-network-subnets,
+                "k8s.ovn.org/owner-type"=AdvertisedNetwork}
+
+$a10109792604843350142 = 10.200.0.0/16 10.202.0.0/16 10.204.0.0/16
+                         10.220.0.0/16 10.221.0.0/16 10.222.0.0/16 10.223.0.0/16
+```
+
+Every advertised UDN subnet, dropped when **both** ends are in the set.
+Advertising a network over BGP is what makes the fabric *able* to carry one
+UDN's pods to another's; this ACL exists so that ability cannot be used. It is
+the isolation guarantee being defended against exactly the thing leaking tries
+to do.
+
+Read the match carefully, though — it is narrower than "tenants cannot talk":
+
+| path | src in set | dst in set | result |
+| --- | --- | --- | --- |
+| green pod → blue pod | ✓ | ✓ | **dropped** |
+| green pod → `blue-ext` | ✓ | ✗ | allowed |
+| `blue-ext` → green pod | ✗ | ✓ | allowed |
+| `udnclient-blue` → green pod | ✗ | ✓ | allowed |
+
+External networks and client segments are not advertised UDN subnets, so only
+the pod-to-pod case matches. That is why every `ok+` above is real and the one
+case tested by hand was the single one that can never work.
+
+It also explains the tenant ingress in 3h. HAProxy reaches both tenants from
+*outside* the advertised subnets, so it never matches this rule — the proxy is
+not a workaround for a fabric limitation, it is the supported shape.
+
+#### Leaking widens ambiguity as much as reachability
+
+The `AMBIG` cells above are new, and they are a consequence of leaking rather
+than a defect. blue is leaked to green; green and purple share
+`10.204.0.0/16`. So blue asking for **purple's** pod address is routed into
+**green**, and if green holds that address too, green answers. The cell would
+read `ok` for purple on a reply purple never sent.
+
+`scripts/udn-vrf-isolation.sh` therefore widens its ambiguity check by each
+source's leak partners before judging. A source now has three possible
+outcomes against a tenant it does not serve: `ok+` where a leak was configured,
+`AMBIG` where a leak makes the answer unattributable, and `FAIL` everywhere
+else — which is still the isolation result the phase exists to prove.
+
 ---
 
 ## Phase 4: EVPN
