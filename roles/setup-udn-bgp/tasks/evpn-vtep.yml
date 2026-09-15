@@ -53,15 +53,60 @@
     mode: '0644'
   delegate_to: localhost
 
+# Every node in the cluster, not just clab_fabric_nodes. The VTEP CR checks
+# them all and fails as a whole if one is unannotated, which is what the
+# masters did:
+#
+#   node master1 is missing the k8s.ovn.org/vteps annotation
+#   reason: AllocationFailed
+#
+# Built from what the cluster reports rather than from a list in vars.yaml,
+# because a list is the thing that was wrong - clab_fabric_nodes is the set
+# of nodes with a FABRIC NIC, which is the right set for VLANs and the wrong
+# set for VTEPs. The octet is the node's own last octet on
+# lab_network_prefix.0/24, so the addresses stay the same deterministic
+# numbers leaf1's static routes are written from.
+- name: Work out which nodes need a VTEP address
+  ansible.builtin.set_fact:
+    udn_bgp_vtep_nodes: >-
+      {{ (udn_bgp_vtep_nodes | default([]))
+         + [{'name': item.value, 'octet': item.key.split('.')[3]}] }}
+  loop: "{{ udn_bgp_name_by_ip | dict2items }}"
+  when: item.key.startswith(lab_network_prefix ~ '.')
+  loop_control:
+    label: "{{ item.value }} ({{ item.key }})"
+
+- name: Report the VTEP address each node will get
+  ansible.builtin.debug:
+    msg: >-
+      {{ udn_bgp_vtep_nodes | map(attribute='name') | list }} ->
+      {{ udn_bgp_vtep_nodes
+         | map(attribute='octet')
+         | map('regex_replace', '^', udn_bgp_vtep_prefix ~ '.')
+         | list }}
+
+# A cluster where nothing matched would render no policies at all and then
+# fail on the CR with the same AllocationFailed this list exists to prevent,
+# so say so here instead.
+- name: Fail if no node's address matched the lab network
+  ansible.builtin.assert:
+    that: (udn_bgp_vtep_nodes | default([])) | length > 0
+    fail_msg: >-
+      No cluster node reports an InternalIP inside {{ lab_network_prefix }}.0/24,
+      so there is nothing to put a VTEP address on. What the cluster reports:
+      {{ udn_bgp_name_by_ip | default({}) }}
+    success_msg: >-
+      {{ udn_bgp_vtep_nodes | length }} nodes will get a VTEP address.
+
 - name: Render a VTEP address policy per node
   ansible.builtin.template:
     src: nncp-vtep.yaml.j2
-    dest: "{{ udn_bgp_manifest_dir }}/nncp-vtep-{{ node_entry.ip_key }}.yaml"
+    dest: "{{ udn_bgp_manifest_dir }}/nncp-vtep-{{ vtep_node.name }}.yaml"
     mode: '0644'
-  loop: "{{ clab_fabric_nodes }}"
+  loop: "{{ udn_bgp_vtep_nodes }}"
   loop_control:
-    loop_var: node_entry
-    label: "{{ node_entry.ip_key }}"
+    loop_var: vtep_node
+    label: "{{ vtep_node.name }}"
   delegate_to: localhost
 
 # Order matters here. The addresses have to be on the nodes before the VTEP
@@ -70,17 +115,17 @@
 # straight to a failed status.
 - name: Put each node's VTEP address in place
   ansible.builtin.command:
-    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-vtep-{{ item.ip_key }}.yaml"
-  loop: "{{ clab_fabric_nodes }}"
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-vtep-{{ item.name }}.yaml"
+  loop: "{{ udn_bgp_vtep_nodes }}"
   loop_control:
-    label: "{{ item.ip_key }}"
+    label: "{{ item.name }}"
 
 - name: Wait for the VTEP address policies to be applied
   ansible.builtin.command:
-    cmd: "oc wait nncp/vtep-{{ item.ip_key }} --for=condition=Available --timeout=300s"
-  loop: "{{ clab_fabric_nodes }}"
+    cmd: "oc wait nncp/vtep-{{ item.name }} --for=condition=Available --timeout=300s"
+  loop: "{{ udn_bgp_vtep_nodes }}"
   loop_control:
-    label: "{{ item.ip_key }}"
+    label: "{{ item.name }}"
   changed_when: false
 
 - name: Create the VTEP
@@ -107,8 +152,10 @@
     fail_msg: >-
       The VTEP CR was not accepted: {{ udn_bgp_vtep_status.stdout }}.
       In Unmanaged mode the usual causes are that a node has no address
-      inside {{ udn_bgp_vtep_prefix }}.0/24, or that it has more than one -
-      an ambiguous match is a failure, not a choice. Check with
+      inside {{ udn_bgp_vtep_prefix }}.0/24 - it then never receives the
+      k8s.ovn.org/vteps annotation and the CR reports AllocationFailed naming
+      it - or that it has more than one, an ambiguous match being a failure
+      rather than a choice. Note this covers EVERY node, masters included. Check with
       `oc get vtep evpn-vtep -o yaml` and
       `oc debug node/<node> -- chroot /host ip -br addr show {{ udn_bgp_vtep_iface }}`.
       The tenant CUDNs reference this VTEP by name, so they cannot be

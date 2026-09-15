@@ -1,6 +1,20 @@
 {#
   This node's VXLAN tunnel endpoint address.
 
+  Rendered for EVERY node in the cluster, not just the fabric nodes. The VTEP
+  CR checks the whole cluster: a node with no address inside its CIDRs never
+  gets the k8s.ovn.org/vteps annotation, and one unannotated node fails the
+  entire CR -
+
+    node master1 is missing the k8s.ovn.org/vteps annotation
+    ...
+    reason: AllocationFailed
+
+  - so the masters need an address even though no tenant pod ever runs on one
+  (workload.yaml.j2 selects workers, which is where the fabric NICs are).
+  Their VTEPs are never a next hop for any tenant route and leaf1 carries no
+  route to them; they exist so the CR can be accepted.
+
   The VTEP CR is deliberately in Unmanaged mode, and this policy is why.
 
   In Managed mode OVN-Kubernetes allocates a VTEP IP per node out of the CR's
@@ -10,17 +24,23 @@
   VTEP - and with Managed allocation you do not know which node got which
   address until after the fact.
 
-  Unmanaged inverts that: this policy puts a known address on a known node
-  (100.64.0.<the node's usual octet>, same scheme as every other address in
-  this lab), OVN-Kubernetes discovers it, and the fabric can carry static
-  /32s written at render time. Deterministic, and one less moving part when
-  a tunnel does not form.
+  Unmanaged inverts that: this policy puts a known address on a known node,
+  OVN-Kubernetes discovers it, and the fabric can carry static /32s written
+  at render time. Deterministic, and one less moving part when a tunnel does
+  not form.
+
+  The octet is the node's own last octet on {{ lab_network_prefix }}.0/24,
+  taken from what the cluster reports as its InternalIP rather than from
+  ip_list. Same scheme, same numbers - worker1 is .34 on both - but it needs
+  no table of nodes to be kept in step with the cluster, which is what let
+  the masters go missing here in the first place.
 
   A dummy interface rather than an address on the fabric NIC: the VTEP
   address is the node's identity in the overlay, not an interface address,
   and it must stay up and reachable independently of any one link. This is
   the same shape as a router loopback and is what OVN-Kubernetes expects to
-  discover.
+  discover. It is also why this works on a master, which has no fabric NIC
+  to put an address on.
 
   Exactly one address per node may match the VTEP CR's CIDRs - if a node has
   two, the VTEP CR goes to a failed status rather than picking one.
@@ -28,10 +48,10 @@
 apiVersion: nmstate.io/v1
 kind: NodeNetworkConfigurationPolicy
 metadata:
-  name: vtep-{{ node_entry.ip_key }}
+  name: vtep-{{ vtep_node.name }}
 spec:
   nodeSelector:
-    kubernetes.io/hostname: {{ udn_bgp_node_names[node_entry.ip_key] }}
+    kubernetes.io/hostname: {{ vtep_node.name }}
   desiredState:
     interfaces:
       - name: {{ udn_bgp_vtep_iface }}
@@ -41,7 +61,7 @@ spec:
           enabled: true
           dhcp: false
           address:
-            - ip: {{ udn_bgp_vtep_prefix }}.{{ ip_list[node_entry.ip_key] }}
+            - ip: {{ udn_bgp_vtep_prefix }}.{{ vtep_node.octet }}
               prefix-length: 32
         ipv6:
           enabled: false
