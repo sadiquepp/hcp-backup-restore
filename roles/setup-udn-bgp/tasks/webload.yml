@@ -57,11 +57,14 @@
 # what the interface actually has, and it is what has to be curled.
 - name: Read each web pod's UDN address
   ansible.builtin.shell:
-    cmd: >-
-      pod=$(oc -n udn-{{ item }} get pods -l app=udn-web
-            -o jsonpath='{.items[0].metadata.name}') &&
-      oc -n udn-{{ item }} exec "$pod" -c httpd --
-        cat /var/www/html/index.html 2>/dev/null |
+    # Literal block, not folded. A folded scalar keeps the newline before any
+    # line that is MORE INDENTED than its first line, so the continuations here
+    # survived into the shell and '-o jsonpath=...' ran as its own command
+    # ("-o: command not found"), leaving stdout empty and rc 0.
+    cmd: |
+      pod=$(oc -n udn-{{ item }} get pods -l app=udn-web -o jsonpath='{.items[0].metadata.name}')
+      [ -n "$pod" ] || { echo "no udn-web pod in udn-{{ item }}" >&2; exit 1; }
+      oc -n udn-{{ item }} exec "$pod" -c httpd -- cat /var/www/html/index.html 2>/dev/null |
         awk '/^udn:/ {split($2, a, "/"); print a[1]}'
   loop: "{{ udn_web_tenants }}"
   register: udn_web_addrs
