@@ -127,12 +127,89 @@
     mode: "0644"
   register: udn_proxy_unit
 
-- name: Enable and start the tenant ingress
+- name: Enable the tenant ingress
   ansible.builtin.systemd:
     name: udn-tenant-proxy.service
     enabled: true
-    state: "{{ 'restarted' if (udn_proxy_cfg is changed or udn_proxy_unit is changed) else 'started' }}"
     daemon_reload: true
+
+# Started softly, because of where SELinux bites. haproxy opens each namespace
+# file (/run/netns/<name>, labelled nsfs_t) while PARSING the config, and
+# haproxy_t has no read rule for nsfs_t, so the denial turns into
+#
+#   [ALERT] config : Fatal errors found in configuration.
+#
+# at parse time - not a connect-time EPERM, which is what this originally
+# expected and guarded against far too late.
+#
+# The `haproxy -c` in the template's validate= does NOT reproduce it: Ansible's
+# process never transitions into haproxy_t, so it reads the namespace files
+# happily and reports the config good. Only systemd's execution of the unit
+# transitions, which is why the first symptom is the service refusing to start.
+- name: Start the tenant ingress
+  ansible.builtin.systemd:
+    name: udn-tenant-proxy.service
+    state: "{{ 'restarted' if (udn_proxy_cfg is changed or udn_proxy_unit is changed) else 'started' }}"
+  register: udn_proxy_start
+  failed_when: false
+
+- name: Note whether it is actually running
+  ansible.builtin.command:
+    cmd: systemctl is-active udn-tenant-proxy.service
+  register: udn_proxy_active
+  changed_when: false
+  failed_when: false
+
+- name: Collect the SELinux denials if it did not start
+  ansible.builtin.shell:
+    cmd: "ausearch -m avc -ts recent 2>/dev/null | grep -i haproxy | tail -20 || true"
+  register: udn_proxy_avc
+  changed_when: false
+  when: udn_proxy_active.stdout | trim != 'active'
+
+# Scoped to the one domain on a disposable lab client VM; the system stays
+# enforcing. Two narrower options if that is not acceptable:
+#
+#   - a targeted module, which is what setroubleshoot itself suggests:
+#       ausearch -c haproxy --raw | audit2allow -M udn-haproxy-netns
+#       semodule -X 300 -i udn-haproxy-netns.pp
+#     Narrower, but audit2allow only sees the denials that have happened, and
+#     the first one masks the next, so it can take several rounds.
+#
+#   - SELinuxContext=system_u:system_r:unconfined_service_t:s0 in the unit,
+#     which runs THIS unit outside haproxy_t without touching the policy store
+#     or affecting the distro's own haproxy.service.
+- name: Make the haproxy domain permissive and start again
+  when:
+    - udn_proxy_active.stdout | trim != 'active'
+    - udn_proxy_avc.stdout | default('') | length > 0
+    - udn_proxy_selinux_permissive_fallback | bool
+  block:
+    - name: Report the denial
+      ansible.builtin.debug:
+        msg: >-
+          SELinux denied haproxy the namespace files it needs
+          (/run/netns/*, labelled nsfs_t) while parsing its config. Making
+          the haproxy_t domain permissive on this lab VM; the system stays
+          enforcing. Denial:
+          {{ udn_proxy_avc.stdout_lines | default([]) | join(' | ') }}
+
+    - name: Set haproxy_t permissive
+      ansible.builtin.command:
+        cmd: semanage permissive -a haproxy_t
+      changed_when: true
+
+    - name: Start the tenant ingress again
+      ansible.builtin.systemd:
+        name: udn-tenant-proxy.service
+        state: restarted
+
+- name: Fail if the ingress is still not running
+  ansible.builtin.command:
+    cmd: systemctl is-active udn-tenant-proxy.service
+  register: udn_proxy_active_final
+  changed_when: false
+  failed_when: udn_proxy_active_final.stdout | trim != 'active'
 
 # ---------------------------------------------------------------------------
 # Verify by identity, not by reachability. A 200 from the wrong tenant is the
@@ -150,69 +227,6 @@
   retries: 6
   delay: 5
   until: udn_proxy_probe.stdout is defined and ('I am ' ~ item) in udn_proxy_probe.stdout
-
-# A page from the WRONG tenant is the failure this design can produce, so the
-# test is "did green's hostname return green's page", not "did it return 200".
-- name: Start the verification result empty
-  ansible.builtin.set_fact:
-    udn_proxy_wrong: []
-
-- name: Note which hostnames did not serve their own tenant
-  ansible.builtin.set_fact:
-    udn_proxy_wrong: >-
-      {{ (udn_proxy_wrong | default([]))
-         + ([item.item] if ('I am ' ~ item.item) not in (item.stdout | default(''))
-            else []) }}
-  loop: "{{ udn_proxy_probe.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-
-- name: Gather SELinux denials if any hostname failed
-  ansible.builtin.shell:
-    cmd: "ausearch -m avc -ts recent 2>/dev/null | grep -i haproxy | tail -20 || true"
-  register: udn_proxy_avc
-  changed_when: false
-  when: udn_proxy_wrong | length > 0
-
-# haproxy_t has no rule permitting setns(), so a valid config can still fail
-# with EPERM on every namespace backend. Scoped to the one domain, and only
-# when a denial is actually present - not applied speculatively.
-- name: Make the haproxy domain permissive and retry
-  when:
-    - udn_proxy_wrong | length > 0
-    - udn_proxy_avc.stdout | default('') | length > 0
-    - udn_proxy_selinux_permissive_fallback | bool
-  block:
-    - name: Report the denial
-      ansible.builtin.debug:
-        msg: >-
-          SELinux denied haproxy the namespace entry it needs. Making the
-          haproxy_t domain permissive on this lab VM - the system stays
-          enforcing. Denial:
-          {{ udn_proxy_avc.stdout_lines | default([]) | join(' | ') }}
-
-    - name: Set haproxy_t permissive
-      ansible.builtin.command:
-        cmd: semanage permissive -a haproxy_t
-      changed_when: true
-
-    - name: Restart the tenant ingress
-      ansible.builtin.systemd:
-        name: udn-tenant-proxy.service
-        state: restarted
-
-    - name: Curl every tenant hostname again
-      ansible.builtin.command:
-        cmd: >-
-          curl -sS --max-time 10 -H "Host: {{ item }}.{{ udn_proxy_domain }}"
-          http://{{ udn_proxy_bind_addr }}:{{ udn_proxy_port }}/
-      loop: "{{ udn_proxy_tenants }}"
-      register: udn_proxy_probe
-      changed_when: false
-      failed_when: false
-      retries: 6
-      delay: 5
-      until: udn_proxy_probe.stdout is defined and ('I am ' ~ item) in udn_proxy_probe.stdout
 
 - name: Fail unless every hostname served its own tenant
   ansible.builtin.assert:

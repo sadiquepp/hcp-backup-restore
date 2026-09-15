@@ -1518,10 +1518,17 @@ udn_proxy_stats_port: 8404
 ## role checks and fails with the verification command rather than rendering a
 ## config the binary cannot parse.
 ##
-## SELinux: haproxy_t carries no rule permitting setns() into another
-## namespace, so backends can fail with EPERM on a config that is perfectly
-## valid. The role reaches for this only if verification fails AND an AVC
-## denial is actually present, and it makes ONE domain permissive rather than
-## the system - this is a disposable lab client VM. Set false to have it fail
-## and leave the policy alone.
+## SELinux: haproxy opens each namespace file (/run/netns/<name>, labelled
+## nsfs_t) while PARSING its config, and haproxy_t has no read rule for nsfs_t.
+## The denial therefore surfaces as "Fatal errors found in configuration" and
+## the service refuses to start - not as a connect-time EPERM. Note that
+## `haproxy -c` run from Ansible does NOT reproduce it, because that process
+## never transitions into haproxy_t; only systemd's execution of the unit does,
+## so a config that validates cleanly can still fail to start.
+##
+## The role reaches for this only if the service fails to start AND an AVC is
+## actually present, and it makes ONE domain permissive rather than the system
+## - this is a disposable lab client VM. Set false to have it fail and leave
+## the policy alone; the task comments name two narrower alternatives (a
+## targeted audit2allow module, or SELinuxContext= on the unit).
 udn_proxy_selinux_permissive_fallback: true
