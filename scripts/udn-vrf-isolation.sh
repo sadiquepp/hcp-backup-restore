@@ -9,6 +9,7 @@
 #
 #   scripts/udn-vrf-isolation.sh              # matrices 1 and 2, from the pods
 #   scripts/udn-vrf-isolation.sh --count 3
+#   scripts/udn-vrf-isolation.sh --pods       # add pod -> pod (see below)
 #
 # Matrix 3 adds real clients behind leaf1, and the flag picks WHICH clients:
 #
@@ -18,6 +19,14 @@
 #
 # The flags are additive and neither implies the other: --netns alone runs the
 # namespaces INSTEAD OF the VMs. Ask for both explicitly to get both.
+#
+# --pods adds a fourth matrix, pod -> pod, which is opt-in because every
+# off-diagonal cell is supposed to time out and n^2 timeouts take a while. It
+# answers a different question from the rest: those measure what the FABRIC
+# routes, this measures what OVN-Kubernetes permits. Off-diagonal cells fail
+# there even between tenants the fabric deliberately leaks to each other,
+# because an AdvertisedNetwork ACL drops pod-to-pod between any two advertised
+# UDNs before routing happens at all.
 #
 # Run it after --tags vrflite. In phase 2 every tenant is in leaf1's default
 # VRF and every cell is reachable, so the off-diagonal "failures" this looks
@@ -56,6 +65,7 @@ SSH_USER="${UDN_CLIENT_SSH_USER:-root}"
 COUNT=2
 WITH_VMS=0
 WITH_NETNS=0
+WITH_PODS=0
 NETNS_ENV="${UDN_NETNS_ENV:-$(dirname "$0")/../udn-bgp/netns-client.env}"
 CLIENTS_ENV="${UDN_CLIENTS_ENV:-$(dirname "$0")/../udn-bgp/tenant-clients.env}"
 LEAKS_ENV="${UDN_LEAKS_ENV:-$(dirname "$0")/../udn-bgp/vrf-leaks.env}"
@@ -67,6 +77,9 @@ while [[ $# -gt 0 ]]; do
         # is the whole correction - --netns used to drag the VMs in with it.
         --vms|-v|--vms-only)   WITH_VMS=1; shift ;;
         --netns|--netns-only)  WITH_NETNS=1; shift ;;
+        # Opt-in: n^2 pings that are all SUPPOSED to time out, so it is minutes
+        # of patience bought to prove a boundary that does not change often.
+        --pods)                WITH_PODS=1; shift ;;
         -h|--help)  sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "unknown option: $1" >&2; exit 1 ;;
     esac
@@ -94,7 +107,7 @@ ext_exec() {  # tenant, then command
 }
 
 declare -A EXTHOST POD PODNS PODADDR
-declare -A M1 M2 OKC TOT VM SERVES CLIENTIP ADDR_OWNERS PREFIX LEAKED
+declare -A M1 M2 PP OKC TOT VM SERVES CLIENTIP ADDR_OWNERS PREFIX LEAKED
 clients=()
 tenants=()
 records=()
@@ -319,8 +332,95 @@ probe_ext_to_pods() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# Matrix 4: every tenant's pod -> every tenant's pod (--pods)
+# ---------------------------------------------------------------------------
+# The one direction the other matrices cannot reach, and the only one whose
+# off-diagonal failures have a DIFFERENT cause.
+#
+# Matrices 1 and 2 fail off the diagonal because the fabric holds no route
+# between two tenants. This one fails off the diagonal even where a route
+# demonstrably does exist - even between a deliberately leaked pair - because
+# OVN-Kubernetes drops the packet before any routing decision is taken:
+#
+#   ACL  owner-type AdvertisedNetwork, action drop, direction from-lport
+#        match (ip4.src == $set && ip4.dst == $set)
+#
+# where $set holds EVERY advertised UDN subnet. Both ends of a pod-to-pod
+# packet are therefore in it, and the packet dies in ls_in_acl_after_lb_eval
+# with ct_mark.blocked = 1 - the ingress ACL stage on the SOURCE node, before
+# routing. The ACL is attached through a port group, so it never appears in
+# `ovn-nbctl acl-list <switch>`, which is why finding it took an ovn-trace.
+#
+# The claim worth measuring: advertising a UDN over BGP cannot defeat UDN
+# isolation. The fabric can carry a perfectly good route between two tenants
+# and their pods still cannot talk. Note what the ACL does NOT match, because
+# the matrices show it: pod -> another tenant's EXTERNAL network has only one
+# end in the set, and a client segment is not an advertised UDN subnet at all.
+# Those paths are governed by routing alone, which is what matrices 1, 2 and 3
+# measure.
+#
+# So the leak annotation is switched OFF for this matrix. A leaked pair is
+# expected to FAIL here, and marking it GAP would report the design working as
+# a fault.
+probe_pods_to_pods() {
+    echo
+    echo "Pinging one pod of every tenant from one pod of every tenant"
+    echo
+    local src dest n out rc spod sns daddr
+    local rt rnode rns rpod raddr rec
+    for src in "${tenants[@]}"; do
+        spod="${POD[$src]:-}"; sns="${PODNS[$src]:-}"
+        if [[ -z "$spod" || -z "${PODADDR[$src]:-}" ]]; then
+            for dest in "${tenants[@]}"; do PP["$src,$dest"]="NO-UDN"; done
+            continue
+        fi
+        for dest in "${tenants[@]}"; do
+            if [[ "$src" == "$dest" ]]; then
+                # A DIFFERENT pod of the same tenant, preferring one on another
+                # node. A pod pinging itself proves nothing, and the cross-node
+                # case is the one that rides the overlay - VXLAN in phase 4.
+                daddr=""
+                for rec in "${records[@]}"; do
+                    IFS=$'\t' read -r rt rnode rns rpod raddr <<< "$rec"
+                    [[ "$rt" == "$src" && "$rpod" != "$spod" && -n "$raddr" ]] || continue
+                    daddr="$raddr"
+                    break
+                done
+                if [[ -z "$daddr" ]]; then
+                    PP["$src,$dest"]="ONE-POD"
+                    printf '  %-8s -> %-8s %-16s ONE-POD (no second pod to ping)\n' \
+                        "$src" "$dest" "-"
+                    continue
+                fi
+            else
+                daddr="${PODADDR[$dest]:-}"
+                if [[ -z "$daddr" ]]; then PP["$src,$dest"]="NO-UDN"; continue; fi
+                # Same unanswerable case as matrix 2: if the destination address
+                # is also held by a tenant this source can reach - itself, most
+                # of the time - then a reply says nothing about who sent it.
+                if shared_with_owned "$(reach_set "$src")" "$dest"; then
+                    PP["$src,$dest"]="AMBIG"
+                    printf '  %-8s -> %-8s %-16s AMBIG (address shared with %s)\n' \
+                        "$src" "$dest" "$daddr" "${ADDR_OWNERS[$daddr]}"
+                    continue
+                fi
+            fi
+            [[ "$src" == "$dest" ]] && n="$COUNT" || n=1
+            out=$(oc -n "$sns" exec "$spod" -- ping -c"$n" -W2 "$daddr" 2>&1); rc=$?
+            if (( rc == 0 )); then
+                PP["$src,$dest"]="ok"
+                printf '  %-8s -> %-8s %-16s ok\n' "$src" "$dest" "$daddr"
+            else
+                PP["$src,$dest"]="FAIL"
+                printf '  %-8s -> %-8s %-16s FAIL\n' "$src" "$dest" "$daddr"
+            fi
+        done
+    done
+}
+
 print_matrix() {
-    local title="$1"; local -n res="$2"; local rowlabel="$3"
+    local title="$1"; local -n res="$2"; local rowlabel="$3"; local leakaware="${4:-1}"
     echo
     echo "$title"
     printf '%-12s' "$rowlabel"
@@ -333,7 +433,7 @@ print_matrix() {
             # An off-diagonal pair that was deliberately leaked is annotated
             # rather than left looking like a leak: ok+ is the opening working,
             # GAP is it configured and not working.
-            if [[ "$r" != "$c" && -n "${LEAKED[$r,$c]:-}" ]]; then
+            if [[ "$leakaware" == 1 && "$r" != "$c" && -n "${LEAKED[$r,$c]:-}" ]]; then
                 case "$v" in
                     ok*)    v="ok+" ;;
                     AMBIG)  ;;
@@ -347,15 +447,17 @@ print_matrix() {
 }
 
 verdict() {
-    local -n res="$1"; local what="$2" r c v leaks=0 broken=0
+    local -n res="$1"; local what="$2" leakaware="${3:-1}" r c v leaks=0 broken=0
     for r in "${tenants[@]}"; do
         for c in "${tenants[@]}"; do
             v="${res["$r,$c"]:-}"
-            [[ "$v" == "AMBIG" ]] && continue
+            # ONE-POD is not a result: the tenant has a single pod, so there
+            # was no second one to ping and the diagonal was never measured.
+            [[ "$v" == "AMBIG" || "$v" == "ONE-POD" ]] && continue
             if [[ "$r" == "$c" && "$v" != "ok" ]]; then
                 echo "  BROKEN  $r cannot reach its own $what ($v)"
                 broken=$((broken + 1))
-            elif [[ "$r" != "$c" && -n "${LEAKED[$r,$c]:-}" ]]; then
+            elif [[ "$leakaware" == 1 && "$r" != "$c" && -n "${LEAKED[$r,$c]:-}" ]]; then
                 # Deliberately leaked: reachable is the requirement here, and
                 # NOT reachable is the failure. The polarity is inverted for
                 # these cells and for no others.
@@ -364,13 +466,22 @@ verdict() {
                     broken=$((broken + 1))
                 fi
             elif [[ "$r" != "$c" && "$v" == ok* ]]; then
-                echo "  LEAK    $r reached $c's $what - the VRFs are not separating"
+                # Different failure, different cause, so different advice. In
+                # the fabric matrices a leak means the VRFs are not separating.
+                # Pod to pod is not the VRFs' job at all - OVN-Kubernetes should
+                # have dropped it in the ingress ACL stage - so pointing at the
+                # VRFs there would send the next person to the wrong place.
+                if [[ "$leakaware" == 1 ]]; then
+                    echo "  LEAK    $r reached $c's $what - the VRFs are not separating"
+                else
+                    echo "  LEAK    $r's pod reached $c's $what - the AdvertisedNetwork ACL is not dropping it"
+                fi
                 leaks=$((leaks + 1))
             fi
         done
     done
     if (( leaks == 0 && broken == 0 )); then
-        if (( ${#leak_pairs[@]} )); then
+        if (( ${#leak_pairs[@]} )) && [[ "$leakaware" == 1 ]]; then
             echo "  clean: every tenant reached its own $what, the deliberately"
             echo "         leaked pairs reached each other, and nobody else did"
         else
@@ -631,10 +742,26 @@ tenants_all=("${tenants[@]}")
 
 probe_pods_to_ext
 probe_ext_to_pods
+(( WITH_PODS )) && probe_pods_to_pods
 (( RUN_CLIENTS )) && probe_from_vms
 print_matrix "pod -> external endpoint   (expect ok on the diagonal only)" M1 "pod tenant"
 print_matrix "external endpoint -> pod   (expect ok on the diagonal only)" M2 "ext tenant"
+# leakaware 0: a leaked pair still cannot do pod-to-pod, so ok+ / GAP would be
+# the wrong question to ask of these cells. See probe_pods_to_pods.
+(( WITH_PODS )) && print_matrix "pod -> pod   (expect ok on the diagonal only, leaked pairs included)" PP "pod tenant" 0
 (( RUN_CLIENTS )) && print_vm_matrix
+
+if (( WITH_PODS )); then
+    echo
+    echo "NOTE  The off-diagonal cells above are dropped by OVN-Kubernetes, not by"
+    echo "      the fabric. An ACL with owner-type AdvertisedNetwork matches"
+    echo "      (ip4.src == \$set && ip4.dst == \$set) over every advertised UDN"
+    echo "      subnet and drops in the ingress stage, before routing - so a"
+    echo "      deliberately leaked pair fails here too, by design. Advertising a"
+    echo "      UDN over BGP does not defeat UDN isolation."
+    echo "      Compare with matrices 1 and 2, where only ONE end is in that set"
+    echo "      and routing alone decides."
+fi
 
 echo
 ambig=0
@@ -656,12 +783,13 @@ echo " pod -> ext:"
 verdict M1 "external network" || rc=$?
 echo " ext -> pod:"
 verdict M2 "pods" || rc=$?
+(( WITH_PODS )) && { echo " pod -> pod:"; verdict PP "pods" 0 || rc=$?; }
 (( RUN_CLIENTS )) && { echo " client -> pod:"; vm_verdict || rc=$?; }
 identity_check || rc=$?
 
 echo
 if (( rc == 0 )); then
-    echo "PASS - phase 3 isolation holds in both directions."
+    echo "PASS - tenant isolation holds in every direction measured."
 else
     echo "FAIL - see the LEAK/BROKEN/WRONG TENANT lines above."
     echo
