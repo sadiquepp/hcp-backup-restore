@@ -1563,6 +1563,27 @@ local gateway mode (`routingViaHost: true`) pod egress is punted to the host
 at the tenant's management port — you can watch it arrive, un-SNATed, which
 proves the advertisement reached the data plane:
 
+> **`tcpdump` is not on the node.** RHCOS ships no `tcpdump`, so
+> `oc debug node/... -- chroot /host tcpdump` fails with "command not found".
+> Use `toolbox`, which runs a support-tools container in the host's network
+> namespace, or call that image directly when you need it non-interactively:
+>
+> ```bash
+> # interactive
+> oc debug node/worker2
+> chroot /host
+> toolbox
+> tcpdump -nni ovn-k8s-mp5 icmp
+>
+> # one-shot, no TTY needed
+> oc debug node/worker2 --quiet -- chroot /host podman run --rm --privileged \
+>     --network=host registry.redhat.io/rhel9/support-tools \
+>     tcpdump -nni ovn-k8s-mp5 icmp -c 10
+> ```
+>
+> Every `tcpdump` on a cluster node below is written the short way for
+> readability; run it one of these two ways.
+
 ```bash
 oc debug node/worker2 --quiet -- chroot /host timeout 10 tcpdump -nni ovn-k8s-mp5 icmp
 # IP 10.220.0.3 > 192.168.140.1: ICMP echo request     <- pod's own address
