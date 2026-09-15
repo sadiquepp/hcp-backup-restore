@@ -25,6 +25,16 @@
     <forwarder domain='{{ hub2_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
     <forwarder domain='{{ hub_disconnected_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
     <forwarder domain='{{ hub2_disconnected_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+{# The single-node cluster, when vars.yaml carries one. Without this forwarder
+   api.sno.<base_domain> resolves from the helper and NOT from a VM on this
+   network - and the SNO itself resolves through this dnsmasq, so it would not
+   be able to find its own API. It cannot point straight at the helper
+   instead: named there forwards to 8.8.8.8, which does not resolve from this
+   lab, so every external name SERVFAILs and a connected install cannot reach
+   quay.io. This network is the only resolver that answers both. #}
+{% if (sno_name | default('')) and (ip_list[sno_name] is defined) %}
+    <forwarder domain='{{ sno_name }}.{{ base_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+{% endif %}
     <forwarder domain='{{ lab_network_reverse_zone }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
   </dns>
   <ip address='{{ lab_network_prefix }}.1' netmask='{{ lab_network_netmask }}'>
@@ -69,6 +79,13 @@ api.{{ hub2_domain }}
 api.{{ hub_disconnected_domain }}
 {%- elif key == 'hub2dlb' -%}
 api.{{ hub2_disconnected_domain }}
+{%- elif (sno_name | default('')) and key == sno_name -%}
+{#- The single-node cluster lives in its OWN zone, so without this branch the
+    fall-through below would name it sno.hub.<base_domain> while the PTR in
+    named-reverse.hub.j2 says sno.sno.<base_domain> - breaking the very
+    invariant the comment at the top of this dhcp block states. 'sno.sno' reads
+    oddly and is right: hostname 'sno' inside zone sno.<base_domain>. -#}
+{{ sno_name }}.{{ sno_name }}.{{ base_domain }}
 {%- else -%}
 {{ key }}.{{ hub_domain }}
 {%- endif -%}
