@@ -336,6 +336,30 @@
 # Backend discovery runs on localhost (it needs oc); the rest is delegated to
 # the VM by nsproxy.yml's own tasks, so this include is not blanket-delegated.
 # ---------------------------------------------------------------------------
+# add_host lives in nsclient-vm.yml, which only runs under clabnsclient. Run
+# clabnsproxy on its own and the name is never registered, so Ansible resolves
+# the bare "udnnsclient" through NSS - 127.0.0.1 here - and tries the default
+# credentials against the KVM host itself. Registering is cheap and idempotent,
+# so it is repeated rather than made a prerequisite of the tag.
+- name: Register the namespace client as an Ansible host
+  ansible.builtin.add_host:
+    name: "{{ udn_nsclient_vm_name }}"
+    ansible_host: "{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}"
+    ansible_user: "{{ udn_client_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ udn_client_ssh_key }}"
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    groups: udn_nsclient
+  changed_when: false
+  tags: [clabnsproxy]
+
+- name: Fail early if the namespace client is not up
+  ansible.builtin.wait_for:
+    host: "{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}"
+    port: 22
+    timeout: 60
+  tags: [clabnsproxy]
+
 - name: Build the tenant ingress on the namespace client
   ansible.builtin.include_tasks:
     file: nsproxy.yml
