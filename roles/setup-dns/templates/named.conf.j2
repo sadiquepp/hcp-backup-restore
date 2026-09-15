@@ -17,7 +17,7 @@ options {
 	secroots-file	"/var/named/data/named.secroots";
 	recursing-file	"/var/named/data/named.recursing";
 	allow-query     { localhost; any; };
-        forwarders	{ 8.8.8.8; };
+        forwarders	{ {% for f in dns_forwarders %}{{ f }}; {% endfor %}};
 
 	/* 
 	 - If you are building an AUTHORITATIVE DNS server, do NOT enable recursion.
