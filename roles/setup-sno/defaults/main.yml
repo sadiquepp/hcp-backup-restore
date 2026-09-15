@@ -43,8 +43,28 @@ sno_installation_disk: /dev/vda
 ## Addressing. Static, not DHCP: the agent installer needs the rendezvous
 ## address to be knowable before the node has booted, and a lease is not.
 sno_gateway: "{{ lab_network_prefix }}.1"
-sno_dns_server: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
 sno_prefix_length: 24
+
+## The resolver, and NOT the helper (.21) even though the helper is what serves
+## sno.<base_domain>. Pointing straight at the authoritative server looks more
+## direct and breaks a CONNECTED install:
+##
+##   nslookup failure:
+##   Server:  192.168.122.21
+##   ** server can't find quay.io: SERVFAIL
+##
+## - which is the agent installer's own pre-flight check refusing to start,
+## because a connected node has to reach quay.io for its release payload.
+## named on the helper is configured with `recursion yes` and a forwarder to
+## 8.8.8.8, but that forwarder does not resolve from this lab, so every
+## external name SERVFAILs. A SERVFAIL is an ANSWER, not a timeout, so a second
+## resolver in this list would never be tried - which is why this is one entry
+## and not two.
+##
+## .1 is libvirt's dnsmasq on the default network: it forwards to the
+## hypervisor's own resolvers for external names, and to the helper for the lab
+## zones. Every other node in this lab uses it for exactly that reason.
+sno_dns_server: "{{ lab_network_prefix }}.1"
 
 ## Same scheme as every other lab VM: 52:54:00:e2:54:<the node's ip_list octet>.
 sno_mgmt_mac_prefix: "52:54:00:e2:54"
