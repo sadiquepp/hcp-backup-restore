@@ -192,11 +192,18 @@ done
 # The cell reads ok for purple on a reply that purple never sent. Judging by
 # owned tenants alone misses it, because blue owns neither green nor purple.
 reach_set() {  # tenant-list -> that list plus every tenant it is leaked to
-    local t p out=""
+    # Reads LEAKED's own keys rather than iterating $tenants. bash is
+    # DYNAMICALLY scoped, so a caller's `local tenants` is visible in here and
+    # silently replaces the global array - which is exactly what happened:
+    # probe_from_vms declares `local ... tenants ...` to parse its manifest, so
+    # this loop saw one client's tenant string instead of every tenant, matched
+    # no leak, and quietly returned the input unchanged. Matrix 2 was right and
+    # matrix 3 was wrong, from one identical call.
+    local t k out=""
     for t in $1; do
         out="$out $t"
-        for p in "${tenants[@]}"; do
-            [[ -n "${LEAKED[$t,$p]:-}" ]] && out="$out $p"
+        for k in "${!LEAKED[@]}"; do
+            [[ "$k" == "$t,"* ]] && out="$out ${k#*,}"
         done
     done
     printf '%s' "$out"
@@ -400,13 +407,13 @@ probe_from_vms() {
         echo "  Build it with --tags clabnsclient, or set UDN_NETNS_ENV." >&2
         (( WITH_VMS )) || return 1
     fi
-    local name ip tenants ns
+    local name ip client_tenants ns
     if (( WITH_VMS )) && [[ -r "$CLIENTS_ENV" ]]; then
-        while IFS='|' read -r name ip tenants; do
+        while IFS='|' read -r name ip client_tenants; do
             [[ -n "${name:-}" && "$name" != \#* ]] || continue
             add_unique clients "$name"
             CLIENTIP["$name"]="$ip"
-            SERVES["$name"]="${tenants//,/ }"
+            SERVES["$name"]="${client_tenants//,/ }"
             PREFIX["$name"]=""
         done < "$CLIENTS_ENV"
     fi
@@ -414,9 +421,9 @@ probe_from_vms() {
     # One machine, one namespace per tenant: one pseudo-client each, same
     # address, different command prefix.
     if (( WITH_NETNS )) && [[ -r "$NETNS_ENV" ]]; then
-        while IFS='|' read -r name ip tenants; do
+        while IFS='|' read -r name ip client_tenants; do
             [[ -n "${name:-}" && "$name" != \#* ]] || continue
-            for ns in ${tenants//,/ }; do
+            for ns in ${client_tenants//,/ }; do
                 add_unique clients "netns/${ns}"
                 CLIENTIP["netns/${ns}"]="$ip"
                 SERVES["netns/${ns}"]="$ns"
