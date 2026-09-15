@@ -3155,10 +3155,18 @@ rows apart, which is why the web workload exists.
 
 Three things to read off it:
 
-- **`10.200.0.3` and `10.200.0.5` are in one `/24`.** Blue and red differ by
-  host address rather than colliding outright, which disposes of the idea that
-  OVN-Kubernetes keeps networks sharing a CIDR apart on purpose. Green and
-  purple, on one address, dispose of it completely.
+- **`10.200.0.3` and `10.200.0.5` are in one `/24`.** The two *web* pods differ
+  by host address, which already disposes of the idea that OVN-Kubernetes keeps
+  networks sharing a CIDR apart on purpose. Their *test* pods go further and
+  collide outright, on two of the three nodes:
+
+  ```
+  udn-blue  udn-test-ssxrr  worker1  10.200.0.4     udn-red  udn-test-z98tw  worker1  10.200.0.4
+  udn-blue  udn-test-kv5xd  worker2  10.200.1.3     udn-red  udn-test-kxzfm  worker2  10.200.1.3
+  ```
+
+  Two Layer3 tenants, same address, same node, twice over. Green and purple were
+  built to collide; blue and red did it unprompted.
 - **Orange earns its row.** It overlaps with nothing, so its page proves
   nothing the ping did not — but its one *answer* is what licenses reading its
   three blanks as isolation. A tenant with no pod produces the same row as a

@@ -140,15 +140,27 @@ for ns in $namespaces; do
     done <<< "$pods"
 done
 
-# Which tenants share a pod address. Layer2 tenants on one subnet can land on
-# the same one - green and purple are in the lab to make that happen - and once
-# they do, a ping to that address answers for BOTH of them. ICMP carries no
-# identity, so those cells are not "ok" or "FAIL", they are unanswerable, and
-# calling them either would be a lie in the direction of a false leak.
-for t in "${tenants[@]}"; do
-    a="${PODADDR[$t]:-}"
+# Which tenants share a pod address. Tenants on one subnet can land on the same
+# one - green and purple are in the lab to make that happen - and once they do,
+# a ping to that address answers for BOTH of them. ICMP carries no identity, so
+# those cells are not "ok" or "FAIL", they are unanswerable, and calling them
+# either would be a lie in the direction of a false leak.
+#
+# Built from EVERY pod of every tenant, not from the representative each matrix
+# probes. Those are different sets and the difference is not academic: blue and
+# red held udn-test pods on 10.200.0.4 (worker1) and 10.200.1.3 (worker2) while
+# their representatives were 10.200.0.4 and 10.200.2.3. Owners built from the
+# representatives alone saw two distinct addresses, marked nothing ambiguous,
+# and reported red reaching blue as a LEAK in three separate cells - red
+# reaching its OWN pod on the address it happens to share. The collision the
+# script exists to detect was on a pod it never sampled.
+for r in "${records[@]}"; do
+    IFS=$'\t' read -r t _node _ns _pod a <<< "$r"
     [[ -n "$a" ]] || continue
-    ADDR_OWNERS["$a"]="${ADDR_OWNERS[$a]:-}${ADDR_OWNERS[$a]:+ }$t"
+    case " ${ADDR_OWNERS[$a]:-} " in
+        *" $t "*) ;;   # this tenant already recorded against this address
+        *) ADDR_OWNERS["$a"]="${ADDR_OWNERS[$a]:-}${ADDR_OWNERS[$a]:+ }$t" ;;
+    esac
 done
 
 # does $1 (a source tenant or client) own any tenant sharing $2's pod address,
