@@ -3562,6 +3562,75 @@ Then recreate the namespaces and DaemonSets from phase 2 unchanged.
 `ipVRF` is required for Layer3 and `macVRF` is forbidden there; a Layer2 CUDN
 is the other way round. Red uses VNI 201 and `65000:201`.
 
+### 4c-bis. The far leaf is not one shape but two
+
+The cluster side already declares the two topologies differently, and the
+fabric side has to match it exactly:
+
+| tenant | topology | cluster declares | leaf2 must instantiate |
+| --- | --- | --- | --- |
+| blue | Layer3 | `ipVRF { vni: 101 }` | VNI **101** |
+| red | Layer3 | `ipVRF { vni: 201 }` | VNI **201** |
+| orange | Layer3 | `ipVRF { vni: 301 }` | VNI **301** |
+| green | Layer2 | `macVRF { vni: 400 }` | VNI **400** |
+| purple | Layer2 | `macVRF { vni: 500 }` | VNI **500** |
+
+The Layer2 rows take `evpn_mac_vni`; the Layer3 rows take `evpn_ip_vni`. Build
+every tenant from `evpn_ip_vni` and green gets 401 while the cluster advertises
+400 — **the two ends instantiate different numbers and no tunnel ever forms.**
+It does not look like a mismatch: the EVPN sessions come up, `advertise-all-vni`
+advertises what exists locally, and both sides are simply talking about VNIs
+the other has never heard of. Three tenants work and two are silent.
+
+The two shapes differ in more than the number.
+
+**ipVRF / L3VNI**, for a Layer3 tenant — symmetric IRB. The bridge is enslaved
+to the VRF, carries no access port, and the tenant's external network is a
+routed neighbour on `external_prefix`:
+
+```bash
+ip link add blue type vrf table 1110
+ip link add vni101 type vxlan id 101 local 10.0.0.2 dstport 4789 nolearning
+ip link add br101 type bridge
+ip link set br101 master blue          # bridge into the VRF
+ip link set vni101 master br101
+ip link set blue-ext master blue       # access port into the VRF
+ip addr add 10.210.10.1/24 dev blue-ext
+```
+
+**macVRF / L2VNI**, for a Layer2 tenant — no VRF at all. A macVRF carries MAC
+reachability, not prefixes, so there is nothing to route: the access port joins
+the *bridge*, and the external endpoint is a host inside the pods' own subnet:
+
+```bash
+ip link add vni400 type vxlan id 400 local 10.0.0.2 dstport 4789 nolearning
+ip link add br400 type bridge
+ip link set vni400 master br400
+ip link set green-ext master br400     # access port into the L2 domain
+# and on the container itself:
+ip addr add 10.204.255.10/16 dev eth1  # inside 10.204.0.0/16, no gateway
+```
+
+That last line is the part that surprises. `external_prefix`, `external_gw`
+and `external_host` go **unused** for a Layer2 tenant in phase 4. Its external
+endpoint is not on a separate network reached by routing; it is in the same
+broadcast domain as the pods, on the far side of a VXLAN tunnel, and it reaches
+them by ARP answered out of type-2 routes. A stretched L2 domain is exactly
+what it says.
+
+Two consequences worth stating before the first run:
+
+- **The L2VNI's route target must be explicit.** FRR auto-derives it from the
+  *local* AS, so leaving it implicit gives `64514:400` on leaf2 while the
+  cluster exports `65000:400`. The type-2 routes are advertised and silently
+  never imported — a failure indistinguishable from the VNI mismatch above.
+  `leaf2-frr.conf.j2` states both directions per Layer2 tenant.
+- **The external address has to be reserved.** OVN knows nothing about
+  `10.204.255.10` and will happily allocate it to a pod, which is a duplicate
+  address in one broadcast domain — not the deliberate cross-network overlap
+  this lab is about. `evpn_l2_exclude` becomes `excludeSubnets` on the Layer2
+  CUDN for that reason.
+
 ### 4d. EVPN peering and advertisement
 
 ```bash

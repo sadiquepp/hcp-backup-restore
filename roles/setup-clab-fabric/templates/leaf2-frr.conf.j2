@@ -12,6 +12,15 @@
   imported only into blue on leaf2. Giving two tenants the same route target
   is how you leak them into each other - worth knowing precisely because it
   is a one-character mistake.
+
+  Two shapes, not one. The Layer3 tenants get an IP-VRF: a VRF, an L3VNI
+  declared with 'vni' under 'vrf', and a per-VRF BGP instance originating
+  their external prefix. The Layer2 tenants get a MAC-VRF: an L2VNI, no VRF,
+  no per-VRF instance and nothing to originate, because their external
+  endpoint is a host inside the pods' own subnet rather than a network to be
+  routed to. The VNI numbers come from different fields for that reason -
+  evpn_ip_vni for one, evpn_mac_vni for the other - and matching whichever
+  one the cluster declares is the whole requirement.
 #}
 frr version 10.2
 frr defaults datacenter
@@ -19,7 +28,13 @@ hostname leaf2
 log stdout
 service integrated-vtysh-config
 !
-{% for t in udn_bgp_tenants %}
+{#
+  'vni' under 'vrf' declares an L3VNI - the one a tenant's IP-VRF routes
+  through. Only the Layer3 tenants have one. A Layer2 tenant's transport is a
+  macVRF, which is an L2VNI with no VRF and nothing to route, and zebra
+  discovers it from the bridge/vxlan pairing built in the topology file.
+#}
+{% for t in udn_bgp_tenants if (t.topology | default('Layer3')) != 'Layer2' %}
 vrf {{ t.name }}
  vni {{ t.evpn_ip_vni }}
 exit-vrf
@@ -46,10 +61,27 @@ router bgp {{ clab_leaf2_asn }}
   neighbor 10.0.0.254 activate
   neighbor 10.0.0.254 allowas-in origin
   advertise-all-vni
+{% for t in udn_bgp_tenants if (t.topology | default('Layer3')) == 'Layer2' %}
+  ! {{ t.name }}: an L2VNI's route target is auto-derived from the LOCAL AS, so
+  ! leaving it implicit gives {{ clab_leaf2_asn }}:{{ t.evpn_mac_vni }} here while the cluster exports
+  ! {{ clab_spine_asn }}:{{ t.evpn_mac_vni }}. The type-2 routes would be advertised and silently
+  ! never imported - stated explicitly so the two ends agree.
+  vni {{ t.evpn_mac_vni }}
+   route-target import {{ clab_spine_asn }}:{{ t.evpn_mac_vni }}
+   route-target export {{ clab_spine_asn }}:{{ t.evpn_mac_vni }}
+  exit-vni
+{% endfor %}
  exit-address-family
 exit
 !
-{% for t in udn_bgp_tenants %}
+{#
+  One per Layer3 tenant. A Layer2 tenant has no VRF on this leaf, nothing to
+  originate - its external endpoint is inside the pods' own subnet, which the
+  cluster already advertises - and no ipv4-unicast family to advertise into
+  EVPN. A 'router bgp ... vrf green' here would reference a VRF that the
+  topology file no longer creates.
+#}
+{% for t in udn_bgp_tenants if (t.topology | default('Layer3')) != 'Layer2' %}
 router bgp {{ clab_leaf2_asn }} vrf {{ t.name }}
  bgp router-id {{ t.external_gw }}
  no bgp ebgp-requires-policy
