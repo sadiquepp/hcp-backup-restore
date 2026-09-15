@@ -109,19 +109,31 @@
   changed_when: false
   failed_when: false
 
-- name: Warn if the cluster's DNS zone is not being served yet
-  ansible.builtin.debug:
-    msg: >-
-      api.{{ sno_cluster_domain }} does not resolve yet. The install will still
-      build, but `openshift-install agent wait-for` and every later `oc` call
-      need it. setup-dns renders this zone - run it before the wait, with:
-      ansible-playbook -i inventory/hosts setup_sno.yaml --tags dns
-  when: sno_api_dns.rc != 0
+# A hard failure, not a warning, and deliberately so: this playbook does NOT
+# render the zone. setup-dns runs on the helper rather than on the hypervisor
+# this play targets, and importing it from here as well would put the same
+# delegate_to in two places - where the cost of getting one of them wrong is
+# that `hostnamectl set-hostname helper.mylab.com` runs on the hypervisor.
+# One owner for DNS, and this checks its work.
+- name: Fail if the cluster's DNS zone is not being served
+  ansible.builtin.assert:
+    that: sno_api_dns.rc == 0 or not (sno_require_dns | bool)
+    fail_msg: |-
+      api.{{ sno_cluster_domain }} does not resolve.
 
-- name: Report the DNS check
-  ansible.builtin.debug:
-    msg: "api.{{ sno_cluster_domain }} -> {{ sno_api_dns.stdout }}"
-  when: sno_api_dns.rc == 0
+      The installer needs it before `agent wait-for` can watch the install, the
+      API certificate is issued for it, and every later `oc` call depends on
+      it - so this stops here rather than forty minutes in.
+
+      Render the zone first:
+        ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+          --ask-vault-pass
+
+      That is the only thing that serves it: vars.yaml carries ip_list.{{ sno_name }}
+      and setup-dns turns it into {{ sno_cluster_domain }} on the helper.
+
+      To build the ISO anyway without a zone, pass -e sno_require_dns=false.
+    success_msg: "api.{{ sno_cluster_domain }} -> {{ sno_api_dns.stdout }}"
 
 - name: Check whether the SNO VM already exists
   ansible.builtin.shell:

@@ -7,8 +7,21 @@
 # install and the node pulls its release payload from quay.io with the pull
 # secret out of vault.yaml.
 #
+# DNS IS NOT DONE HERE. The zone sno.<base_domain> is rendered by setup-dns,
+# which runs on the HELPER, not on the hypervisor this play targets - so it is
+# reached through the playbook that already owns it:
+#
+#   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+#     --ask-vault-pass
+#
+# Run that first. Importing setup-dns from here as well would mean two
+# playbooks carrying the same delegate_to, and the failure mode when one of
+# them lacks it is not subtle: setup-dns's first task is
+# `hostnamectl set-hostname helper.mylab.com`, so a mis-delegated run renames
+# the hypervisor. Pre-flight fails with the command above if the zone is not
+# being served yet.
+#
 # Useful subsets:
-#   --tags dns          just (re)render the cluster's DNS zone
 #   --tags snoimage     rebuild the agent ISO without touching the VM
 #   --tags snovm        rebuild the VM from the ISO already built
 #   --tags snowait      just block until an install already running finishes
@@ -22,20 +35,6 @@
     - vars.yaml
     - vault.yaml
   tasks:
-    # The API name has to resolve before `agent wait-for` can watch the
-    # install, so the zone is served first rather than as a day-2 fix.
-    #
-    # delegate_to the helper, exactly as setup_bm_host.yaml does, and it is not
-    # optional: named runs THERE, not on the hypervisor this play targets. Run
-    # without it and setup-dns's first task - `hostnamectl set-hostname
-    # helper.mylab.com` - renames the hypervisor, then installs bind on it and
-    # writes /var/named on the wrong machine entirely.
-    - name: Serve the cluster's DNS zone
-      ansible.builtin.import_role:
-        name: setup-dns
-      tags: [sno, dns]
-      delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
-
     - name: Install the SNO
       ansible.builtin.import_role:
         name: setup-sno
