@@ -82,3 +82,10 @@ sno_install_timeout_min: 90
 ## the lab uses; read at render time rather than templated from a variable so
 ## there is one copy of it on disk and no chance of the two drifting.
 sno_ssh_public_key_file: "~/.ssh/lab_rsa.pub"
+
+## Whether a missing DNS zone is fatal. It is by default: the installer cannot
+## watch its own install without api.<cluster>.<base_domain>, and the zone is
+## rendered elsewhere (setup_bm_host.yaml --tags dns), so a missing one means a
+## step was skipped rather than something this role can fix. Set false to build
+## an ISO without a zone in place.
+sno_require_dns: true
