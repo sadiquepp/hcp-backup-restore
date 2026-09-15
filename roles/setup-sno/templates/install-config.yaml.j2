@@ -1,0 +1,41 @@
+{#
+  install-config.yaml for the connected SNO.
+
+  One control-plane replica and zero compute is what makes this single-node;
+  the agent installer reads that combination and builds an SNO rather than
+  asking for a bootstrap machine. bootstrapInPlace is NOT needed here - that
+  belongs to the older `create single-node-ignition-config` flow, and setting
+  it alongside the agent installer is a common way to get a confusing failure.
+
+  Connected, so no imageContentSources and no additionalTrustBundle: the node
+  reaches quay.io directly with the lab's pull secret. The disconnected variant
+  adds both, plus the mirror's CA - see the coco/README procedure this role was
+  modelled on.
+
+  machineNetwork must contain the node's own address or the installer cannot
+  work out which interface is the machine network, and the install fails late
+  with an error that does not mention addressing at all.
+#}
+apiVersion: v1
+baseDomain: {{ base_domain }}
+compute:
+- name: worker
+  replicas: 0
+controlPlane:
+  name: master
+  replicas: 1
+metadata:
+  name: {{ sno_name }}
+networking:
+  clusterNetwork:
+  - cidr: {{ sno_cluster_network_cidr }}
+    hostPrefix: {{ sno_cluster_network_host_prefix }}
+  machineNetwork:
+  - cidr: {{ lab_network_prefix }}.0/{{ sno_prefix_length }}
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - {{ sno_service_network_cidr }}
+platform:
+  none: {}
+pullSecret: '{{ pull_secret }}'
+sshKey: '{{ sno_ssh_key }}'

@@ -1,0 +1,150 @@
+---
+# Everything that can be known before anything is built.
+#
+# All of it is cheap, and every one of these has a failure mode that only shows
+# up forty minutes into an install otherwise.
+
+- name: Check for libvirt tooling
+  ansible.builtin.command:
+    cmd: "which virsh qemu-img virt-install"
+  register: sno_virsh
+  changed_when: false
+  failed_when: false
+
+- name: Fail if this is not the libvirt host
+  ansible.builtin.assert:
+    that: sno_virsh.rc == 0
+    fail_msg: >-
+      virsh, qemu-img or virt-install is missing, so this is not the lab's
+      libvirt host. This role builds a VM and must run ON the hypervisor.
+    success_msg: "libvirt tooling is present."
+
+# vault.yaml, not vars.yaml. A missing pull secret otherwise renders as the
+# empty string, the ISO builds cleanly, and the node fails to pull the release
+# image - which looks like a network fault rather than a missing credential.
+- name: Fail if the pull secret is not available
+  ansible.builtin.assert:
+    that:
+      - pull_secret is defined
+      - (pull_secret | trim | length) > 0
+    fail_msg: >-
+      pull_secret is not set. This is a CONNECTED install, so the node pulls
+      its release payload from quay.io and cannot start without it. It lives in
+      vault.yaml - run the playbook with --ask-vault-pass.
+    success_msg: "Pull secret is available."
+
+- name: Fail if the SNO has no address reserved in ip_list
+  ansible.builtin.assert:
+    that: ip_list[sno_name] is defined
+    fail_msg: >-
+      ip_list has no entry for '{{ sno_name }}' in vars.yaml. The address is
+      not incidental here: it is the rendezvous address, the API address and
+      the ingress address all at once, and it has to be known before the ISO
+      is built.
+    success_msg: >-
+      {{ sno_name }} will take {{ lab_network_prefix }}.{{ ip_list[sno_name] | default('?') }}.
+
+# shell, not command: the default path is ~-relative and the command module
+# does no tilde expansion - it would look for a literal './~/.ssh/...'.
+# The same trap the UDN client VM fell into: an address inside a MetalLB pool
+# is one another service may legitimately claim, so the two answer each other's
+# ARP intermittently. The symptom is a cluster that is reachable most of the
+# time, which is far worse to debug than one that is never reachable.
+- name: Fail if the SNO's address is inside a MetalLB pool
+  vars:
+    sno_metallb_octets: >-
+      {{ hosted_cluster_metallb_pools | default({}) | dict2items
+         | map(attribute='value.ip') | map('dict2items') | flatten
+         | map(attribute='value') | list }}
+  ansible.builtin.assert:
+    that: (ip_list[sno_name] | int) not in (sno_metallb_octets | map('int') | list)
+    fail_msg: >-
+      ip_list.{{ sno_name }} is {{ ip_list[sno_name] }}, which is inside
+      hosted_cluster_metallb_pools ({{ sno_metallb_octets | sort | list }}).
+      MetalLB may hand that address to a hosted cluster's API service, and the
+      two would then fight over it by ARP - intermittently, so the cluster
+      would look flaky rather than misconfigured. Pick an octet outside those.
+    success_msg: >-
+      .{{ ip_list[sno_name] }} is clear of every MetalLB pool.
+
+# The lab's MAC scheme appends the ip_list octet verbatim, so a three-digit
+# octet renders 52:54:00:e2:54:100 - not a MAC. libvirt rejects it, but only
+# after the ISO has been built, and the error names the XML rather than
+# vars.yaml.
+- name: Fail if the SNO's octet cannot form a valid MAC
+  ansible.builtin.assert:
+    that:
+      - (ip_list[sno_name] | int) >= 10
+      - (ip_list[sno_name] | int) <= 99
+    fail_msg: >-
+      ip_list.{{ sno_name }} is {{ ip_list[sno_name] }}. This lab builds MACs
+      as {{ sno_mgmt_mac_prefix }}:<octet>, so the octet has to be two digits -
+      {{ sno_mgmt_mac_prefix }}:{{ ip_list[sno_name] }} is not a valid MAC.
+      Pick an octet between 10 and 99 that is outside the MetalLB pools.
+    success_msg: >-
+      {{ sno_mgmt_mac_prefix }}:{{ ip_list[sno_name] }} is a well-formed MAC.
+
+- name: Read the lab ssh public key
+  ansible.builtin.shell:
+    cmd: "cat {{ sno_ssh_public_key_file }}"
+  register: sno_ssh_out
+  changed_when: false
+
+- name: Record the addressing this install will use
+  ansible.builtin.set_fact:
+    sno_ip: "{{ lab_network_prefix }}.{{ ip_list[sno_name] }}"
+    sno_mgmt_mac: "{{ (sno_mgmt_mac_prefix ~ ':' ~ ip_list[sno_name]) | lower }}"
+    sno_ssh_key: "{{ sno_ssh_out.stdout }}"
+    sno_cluster_domain: "{{ sno_name }}.{{ base_domain }}"
+
+# The API server certificate is issued for api.<cluster>.<base_domain>, and the
+# installer's own wait-for resolves that name. If DNS is not serving the zone
+# yet the install completes and every subsequent `oc` call fails, which is a
+# miserable way to find out. Checked, not assumed - and a warning rather than a
+# failure, because the zone can legitimately be added while the ISO builds.
+- name: Check that the cluster's API name resolves
+  ansible.builtin.command:
+    cmd: "getent hosts api.{{ sno_cluster_domain }}"
+  register: sno_api_dns
+  changed_when: false
+  failed_when: false
+
+- name: Warn if the cluster's DNS zone is not being served yet
+  ansible.builtin.debug:
+    msg: >-
+      api.{{ sno_cluster_domain }} does not resolve yet. The install will still
+      build, but `openshift-install agent wait-for` and every later `oc` call
+      need it. setup-dns renders this zone - run it before the wait, with:
+      ansible-playbook -i inventory/hosts setup_sno.yaml --tags dns
+  when: sno_api_dns.rc != 0
+
+- name: Report the DNS check
+  ansible.builtin.debug:
+    msg: "api.{{ sno_cluster_domain }} -> {{ sno_api_dns.stdout }}"
+  when: sno_api_dns.rc == 0
+
+- name: Check whether the SNO VM already exists
+  ansible.builtin.shell:
+    cmd: "virsh dominfo {{ sno_name }} 2>/dev/null | awk '/State/ {print $2}'"
+  register: sno_vm_state
+  changed_when: false
+
+# The destructive step in this role is deleting sno_install_folder, and that
+# folder holds auth/kubeconfig - the only copy of the admin credentials. A VM
+# that already exists may be a perfectly healthy cluster, so rebuilding over it
+# is something to ask for explicitly rather than something to default to.
+- name: Fail rather than rebuild over an existing SNO
+  ansible.builtin.assert:
+    that: sno_vm_state.stdout == '' or (sno_force_reinstall | bool)
+    fail_msg: >-
+      A libvirt domain named '{{ sno_name }}' already exists (state:
+      {{ sno_vm_state.stdout }}). Rebuilding deletes
+      {{ sno_install_folder }}, which holds auth/kubeconfig - the only copy of
+      this cluster's admin credentials.
+
+      To rebuild anyway, pass -e sno_force_reinstall=true. To remove it by
+      hand first:
+        virsh destroy {{ sno_name }} ; virsh undefine {{ sno_name }} --remove-all-storage
+    success_msg: >-
+      {% if sno_vm_state.stdout %}Rebuilding {{ sno_name }} as requested.
+      {% else %}No existing {{ sno_name }} domain; building fresh.{% endif %}

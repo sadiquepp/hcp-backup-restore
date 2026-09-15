@@ -65,6 +65,17 @@ zone "{{ hub_disconnected_domain }}" IN {
 	file "{{hub_disconnected_domain}}.db";
 	allow-update { none; };
 };
+{# The single-node cluster, when vars.yaml carries one. Guarded on the ip_list
+   entry rather than on sno_name, because the zone file is only rendered when
+   that entry exists - and a stanza naming a file that is not there stops named
+   from starting at all, taking every other zone down with it. #}
+{% if (sno_name | default('')) and (ip_list[sno_name] is defined) %}
+zone "{{ sno_name }}.{{ base_domain }}" IN {
+	type master;
+	file "{{ sno_name }}.{{ base_domain }}.db";
+	allow-update { none; };
+};
+{% endif %}
 {# One zone per hosted cluster, connected and disconnected alike, derived from
    the cluster lists so a new cluster needs no edit here. The zone name is
    <cluster-name>.<base_domain>, matching the .db files tasks/main.yml writes -
