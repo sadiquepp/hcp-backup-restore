@@ -204,19 +204,32 @@
   changed_when: false
   failed_when: false
 
+# What counts as "correctly addressed" depends on the tenant's EVPN transport,
+# not just on the tenant. A Layer3 tenant's endpoint sits on its own external
+# prefix behind a gateway. A Layer2 tenant's endpoint is a port on the L2VNI
+# bridge - one stretched broadcast domain - so it is addressed INSIDE the pods'
+# own subnet and has no gateway at all. Asserting the Layer3 shape against a
+# macVRF tenant fails on a correctly built fabric, which is what it did to
+# green and purple the first time phase 4 ran.
 - name: Fail if a tenant's external endpoint is not addressed
+  vars:
+    ext_is_l2: "{{ clab_topology == 'evpn' and (item.item.topology | default('Layer3')) == 'Layer2' }}"
+    ext_want: "{{ item.item.evpn_l2_external_host if (ext_is_l2 | bool) else item.item.external_host }}"
   ansible.builtin.assert:
     that:
       - item.rc == 0
-      - item.stdout is search(item.item.external_host | replace('.', '\\.') ~ '/')
+      - item.stdout is search(ext_want | replace('.', '\\.') ~ '/')
     fail_msg: >-
       The {{ item.item.name }}-ext container is missing or has no
-      {{ item.item.external_host }}. This is what a {{ item.item.name }} pod
-      is supposed to reach in phase 3, so the isolation test would fail for a
-      reason that has nothing to do with isolation.
+      {{ ext_want }}.
+      {% if ext_is_l2 | bool %}This tenant's transport is a macVRF, so its
+      endpoint belongs in {{ item.item.udn_subnet }} alongside the pods,
+      {% else %}This is what a {{ item.item.name }} pod is supposed to reach,
+      {% endif %}so the isolation test would fail for a reason that has
+      nothing to do with isolation.
       It reports: {{ item.stdout | default(item.stderr, true) }}
     success_msg: >-
-      {{ item.item.name }}-ext holds {{ item.item.external_host }}.
+      {{ item.item.name }}-ext holds {{ ext_want }}{{ ' (on the L2VNI, inside the pod subnet)' if ext_is_l2 | bool else '' }}.
   loop: "{{ clab_ext_hosts.results }}"
   loop_control:
     label: "{{ item.item.name }}"
@@ -239,20 +252,30 @@
   changed_when: false
   failed_when: false
 
+# Same split as the addressing check above. A Layer3 endpoint needs a default
+# route via its gateway. A Layer2 endpoint must NOT have one - it reaches every
+# pod on-link, by ARP answered out of EVPN type-2 routes, so what it needs is
+# the connected route the kernel derives from its own address. Requiring a
+# gateway there would demand the fabric be built wrong.
 - name: Fail if a tenant endpoint has no route back through the leaf
+  vars:
+    ext_is_l2: "{{ clab_topology == 'evpn' and (item.item.topology | default('Layer3')) == 'Layer2' }}"
+    ext_want_route: "{{ item.item.udn_subnet if (ext_is_l2 | bool) else ('default via ' ~ item.item.external_gw) }}"
   ansible.builtin.assert:
     that:
       - item.rc == 0
-      - item.stdout is search('default via ' ~ (item.item.external_gw | replace('.', '\\.')))
+      - item.stdout is search(ext_want_route | replace('.', '\\.'))
     fail_msg: >-
-      {{ item.item.name }}-ext has no default route via {{ item.item.external_gw }}.
+      {% if ext_is_l2 | bool %}{{ item.item.name }}-ext has no connected route
+      for {{ item.item.udn_subnet }}, so its address is not on the L2VNI the
+      pods share.{% else %}{{ item.item.name }}-ext has no default route via
+      {{ item.item.external_gw }}.{% endif %}
       It is addressed, so it will answer ARP and look alive, but every reply to
-      a pod will be dropped for want of a route. A phase 3 ping to
-      {{ item.item.external_host }} would then time out identically to a
-      correctly isolated one.
+      a pod will be dropped for want of a route. A pod's ping would then time
+      out identically to a correctly isolated one.
       It reports: {{ item.stdout | default(item.stderr, true) }}
     success_msg: >-
-      {{ item.item.name }}-ext routes back via {{ item.item.external_gw }}.
+      {{ item.item.name }}-ext reaches pods via {{ ext_want_route }}.
   loop: "{{ clab_ext_routes.results }}"
   loop_control:
     label: "{{ item.item.name }}"
