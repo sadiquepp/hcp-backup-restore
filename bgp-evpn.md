@@ -3358,6 +3358,86 @@ The leaf1 capture is the one that shows the mechanism: the same TCP stream
 appears twice, once tagged 210 and once tagged 110, with the VRF lookup in
 between.
 
+### 3h. How an end user reaches a tenant on an overlapping segment
+
+Everything up to here proves the tenants are *separated*. That immediately
+raises its opposite: if green and purple genuinely both own `10.204.0.12`, how
+does an ordinary user reach either one? A browser has one routing table and one
+DNS answer, and neither can express "the `10.204.0.12` that belongs to green".
+
+The answer is that the user does not reach the tenant at all — something
+multi-homed into every tenant reaches it on their behalf, and picks which one
+by a name. `--tags clabnsproxy` builds that on the namespace client:
+
+```bash
+ansible-playbook setup_udn_bgp_lab.yaml -i inventory/hosts --tags clabnsproxy --ask-vault-pass
+```
+
+The load-bearing part is one keyword. HAProxy can open a backend connection
+*inside* a named network namespace, so two backends name the identical address
+and port and reach different pods:
+
+```haproxy
+backend be_green
+    server green1  10.204.0.12:8080 namespace green  check
+backend be_purple
+    server purple1 10.204.0.12:8080 namespace purple check
+```
+
+No other single-process arrangement gets that. A proxy in the root namespace
+has no fabric presence here at all — `udn-netns-client.sh` deliberately leaves
+root holding the NIC and no address — and even given one, root has a single
+routing table and therefore a single route to `10.204.0.12`. The collision
+would simply move from the fabric to the proxy.
+
+Confirmed, all five tenants, by hostname and by path:
+
+```
+Tenant ingress on udnnsclient (192.168.122.88:80)
+
+  hostname                   backend        via Host:        via /path/
+  blue.hub.mylab.com         10.200.0.3     I am blue        I am blue
+  red.hub.mylab.com          10.200.0.5     I am red         I am red
+  orange.hub.mylab.com       10.202.5.4     I am orange      I am orange
+  green.hub.mylab.com        10.204.0.12    I am green       I am green
+  purple.hub.mylab.com       10.204.0.12    I am purple      I am purple
+
+  *** 10.204.0.12 is the backend for more than one hostname above.
+```
+
+The DNS records live in the hub zone — `hub_domain` is already
+`hub.mylab.com` — and all five names resolve to the **same** address
+(`roles/setup-dns/templates/hub_domain.j2`, `--tags dns`). That is not a
+shortcut. The tenant is chosen by the Host header, not by where the name
+points, so green and purple resolve to one address *and* dial one backend
+address *and* still return different documents.
+
+#### What it costs, which is the part worth arguing about
+
+This machine can now reach every tenant. That is a deliberate hole in the
+property the rest of phase 3 demonstrates, and it should be built on purpose
+rather than met by accident.
+
+Everywhere else in this lab, a misconfiguration *cannot* cross-connect
+tenants, because no path exists: `udnclient-blue` has no VLAN for red, so no
+mistake in its configuration can reach red. Here the Host-to-namespace mapping
+is the only thing keeping them apart. A wrong `namespace` keyword on one
+backend would serve purple's page on green's hostname, and nothing in the
+fabric would object — every packet would be correctly isolated, correctly
+routed, and delivered to the wrong tenant.
+
+That is exactly what a real tenant-facing ingress is, and it is why
+verification here is by **identity** rather than reachability: each hostname
+must return the page naming the tenant that was asked for. A health check
+sees a healthy backend in both cases.
+
+```bash
+scripts/udn-web-demo.sh --proxy
+```
+
+That check is also why every tenant has a web pod rather than only the
+overlapping pairs — a tenant with no page cannot be verified this way at all.
+
 ---
 
 ## Phase 4: EVPN

@@ -41,6 +41,14 @@
 ##                             Built alongside clabtenantclients, not instead
 ##                             of it; they coexist because the namespaces take
 ##                             .21 on each client segment and the VMs take .20.
+##   --tags clabnsproxy        a tenant ingress on that same VM: one hostname
+##                             per tenant, all resolving to one address, with
+##                             haproxy choosing the namespace from the Host
+##                             header. Answers how an end user reaches a
+##                             tenant whose pod address another tenant also
+##                             holds. Needs clabnsclient and --tags web, and
+##                             re-run after any --tags web, because it proxies
+##                             to pod addresses and those change.
 ##                      Builds a VM and edits the lab host's sysctls, so it is
 ##                      deliberately not part of --tags fabric. Meaningful in
 ##                      phase 2 only - in phase 3 each tenant has its own VRF
@@ -50,7 +58,7 @@
 ## delegation to fall back on and the tag decides which machine you must be on:
 ##
 ##   fabric, clabinstall, clabdeploy, clabverify, clabclient,
-##   clabtenantclients, clabnsclient
+##   clabtenantclients, clabnsclient, clabnsproxy
 ##       ON THE LAB HOST. These drive libvirt - virsh, qemu-img, virt-install,
 ##       the bridges - and the clab VM over ssh from there.
 ##
