@@ -267,7 +267,10 @@
            oc debug node/<node> --quiet -- chroot /host ip -br addr show \
                | grep {{ udn_bgp_tenants[0].udn_subnet_shared | regex_replace('\\.0\\.0/16$', '') }}.
            # e.g. ovn-k8s-mp5   UNKNOWN   {{ udn_bgp_tenants[0].udn_subnet_shared | regex_replace('\\.0\\.0/16$', '') }}.0.2/24
-           oc debug node/<node> --quiet -- chroot /host timeout 10 tcpdump -nni <that port> icmp
+           # RHCOS has no tcpdump - go through the support-tools image:
+           oc debug node/<node> --quiet -- chroot /host podman run --rm --privileged \
+               --network=host registry.redhat.io/rhel9/support-tools \
+               tcpdump -nni <that port> icmp -c 10
            oc -n udn-{{ udn_bgp_tenants[0].name }} exec <pod> -- ping -c5 {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
          The source address must be the POD's, not the node's. That is the
          advertisement taking effect on the data plane.
