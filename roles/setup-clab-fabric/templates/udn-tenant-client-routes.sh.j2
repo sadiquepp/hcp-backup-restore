@@ -73,6 +73,22 @@ VLAN{{ seg.vlan }}="$NIC.{{ seg.vlan }}"
 ip link show "$VLAN{{ seg.vlan }}" >/dev/null 2>&1 || \
     ip link add link "$NIC" name "$VLAN{{ seg.vlan }}" type vlan id {{ seg.vlan }}
 ip link set "$VLAN{{ seg.vlan }}" mtu "$MTU" up
+
+# Flush before configuring, every run. This device survives a re-run by design, and neither `ip addr replace` nor `ip route
+# replace` removes anything: replace only overwrites an address of the SAME
+# prefix, or a route we still render. A segment that changes shape between
+# phases therefore keeps both shapes at once.
+#
+# That is not hypothetical - it is how green and purple broke moving to phase 4.
+# Their phase-3 config left
+#     10.218.10.21/24  and  10.204.0.0/16 via 10.218.10.1
+# in the namespace, and 10.218.10.1 is a leaf1 gateway that phase 4 does not
+# build. The new on-link address went in alongside, the stale route still
+# covered the whole tenant subnet, and every packet went to a gateway that was
+# not there. blue, red and orange were unaffected only because their segment is
+# identical in both phases, so replace happened to be enough.
+ip addr flush dev "$VLAN{{ seg.vlan }}" || true
+ip route flush dev "$VLAN{{ seg.vlan }}" || true
 {% set l2 = (clab_topology | default('bgp') == 'evpn') and ((tenant.topology | default('Layer3')) == 'Layer2') %}
 {% if l2 %}
 # {{ t }}'s transport is a macVRF, so this VLAN is not a routed segment with a
