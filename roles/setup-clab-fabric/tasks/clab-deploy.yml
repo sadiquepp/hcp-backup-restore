@@ -16,6 +16,13 @@
     state: directory
     mode: '0755'
 
+- name: Record the deliberate VRF leaks for the test script
+  ansible.builtin.template:
+    src: vrf-leaks.env.j2
+    dest: "{{ playbook_dir }}/udn-bgp/vrf-leaks.env"
+    mode: "0644"
+  delegate_to: localhost
+
 - name: Create the spine/leaf2 config directories (EVPN topology only)
   ansible.builtin.file:
     path: "{{ clab_lab_dir }}/{{ item }}"

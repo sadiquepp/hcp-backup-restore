@@ -58,6 +58,7 @@ WITH_VMS=0
 WITH_NETNS=0
 NETNS_ENV="${UDN_NETNS_ENV:-$(dirname "$0")/../udn-bgp/netns-client.env}"
 CLIENTS_ENV="${UDN_CLIENTS_ENV:-$(dirname "$0")/../udn-bgp/tenant-clients.env}"
+LEAKS_ENV="${UDN_LEAKS_ENV:-$(dirname "$0")/../udn-bgp/vrf-leaks.env}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -93,7 +94,7 @@ ext_exec() {  # tenant, then command
 }
 
 declare -A EXTHOST POD PODNS PODADDR
-declare -A M1 M2 OKC TOT VM SERVES CLIENTIP ADDR_OWNERS PREFIX
+declare -A M1 M2 OKC TOT VM SERVES CLIENTIP ADDR_OWNERS PREFIX LEAKED
 clients=()
 tenants=()
 records=()
@@ -110,6 +111,22 @@ add_unique() {
 # The ext address is read off the container rather than out of vars.yaml for
 # the same reason the pod address is read off the pod: it is what the
 # interface actually has, not what something intended it to have.
+# Deliberate inter-tenant routing. leaf1 can be told to `import vrf <other>`,
+# which opens a chosen pair of tenants to each other - legal only where their
+# subnets are disjoint, since one table holds one route per destination. Those
+# cells must then be reachable, and every OTHER off-diagonal cell must still
+# not be, which is the distinction this file lets the verdict draw. Without it
+# an intended opening and a broken VRF look identical.
+leak_pairs=()
+if [[ -r "$LEAKS_ENV" ]]; then
+    while IFS='|' read -r a b; do
+        [[ -n "${a:-}" && "$a" != \#* && -n "${b:-}" ]] || continue
+        LEAKED["$a,$b"]=1
+        LEAKED["$b,$a"]=1
+        leak_pairs+=("$a <-> $b")
+    done < "$LEAKS_ENV"
+fi
+
 echo "Discovering tenants, pods and external endpoints"
 
 namespaces=$(oc get ns -l udn-tenant -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
@@ -180,6 +197,16 @@ printf '  %-8s %-16s %-16s %s\n' tenant ext-endpoint pod-address pod
 for t in "${tenants[@]}"; do
     printf '  %-8s %-16s %-16s %s\n' "$t" "${EXTHOST[$t]:-?}" "${PODADDR[$t]:-?}" "${POD[$t]:-?}"
 done
+
+if (( ${#leak_pairs[@]} )); then
+    echo
+    echo "Deliberate inter-tenant routing on leaf1 (udn_vrf_leaks):"
+    for lp in "${leak_pairs[@]}"; do echo "  $lp"; done
+    echo "  These pairs are SUPPOSED to reach each other. Their cells show ok+"
+    echo "  when the opening works and GAP when it does not - the polarity is"
+    echo "  inverted for those cells and for no others. Every pair not listed"
+    echo "  here must still be unreachable, which is what the matrices prove."
+fi
 
 # ---------------------------------------------------------------------------
 # Matrix 1: every pod -> every tenant's external endpoint
@@ -275,7 +302,18 @@ print_matrix() {
     for r in "${tenants[@]}"; do
         printf '%-12s' "$r"
         for c in "${tenants[@]}"; do
-            printf ' %-10s' "${res["$r,$c"]:--}"
+            v="${res["$r,$c"]:--}"
+            # An off-diagonal pair that was deliberately leaked is annotated
+            # rather than left looking like a leak: ok+ is the opening working,
+            # GAP is it configured and not working.
+            if [[ "$r" != "$c" && -n "${LEAKED[$r,$c]:-}" ]]; then
+                case "$v" in
+                    ok*)    v="ok+" ;;
+                    AMBIG)  ;;
+                    *)      v="GAP" ;;
+                esac
+            fi
+            printf ' %-10s' "$v"
         done
         echo
     done
@@ -290,13 +328,28 @@ verdict() {
             if [[ "$r" == "$c" && "$v" != "ok" ]]; then
                 echo "  BROKEN  $r cannot reach its own $what ($v)"
                 broken=$((broken + 1))
+            elif [[ "$r" != "$c" && -n "${LEAKED[$r,$c]:-}" ]]; then
+                # Deliberately leaked: reachable is the requirement here, and
+                # NOT reachable is the failure. The polarity is inverted for
+                # these cells and for no others.
+                if [[ "$v" != ok* ]]; then
+                    echo "  GAP     $r should reach $c's $what - they are leaked to each other - but got $v"
+                    broken=$((broken + 1))
+                fi
             elif [[ "$r" != "$c" && "$v" == ok* ]]; then
                 echo "  LEAK    $r reached $c's $what - the VRFs are not separating"
                 leaks=$((leaks + 1))
             fi
         done
     done
-    (( leaks == 0 && broken == 0 )) && echo "  clean: every tenant reached its own $what and nobody else's"
+    if (( leaks == 0 && broken == 0 )); then
+        if (( ${#leak_pairs[@]} )); then
+            echo "  clean: every tenant reached its own $what, the deliberately"
+            echo "         leaked pairs reached each other, and nobody else did"
+        else
+            echo "  clean: every tenant reached its own $what and nobody else's"
+        fi
+    fi
     return $(( leaks + broken ))
 }
 
@@ -391,13 +444,27 @@ probe_from_vms() {
 
 print_vm_matrix() {
     echo
-    echo "client -> pod   (expect ok only for the tenants each client serves)"
+    echo "client -> pod   (expect ok only for the tenants each client serves${leak_pairs[0]:+, plus what those are leaked to})"
     printf '%-16s' 'client'
     for c in "${tenants_all[@]}"; do printf ' %-10s' "$c"; done
     echo
+    local r c v t
     for r in "${clients[@]}"; do
         printf '%-16s' "$r"
-        for c in "${tenants_all[@]}"; do printf ' %-10s' "${VM["$r,$c"]:--}"; done
+        for c in "${tenants_all[@]}"; do
+            v="${VM["$r,$c"]:--}"
+            # A cell this client is meant to reach only because of a leak is
+            # annotated, so an intended opening never reads as a leak.
+            case " ${SERVES[$r]} " in
+                *" $c "*) ;;
+                *) for t in ${SERVES[$r]}; do
+                       [[ -n "${LEAKED[$t,$c]:-}" ]] || continue
+                       case "$v" in ok*) v="ok+" ;; AMBIG) ;; *) v="GAP" ;; esac
+                       break
+                   done ;;
+            esac
+            printf ' %-10s' "$v"
+        done
         echo
     done
 }
@@ -408,17 +475,38 @@ vm_verdict() {
         for c in "${tenants_all[@]}"; do
             v="${VM["$r,$c"]:-}"
             [[ "$v" == "NO-SSH" || "$v" == "NO-UDN" || "$v" == "AMBIG" ]] && continue
-            case " ${SERVES[$r]} " in *" $c "*) expected=ok ;; *) expected=FAIL ;; esac
+            # A client reaches the tenants it serves, and - once leaf1 is told
+            # to leak - also whatever those tenants were opened to. It gets
+            # there through its OWN VLAN: the leak is in leaf1's table, not in
+            # anything the client is configured with beyond one route.
+            expected=FAIL; via=""
+            case " ${SERVES[$r]} " in *" $c "*) expected=ok ;; esac
+            if [[ "$expected" == FAIL ]]; then
+                for t in ${SERVES[$r]}; do
+                    if [[ -n "${LEAKED[$t,$c]:-}" ]]; then expected=ok; via=" (leaked from $t)"; break; fi
+                done
+            fi
             if [[ "$expected" == "ok" && "$v" != "ok" ]]; then
-                echo "  BROKEN  $r serves $c but cannot reach its pods"
+                if [[ -n "$via" ]]; then
+                    echo "  GAP     $r should reach $c$via but got $v"
+                else
+                    echo "  BROKEN  $r serves $c but cannot reach its pods"
+                fi
                 bad=$((bad + 1))
             elif [[ "$expected" == "FAIL" && "$v" == "ok" ]]; then
-                echo "  LEAK    $r reached $c, which it has no VLAN for"
+                echo "  LEAK    $r reached $c, which it has no VLAN for and no leak to"
                 bad=$((bad + 1))
             fi
         done
     done
-    (( bad == 0 )) && echo "  clean: every client reached exactly the tenants it serves"
+    if (( bad == 0 )); then
+        if (( ${#leak_pairs[@]} )); then
+            echo "  clean: every client reached exactly the tenants it serves and"
+            echo "         the tenants those are leaked to, and nothing else"
+        else
+            echo "  clean: every client reached exactly the tenants it serves"
+        fi
+    fi
     return $bad
 }
 

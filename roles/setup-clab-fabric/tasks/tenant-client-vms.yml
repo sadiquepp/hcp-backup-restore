@@ -76,22 +76,38 @@
 # Two tenants on one VM is only safe while their pod subnets differ - one
 # routing table cannot hold a route to each of two identical prefixes. This is
 # the check that would have caught "just put all four on one VM".
+#
+# Route leaking widens this. A client that serves green also gets a route to
+# whatever green is leaked to, so the prefixes it must hold are its tenants'
+# subnets PLUS its tenants' leak partners' subnets - and the whole set has to
+# be distinct, for the same one-table reason. A client serving green and purple
+# would be legal today and illegal the moment green is leaked to blue and
+# purple to red, because it would then need 10.200.0.0/16 twice.
 - name: Fail if one client serves two tenants with the same pod subnet
   vars:
+    udn_tc_subnet_of: >-
+      {{ udn_bgp_tenants | items2dict(key_name='name', value_name='udn_subnet') }}
+    udn_tc_partners: >-
+      {{ client.tenants | map('extract', udn_vrf_leak_partners | default({}))
+         | select('defined') | flatten | list }}
     udn_tc_subnets: >-
-      {{ client.tenants | map('extract', udn_bgp_tenants | items2dict(key_name='name', value_name='udn_subnet')) | list }}
+      {{ (client.tenants | map('extract', udn_tc_subnet_of) | list)
+         + (udn_tc_partners | map('extract', udn_tc_subnet_of) | list) }}
   ansible.builtin.assert:
     that: udn_tc_subnets | unique | length == udn_tc_subnets | length
     fail_msg: >-
-      {{ client.name }} serves {{ client.tenants | join(', ') }}, whose pod
-      subnets are {{ udn_tc_subnets }} - and two of those are identical. One
-      host has one routing table, so it can hold a route to that prefix once:
-      one of the tenants would be unreachable by construction and the
-      isolation result would be meaningless. Overlapping tenants need separate
-      VMs. That is the point of the phase, not a limitation to work around.
+      {{ client.name }} serves {{ client.tenants | join(', ') }}{{
+      ', which are leaked to ' ~ (udn_tc_partners | join(', ')) if udn_tc_partners else '' }},
+      so it needs routes for {{ udn_tc_subnets }} - and two of those are
+      identical. One host has one routing table, so it can hold a route to that
+      prefix once: one of the tenants would be unreachable by construction and
+      the isolation result would be meaningless. Overlapping tenants need
+      separate VMs. That is the point of the phase, not a limitation to work
+      around.
     success_msg: >-
-      {{ client.name }} serves {{ client.tenants | join(', ') }} with distinct
-      pod subnets {{ udn_tc_subnets }}.
+      {{ client.name }} serves {{ client.tenants | join(', ') }}{{
+      ' (+ leaked ' ~ (udn_tc_partners | join(', ')) ~ ')' if udn_tc_partners else '' }}
+      and needs distinct prefixes {{ udn_tc_subnets }}.
   loop: "{{ udn_tenant_clients }}"
   loop_control:
     loop_var: client

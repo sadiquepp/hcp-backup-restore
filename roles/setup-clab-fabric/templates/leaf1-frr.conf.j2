@@ -129,6 +129,24 @@ router bgp {{ clab_leaf1_asn }} vrf {{ t.name }}
   neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} route-map FROM-CLUSTER in
   neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} soft-reconfiguration inbound
 {% endfor %}
+{% set partners = [] %}
+{% for pair in udn_vrf_leaks | default([]) %}
+{% if t.name == pair[0] %}{% set _ = partners.append(pair[1]) %}
+{% elif t.name == pair[1] %}{% set _ = partners.append(pair[0]) %}
+{% endif %}
+{% endfor %}
+{% for other in partners %}
+  ! Deliberate leak: {{ other }}'s routes are copied into this table, and
+  ! {{ t.name }}'s into {{ other }}'s. Both directions, because a one-way import
+  ! gives a path out and none back - a configuration choice that presents as
+  ! a fabric fault. There is no outbound route-map on the neighbours above, so
+  ! these propagate to the cluster over VLAN {{ t.vlan }} with nothing further.
+  !
+  ! Legal only because {{ t.udn_subnet }} and {{ (udn_bgp_tenants | selectattr('name','equalto',other) | first).udn_subnet }} are disjoint. This
+  ! table now holds exactly one route for each, which is the whole condition:
+  ! a table has one entry per destination, and {{ other }} is unambiguous here.
+  import vrf {{ other }}
+{% endfor %}
  exit-address-family
 exit
 !

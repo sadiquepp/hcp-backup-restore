@@ -1551,3 +1551,38 @@ udn_proxy_stats_port: 8404
 ## the policy alone; the task comments name two narrower alternatives (a
 ## targeted audit2allow module, or SELinuxContext= on the unit).
 udn_proxy_selinux_permissive_fallback: true
+
+
+## ---------------------------------------------------------------------------
+## Deliberate inter-tenant routing (--tags clabdeploy, leaf1)
+## ---------------------------------------------------------------------------
+## VRF-Lite separates tenants by giving each its own routing table. Route
+## LEAKING is the controlled exception: `import vrf <other>` copies one VRF's
+## BGP routes into another's table, which is how a shared service is reached
+## without making the tenants mutually reachable in general.
+##
+## The constraint is arithmetic, not policy. A table holds one route per
+## destination, so a VRF can only import tenants whose subnets are disjoint
+## from its own AND from each other. That makes blue<->red and green<->purple
+## impossible - they are the pairs built to collide - and everything else
+## legal. An assert in setup-clab-fabric enforces it rather than leaving a
+## silent winner-takes-all in the table.
+##
+## These two pairs are chosen to say something the lab has not said yet:
+##
+##   blue imports green   ->  blue's table:  10.204.0.0/16 = green
+##   red  imports purple  ->  red's table:   10.204.0.0/16 = purple
+##
+## The same prefix, in two tables, meaning two different tenants. Phase 3 has
+## been proving that two tenants can hold one address and stay apart; this
+## proves the same tables can be opened between chosen pairs without the
+## ambiguity ever arising, because no single table is asked to hold both.
+##
+## Each pair is leaked BOTH ways. A one-way import gives a path out and none
+## back, which presents as a fabric fault rather than a configuration choice -
+## the same trap as leaving out the client segment's `network` statement.
+##
+## Set to [] to have the tenants fully isolated again.
+udn_vrf_leaks:
+  - [blue, green]
+  - [red, purple]

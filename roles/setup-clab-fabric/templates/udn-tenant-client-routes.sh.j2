@@ -83,5 +83,21 @@ ip route replace {{ tenant.udn_subnet }} via {{ seg.prefix }}.{{ udn_client_segm
 # because leaf1 routes it inside the {{ t }} VRF - the same VRF, a second way in.
 ip route replace {{ tenant.external_prefix }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$VLAN{{ seg.vlan }}"
 
+{% set leak_partners = [] %}
+{% for pair in udn_vrf_leaks | default([]) %}
+{% if pair[0] == t %}{% set _ = leak_partners.append(pair[1]) %}
+{% elif pair[1] == t %}{% set _ = leak_partners.append(pair[0]) %}
+{% endif %}
+{% endfor %}
+{% for other in leak_partners %}
+{% set otenant = udn_bgp_tenants | selectattr('name', 'equalto', other) | first %}
+# {{ other }}'s pods, reached THROUGH {{ t }}. leaf1 has `import vrf {{ other }}` inside the
+# {{ t }} VRF, so {{ otenant.udn_subnet }} is resolvable in {{ t }}'s table - one more
+# destination on the VLAN this client already has, not a second VLAN. Remove
+# the leak from udn_vrf_leaks and this route stops working while everything
+# else here carries on, which is the point of leaking being explicit.
+ip route replace {{ otenant.udn_subnet }} via {{ seg.prefix }}.{{ udn_client_segment_gw_octet }} dev "$VLAN{{ seg.vlan }}"
+{% endfor %}
+
 {% endfor %}
 echo "udn-tenant-client-routes.sh: $NIC up, {{ client.tenants | length }} tenant VLAN(s): {% for t in client.tenants %}{{ t }}={{ udn_client_segments[t].vlan }} {% endfor %}"
