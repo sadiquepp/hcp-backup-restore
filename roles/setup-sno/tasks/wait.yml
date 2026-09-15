@@ -1,0 +1,74 @@
+---
+# Two waits, because they fail for different reasons.
+#
+# bootstrap-complete   the agents elected a rendezvous node, RHCOS was written,
+#                      and a control plane came up. Failures here are addressing,
+#                      disk, or the release payload not being pullable.
+# install-complete     the cluster operators settled. Failures here are the
+#                      cluster running but unhappy - usually DNS, or an SNO
+#                      short of memory.
+#
+# Conflating them costs a debugging round, because the second failure looks
+# identical to the first if you only ever run the second.
+
+- name: Wait for bootstrap to complete (up to {{ sno_bootstrap_timeout_min }}m)
+  ansible.builtin.command:
+    cmd: >-
+      {{ sno_install_folder }}/openshift-install --dir {{ sno_install_folder }}
+      agent wait-for bootstrap-complete --log-level=info
+  register: sno_bootstrap
+  changed_when: false
+  failed_when: false
+  timeout: "{{ (sno_bootstrap_timeout_min | int) * 60 }}"
+
+- name: Report the bootstrap result
+  ansible.builtin.debug:
+    msg: "{{ (sno_bootstrap.stderr_lines | default([], true) + sno_bootstrap.stdout_lines | default([], true))[-25:] }}"
+
+- name: Fail if bootstrap did not complete
+  ansible.builtin.assert:
+    that: sno_bootstrap.rc == 0
+    fail_msg: >-
+      The SNO did not reach a working control plane. Look at the node itself
+      before the installer's log - the common causes are all visible there:
+        virsh console {{ sno_name }}
+        ssh core@{{ sno_ip }} 'sudo journalctl -u assisted-service -u agent'
+      An agent that never got an address means agent-config.yaml's MAC or NIC
+      name is wrong ({{ sno_mgmt_mac }} / {{ sno_primary_nic }}); an agent that
+      got an address and stalled is usually the release payload not being
+      pullable with this pull secret.
+    success_msg: "Control plane is up."
+
+- name: Wait for the install to complete (up to {{ sno_install_timeout_min }}m)
+  ansible.builtin.command:
+    cmd: >-
+      {{ sno_install_folder }}/openshift-install --dir {{ sno_install_folder }}
+      agent wait-for install-complete --log-level=info
+  register: sno_complete
+  changed_when: false
+  failed_when: false
+  timeout: "{{ (sno_install_timeout_min | int) * 60 }}"
+
+- name: Report the install result
+  ansible.builtin.debug:
+    msg: "{{ (sno_complete.stderr_lines | default([], true) + sno_complete.stdout_lines | default([], true))[-25:] }}"
+
+- name: Fail if the install did not complete
+  ansible.builtin.assert:
+    that: sno_complete.rc == 0
+    fail_msg: >-
+      The control plane came up but the cluster did not finish settling. It is
+      reachable, so look at it directly:
+        export KUBECONFIG={{ sno_install_folder }}/auth/kubeconfig
+        oc get clusteroperators
+      A cluster that is up but has degraded operators is most often DNS
+      (*.apps.{{ sno_cluster_domain }} must resolve to {{ sno_ip }}) or an SNO
+      short of memory - sno_memory is currently {{ sno_memory }}MiB.
+    success_msg: "{{ sno_name }} is installed."
+
+- name: Report how to use the cluster
+  ansible.builtin.debug:
+    msg:
+      - "export KUBECONFIG={{ sno_install_folder }}/auth/kubeconfig"
+      - "kubeadmin password: {{ sno_install_folder }}/auth/kubeadmin-password"
+      - "console: https://console-openshift-console.apps.{{ sno_cluster_domain }}"

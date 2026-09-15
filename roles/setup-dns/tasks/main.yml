@@ -82,6 +82,26 @@
   notify:
     -  Restart_Named
 
+# The single-node cluster (setup_sno.yaml), when vars.yaml carries one.
+#
+# Rendered whether or not the cluster has been built: the agent installer needs
+# api.<zone> to resolve before it can watch its own install, so the zone has to
+# exist first. Guarded on the SAME condition as the stanza in
+# named.rfc1912.zones.j2 - a stanza without its file stops named from starting,
+# which would take every other zone down with it.
+- name: Deploy "{{ sno_name | default('') }}.{{ base_domain }}" - Forward zonefile
+  template:
+    src: sno_domain.j2
+    dest: "/var/named/{{ sno_name }}.{{ base_domain }}.db"
+    owner: root
+    group: named
+    mode: u=rw,g=r,o=r
+  when:
+    - (sno_name | default('')) | length > 0
+    - ip_list[sno_name] is defined
+  notify:
+    -  Restart_Named
+
 # Every hosted cluster gets a zone, connected and disconnected alike, in one
 # unconditional pass - the helper serves all of them at once and never needs
 # rebuilding to switch between the two. The zones are derived from the cluster

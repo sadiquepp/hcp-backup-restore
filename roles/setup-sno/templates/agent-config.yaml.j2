@@ -1,0 +1,54 @@
+{#
+  agent-config.yaml for the connected SNO.
+
+  rendezvousIP is the address the agents elect as the bootstrap node. On a
+  single-node cluster there is only one candidate, so it is simply this node's
+  address - but it still has to be correct and it still has to be STATIC. The
+  agent needs to know it before the node has finished booting, which a DHCP
+  lease cannot provide.
+
+  networkConfig is nmstate, applied by the agent before the install starts. It
+  matches the interface on BOTH name and MAC; a mismatch in either leaves the
+  node with no address and the install never begins - the ISO boots, the
+  console looks healthy, and nothing ever registers.
+
+  rootDeviceHints removes the one remaining guess. With a single virtio disk
+  the installer would pick /dev/vda anyway, but naming it means adding a second
+  disk later cannot silently change where RHCOS lands.
+#}
+apiVersion: v1alpha1
+kind: AgentConfig
+metadata:
+  name: {{ sno_name }}
+rendezvousIP: {{ sno_ip }}
+hosts:
+  - hostname: {{ sno_name }}
+    interfaces:
+      - name: {{ sno_primary_nic }}
+        macAddress: {{ sno_mgmt_mac }}
+    rootDeviceHints:
+      deviceName: {{ sno_installation_disk }}
+    networkConfig:
+      interfaces:
+        - name: {{ sno_primary_nic }}
+          type: ethernet
+          state: up
+          mac-address: {{ sno_mgmt_mac }}
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: {{ sno_ip }}
+                prefix-length: {{ sno_prefix_length }}
+          ipv6:
+            enabled: false
+      dns-resolver:
+        config:
+          server:
+            - {{ sno_dns_server }}
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: {{ sno_gateway }}
+            next-hop-interface: {{ sno_primary_nic }}
+            table-id: 254

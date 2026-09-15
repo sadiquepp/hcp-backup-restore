@@ -1,0 +1,84 @@
+---
+# Single-node OpenShift, installed from an agent ISO.
+#
+# CONNECTED. The node pulls its release payload straight from quay.io using the
+# lab's real pull secret, so there is no imageContentSources block, no
+# additionalTrustBundle and no dependency on the mirror registry. The
+# disconnected variant differs only in install-config.yaml - see
+# roles/setup-hub-cluster-disconnected for how that is done here - but it needs
+# the mirror to be up first, which is a different prerequisite chain.
+
+## The cluster's name, and with base_domain its DNS zone. metadata.name in
+## install-config, so api.<sno_name>.<base_domain> and
+## *.apps.<sno_name>.<base_domain> are what the installer will expect to
+## resolve. setup-dns renders that zone from the same two values.
+sno_name: sno
+
+## Where the installer works. Wiped and rebuilt on a fresh install, because
+## `agent create image` CONSUMES install-config.yaml and agent-config.yaml -
+## they are gone after the ISO is built, and a second run with no manifests
+## fails in a way that reads like a tooling bug. The rendered copies are kept
+## in {{ sno_install_folder }}/rendered/ for reference.
+sno_install_folder: /var/lib/libvirt/images/sno_install
+sno_vm_folder: /var/lib/libvirt/images/sno
+
+## SNO minimums are 8 vCPU / 16GiB / 120GB. These are comfortable rather than
+## minimal: an SNO at exactly the minimum spends its life under memory pressure
+## and the first symptom is operators flapping, which reads as a broken install.
+sno_memory: 32768
+sno_vcpus: 12
+sno_disk_gb: 200
+sno_os_variant: rhel9.4
+
+## The in-guest NIC name RHCOS will pick for the single virtio NIC on the first
+## PCI slot. Referenced by agent-config.yaml's networkConfig, which is nmstate
+## and matches on BOTH name and MAC - so this has to be right or the node comes
+## up with no address and the install never starts.
+sno_primary_nic: enp1s0
+
+## Where RHCOS is written. With one virtio disk this is /dev/vda; it becomes a
+## rootDeviceHints entry so the installer never has to guess.
+sno_installation_disk: /dev/vda
+
+## Addressing. Static, not DHCP: the agent installer needs the rendezvous
+## address to be knowable before the node has booted, and a lease is not.
+sno_gateway: "{{ lab_network_prefix }}.1"
+sno_dns_server: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+sno_prefix_length: 24
+
+## Same scheme as every other lab VM: 52:54:00:e2:54:<the node's ip_list octet>.
+sno_mgmt_mac_prefix: "52:54:00:e2:54"
+
+## Cluster-internal networks. Left at the OpenShift defaults deliberately - the
+## hub uses the same ones, and that is fine because neither cluster advertises
+## its default pod network (phase 2 onward removes default-podnetwork for
+## exactly that reason). If you ever DO advertise both, these have to differ.
+sno_cluster_network_cidr: 10.128.0.0/14
+sno_cluster_network_host_prefix: 23
+sno_service_network_cidr: 172.30.0.0/16
+
+## An unconfigured second NIC on the containerlab fabric. Off by default: this
+## role builds a cluster and nothing here needs the fabric. Turn it on before
+## the first build if the SNO is destined for the EVPN lab - adding a NIC to a
+## live VM afterwards works (virsh attach-interface, as the UDN client VMs do)
+## but means a reboot and a second pass over agent-config.
+sno_fabric_nic: false
+
+## Refuse to rebuild over an existing VM unless this is set. The guard exists
+## because the first thing a rebuild does is delete sno_install_folder, and
+## that folder holds auth/kubeconfig - the only copy of the admin credentials
+## for a cluster that may be perfectly healthy.
+sno_force_reinstall: false
+
+## Block until the cluster is up. Two waits, not one: bootstrap-complete tells
+## you the agent got as far as a working control plane, install-complete tells
+## you the operators settled. They fail for different reasons and conflating
+## them costs a debugging round.
+sno_wait_for_install: true
+sno_bootstrap_timeout_min: 60
+sno_install_timeout_min: 90
+
+## The key injected into the node for `ssh core@<sno>`. Same key the rest of
+## the lab uses; read at render time rather than templated from a variable so
+## there is one copy of it on disk and no chance of the two drifting.
+sno_ssh_public_key_file: "~/.ssh/lab_rsa.pub"

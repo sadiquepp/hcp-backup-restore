@@ -1,0 +1,23 @@
+{# Forward zone for the single-node cluster (setup_sno.yaml).
+
+   Everything points at one address, because on an SNO everything IS one
+   machine: the node, the API server and the ingress router all live there.
+   That is the whole difference from the hosted-cluster zones next door, where
+   api/api-int follow a MetalLB VIP that can move between hubs.
+
+   The installer needs api.<zone> to resolve before `agent wait-for` can watch
+   the install, and the router needs *.apps.<zone> before any route works - so
+   this zone is rendered whether or not the cluster exists yet. A zone serving
+   an address nothing answers on is harmless; a missing zone is not. #}
+$TTL 1D
+@	IN SOA	helper.{{ hub_domain }}. root.{{ hub_domain }}. (
+					0	; serial
+					1D	; refresh
+					1H	; retry
+					1W	; expire
+					3H )	; minimum
+		NS	helper.{{ hub_domain }}.
+{{ "%-15s" | format(sno_name) }}A	{{ lab_network_prefix }}.{{ ip_list[sno_name] }}
+api		A	{{ lab_network_prefix }}.{{ ip_list[sno_name] }}
+api-int		A	{{ lab_network_prefix }}.{{ ip_list[sno_name] }}
+*.apps		A	{{ lab_network_prefix }}.{{ ip_list[sno_name] }}

@@ -1,0 +1,34 @@
+---
+# Build a connected single-node OpenShift from an agent ISO.
+#
+#   ansible-playbook -i inventory/hosts setup_sno.yaml --ask-vault-pass
+#
+# Runs on the hypervisor. --ask-vault-pass is not optional: this is a connected
+# install and the node pulls its release payload from quay.io with the pull
+# secret out of vault.yaml.
+#
+# Useful subsets:
+#   --tags dns          just (re)render the cluster's DNS zone
+#   --tags snoimage     rebuild the agent ISO without touching the VM
+#   --tags snovm        rebuild the VM from the ISO already built
+#   --tags snowait      just block until an install already running finishes
+#
+# Rebuilding over an existing cluster needs -e sno_force_reinstall=true; the
+# guard is there because the rebuild deletes the only copy of its kubeconfig.
+- name: Set up a single-node OpenShift cluster
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+    # The API name has to resolve before `agent wait-for` can watch the
+    # install, so the zone is served first rather than as a day-2 fix.
+    - name: Serve the cluster's DNS zone
+      ansible.builtin.import_role:
+        name: setup-dns
+      tags: [sno, dns]
+
+    - name: Install the SNO
+      ansible.builtin.import_role:
+        name: setup-sno

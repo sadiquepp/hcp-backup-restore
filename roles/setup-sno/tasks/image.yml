@@ -1,0 +1,101 @@
+---
+# Fetch the installer, render the two manifests, and build the agent ISO.
+
+- name: Create the install and VM directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ sno_install_folder }}"
+    - "{{ sno_vm_folder }}"
+
+# Matched to the cluster version rather than 'latest': the agent ISO embeds the
+# release payload's coordinates, so an installer from a different stream builds
+# an ISO for a different OpenShift than the one intended.
+- name: Get the OpenShift installer for {{ ocp_major_version }}.{{ ocp_minor_version }}
+  ansible.builtin.get_url:
+    url: >-
+      https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-install-linux.tar.gz
+    dest: "{{ sno_install_folder }}/openshift-install-linux.tar.gz"
+    mode: '0644'
+
+- name: Extract openshift-install
+  ansible.builtin.unarchive:
+    src: "{{ sno_install_folder }}/openshift-install-linux.tar.gz"
+    dest: "{{ sno_install_folder }}"
+    remote_src: true
+
+- name: Report the installer version
+  ansible.builtin.command:
+    cmd: "{{ sno_install_folder }}/openshift-install version"
+  register: sno_installer_version
+  changed_when: false
+
+- name: Show the installer version
+  ansible.builtin.debug:
+    msg: "{{ sno_installer_version.stdout_lines }}"
+
+# Kept where they can be read after the fact. `agent create image` CONSUMES
+# both manifests - they are deleted from the install directory once the ISO is
+# built - so without this copy there is no record of what was actually
+# installed, and re-running is the only way to see the config.
+- name: Keep a readable copy of what is being installed
+  ansible.builtin.file:
+    path: "{{ sno_install_folder }}/rendered"
+    state: directory
+    mode: '0755'
+
+- name: Render install-config.yaml and agent-config.yaml
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ sno_install_folder }}/rendered/{{ item }}"
+    mode: '0600'
+  loop:
+    - install-config.yaml
+    - agent-config.yaml
+
+- name: Place the manifests where the installer will consume them
+  ansible.builtin.copy:
+    src: "{{ sno_install_folder }}/rendered/{{ item }}"
+    dest: "{{ sno_install_folder }}/{{ item }}"
+    mode: '0600'
+    remote_src: true
+  loop:
+    - install-config.yaml
+    - agent-config.yaml
+
+- name: Build the agent ISO
+  ansible.builtin.command:
+    cmd: "{{ sno_install_folder }}/openshift-install --dir {{ sno_install_folder }} agent create image"
+  register: sno_iso_build
+  changed_when: true
+
+- name: Report the ISO build
+  ansible.builtin.debug:
+    msg: "{{ sno_iso_build.stdout_lines | default([], true) + sno_iso_build.stderr_lines | default([], true) }}"
+
+- name: Confirm the ISO exists
+  ansible.builtin.stat:
+    path: "{{ sno_install_folder }}/agent.x86_64.iso"
+  register: sno_iso
+
+- name: Fail if the ISO was not produced
+  ansible.builtin.assert:
+    that: sno_iso.stat.exists
+    fail_msg: >-
+      openshift-install reported success but there is no
+      {{ sno_install_folder }}/agent.x86_64.iso. The rendered manifests are in
+      {{ sno_install_folder }}/rendered/ - check them, since the installer
+      consumed the originals and they are no longer in the install directory.
+    success_msg: >-
+      Agent ISO built: {{ sno_install_folder }}/agent.x86_64.iso
+      ({{ (sno_iso.stat.size / 1024 / 1024) | round | int }} MiB).
+
+# qemu needs to read the ISO and the disk as its own user.
+- name: Let qemu read the ISO
+  ansible.builtin.file:
+    path: "{{ sno_install_folder }}/agent.x86_64.iso"
+    mode: '0644'
