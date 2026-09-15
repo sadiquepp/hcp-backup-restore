@@ -128,6 +128,33 @@ topology:
         - ip link set eth10 mtu {{ clab_fabric_mtu }} up
         - ip addr add 10.1.0.6/30 dev eth10
 {% for t in udn_bgp_tenants %}
+{% if t.topology | default('Layer3') == 'Layer2' %}
+        ## macVRF / L2VNI. The cluster declares this tenant with
+        ##   evpn: macVRF: { vni: {{ t.evpn_mac_vni }} }
+        ## so the VNI instantiated here MUST be {{ t.evpn_mac_vni }}, not {{ t.evpn_ip_vni }}. Building
+        ## every tenant from evpn_ip_vni was the original bug: the two ends
+        ## instantiated different numbers and no tunnel ever formed, with the
+        ## EVPN sessions up and nothing to show for them.
+        ##
+        ## No VRF and no SVI. A macVRF carries MAC reachability, not prefixes,
+        ## so there is nothing to route: the external endpoint is a host INSIDE
+        ## {{ t.udn_subnet }}, in the same broadcast domain as the pods, and it
+        ## reaches them by ARP resolved from type-2 routes. external_gw and
+        ## external_prefix are unused for this tenant here.
+        - ip link add vni{{ t.evpn_mac_vni }} type vxlan id {{ t.evpn_mac_vni }} local 10.0.0.2 dstport 4789 nolearning
+        - ip link add br{{ t.evpn_mac_vni }} type bridge
+        - ip link set vni{{ t.evpn_mac_vni }} master br{{ t.evpn_mac_vni }}
+        - ip link set vni{{ t.evpn_mac_vni }} type bridge_slave neigh_suppress on learning off
+        ## The access port joins the stretched L2 domain - a bridge port, not a
+        ## VRF slave, and with no address of its own on this side.
+        - ip link set {{ t.name }}-ext master br{{ t.evpn_mac_vni }}
+        - ip link set vni{{ t.evpn_mac_vni }} mtu {{ clab_fabric_mtu }} up
+        - ip link set br{{ t.evpn_mac_vni }} mtu {{ clab_fabric_mtu }} up
+        - ip link set {{ t.name }}-ext up
+{% else %}
+        ## ipVRF / L3VNI, symmetric IRB: the bridge is enslaved to the VRF and
+        ## carries no access port. Type-5 prefix routes arrive, are decapsulated
+        ## into this VNI and routed in the VRF.
         - ip link add {{ t.name }} type vrf table {{ 1000 + t.vlan }}
         - ip link set {{ t.name }} up
         - ip link add vni{{ t.evpn_ip_vni }} type vxlan id {{ t.evpn_ip_vni }} local 10.0.0.2 dstport 4789 nolearning
@@ -141,6 +168,7 @@ topology:
         - ip link set {{ t.name }}-ext master {{ t.name }}
         - ip addr add {{ t.external_gw }}/{{ t.external_prefix_bits }} dev {{ t.name }}-ext
         - ip link set {{ t.name }}-ext up
+{% endif %}
 {% endfor %}
         ## vtysh -b, never frrinit.sh restart - see leaf1 above.
         - vtysh -b
@@ -150,9 +178,18 @@ topology:
       kind: linux
       image: {{ clab_alpine_image }}
       exec:
+{% if t.topology | default('Layer3') == 'Layer2' %}
+        ## In the pods' own subnet, because this tenant's EVPN transport is a
+        ## macVRF: one broadcast domain stretched across the fabric. No gateway
+        ## and no default route - every pod is on-link from here, reached by
+        ## ARP answered out of type-2 routes rather than by any routing at all.
+        - ip addr add {{ t.evpn_l2_external_host }}/{{ t.udn_subnet.split('/')[1] }} dev eth1
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+{% else %}
         - ip addr add {{ t.external_host }}/{{ t.external_prefix_bits }} dev eth1
         - ip link set eth1 mtu {{ clab_fabric_mtu }} up
         - ip route replace default via {{ t.external_gw }} dev eth1
+{% endif %}
 {% endfor %}
 
   links:

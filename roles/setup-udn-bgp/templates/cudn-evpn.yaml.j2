@@ -49,6 +49,16 @@ spec:
       role: Primary
       subnets:
         - {{ tenant.udn_subnet }}
+{% if tenant.evpn_l2_exclude is defined %}
+      # Reserved for the fabric side. This tenant's EVPN transport is a macVRF,
+      # so its external endpoint sits INSIDE this subnet, on leaf2's side of the
+      # VXLAN tunnel - {{ tenant.evpn_l2_external_host }}. OVN knows nothing about it and would
+      # happily allocate the same address to a pod, putting two machines on one
+      # address in one broadcast domain. That is a duplicate-address bug, not
+      # the deliberate cross-network overlap this lab is about.
+      excludeSubnets:
+        - {{ tenant.evpn_l2_exclude }}
+{% endif %}
       ipam:
         lifecycle: Persistent
     transport: EVPN

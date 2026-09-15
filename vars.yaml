@@ -1404,6 +1404,16 @@ udn_bgp_tenants:
     external_gw: "10.213.10.1"
     external_host: "10.213.10.10"
     evpn_mac_vni: 400
+    ## Phase 4 only. A macVRF carries MACs, not prefixes, so this tenant's
+    ## external endpoint is not a routed neighbour on external_prefix - it is a
+    ## HOST INSIDE udn_subnet, sharing the pods' broadcast domain across the
+    ## VXLAN tunnel. That is what a stretched L2 domain means, and it is why
+    ## external_gw / external_prefix go unused for this tenant on leaf2.
+    ##
+    ## Must sit inside udn_subnet and outside anything OVN might allocate,
+    ## which evpn_l2_exclude below reserves.
+    evpn_l2_external_host: "10.204.255.10"
+    evpn_l2_exclude: "10.204.255.0/24"
     evpn_ip_vni: 401
 
   ## The collision tenant. Layer2, and deliberately carrying the SAME
@@ -1442,6 +1452,15 @@ udn_bgp_tenants:
     external_host: "10.214.10.10"
     ## Layer2, so this takes a macVRF on the L2VNI like green does.
     evpn_mac_vni: 500
+    ## Deliberately NOT the same address as green's, though the two subnets are
+    ## identical and it would work. Two ext containers on one address would make
+    ## matrix 1 (pod -> external endpoint) ambiguous for exactly the same reason
+    ## the pod collision does, and udn-vrf-isolation.sh keys EXTHOST by tenant
+    ## with no AMBIG handling on that axis. The pod-side collision already makes
+    ## the overlap point; this would cost a second round of script work to say
+    ## it again. Set them equal once EXTHOST is address-keyed like ADDR_OWNERS.
+    evpn_l2_external_host: "10.204.255.20"
+    evpn_l2_exclude: "10.204.255.0/24"
     evpn_ip_vni: 501
 
 ## Where the rendered containerlab topology and FRR configs are staged, on
