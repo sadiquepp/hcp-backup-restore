@@ -50,7 +50,16 @@ ip link set "$NIC" mtu "$MTU" up
 NS="{{ t.name }}"
 DEV="$NIC.{{ seg.vlan }}"
 
-ip netns list | grep -qx "$NS" || ip netns add "$NS"
+# Test the file, not `ip netns list`. Once anything references a namespace -
+# and moving the VLAN in below does exactly that - the listing gains an id:
+#
+#     blue            becomes            blue (id: 0)
+#
+# so `grep -qx "$NS"` stops matching, the script tries to create a namespace
+# that already exists, and `ip netns add` fails with "File exists". It works on
+# the first run and fails on every one after, which is invisible until the unit
+# is restarted - and the unit only restarts when this script changes.
+[ -e "/var/run/netns/$NS" ] || ip netns add "$NS"
 
 # Create the VLAN device in the ROOT namespace, then move it. The parent NIC
 # stays in root - only the subinterface moves, which is what lets one physical
