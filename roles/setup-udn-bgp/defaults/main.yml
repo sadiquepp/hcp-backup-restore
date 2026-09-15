@@ -95,3 +95,17 @@ udn_bgp_catalog_source_namespace: "{{ acm_catalog_source_namespace | default('op
 # it - see tasks/wait-cudn.yml.
 udn_bgp_cudn_ready_retries: 30
 udn_bgp_cudn_ready_delay: 5
+
+# Where ovnkube-node lives. It is the component that notices a node's VTEP
+# address and writes the k8s.ovn.org/vteps annotation the VTEP CR checks for,
+# and it does not always notice an interface that appeared under it - see
+# tasks/evpn-vtep.yml.
+udn_bgp_ovnkube_namespace: openshift-ovn-kubernetes
+
+# Two waits for the VTEP annotation, not one. The first is short: if every
+# node is going to be annotated on its own, it happens quickly. What follows
+# it is a targeted restart of the agents that did not, and the second wait is
+# the generous one that covers the restart.
+udn_bgp_vtep_annotation_retries: 12
+udn_bgp_vtep_annotation_delay: 10
+udn_bgp_vtep_annotation_retries_after_restart: 30

@@ -1,0 +1,22 @@
+---
+# Poll until every node carries k8s.ovn.org/vteps, and leave the nodes that
+# do not in udn_bgp_vtep_unannotated.stdout_lines. The caller decides what an
+# empty result means - this file never fails.
+#
+# Per node rather than `oc wait` on the CR: the CR reports one aggregate
+# AllocationFailed however many nodes are short, and that message reads the
+# same whether the address is missing or merely unnoticed.
+#
+# Parameters: udn_bgp_vtep_wait_retries, udn_bgp_vtep_wait_delay.
+
+- name: Wait for OVN-Kubernetes to annotate every node with its VTEP address
+  ansible.builtin.shell:
+    cmd: |
+      oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.k8s\.ovn\.org/vteps}{"\n"}{end}' |
+        awk -F'\t' '$2 == "" { print $1 }'
+  register: udn_bgp_vtep_unannotated
+  changed_when: false
+  failed_when: false
+  until: (udn_bgp_vtep_unannotated.stdout | default("", true) | trim) == ""
+  retries: "{{ udn_bgp_vtep_wait_retries | default(udn_bgp_vtep_annotation_retries) }}"
+  delay: "{{ udn_bgp_vtep_wait_delay | default(udn_bgp_vtep_annotation_delay) }}"

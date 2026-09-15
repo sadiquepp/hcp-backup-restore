@@ -136,44 +136,88 @@
 # AFTER the CR exists: ovnkube-node has no way to know which of a node's
 # addresses is a VTEP until something tells it the CIDRs. So this cannot be
 # checked before creating the CR - the order here is the only one that works.
-#
-# Polled per node rather than left to `oc wait` on the CR, because the CR
-# reports one aggregate AllocationFailed however many nodes are short, and
-# that message is the same whether the address is missing or merely
-# unnoticed. Naming the nodes turns a five-minute timeout into a fact.
-- name: Wait for OVN-Kubernetes to annotate every node with its VTEP address
-  ansible.builtin.shell:
-    cmd: |
-      oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.k8s\.ovn\.org/vteps}{"\n"}{end}' |
-        awk -F'\t' '$2 == "" { print $1 }'
-  register: udn_bgp_vtep_unannotated
-  changed_when: false
-  failed_when: false
-  until: (udn_bgp_vtep_unannotated.stdout | default("", true) | trim) == ""
-  retries: 30
-  delay: 10
+- name: Wait for every node to be annotated with its VTEP address
+  ansible.builtin.include_tasks: wait-vtep-annotation.yml
 
-# Only for the nodes that did not make it, and only to answer the one
-# question the CR's own message cannot: is the address actually on the node?
+# Everything below is the remedy for one specific, reproducible state:
+# nmstate has put the address on the node and reported SuccessfullyConfigured,
+# and ovnkube-node has not noticed. It was seen on master1 and master3 while
+# master2 and all three workers annotated themselves - the agents that had
+# restarted for other reasons picked the interface up, and the ones that had
+# not, did not. It does not resolve on its own.
 #
-#   vtep0 present with an address  -> nmstate did its job and ovnkube-node
-#                                     has not picked it up; restarting that
-#                                     node's ovnkube-node is the usual cure.
-#   vtep0 absent or empty          -> the NNCP reported Available without
-#                                     applying, so the problem is nmstate on
-#                                     that node, not OVN-Kubernetes.
-- name: Ask the unannotated nodes whether they have the address at all
-  ansible.builtin.command:
-    cmd: >-
-      oc debug node/{{ item }} --quiet --
-      chroot /host ip -br addr show {{ udn_bgp_vtep_iface }}
-  loop: "{{ udn_bgp_vtep_unannotated.stdout_lines | default([], true) }}"
-  loop_control:
-    label: "{{ item }}"
-  register: udn_bgp_vtep_iface_state
-  changed_when: false
-  failed_when: false
+# Nothing here runs when every node is already annotated, which is the normal
+# case; the block is skipped whole.
+- name: Nudge the agents that have the address but have not annotated it
   when: (udn_bgp_vtep_unannotated.stdout | default('', true) | trim) != ""
+  block:
+    - name: Ask the unannotated nodes whether they have the address at all
+      ansible.builtin.command:
+        cmd: >-
+          oc debug node/{{ item }} --quiet --
+          chroot /host ip -br addr show {{ udn_bgp_vtep_iface }}
+      loop: "{{ udn_bgp_vtep_unannotated.stdout_lines | default([], true) }}"
+      loop_control:
+        label: "{{ item }}"
+      register: udn_bgp_vtep_iface_state
+      changed_when: false
+      failed_when: false
+
+    # Only the nodes that demonstrably have the address. A node whose vtep0 is
+    # missing has an nmstate problem, and restarting its ovnkube-node would
+    # change nothing while making the real fault harder to see.
+    - name: Work out which agents are worth restarting
+      ansible.builtin.set_fact:
+        udn_bgp_vtep_stuck: >-
+          {{ udn_bgp_vtep_iface_state.results
+             | selectattr('stdout', 'search', udn_bgp_vtep_prefix | replace('.', '\\.'))
+             | map(attribute='item') | list }}
+
+    - name: Report what the nudge will and will not touch
+      ansible.builtin.debug:
+        msg: >-
+          unannotated {{ udn_bgp_vtep_unannotated.stdout_lines | default([], true) }};
+          restarting ovnkube-node on {{ udn_bgp_vtep_stuck }}
+          (the rest have no {{ udn_bgp_vtep_prefix }}.x address, which is an
+          nmstate problem and not something a restart fixes)
+
+    # Deleting an ovnkube-node pod is a normal operation - the DaemonSet
+    # recreates it - but it does interrupt that node's data plane briefly, so
+    # it is aimed at named nodes rather than the DaemonSet as a whole.
+    - name: Restart ovnkube-node on the stuck nodes
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ udn_bgp_ovnkube_namespace }} delete pod -l app=ovnkube-node
+          --field-selector spec.nodeName={{ item }}
+      loop: "{{ udn_bgp_vtep_stuck }}"
+      loop_control:
+        label: "{{ item }}"
+      when: udn_bgp_vtep_stuck | length > 0
+
+    - name: Wait for the restarted agents to come back
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ udn_bgp_ovnkube_namespace }} rollout status daemonset/ovnkube-node
+          --timeout=600s
+      changed_when: false
+      when: udn_bgp_vtep_stuck | length > 0
+
+    - name: Wait again for the annotation now the agents have restarted
+      ansible.builtin.include_tasks: wait-vtep-annotation.yml
+      vars:
+        udn_bgp_vtep_wait_retries: "{{ udn_bgp_vtep_annotation_retries_after_restart }}"
+
+    - name: Re-read the interface on anything still unannotated
+      ansible.builtin.command:
+        cmd: >-
+          oc debug node/{{ item }} --quiet --
+          chroot /host ip -br addr show {{ udn_bgp_vtep_iface }}
+      loop: "{{ udn_bgp_vtep_unannotated.stdout_lines | default([], true) }}"
+      loop_control:
+        label: "{{ item }}"
+      register: udn_bgp_vtep_iface_final
+      changed_when: false
+      failed_when: false
 
 - name: Fail naming the nodes that never got the annotation
   ansible.builtin.assert:
@@ -183,19 +227,22 @@
       VTEP CR cannot be accepted and the tenant CUDNs cannot be realised:
         {{ udn_bgp_vtep_unannotated.stdout_lines | default([], true) | join(', ') }}
 
-      What {{ udn_bgp_vtep_iface }} looks like on each of them:
-      {% for r in udn_bgp_vtep_iface_state.results | default([], true) %}
+      This is after restarting ovnkube-node on any of them that had the
+      address, so the easy cause is already ruled out.
+
+      What {{ udn_bgp_vtep_iface }} looks like on each of them now:
+      {% for r in udn_bgp_vtep_iface_final.results | default([], true) %}
         {{ r.item }}: {{ (r.stdout | default(r.stderr, true) | trim) or '(no output)' }}
       {% endfor %}
 
-      If the address IS there, nmstate has done its part and ovnkube-node has
-      not noticed it. Restart that node's agent and it will annotate:
-        oc -n openshift-ovn-kubernetes delete pod -l app=ovnkube-node \
-          --field-selector spec.nodeName=<node>
+      An address that IS there after a restart means ovnkube-node is
+      rejecting it rather than missing it - check its log on that node:
+        oc -n {{ udn_bgp_ovnkube_namespace }} logs -c ovnkube-controller \
+          $(oc -n {{ udn_bgp_ovnkube_namespace }} get pod -l app=ovnkube-node \
+              --field-selector spec.nodeName=<node> -o name) | grep -i vtep
 
-      If the address is NOT there, the NNCP reported Available without
-      applying - look at `oc get nncp vtep-<node> -o yaml` and the nmstate
-      handler on that node, not at OVN-Kubernetes.
+      An address that is NOT there is an nmstate problem, not an
+      OVN-Kubernetes one: look at `oc get nncp vtep-<node> -o yaml`.
     success_msg: >-
       Every node carries a k8s.ovn.org/vteps annotation.
 
