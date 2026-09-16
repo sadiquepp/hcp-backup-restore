@@ -24,6 +24,12 @@ Verified working, measured not assumed:
 - One ingress fronting both clusters: seven hostnames, one address, including
   `green-sno` and `purple-sno` sharing one backend address and returning
   different pages
+- Pod-to-pod HTTP across clusters, run against the live clusters: clean matrix,
+  4 boundary crossings, and the shared address `10.204.128.2` resolved to the
+  asking tenant in both directions
+
+Build instructions with the test and expected output after each phase, branched
+by transport: [udn-bgp-evpn-steps.md](udn-bgp-evpn-steps.md).
 
 ## Re-verify in five commands
 
@@ -73,6 +79,8 @@ In descending order of interest. None of these is a lab misconfiguration.
 - DNS for the two new ingress names needs `setup_bm_host.yaml --tags dns` after
   any change to `udn_proxy_clusters`. The demo uses `Host:` headers so it
   passes without it — which is how the gap went unnoticed once already.
+- README's "Layer 2 / MAC-VRF is not wired up" paragraph is stale - it was
+  wired up this session (green and purple on L2VNI 400, SVI on leaf2).
 - Phase 5, cross-cluster **Layer3** tenants, is not built. It needs its own
   subnet, VNI and route target per cluster — not a second copy of an existing
   tenant, which would put two origins on one route target.

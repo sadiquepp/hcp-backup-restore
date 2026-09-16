@@ -18,6 +18,10 @@ ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --ta
 
 where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
 
+To *build* the lab rather than understand it, follow
+**[udn-bgp-evpn-steps.md](udn-bgp-evpn-steps.md)** - commands and expected
+output, branched by which transport you want.
+
 ---
 
 ## Contents

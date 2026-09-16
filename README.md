@@ -1874,6 +1874,10 @@ Built by `setup_udn_bgp_lab.yaml` (roles `setup-clab-fabric` and
 or Ceph flows reads any of it, and none of those flows change whether or not
 you ever run it.
 
+**[udn-bgp-evpn-steps.md](udn-bgp-evpn-steps.md)** is the one to follow if you
+just want to build it: pick shared VRF, VRF-Lite or EVPN up front, and it names
+the sections for that path with the test and expected output after each one.
+
 **[bgp-evpn.md](bgp-evpn.md)** takes `setup-udn-bgp` apart into the `oc`
 commands it runs, phase by phase, with every manifest shown filled in rather
 than as a template. Read that to understand the mechanism, to debug a phase
