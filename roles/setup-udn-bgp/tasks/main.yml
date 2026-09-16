@@ -462,6 +462,60 @@
   ansible.builtin.include_tasks: wait-cudn.yml
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
+# Did the exclusions the manifest asked for actually survive the apply?
+#
+# Kubernetes prunes fields a CRD's structural schema does not declare, and it
+# does so SILENTLY - no error, no warning, no event. `oc apply` reports
+# configured, the manifest on disk says one thing and the live object says
+# another, and nothing connects the two. What that costs here is specific: the
+# exclusions are what keep two clusters on one stretched Layer2 network from
+# handing out the same address, so a pruned field does not fail, it produces a
+# duplicate address in one broadcast domain days later and presents as
+# intermittent loss.
+#
+# Reported rather than enforced. If the field turns out not to exist on
+# Layer2, that is a real finding about stretched L2 across clusters and the
+# lab should surface it, not refuse to run.
+- name: Read back the exclusions the cluster actually kept
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusteruserdefinednetwork {{ item.name }}
+      -o jsonpath={.spec.network.layer2.excludeSubnets}
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: udn_bgp_cudn_excludes
+  changed_when: false
+  failed_when: false
+  when:
+    - udn_phase == 'evpn'
+    - (item.topology | default('Layer3')) == 'Layer2'
+
+- name: Warn if an exclusion was asked for and not kept
+  vars:
+    want: >-
+      {{ (item.item.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
+         or ([item.item.evpn_l2_exclude] if item.item.evpn_l2_exclude is defined else []) }}
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ item.item.name }} asked for excludeSubnets {{ want }} and the
+      cluster kept '{{ item.stdout | default('') | trim or '(nothing)' }}'.
+      The API pruned the field rather than rejecting it, which means nothing is
+      reserving those addresses. Two consequences, both silent: the external
+      endpoint {{ item.item.evpn_l2_external_host | default('') }} can be
+      handed to a pod, and on a fabric with more than one cluster on this
+      L2VNI both clusters allocate from the same range and will eventually
+      collide. Confirm with:
+        oc explain clusteruserdefinednetwork.spec.network.layer2 | grep -i exclude
+        oc apply -f {{ udn_bgp_manifest_dir }}/cudn-{{ item.item.name }}.yaml --dry-run=server -o yaml
+  loop: "{{ udn_bgp_cudn_excludes.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name | default('?') }}"
+  when:
+    - item.skipped is not defined
+    - (item.stdout | default('') | trim | length) == 0
+    - (item.item.evpn_l2_excludes is defined) or (item.item.evpn_l2_exclude is defined)
+
 # `rollout status` on its own times out after ten minutes saying only that
 # it timed out, which is the least useful form of every failure this can hit.
 # The two common ones look nothing alike and are not visible in the DaemonSet
