@@ -43,6 +43,29 @@
     label: "{{ item.0 }}/{{ item.1 }}"
   when: item.1 in (clab_clusters[item.0].tenants | default(udn_proxy_tenants))
 
+# The DNS zone is generated from udn_proxy_names in a different playbook
+# entirely (setup-dns, via setup_bm_host.yaml --tags dns). If that list and the
+# routes built here ever disagree, the symptom is a hostname that resolves and
+# returns 404 - which reads as a proxy fault and is not one. Cheap to compare,
+# so compare.
+- name: Fail if the routes and the DNS name list disagree
+  ansible.builtin.assert:
+    that:
+      - (udn_proxy_routes | map(attribute='label') | list | sort)
+        == (udn_proxy_names | default('') | split | sort)
+    fail_msg: >-
+      The ingress will front
+      {{ udn_proxy_routes | map(attribute='label') | list | sort }}
+      but udn_proxy_names says
+      {{ udn_proxy_names | default('') | split | sort }}. Both are built from
+      udn_proxy_clusters, udn_proxy_tenants and clab_clusters in vars.yaml, so
+      they should not be able to differ - if they do, one of those changed
+      while a rendered manifest did not. The DNS zone is generated from
+      udn_proxy_names, so the mismatch would show up as a hostname that
+      resolves and 404s.
+    success_msg: >-
+      {{ udn_proxy_routes | length }} route(s) match the names DNS will serve.
+
 - name: Fail if no cluster offers any of the requested tenants
   ansible.builtin.assert:
     that: (udn_proxy_routes | default([])) | length > 0
@@ -115,6 +138,18 @@
 - name: Record where the ingress listens
   ansible.builtin.set_fact:
     udn_proxy_bind_addr: "{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}"
+
+- name: Point out that the zone is rendered by a different playbook
+  ansible.builtin.debug:
+    msg: >-
+      These names are served by haproxy as soon as this task file finishes, and
+      the demo reaches them with an explicit Host header, so nothing here needs
+      DNS. Resolving them - in a browser, or with plain curl - needs the hub
+      zone regenerated, which is a different playbook:
+        ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass --tags dns
+      Adding a cluster to udn_proxy_clusters adds names
+      ({{ udn_proxy_names | default('') | split | join(', ') }}), so that run is
+      needed again each time.
 
 - name: Record the ingress for the demo script
   ansible.builtin.template:

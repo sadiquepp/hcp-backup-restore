@@ -2055,6 +2055,23 @@ udn_proxy_clusters:
   - hub
   - sno
 
+## Every hostname the ingress answers to, as a space-separated string.
+##
+## Defined here rather than in either consumer because there are two: the
+## haproxy config in setup-clab-fabric and the DNS zone in setup-dns. Those run
+## from different playbooks, and a zone generated from the TENANT list while
+## haproxy was generated from the ROUTE list is a drift that presents as one
+## hostname resolving and 404ing - which reads as a proxy fault and is not one.
+##
+## Space-separated rather than a list because it is built by a Jinja loop, and
+## a joined string needs no type conversion to survive templating. Consumers
+## call .split() on it.
+##
+## The rule: bare name for the first cluster in udn_proxy_clusters, suffixed
+## for the rest, and a cluster only contributes the tenants it actually builds.
+udn_proxy_names: >-
+  {% for c in udn_proxy_clusters %}{% for t in udn_proxy_tenants %}{% if t in (clab_clusters[c].tenants | default(udn_proxy_tenants)) %}{{ t if c == udn_proxy_clusters[0] else t ~ '-' ~ c }} {% endif %}{% endfor %}{% endfor %}
+
 ## Hostnames are <tenant>.<domain>, pointed at the namespace client's
 ## management address in whatever resolver the lab uses. No DNS? The proxy also
 ## routes on path, so http://<vm>/green/ works with no name resolution at all,

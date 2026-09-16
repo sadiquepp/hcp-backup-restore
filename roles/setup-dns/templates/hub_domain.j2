@@ -23,18 +23,25 @@ cephadmin		A	{{ lab_network_prefix }}.{{ ip_list.cephadmin}}
 api		A	{{ lab_network_prefix }}.{{ ip_list.hublb}}
 api-int		A	{{ lab_network_prefix }}.{{ ip_list.hublb}}
 *.apps		A	{{ lab_network_prefix }}.{{ ip_list.hublb}}
-{% if (udn_proxy_tenants | default([])) and ip_list.get(udn_nsclient_vm_name | default('')) %}
+{% if (udn_proxy_names | default('') | trim) and ip_list.get(udn_nsclient_vm_name | default('')) %}
 ;
-; Tenant ingress for the UDN lab (--tags clabnsproxy). One name per tenant,
-; every one of them the same address: the proxy picks the tenant from the Host
-; header, not from where the name points. That is the whole trick - green and
-; purple resolve to one address AND dial one backend address (10.204.0.12) and
+; Tenant ingress for the UDN lab (--tags clabnsproxy). One name per tenant per
+; cluster, every one of them the same address: the proxy picks the route from
+; the Host header, not from where the name points. That is the whole trick -
+; green and purple resolve to one address AND dial one backend address and
 ; still return different pages, because haproxy makes each connection inside a
 ; different network namespace.
 ;
-; Generated from udn_proxy_tenants so the zone cannot drift from the tenant
-; list, and skipped entirely when the UDN lab vars are not loaded.
-{% for t in udn_proxy_tenants %}
-{{ "%-15s" | format(t) }}A	{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}
+; Once a second cluster is on the fabric the same applies across clusters:
+; green-sno resolves here too, is served out of the green namespace, and on a
+; stretched L2VNI its backend address can be identical to purple-sno's.
+;
+; Generated from udn_proxy_names, which is where the naming rule lives, so this
+; zone cannot drift from the haproxy config that setup-clab-fabric renders from
+; the same variable. Generating it from the TENANT list instead was the bug: a
+; hostname that resolves and 404s reads as a proxy fault and is not one.
+; Skipped entirely when the UDN lab vars are not loaded.
+{% for n in udn_proxy_names.split() %}
+{{ "%-15s" | format(n) }}A	{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}
 {% endfor %}
 {% endif %}
