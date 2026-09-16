@@ -169,6 +169,73 @@
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/tuned-forwarding.yaml"
   when: udn_phase not in ['preflight', 'web']
 
+# The NNCP below captures its interface by MAC. When the NIC is not on the
+# node, nmstate fails the policy with
+#
+#   PolicyError: interface with 'mac-address=52:54:00:E2:55:20' not found
+#
+# and that condition never becomes Available - so the wait after it burns its
+# full five minutes before saying only that it timed out. The cause is not on
+# the cluster at all: the NIC is a libvirt device that --tags nodenics
+# attaches, and this role has no way to add one. Ask the node directly first,
+# which takes seconds and names the actual next command.
+- name: Check each node actually has its fabric NIC
+  ansible.builtin.command:
+    argv:
+      - oc
+      - debug
+      - "node/{{ udn_bgp_node_names[item.ip_key] }}"
+      - --quiet
+      - --
+      - chroot
+      - /host
+      - bash
+      - -c
+      - >-
+        ip -o link show | grep -i -c '{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}' || true
+  loop: "{{ udn_bgp_cluster_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  register: udn_bgp_fabric_nic_present
+  changed_when: false
+  failed_when: false
+  when: udn_phase not in ['preflight', 'web']
+
+- name: Fail with the command that fixes it if a fabric NIC is missing
+  ansible.builtin.assert:
+    that: item.stdout | default('0') | trim | int > 0
+    fail_msg: >-
+      Node {{ udn_bgp_node_names[item.item.ip_key] }} ({{ item.item.ip_key }},
+      cluster '{{ udn_bgp_cluster }}') has no interface with MAC
+      {{ clab_fabric_mac_prefix }}:{{ ip_list[item.item.ip_key] }}, so the
+      NodeNetworkConfigurationPolicy that captures on that MAC cannot match
+      anything. nmstate reports this as
+      "PolicyError: interface with 'mac-address=...' not found" and the policy
+      never goes Available.
+
+      The NIC is a libvirt device and this role cannot add one. On the LAB
+      HOST:
+
+        virsh domiflist {{ item.item.domain }}
+
+      If the MAC is absent there, attach it:
+
+        ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml \
+          --ask-vault-pass --tags nodenics
+
+      If the MAC IS listed on the domain but the node still does not see it,
+      the guest has not surfaced the hot-plugged device. Check from the node
+      with `oc debug node/{{ udn_bgp_node_names[item.item.ip_key] }} --
+      chroot /host ip -br link`, and reboot the VM if it is genuinely absent -
+      a hot-plug that libvirt accepted but the guest ignored is the one case
+      that needs one.
+    success_msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] }} has its fabric NIC.
+  loop: "{{ udn_bgp_fabric_nic_present.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.ip_key | default('?') }}"
+  when: udn_phase not in ['preflight', 'web']
+
 - name: Address the fabric NICs
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-fabric-untagged-{{ item.ip_key }}.yaml"
