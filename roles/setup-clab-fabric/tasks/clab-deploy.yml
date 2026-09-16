@@ -16,6 +16,7 @@
     state: directory
     mode: '0755'
 
+# udn-bgp/ is created in main.yml, tags: [always], before any include runs.
 - name: Record the deliberate VRF leaks for the test script
   ansible.builtin.template:
     src: vrf-leaks.env.j2
@@ -115,13 +116,6 @@
 # segment for a tenant that is now a macVRF, VRF leak routes that no longer
 # exist - and the first sign is a ping to a gateway that was never built. The
 # assert in main.yml reads this file and says so up front instead.
-- name: Make sure the directory the marker lives in exists
-  ansible.builtin.file:
-    path: "{{ playbook_dir }}/udn-bgp"
-    state: directory
-    mode: '0755'
-  delegate_to: localhost
-
 - name: Record the deployed topology so later runs can check themselves
   ansible.builtin.copy:
     content: "{{ clab_topology }}\n"

@@ -712,6 +712,7 @@ message; re-run it alone against a live fabric with `--tags clabverify`.
 | Cluster shows `Active`, `MsgRcvd` 0, `Last write never` | BFD configured on one side only |
 | Node loses the API the moment BGP comes up | `192.168.122.0/24` crossed the fabric. That is what `LAB-MGMT` prevents |
 | A second run "did not take" | `containerlab deploy` without `--reconfigure` |
+| `Destination directory .../udn-bgp does not exist` | The role writes its output there but never created it - masked for as long as `setup-udn-bgp` created it and nothing removed it. `cleanup.yaml --tags udnlab` removes it, so a clean tree found it |
 | `--tags network` / `nodenics` / `clabvm` ran nothing | `include_tasks` needs `apply:` to pass tags. Fixed, but the pattern recurs |
 | Client namespaces got phase-3 shapes on an EVPN fabric | `clab_topology` defaults to `bgp`. The `.fabric-topology` marker now catches it |
 | Phase 2 cannot reach `10.210.10.10` | Correct. That endpoint is in leaf1's `blue` VRF; phase 2 is in the default VRF |

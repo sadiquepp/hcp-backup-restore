@@ -24,6 +24,26 @@
     fail_msg: "clab_topology must be 'bgp' or 'evpn', got '{{ clab_topology }}'"
   tags: [always]
 
+# This role's output directory, on the CONTROLLER, created once here because
+# four different task files write into it - .fabric-topology, vrf-leaks.env,
+# tenant-clients.env, netns-client.env, tenant-proxy.env - and only one of them
+# ever created it. That went unnoticed for as long as nothing removed the
+# directory: setup-udn-bgp creates it too, and every tree had already had a
+# cluster-half run. cleanup.yaml removes it now, and the first fabric run
+# against a cleaned tree failed on
+#
+#   Destination directory .../udn-bgp does not exist
+#
+# tags: [always] so it is there whichever subset of this role is being run -
+# --tags clabnsproxy writes here and does not go near clab-deploy.yml.
+- name: Create this role's output directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/udn-bgp"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  tags: [always]
+
 # clab_topology decides the SHAPE of almost everything this role renders, it
 # defaults to 'bgp', and it is deliberately not in vars.yaml - so it has to be
 # passed on every command line that touches the fabric. Forget it against an

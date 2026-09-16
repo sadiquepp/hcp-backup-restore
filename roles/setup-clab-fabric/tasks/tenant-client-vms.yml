@@ -122,13 +122,7 @@
 # So scripts/udn-vrf-isolation.sh --vms can find the clients and know which
 # tenants each one is supposed to reach, without parsing vars.yaml in bash.
 # Rendered from the same list the VMs are built from, so the two cannot drift.
-- name: Make sure the manifest directory exists
-  ansible.builtin.file:
-    path: "{{ playbook_dir }}/udn-bgp"
-    state: directory
-    mode: '0755'
-  delegate_to: localhost
-
+# udn-bgp/ is created in main.yml, tags: [always], before any include runs.
 - name: Record which client serves which tenants
   ansible.builtin.template:
     src: tenant-clients.env.j2
