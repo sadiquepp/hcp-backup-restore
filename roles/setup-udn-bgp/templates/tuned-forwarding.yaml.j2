@@ -36,9 +36,23 @@
   from PCI enumeration and is not guaranteed stable across nodes or across a
   re-attach. A Tuned profile naming an interface that no longer exists
   applies cleanly and does nothing, which is precisely the silent failure
-  this is fixing. net.ipv4.ip_forward cannot miss: it is the same knob as
-  conf.all.forwarding, and writing it propagates to every interface present
-  and sets the default every later one inherits.
+  this is fixing. net.ipv4.ip_forward names no interface: it is the same knob
+  as conf.all.forwarding, and writing it propagates to every interface present.
+
+  IT DOES NOT COVER INTERFACES THAT ARRIVE LATER, which is why
+  conf.default.forwarding is set alongside it. This file used to claim the
+  global write "sets the default every later one inherits"; it does not touch
+  conf.default.forwarding at all, so an interface created afterwards still
+  inherits 0. The fabric NIC is hot-plugged, so whether it was covered came
+  down to whether it happened to exist when Tuned last applied - true on a node
+  whose NIC was attached before the cluster half ever ran, false on one
+  attached later. Same profile, same node label, opposite result, and the only
+  symptom is that node's pods never answering anything from the fabric.
+
+  Tuned still does not re-apply when an interface appears, so a NIC attached to
+  a node whose profile is already current is missed even with the default set.
+  roles/setup-udn-bgp/tasks/main.yml writes both values directly for exactly
+  that case, before the verification that would otherwise fail on it.
 
   The cost is that forwarding is on for every interface on these nodes rather
   than the one that needs it. On a node already routing pod traffic through
@@ -64,6 +78,10 @@ spec:
 
         [sysctl]
         net.ipv4.ip_forward=1
+        # For interfaces that do not exist yet - see the note above. Without
+        # this, a NIC hot-plugged after Tuned last applied comes up with
+        # forwarding 0 and silently drops every reply from the fabric.
+        net.ipv4.conf.default.forwarding=1
 {% if udn_bgp_loose_rp_filter | bool %}
         # Loose reverse-path filtering. Off by default: the untagged fabric
         # session is symmetric, so strict filtering passes. Turn it on if
