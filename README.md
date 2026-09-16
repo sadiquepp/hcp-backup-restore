@@ -2094,6 +2094,34 @@ limits what a cluster builds; the SNO builds `green` and `purple` only. A
 routed tenant that genuinely spans clusters needs its own subnet, VNI and
 route target, not a second copy of an existing one.
 
+### What a stretched Layer2 UDN across two clusters actually does
+
+Measured on this lab, hub + SNO on L2VNI 400:
+
+**Pod to pod works, and is bridged rather than routed.** A SNO pod at
+`10.204.128.0` pings a hub pod at `10.204.0.6` with 0% loss and `ttl=64` —
+unchanged, so the packet crossed SNO VTEP → VXLAN → leaf2 → hub VTEP without
+passing through any gateway router. That is what a macVRF is for.
+
+In particular the `advertised-network-subnets` drop ACL does **not** block it.
+That ACL matches source and destination against the set of advertised UDN
+subnets, in the source node's ingress pipeline, using addresses only — so a
+hub pod sending to `10.204.128.5` is indistinguishable from one sending to
+`10.204.0.5`, and the latter obviously has to work. Same-UDN traffic is
+allowed whichever cluster it lands in.
+
+**The infrastructure addresses collide, and cannot be split.** Both clusters
+put their Layer2 gateway on `10.204.0.1` and their per-node management port on
+`10.204.0.2`. ovn-kubernetes derives a MAC from the IP, so those are literally
+the same MAC advertised from two VTEPs — `show evpn mac vni 400` lists
+`0a:58:0a:cc:00:02` at one VTEP only, so one cluster's is shadowed. Pod ranges
+separate cleanly with `reservedSubnets`; these do not, because every cluster on
+the subnet needs them. This is the real limit on the design, not the IPAM.
+
+It does not break pod-to-pod traffic, which never touches the gateway — but
+anything a pod sends *off* its own subnet goes to whichever `10.204.0.1`
+answered its ARP, which may be the other cluster's router.
+
 The tenant ingress fronts every cluster at once. `udn_proxy_clusters` decides
 which, the first entry keeps the bare hostname and the rest are suffixed, so
 `green.hub.mylab.com` stays the hub's and the SNO's is
