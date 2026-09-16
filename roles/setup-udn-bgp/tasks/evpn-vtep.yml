@@ -53,17 +53,18 @@
     mode: '0644'
   delegate_to: localhost
 
-# Every node in the cluster, not just clab_fabric_nodes. The VTEP CR checks
-# them all and fails as a whole if one is unannotated, which is what the
+# Every node in the cluster, not just the ones with a fabric NIC. The VTEP CR
+# checks them all and fails as a whole if one is unannotated, which is what the
 # masters did:
 #
 #   node master1 is missing the k8s.ovn.org/vteps annotation
 #   reason: AllocationFailed
 #
 # Built from what the cluster reports rather than from a list in vars.yaml,
-# because a list is the thing that was wrong - clab_fabric_nodes is the set
-# of nodes with a FABRIC NIC, which is the right set for VLANs and the wrong
-# set for VTEPs. The octet is the node's own last octet on
+# because a list is the thing that was wrong - udn_bgp_cluster_nodes is the
+# set of nodes with a FABRIC NIC, which is the right set for VLANs and the
+# wrong set for VTEPs. On a single-node cluster the two sets coincide and this
+# yields exactly one address. The octet is the node's own last octet on
 # lab_network_prefix.0/24, so the addresses stay the same deterministic
 # numbers leaf1's static routes are written from.
 - name: Work out which nodes need a VTEP address

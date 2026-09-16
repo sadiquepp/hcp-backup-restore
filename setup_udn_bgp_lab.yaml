@@ -81,6 +81,22 @@
 ##
 ## Build the three-node EVPN fabric instead of the single border leaf:
 ##   ... --tags fabric -e clab_topology=evpn
+##
+## MORE THAN ONE CLUSTER ON THE FABRIC. vars.yaml declares clab_clusters (who
+## is in each cluster, and its ASN) and clab_fabric_clusters (which of them
+## are wired in). The fabric half builds for all of them at once; the cluster
+## half runs once per cluster and is told which one with -e udn_bgp_cluster:
+##
+##   # once, on the lab host - NICs for every cluster's nodes, and a leaf1
+##   # that knows all of them
+##   ... --tags nodenics,clabdeploy -e clab_topology=evpn
+##
+##   # then once per cluster, anywhere with the right kubeconfig
+##   ... --tags evpn -e clab_topology=evpn -e udn_bgp_cluster=hub
+##   ... --tags evpn -e clab_topology=evpn -e udn_bgp_cluster=sno
+##
+## Each cluster MUST have its own ASN; see the note at clab_cluster_asn in
+## vars.yaml for what sharing one silently does to the EVPN tables.
 
 - name: Build the containerlab provider fabric
   hosts: localhost
@@ -117,11 +133,36 @@
     - vars.yaml
     - vault.yaml
   vars:
+    # Which cluster's kubeconfig this half runs against. Read from
+    # clab_clusters in vars.yaml rather than from a ternary over two hub
+    # names, so attaching a third cluster to the fabric is a vars.yaml edit
+    # and nothing else. Select it with -e udn_bgp_cluster=<key>.
     hub_install_folder_selected: >-
-      {{ (udn_bgp_target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}
+      {{ clab_clusters[udn_bgp_cluster].install_folder }}
     hub_kubeconfig: "{{ hub_install_folder_selected }}/auth/kubeconfig"
   environment:
     KUBECONFIG: "{{ hub_kubeconfig }}"
+  pre_tasks:
+    - name: Fail early if the selected cluster's kubeconfig is not there
+      ansible.builtin.stat:
+        path: "{{ hub_kubeconfig }}"
+      register: udn_bgp_kubeconfig_stat
+      tags: [preflight, default, shared, vrflite, evpn, web]
+
+    - name: Say which kubeconfig is missing rather than letting oc say nothing
+      ansible.builtin.assert:
+        that: udn_bgp_kubeconfig_stat.stat.exists
+        fail_msg: >-
+          udn_bgp_cluster is '{{ udn_bgp_cluster }}', whose kubeconfig should
+          be at {{ hub_kubeconfig }} - and there is no file there. Either the
+          cluster has not been built yet, or clab_clusters.{{ udn_bgp_cluster
+          }}.install_folder in vars.yaml points somewhere else. Without this,
+          every `oc` below talks to whatever the ambient KUBECONFIG is, which
+          on this host is usually the hub - so a SNO run would reconfigure the
+          hub instead and look like it worked.
+        success_msg: >-
+          Cluster '{{ udn_bgp_cluster }}' -> {{ hub_kubeconfig }}
+      tags: [preflight, default, shared, vrflite, evpn, web]
   tasks:
     - name: Pre-flight only
       ansible.builtin.import_role:

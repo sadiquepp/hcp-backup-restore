@@ -497,6 +497,12 @@ hub2_disconnected_install_folder: "{{ download_dir }}/hub2d_install"
 ## are correct for this lab as they stand.
 sno_name: sno
 
+## Where the installer's working directory lives - auth/kubeconfig under it is
+## what the UDN/BGP lab reads when clab_clusters.sno is targeted. Set here
+## rather than left to roles/setup-sno/defaults so that setup_udn_bgp_lab.yaml,
+## which does not import setup-sno, can still resolve it.
+sno_install_folder: "{{ download_dir }}/sno_install"
+
 ## SNO minimums are 8 vCPU / 16GiB / 120GB. These are comfortable rather than
 ## minimal - an SNO at exactly the minimum spends its life under memory
 ## pressure, and the first symptom is operators flapping, which reads as a
@@ -505,12 +511,17 @@ sno_memory: 32768
 sno_vcpus: 12
 sno_disk_gb: 200
 
-## A second, unconfigured NIC on the containerlab fabric. Off by default: this
-## builds a cluster and nothing about a cluster needs the fabric. Turn it on
-## BEFORE the first build if this SNO is destined for the EVPN lab - attaching
-## one to a live VM afterwards works (virsh attach-interface, the way the UDN
-## client VMs get theirs) but costs a reboot and a second pass over
-## agent-config.yaml.
+## A second, unconfigured NIC on the containerlab fabric, added at build time.
+## Off by default: this builds a cluster and nothing about a cluster needs the
+## fabric.
+##
+## Leaving it false is the normal path even for a SNO destined for the EVPN
+## lab. setup_udn_bgp_lab.yaml --tags nodenics attaches the NIC to whatever is
+## in clab_fabric_clusters, hot-plugging it into the running VM with the same
+## deterministic MAC (52:54:00:e2:55:<octet>) this would have used - so the
+## NNCP's MAC capture finds it either way and no reboot is needed. Setting it
+## true only saves that one step, and only on a cluster built after the
+## decision to attach it.
 sno_fabric_nic: false
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
@@ -1287,11 +1298,20 @@ clab_fabric_prefix: "192.168.140"
 clab_fabric_netmask_bits: 24
 clab_fabric_router_octet: 1
 
-## BGP. eBGP between the cluster and the fabric: every node shares one ASN
-## (that is how FRR-K8s and RouteAdvertisements model it) and each fabric
-## device gets its own, which is the ordinary datacentre design and avoids
-## the route-reflector/next-hop-self problems an iBGP lab runs into as soon
-## as a second fabric router appears.
+## BGP. eBGP between the cluster and the fabric: every node in ONE cluster
+## shares one ASN (that is how FRR-K8s and RouteAdvertisements model it) and
+## each fabric device gets its own, which is the ordinary datacentre design
+## and avoids the route-reflector/next-hop-self problems an iBGP lab runs
+## into as soon as a second fabric router appears.
+##
+## clab_cluster_asn is the DEFAULT for a cluster that does not name its own
+## in clab_clusters below. With more than one cluster on the fabric each
+## needs a distinct ASN, and it is not optional: leaf1 re-advertises hub's
+## EVPN routes to the SNO with AS_PATH "64513 64512", and if the SNO is also
+## 64512 it drops every one of them as a loop. What you see then is a healthy
+## session, the right routes on leaf1, and an empty table on the far side -
+## the single most time-consuming way for this to fail, because nothing
+## anywhere reports an error.
 clab_cluster_asn: 64512
 clab_leaf1_asn: 64513
 clab_leaf2_asn: 64514
@@ -1304,30 +1324,132 @@ clab_spine_asn: 65000
 clab_frr_image: "quay.io/frrouting/frr:10.2.1"
 clab_alpine_image: "alpine:3.20"
 
-## Which node VMs get a fabric NIC. These are ip_list keys AND libvirt domain
-## names - see clab_fabric_nodes entries below. Defaults to hub1's three
-## workers: hub1 is a plain standalone cluster whose
-## Network.operator.openshift.io CR you can patch directly, which is what
-## every phase below needs. Hosted-cluster workers are deliberately NOT here;
-## see the README section on why to prove this out on hub1 first.
-## 'domain' is the libvirt domain name (what virsh calls the VM); 'ip_key'
-## is its entry in ip_list, which gives both its address and its MAC.
+## ---------------------------------------------------------------------------
+## The clusters attached to this fabric.
 ##
-## Deliberately NO Kubernetes node name here. It used to carry one and it was
-## wrong - worker1.hub.mylab.com, the SSH/DNS name, where the cluster had
-## registered the node as plain 'worker1'. Every NodeNetworkConfigurationPolicy
-## then selected a node that did not exist and was silently Ignored. There is
-## no value that is right for every lab, because the node name is whatever the
-## host sent as its hostname at install time, so the role looks it up instead:
-## it matches ip_list's address against the nodes' InternalIP. See
+## There used to be one flat clab_fabric_nodes list here, and it was serving
+## two different questions that only have the same answer while exactly one
+## cluster is attached:
+##
+##   FABRIC-WIDE  which VMs get a NIC on virbr1, which addresses leaf1 opens
+##                a BGP session to, and which VTEP /32s leaf1 carries. Every
+##                node of every cluster.
+##   PER-CLUSTER  which nodes get a NodeNetworkConfigurationPolicy, which
+##                node names the NNCPs select, which nodes are checked for a
+##                tenant VRF. Only the nodes of the cluster being targeted.
+##
+## Reading the second from the first is what breaks the moment a second
+## cluster appears: roles/setup-udn-bgp/tasks/node-names.yml resolves every
+## entry against `oc get nodes` of the cluster it is pointed at, so a hub run
+## with the SNO in the list fails with "No cluster node has internal address
+## 192.168.122.20" - and a SNO run fails the same way on the three workers.
+##
+## So the per-cluster list is the source of truth and the fabric-wide one is
+## derived from it (roles/setup-clab-fabric/tasks/main.yml). Each entry:
+##
+##   install_folder  where this cluster's auth/kubeconfig lives.
+##   asn             this cluster's BGP ASN. MUST be unique per cluster - see
+##                   the note at clab_cluster_asn above for what happens if
+##                   two clusters share one.
+##   nodes           domain = the libvirt domain name (what virsh calls the
+##                   VM); ip_key = its entry in ip_list, which gives both its
+##                   address and its fabric MAC.
+##
+## Deliberately NO Kubernetes node name in `nodes`. It used to carry one and
+## it was wrong - worker1.hub.mylab.com, the SSH/DNS name, where the cluster
+## had registered the node as plain 'worker1'. Every NNCP then selected a node
+## that did not exist and was silently Ignored. There is no value that is
+## right for every lab, because the node name is whatever the host sent as its
+## hostname at install time, so the role looks it up instead: it matches
+## ip_list's address against the nodes' InternalIP. See
 ## roles/setup-udn-bgp/tasks/node-names.yml.
-clab_fabric_nodes:
-  - domain: hub_worker1
-    ip_key: worker1
-  - domain: hub_worker2
-    ip_key: worker2
-  - domain: hub_worker3
-    ip_key: worker3
+clab_clusters:
+  ## hub1 is a plain standalone cluster whose Network.operator.openshift.io CR
+  ## you can patch directly, which is what every phase needs. Hosted-cluster
+  ## workers are deliberately NOT here; see the README section on why to prove
+  ## this out on hub1 first.
+  hub:
+    install_folder: "{{ hub_install_folder }}"
+    asn: 64512
+    nodes:
+      - domain: hub_worker1
+        ip_key: worker1
+      - domain: hub_worker2
+        ip_key: worker2
+      - domain: hub_worker3
+        ip_key: worker3
+
+  ## The replacement hub from the OADP flow. Not in clab_fabric_clusters
+  ## below, so nothing is built for it - it is declared so that the old
+  ## `-e udn_bgp_target_hub=hub2` still resolves to a kubeconfig. Give it its
+  ## own ASN before putting it on the fabric alongside hub1.
+  hub2:
+    install_folder: "{{ hub2_install_folder }}"
+    asn: 64516
+    nodes:
+      - domain: hub2_worker1
+        ip_key: hub2_worker1
+      - domain: hub2_worker2
+        ip_key: hub2_worker2
+      - domain: hub2_worker3
+        ip_key: hub2_worker3
+
+  ## The single-node cluster from setup_sno.yaml. One node, which is both
+  ## master and worker, so it takes an NNCP and a VTEP exactly as a worker
+  ## does - single-node OpenShift labels its one node with both roles, which
+  ## is why the test workloads' `node-role.kubernetes.io/worker` selector
+  ## needs no special case here.
+  ##
+  ## advertise_default is false because this cluster's default pod network is
+  ## 10.128.0.0/14, the same as hub1's. Advertising both puts one prefix into
+  ## the fabric from two origins, and leaf1 picks a winner - so one cluster's
+  ## pods silently become unreachable. Phase 1 has already been proved on the
+  ## hub; there is nothing a second run of it here would establish.
+  sno:
+    install_folder: "{{ sno_install_folder }}"
+    asn: 64515
+    advertise_default: false
+    ## The Layer2 tenants only, and this is not a simplification - building
+    ## the others here would break the hub.
+    ##
+    ## A tenant's identity in the fabric is its route target. blue is
+    ## RT 65000:101 carrying 10.200.0.0/16, and that belongs to the tenant,
+    ## not to the cluster. Build blue in both clusters and both originate
+    ## 10.200.0.0/16 into RT 65000:101 under different route distinguishers,
+    ## so leaf2 imports two equally good paths to one prefix pointing at two
+    ## different VTEPs - and traffic for a hub pod starts arriving at the SNO,
+    ## where nothing answers. Nothing reports this; it looks like packet loss.
+    ##
+    ## green and purple are the opposite case, and the reason this cluster is
+    ## on the fabric at all. A macVRF on one L2VNI is MEANT to exist in both
+    ## clusters - that is what makes it one stretched broadcast domain across
+    ## two clusters, which is the thing being tested. The addresses stay
+    ## unambiguous because evpn_l2_excludes gives each cluster its own half of
+    ## the prefix to allocate from.
+    ##
+    ## To test a ROUTED tenant across clusters instead, add a tenant here with
+    ## its own subnet, its own evpn_ip_vni and its own route target - not a
+    ## second copy of an existing one.
+    tenants:
+      - green
+      - purple
+    nodes:
+      - domain: "{{ sno_name }}"
+        ip_key: sno
+
+## Which of the clusters above are actually wired into the fabric. This is
+## what builds clab_fabric_nodes, so it decides which VMs get a NIC on virbr1
+## and which neighbours leaf1 is configured with.
+##
+## Adding a cluster here and running --tags nodenics,clabdeploy is the whole
+## fabric-side change. Removing one and redeploying takes it back out; the
+## NIC stays attached to the VM, which is harmless.
+##
+## Order matters only for readability - leaf1's neighbour statements come out
+## in this order.
+clab_fabric_clusters:
+  - hub
+  - sno
 
 ## The fabric NIC's MAC follows the lab's existing scheme with a bumped
 ## fifth octet, so a fabric NIC is recognisable at a glance and can never
@@ -1477,6 +1599,30 @@ udn_bgp_tenants:
     ## are distinct - see the note there.
     evpn_l2_client_host: "10.204.255.30"
     evpn_l2_exclude: "10.204.255.0/24"
+    ## The IPAM split, per cluster, and the reason it is not optional once a
+    ## second cluster joins this L2VNI. A stretched Layer2 network is ONE
+    ## broadcast domain, but each cluster's OVN-Kubernetes allocates from the
+    ## subnet with no knowledge of the other - so both would hand out
+    ## 10.204.0.3 and put two pods on one address. There is no cross-cluster
+    ## IPAM in OVN-K and no plan for one; carving the prefix in half here is
+    ## how it is actually done.
+    ##
+    ## hub gets the low half, sno the high half. The .255.0/24 reservation for
+    ## the external endpoint and the client is inside the high half, so hub's
+    ## single /17 already covers it and sno has to name it a second time.
+    ##
+    ## Spelled out rather than computed: this repo deliberately does not
+    ## depend on ansible.utils/netaddr, and a subnet split that is a literal
+    ## can be checked against a routing table by eye.
+    ##
+    ## A cluster with no entry here falls back to evpn_l2_exclude alone, which
+    ## is correct for a single-cluster fabric.
+    evpn_l2_excludes:
+      hub:
+        - "10.204.128.0/17"
+      sno:
+        - "10.204.0.0/17"
+        - "10.204.255.0/24"
     evpn_ip_vni: 401
 
   ## The collision tenant. Layer2, and deliberately carrying the SAME
@@ -1525,6 +1671,16 @@ udn_bgp_tenants:
     evpn_l2_external_host: "10.204.255.20"
     evpn_l2_client_host: "10.204.255.40"
     evpn_l2_exclude: "10.204.255.0/24"
+    ## Same split as green's, and the same values because purple carries the
+    ## same prefix. The green/purple collision this tenant exists to prove is
+    ## unaffected: both still allocate from the low half on the hub, so they
+    ## still land on the same address as each other.
+    evpn_l2_excludes:
+      hub:
+        - "10.204.128.0/17"
+      sno:
+        - "10.204.0.0/17"
+        - "10.204.255.0/24"
     evpn_ip_vni: 501
 
 ## Where the rendered containerlab topology and FRR configs are staged, on
@@ -1534,11 +1690,25 @@ clab_lab_name: udnbgp
 
 ## Where the cluster-side manifests this role renders are written locally,
 ## so they can be read, diffed and re-applied by hand. Nothing secret.
-udn_bgp_manifest_dir: "{{ playbook_dir }}/udn-bgp"
+##
+## Per cluster, because they are not interchangeable: the NNCPs name that
+## cluster's nodes, the FRRConfigurations carry its ASN, and the Layer2 CUDNs
+## carry its half of the IPAM split. One shared directory meant a SNO run
+## silently overwrote the hub's manifests, so `oc apply -f udn-bgp/` after the
+## fact applied the wrong cluster's objects to whichever cluster KUBECONFIG
+## happened to point at.
+udn_bgp_manifest_dir: "{{ playbook_dir }}/udn-bgp/{{ udn_bgp_cluster }}"
 
-## Which cluster the cluster-side phases target. Same convention as the rest
-## of the lab: hub (default) or hub2.
+## Which cluster the cluster-side phases target - a key of clab_clusters
+## above. It selects the kubeconfig, the BGP ASN, and which nodes get an NNCP.
+##
+##   ansible-playbook ... setup_udn_bgp_lab.yaml --tags evpn -e udn_bgp_cluster=sno
+##
+## udn_bgp_target_hub is the old name, kept working because it is what every
+## existing note and command line says. Setting either works; udn_bgp_cluster
+## wins if both are given.
 udn_bgp_target_hub: hub
+udn_bgp_cluster: "{{ udn_bgp_target_hub | default('hub') }}"
 
 ## VRF-Lite and EVPN both require OVN-Kubernetes LOCAL gateway mode
 ## (routingViaHost: true). Switching gateway mode restarts every ovnkube-node

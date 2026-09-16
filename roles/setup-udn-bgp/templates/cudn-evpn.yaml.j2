@@ -49,15 +49,40 @@ spec:
       role: Primary
       subnets:
         - {{ tenant.udn_subnet }}
-{% if tenant.evpn_l2_exclude is defined %}
-      # Reserved for the fabric side. This tenant's EVPN transport is a macVRF,
-      # so its external endpoint sits INSIDE this subnet, on leaf2's side of the
-      # VXLAN tunnel - {{ tenant.evpn_l2_external_host }}. OVN knows nothing about it and would
-      # happily allocate the same address to a pod, putting two machines on one
-      # address in one broadcast domain. That is a duplicate-address bug, not
-      # the deliberate cross-network overlap this lab is about.
+{#
+   What this cluster must NOT allocate from, which is two separate things
+   that happen to be expressed the same way.
+
+   1. The fabric side. This tenant's EVPN transport is a macVRF, so its
+      external endpoint sits INSIDE this subnet, on leaf2's side of the VXLAN
+      tunnel - {{ tenant.evpn_l2_external_host }}. OVN knows nothing about it
+      and would happily allocate the same address to a pod, putting two
+      machines on one address in one broadcast domain. That is a
+      duplicate-address bug, not the deliberate cross-network overlap this lab
+      is about.
+
+   2. The other clusters' half of the prefix. A stretched Layer2 network is
+      one broadcast domain spanning every cluster on the L2VNI, but each
+      cluster's OVN-Kubernetes allocates from the subnet knowing nothing about
+      the others - so without a split they both hand out the low addresses and
+      two pods in different clusters end up on one address. There is no
+      cross-cluster IPAM to lean on; carving the prefix per cluster is how it
+      is done.
+
+   evpn_l2_excludes[<cluster>] carries the answer for both, per cluster.
+   evpn_l2_exclude is the single-cluster form and is the fallback when this
+   cluster has no entry - which is correct for a fabric with one cluster on
+   it, where only reason 1 applies.
+#}
+{% set l2_excludes = (tenant.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
+                     or ([tenant.evpn_l2_exclude] if tenant.evpn_l2_exclude is defined else []) %}
+{% if l2_excludes %}
+      # Reserved: see the note above. Cluster '{{ udn_bgp_cluster }}' allocates
+      # from {{ tenant.udn_subnet }} minus these.
       excludeSubnets:
-        - {{ tenant.evpn_l2_exclude }}
+{% for x in l2_excludes %}
+        - {{ x }}
+{% endfor %}
 {% endif %}
       ipam:
         lifecycle: Persistent

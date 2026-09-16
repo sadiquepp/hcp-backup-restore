@@ -83,7 +83,7 @@
       - >-
         nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ && !f {gsub(":","",$2); print $2; f=1}');
         echo "${nic:-NONE} $(cat /proc/sys/net/ipv4/conf/${nic:-lo}/forwarding 2>/dev/null || echo unknown)"
-  loop: "{{ clab_fabric_nodes }}"
+  loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
   register: udn_bgp_fwd
@@ -215,7 +215,7 @@
       actually prove the data plane, and they are left as explicit commands
       because each needs a pod name from your cluster.
       {% set ns = namespace(step=0) %}
-      {% set probe_node = udn_bgp_node_names[clab_fabric_nodes[0].ip_key] %}
+      {% set probe_node = udn_bgp_node_names[udn_bgp_cluster_nodes[0].ip_key] %}
       {% if udn_phase == 'default' %}
 
       This phase advertises the cluster DEFAULT pod network - no UDN exists

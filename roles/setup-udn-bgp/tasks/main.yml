@@ -25,6 +25,104 @@
       udn_phase must be one of preflight, enable, default, shared, vrflite,
       evpn, web - got '{{ udn_phase | default("(unset)") }}'.
 
+# ---------------------------------------------------------------------------
+# Which cluster this run is targeting, and therefore which nodes it owns.
+#
+# udn_bgp_cluster is a key of clab_clusters in vars.yaml. Everything below
+# that touches a node - the NNCPs, the node-name lookup, the VRF discovery,
+# the forwarding check - must loop THIS CLUSTER'S nodes, not the fabric-wide
+# clab_fabric_nodes, which spans every cluster on the fabric. Pointing a hub
+# run at the SNO's node fails node-names.yml with
+#
+#   No cluster node has internal address 192.168.122.20
+#
+# which is correct and unhelpful: the address belongs to a different cluster
+# entirely. See the long note at clab_clusters in vars.yaml.
+- name: Fail if udn_bgp_cluster does not name a declared cluster
+  ansible.builtin.assert:
+    that: udn_bgp_cluster in (clab_clusters | default({}))
+    fail_msg: >-
+      udn_bgp_cluster is '{{ udn_bgp_cluster | default("(unset)") }}', which
+      is not a key of clab_clusters in vars.yaml. Declared clusters:
+      {{ clab_clusters | default({}) | list }}. Pass one with
+      -e udn_bgp_cluster=<name>.
+
+- name: Resolve this cluster's nodes and ASN
+  ansible.builtin.set_fact:
+    udn_bgp_cluster_nodes: "{{ clab_clusters[udn_bgp_cluster].nodes }}"
+    udn_bgp_cluster_asn: >-
+      {{ clab_clusters[udn_bgp_cluster].asn | default(clab_cluster_asn) }}
+
+# Which tenants THIS cluster builds. Defaults to all of them, which is right
+# for a fabric with one cluster on it.
+#
+# It stops being right the moment a second cluster joins, and the reason is
+# worth stating because nothing reports it. A tenant's identity in the fabric
+# is its route target - blue is RT 65000:101 carrying 10.200.0.0/16 - and that
+# is a property of the TENANT, not of the cluster. Build blue in two clusters
+# and both originate 10.200.0.0/16 into RT 65000:101 with different route
+# distinguishers, so leaf2 imports both into one VRF and ends up with two
+# equally good paths to one prefix pointing at two different VTEPs. Half the
+# traffic for a hub pod then goes to the SNO, where nothing answers.
+#
+# Layer2 is the exception, and it is the exception this lab is for: a macVRF
+# on one L2VNI is SUPPOSED to be present in both clusters. That is what makes
+# it one stretched broadcast domain, and the addresses stay unambiguous
+# because evpn_l2_excludes splits the IPAM. See clab_clusters in vars.yaml.
+#
+# Overwriting udn_bgp_tenants rather than introducing a second name is safe
+# because of play ordering: setup-clab-fabric runs in the first play of
+# setup_udn_bgp_lab.yaml and always sees the full list, and nothing imports it
+# after this role.
+- name: Fail if this cluster's tenant list names a tenant that does not exist
+  ansible.builtin.assert:
+    that:
+      - clab_clusters[udn_bgp_cluster].tenants
+        | difference(udn_bgp_tenants | map(attribute='name') | list)
+        | length == 0
+    fail_msg: >-
+      clab_clusters.{{ udn_bgp_cluster }}.tenants names
+      {{ clab_clusters[udn_bgp_cluster].tenants
+         | difference(udn_bgp_tenants | map(attribute='name') | list) }},
+      which are not tenants. The tenants declared in vars.yaml are
+      {{ udn_bgp_tenants | map(attribute='name') | list }}. A typo here would
+      otherwise just build fewer tenants than asked for, silently.
+  when: clab_clusters[udn_bgp_cluster].tenants is defined
+
+- name: Narrow the tenant list to the ones this cluster builds
+  ansible.builtin.set_fact:
+    udn_bgp_tenants: >-
+      {{ udn_bgp_tenants
+         | selectattr('name', 'in', clab_clusters[udn_bgp_cluster].tenants)
+         | list }}
+  when: clab_clusters[udn_bgp_cluster].tenants is defined
+
+- name: Report which cluster this run is targeting
+  ansible.builtin.debug:
+    msg: >-
+      Targeting cluster '{{ udn_bgp_cluster }}' (AS {{ udn_bgp_cluster_asn }})
+      with node(s)
+      {{ udn_bgp_cluster_nodes | map(attribute='ip_key') | join(', ') }}
+      and tenant(s)
+      {{ udn_bgp_tenants | map(attribute='name') | join(', ') }}.
+      Manifests for this cluster are written to {{ udn_bgp_manifest_dir }}.
+
+# The fabric side is built once and shared, so a cluster-side run must not
+# find leaf1 unaware of its nodes. Checked here because the symptom otherwise
+# arrives twenty minutes later as a BGP session stuck in Active, which reads
+# as a cluster problem.
+- name: Warn if this cluster is not in the fabric's cluster list
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: '{{ udn_bgp_cluster }}' is not in clab_fabric_clusters
+      ({{ clab_fabric_clusters | default([]) | join(', ') }}), so leaf1 has no
+      BGP neighbour for its nodes and no static route to their VTEPs. The
+      sessions below will sit in Active forever. Add it to
+      clab_fabric_clusters in vars.yaml and re-run:
+        ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml \
+          --ask-vault-pass --tags nodenics,clabdeploy -e clab_topology=evpn
+  when: udn_bgp_cluster not in (clab_fabric_clusters | default([]))
+
 - name: Resolve where the containerlab fabric can be reached
   ansible.builtin.set_fact:
     clab_exec_host: >-
@@ -74,7 +172,7 @@
 - name: Address the fabric NICs
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-fabric-untagged-{{ item.ip_key }}.yaml"
-  loop: "{{ clab_fabric_nodes }}"
+  loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
   when: udn_phase not in ['preflight', 'web']
@@ -84,7 +182,7 @@
     cmd: >-
       oc wait nncp/fabric-untagged-{{ item.ip_key }}
       --for=condition=Available --timeout=300s
-  loop: "{{ clab_fabric_nodes }}"
+  loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
   when: udn_phase not in ['preflight', 'web']
@@ -112,6 +210,26 @@
   when:
     - udn_phase == 'default'
     - udn_bgp_advertise_default | bool
+
+# A second cluster on the fabric carries the same 10.128.0.0/14 as the
+# first, so only one of them may advertise it. Said out loud rather than
+# skipped silently, because a phase that does nothing and reports success is
+# how someone spends an afternoon looking for a route that was never asked
+# for.
+- name: Explain why this cluster is not advertising its default pod network
+  ansible.builtin.debug:
+    msg: >-
+      Phase 'default' is a no-op for cluster '{{ udn_bgp_cluster }}':
+      clab_clusters sets advertise_default false for it. Its default pod
+      network is the same 10.128.0.0/14 every other cluster in this lab has,
+      and a prefix advertised into the fabric from two origins leaves leaf1
+      with two paths and one winner - so the losing cluster's pods become
+      unreachable with nothing reporting an error. Phase 1 is proved once, on
+      the cluster that does advertise it. Go straight to --tags shared,
+      vrflite or evpn here.
+  when:
+    - udn_phase == 'default'
+    - not (udn_bgp_advertise_default | bool)
 
 - name: Warn about what advertising the default pod network costs
   ansible.builtin.debug:

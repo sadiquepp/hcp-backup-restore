@@ -30,7 +30,7 @@
     src: nncp-fabric-untagged.yaml.j2
     dest: "{{ udn_bgp_manifest_dir }}/nncp-fabric-untagged-{{ node_entry.ip_key }}.yaml"
     mode: '0644'
-  loop: "{{ clab_fabric_nodes }}"
+  loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     loop_var: node_entry
     label: "{{ node_entry.ip_key }}"

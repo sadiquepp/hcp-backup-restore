@@ -53,7 +53,7 @@
          | combine({ item.ip_key:
                      udn_bgp_name_by_ip[lab_network_prefix ~ '.' ~ ip_list[item.ip_key]]
                      | default('', true) }) }}
-  loop: "{{ clab_fabric_nodes }}"
+  loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
 
@@ -63,7 +63,7 @@
       {{ item.ip_key }} at
       {{ lab_network_prefix }}.{{ ip_list[item.ip_key] }}
       -> cluster node '{{ udn_bgp_node_names[item.ip_key] }}'
-  loop: "{{ clab_fabric_nodes }}"
+  loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
 
@@ -78,9 +78,13 @@
       What the cluster reports:
       {{ udn_bgp_node_addrs.stdout_lines | reject('equalto', '') | list }}
 
-      Either clab_fabric_nodes lists a node that is not part of this cluster,
-      or that node's address does not match its ip_list octet. Both live in
-      vars.yaml.
-  loop: "{{ clab_fabric_nodes }}"
+      Either clab_clusters['{{ udn_bgp_cluster }}'].nodes lists a node that is
+      not part of this cluster, or that node's address does not match its
+      ip_list octet. Both live in vars.yaml.
+
+      If that node belongs to a DIFFERENT cluster on the same fabric, it does
+      not belong in this list: clab_clusters is per cluster and the union of
+      them all is built separately for the fabric side.
+  loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"

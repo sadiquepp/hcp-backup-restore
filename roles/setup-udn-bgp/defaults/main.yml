@@ -72,7 +72,15 @@ udn_bgp_loose_rp_filter: false
 ##     UDNs are advertised and OpenShift's own pods keep their SNAT.
 ##
 ## Either way the later phases remove this CR - see main.yml.
-udn_bgp_advertise_default: true
+##
+## Also false for any cluster that sets advertise_default: false in
+## clab_clusters (vars.yaml). The SNO does, because its default pod network is
+## 10.128.0.0/14 - identical to the hub's. Two clusters advertising one prefix
+## into the fabric is not a tie the fabric reports; leaf1 picks a winner and
+## the other cluster's pods quietly stop being reachable.
+udn_bgp_advertise_default: >-
+  {{ (clab_clusters | default({})).get(udn_bgp_cluster | default('hub'), {})
+     .get('advertise_default', true) }}
 
 ## Kubernetes NMState Operator - the source of the
 ## NodeNetworkConfigurationPolicy API. Every NNCP this role applies (fabric

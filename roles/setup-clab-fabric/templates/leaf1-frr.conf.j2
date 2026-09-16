@@ -79,8 +79,8 @@ router bgp {{ clab_leaf1_asn }}
   defaults already give 3s/9s timers.
 #}
 {% for n in clab_fabric_nodes %}
- neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ clab_cluster_asn }}
- neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ n.asn | default(clab_cluster_asn) }}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }} [{{ n.cluster | default('?') }}]
 {% endfor %}
  !
  address-family ipv4 unicast
@@ -109,8 +109,8 @@ router bgp {{ clab_leaf1_asn }} vrf {{ t.name }}
  no bgp ebgp-requires-policy
  bgp log-neighbor-changes
 {% for n in clab_fabric_nodes %}
- neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ clab_cluster_asn }}
- neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }} ({{ t.name }})
+ neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ n.asn | default(clab_cluster_asn) }}
+ neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }} [{{ n.cluster | default('?') }}] ({{ t.name }})
 {% endfor %}
  !
  address-family ipv4 unicast

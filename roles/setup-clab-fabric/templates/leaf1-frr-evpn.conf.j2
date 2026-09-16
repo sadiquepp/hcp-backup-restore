@@ -62,8 +62,8 @@ router bgp {{ clab_leaf1_asn }}
  ! for the tenant routes. The node side of this is the FRRConfiguration
  ! roles/setup-udn-bgp renders as fabric-peering-evpn.
 {% for n in clab_fabric_nodes %}
- neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ clab_cluster_asn }}
- neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ n.asn | default(clab_cluster_asn) }}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }} [{{ n.cluster | default('?') }}]
 {% endfor %}
  !
  address-family ipv4 unicast

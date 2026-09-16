@@ -28,9 +28,15 @@
     that: item.rc == 0
     fail_msg: >-
       libvirt domain '{{ item.item.domain }}' does not exist on this host.
-      clab_fabric_nodes lists the VMs that get a fabric NIC - edit it in
-      vars.yaml to match the cluster you are actually attaching (the default
-      is hub1's three workers, built by setup_hub_cluster.yaml).
+
+      The VMs that get a fabric NIC are the nodes of every cluster named in
+      clab_fabric_clusters, read from clab_clusters - both in vars.yaml. This
+      one is listed under cluster '{{ item.item.cluster | default('?') }}'.
+
+      Either that cluster has not been built yet (hub1 comes from
+      setup_hub_cluster.yaml, the SNO from setup_sno.yaml), or its domain name
+      in clab_clusters does not match what virsh calls the VM. Check with
+      `virsh list --all`.
   loop: "{{ clab_domiflist.results }}"
   loop_control:
     label: "{{ item.item.domain }}"

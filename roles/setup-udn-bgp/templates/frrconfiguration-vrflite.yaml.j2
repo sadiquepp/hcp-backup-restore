@@ -30,7 +30,7 @@ spec:
   bgp:
     routers:
 {% for t in udn_bgp_tenants %}
-      - asn: {{ clab_cluster_asn }}
+      - asn: {{ udn_bgp_cluster_asn }}
         vrf: {{ udn_bgp_vrf_names[t.name] }}
         neighbors:
           - address: {{ t.vrf_prefix }}.{{ clab_fabric_router_octet }}

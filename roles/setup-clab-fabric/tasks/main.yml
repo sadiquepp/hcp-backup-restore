@@ -24,6 +24,86 @@
     fail_msg: "clab_topology must be 'bgp' or 'evpn', got '{{ clab_topology }}'"
   tags: [always]
 
+# ---------------------------------------------------------------------------
+# The fabric-wide node list, built from the per-cluster lists.
+#
+# vars.yaml declares clab_clusters (who is in each cluster) and
+# clab_fabric_clusters (which of them are wired into this fabric). Everything
+# on the FABRIC side - the NIC attach, leaf1's neighbour statements, the VTEP
+# static routes - wants the union of those, with each node carrying the ASN of
+# the cluster it belongs to so leaf1 can write the right remote-as per
+# neighbour.
+#
+# The cluster side wants the opposite: one cluster's nodes only. That list is
+# built separately, in roles/setup-udn-bgp/tasks/main.yml, from the same
+# source. See the long note in vars.yaml for why reading one from the other
+# does not work.
+- name: Validate that every fabric cluster is declared
+  ansible.builtin.assert:
+    that: item in (clab_clusters | default({}))
+    fail_msg: >-
+      clab_fabric_clusters names '{{ item }}', which is not a key of
+      clab_clusters. Both live in vars.yaml; the declared clusters are
+      {{ clab_clusters | default({}) | list }}.
+  loop: "{{ clab_fabric_clusters }}"
+  tags: [always]
+
+- name: Build the fabric-wide node list from the clusters on this fabric
+  ansible.builtin.set_fact:
+    clab_fabric_nodes: >-
+      {{ (clab_fabric_nodes | default([]))
+         + (clab_clusters[item].nodes
+            | map('combine', {'cluster': item,
+                              'asn': clab_clusters[item].asn | default(clab_cluster_asn)})
+            | list) }}
+  loop: "{{ clab_fabric_clusters }}"
+  tags: [always]
+
+# Two clusters whose nodes share an ip_list octet would collide on the fabric
+# subnet, on the fabric MAC and on the VTEP address all at once, and the first
+# symptom would be a tunnel built to the wrong node. ip_list is one flat
+# namespace across the whole lab, so this cannot happen by accident - but it
+# costs one task to make sure.
+- name: Fail if two fabric nodes share an ip_list octet
+  ansible.builtin.assert:
+    that:
+      - (clab_fabric_nodes | map(attribute='ip_key') | unique | length)
+        == (clab_fabric_nodes | length)
+    fail_msg: >-
+      Two nodes on this fabric have the same ip_list key:
+      {{ clab_fabric_nodes | map(attribute='ip_key') | list }}. Each node's
+      fabric address ({{ clab_fabric_prefix }}.<octet>), its fabric MAC
+      ({{ clab_fabric_mac_prefix }}:<octet>) and its VTEP address
+      ({{ udn_bgp_vtep_prefix }}.<octet>) are all derived from that octet.
+    success_msg: >-
+      {{ clab_fabric_nodes | length }} node(s) on this fabric across
+      {{ clab_fabric_clusters | length }} cluster(s):
+      {% for c in clab_fabric_clusters %}
+      {{ c }} (AS {{ clab_clusters[c].asn | default(clab_cluster_asn) }}):
+      {{ clab_clusters[c].nodes | map(attribute='ip_key') | join(', ') }}
+      {% endfor %}
+  tags: [always]
+
+# Two clusters on one fabric sharing an ASN is the failure described at
+# clab_cluster_asn in vars.yaml: leaf1 re-advertises one cluster's routes to
+# the other with the receiver's own ASN already in the path, and the receiver
+# drops them as a loop. Sessions Established, routes present on leaf1, table
+# empty on the far side, nothing logged anywhere.
+- name: Fail if two clusters on this fabric share an ASN
+  ansible.builtin.assert:
+    that:
+      - (clab_fabric_nodes | map(attribute='asn') | unique | length)
+        == (clab_fabric_clusters | length)
+    fail_msg: >-
+      Two of the clusters on this fabric have the same BGP ASN
+      ({% for c in clab_fabric_clusters %}{{ c }}={{ clab_clusters[c].asn | default(clab_cluster_asn) }}{% if not loop.last %}, {% endif %}{% endfor %}).
+      eBGP loop prevention then makes each one silently discard the other's
+      routes: leaf1 re-advertises them with the receiver's own ASN already in
+      the AS_PATH. Give each cluster its own asn in clab_clusters (vars.yaml).
+    success_msg: >-
+      Each cluster on this fabric has its own ASN.
+  tags: [always]
+
 # Two tenants sharing a VLAN, a VRF prefix or a VNI would produce a fabric
 # that looks built and behaves incoherently. Caught here rather than in FRR's
 # logs an hour later.

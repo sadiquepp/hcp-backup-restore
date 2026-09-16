@@ -1998,8 +1998,8 @@ on the hypervisor. Stay on `vm` otherwise.
 
 ### What it costs the existing lab
 
-- Each node VM in `clab_fabric_nodes` gains **one extra NIC**. Hot-plugged on
-  a running VM, no reboot, no rebuild.
+- Each node VM of every cluster in `clab_fabric_clusters` gains **one extra
+  NIC**. Hot-plugged on a running VM, no reboot, no rebuild.
 - A new libvirt network (`virbr1`): isolated, with no `<ip>` at all - so no
   NAT, no DHCP, no DNS, no address on the host, and no dnsmasq started for
   it. It cannot route anywhere and cannot perturb virbr0.
@@ -2043,8 +2043,62 @@ A HyperShift hosted cluster's OVN-Kubernetes is configured through its
 `HostedCluster`/`NodePool` and reconciled from the management cluster, so
 patching the guest's Network CR directly is at best fragile. Prove the
 mechanism on hub1 first; extending it to a hosted cluster afterwards is a
-separate piece of work, not a variable change. `clab_fabric_nodes` therefore
-defaults to hub1's three workers.
+separate piece of work, not a variable change. `clab_fabric_clusters`
+therefore starts with hub1's three workers.
+
+### More than one cluster on the fabric
+
+`vars.yaml` declares two things: `clab_clusters`, which says who is in each
+cluster (its nodes, its kubeconfig and its BGP ASN), and
+`clab_fabric_clusters`, which says which of those are actually wired into the
+fabric. The fabric half builds for all of them in one pass; the cluster half
+runs once per cluster and is told which one with `-e udn_bgp_cluster=<key>`.
+
+```
+# once, on the lab host: NICs for every cluster's nodes, and a leaf1 that
+# knows all of them
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+    --tags nodenics,clabdeploy -e clab_topology=evpn
+
+# then once per cluster, anywhere with the right kubeconfig
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+    --tags evpn -e clab_topology=evpn -e udn_bgp_cluster=hub
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+    --tags evpn -e clab_topology=evpn -e udn_bgp_cluster=sno
+```
+
+Three things are per-cluster and all three are load-bearing:
+
+**Its own ASN.** leaf1 re-advertises one cluster's EVPN routes to the other,
+and eBGP loop prevention makes the receiver drop anything carrying its own
+ASN in the AS\_PATH. Share an ASN between two clusters and you get healthy
+sessions, the right routes on leaf1, and an empty table on the far side -
+with nothing logged anywhere. An assert in `setup-clab-fabric` refuses the
+configuration rather than letting you find out later.
+
+**Its own half of a stretched Layer2 subnet.** A macVRF on one L2VNI is one
+broadcast domain across both clusters - that is the point - but each
+cluster's OVN-Kubernetes allocates from the subnet knowing nothing about the
+other, so both would hand out the low addresses and two pods would land on
+one address. There is no cross-cluster IPAM; `evpn_l2_excludes` on the tenant
+carves the prefix per cluster. `green` and `purple` give hub `10.204.0.0/17`
+and the SNO `10.204.128.0/17`.
+
+**Its own tenants, for anything routed.** A tenant's identity in the fabric
+is its route target, and that belongs to the tenant rather than to the
+cluster. Build the Layer3 tenant `blue` in two clusters and both originate
+`10.200.0.0/16` into RT `65000:101`, so leaf2 imports two equally good paths
+to one prefix pointing at two different VTEPs - and traffic for a hub pod
+starts arriving at the SNO, where nothing answers. `clab_clusters.<name>.tenants`
+limits what a cluster builds; the SNO builds `green` and `purple` only. A
+routed tenant that genuinely spans clusters needs its own subnet, VNI and
+route target, not a second copy of an existing one.
+
+Do not run `--tags default` on a second cluster. Its default pod network is
+the same `10.128.0.0/14` the first one has, and one prefix advertised into
+the fabric from two origins leaves leaf1 with a winner and a loser.
+`clab_clusters.sno.advertise_default: false` makes that phase a no-op with an
+explanation rather than a silent breakage.
 
 **VRF-Lite and EVPN require local gateway mode** (`routingViaHost: true`).
 This is an OVN-Kubernetes restriction, not a lab one - VRF-Lite is not

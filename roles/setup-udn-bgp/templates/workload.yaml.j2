@@ -99,10 +99,13 @@ spec:
             requests:
               cpu: 10m
               memory: 32Mi
-      # Workers only. The fabric NICs are on workers (clab_fabric_nodes), so
-      # a pod on a master would have no VRF-Lite path and would fail the
-      # tests for a reason that has nothing to do with what is being
-      # tested.
+      # Workers only. The fabric NICs are on workers, so a pod on a master
+      # would have no VRF-Lite path and would fail the tests for a reason that
+      # has nothing to do with what is being tested.
+      #
+      # Single-node OpenShift is not an exception to handle: SNO labels its one
+      # node with master AND worker, so this selector matches it. The toleration
+      # below covers the control-plane taint on a cluster that has one.
       nodeSelector:
         node-role.kubernetes.io/worker: ""
       tolerations:

@@ -75,7 +75,7 @@
 - name: Read the link table from each node
   ansible.builtin.command:
     cmd: "oc debug node/{{ udn_bgp_node_names[item.ip_key] }} --quiet -- chroot /host ip -j -d link show"
-  loop: "{{ clab_fabric_nodes }}"
+  loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
   register: udn_bgp_links_raw
@@ -132,10 +132,10 @@
 
 - name: Fail if any node is missing a tenant VRF
   ansible.builtin.assert:
-    that: (udn_bgp_vrf_facts | default([]) | length) == (clab_fabric_nodes | length) * (udn_bgp_tenants | length)
+    that: (udn_bgp_vrf_facts | default([]) | length) == (udn_bgp_cluster_nodes | length) * (udn_bgp_tenants | length)
     fail_msg: >-
-      Expected {{ (clab_fabric_nodes | length) * (udn_bgp_tenants | length) }}
-      tenant VRFs ({{ clab_fabric_nodes | length }} nodes x
+      Expected {{ (udn_bgp_cluster_nodes | length) * (udn_bgp_tenants | length) }}
+      tenant VRFs ({{ udn_bgp_cluster_nodes | length }} nodes x
       {{ udn_bgp_tenants | length }} tenants) but found
       {{ udn_bgp_vrf_facts | default([]) | length }}.
 
@@ -147,7 +147,7 @@
       1. The VRF does not exist yet. OVN-Kubernetes creates a node's UDN VRF
          when that network first has something on the node, so a node with no
          pod on a tenant network genuinely has no VRF. Confirm a test pod of
-         each tenant is Running on every node in clab_fabric_nodes
+         each tenant is Running on every node of cluster '{{ udn_bgp_cluster }}'
          (`oc get pods -A -o wide -l app=udn-test`) and re-run.
 
       2. The node has not converged yet, or the naming has changed. The

@@ -34,7 +34,9 @@
 - name: Report the cluster under test
   ansible.builtin.debug:
     msg: >-
-      Targeting {{ udn_bgp_target_hub }} at {{ hub_kubeconfig }} -
+      Targeting cluster '{{ udn_bgp_cluster }}'
+      (AS {{ udn_bgp_cluster_asn | default(clab_cluster_asn) }})
+      at {{ hub_kubeconfig }} -
       OpenShift {{ udn_bgp_cluster_version.stdout }},
       network plugin {{ udn_bgp_network_type.stdout }}
 
