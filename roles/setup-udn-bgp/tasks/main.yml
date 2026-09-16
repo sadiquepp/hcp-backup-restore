@@ -89,12 +89,22 @@
       otherwise just build fewer tenants than asked for, silently.
   when: clab_clusters[udn_bgp_cluster].tenants is defined
 
-- name: Narrow the tenant list to the ones this cluster builds
+#
+# udn_web_tenants is narrowed alongside it, and it is a separate list on
+# purpose: it is the demo's own subset knob (a tenant can be left out of the
+# web demo while still existing), so it is intersected rather than replaced.
+# Missing it meant --tags web on the SNO went looking for udn-blue - a
+# namespace only the hub has - and failed on a tenant this cluster is
+# deliberately not building. Both keys read clab_clusters directly, not each
+# other, so they are safe in one set_fact.
+- name: Narrow the tenant lists to the ones this cluster builds
   ansible.builtin.set_fact:
     udn_bgp_tenants: >-
       {{ udn_bgp_tenants
          | selectattr('name', 'in', clab_clusters[udn_bgp_cluster].tenants)
          | list }}
+    udn_web_tenants: >-
+      {{ udn_web_tenants | intersect(clab_clusters[udn_bgp_cluster].tenants) }}
   when: clab_clusters[udn_bgp_cluster].tenants is defined
 
 - name: Report which cluster this run is targeting
@@ -102,9 +112,9 @@
     msg: >-
       Targeting cluster '{{ udn_bgp_cluster }}' (AS {{ udn_bgp_cluster_asn }})
       with node(s)
-      {{ udn_bgp_cluster_nodes | map(attribute='ip_key') | join(', ') }}
-      and tenant(s)
-      {{ udn_bgp_tenants | map(attribute='name') | join(', ') }}.
+      {{ udn_bgp_cluster_nodes | map(attribute='ip_key') | join(', ') }},
+      tenant(s) {{ udn_bgp_tenants | map(attribute='name') | join(', ') }}
+      and web tenant(s) {{ udn_web_tenants | join(', ') }}.
       Manifests for this cluster are written to {{ udn_bgp_manifest_dir }}.
 
 # The fabric side is built once and shared, so a cluster-side run must not
