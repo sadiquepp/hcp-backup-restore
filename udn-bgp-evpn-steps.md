@@ -558,10 +558,19 @@ Confirm rather than assume - two commands, on the lab host:
 
 ```bash
 virsh domiflist sno | grep 52:54:00:e2:55:20          # the SNO's fabric NIC
+
 ssh root@192.168.122.40 \
-  'docker exec clab-udnbgp-leaf1 vtysh -c "show bgp summary"' | grep -c 192.168.140
-# 4 - three hub workers and the SNO
+  'docker exec clab-udnbgp-leaf1 vtysh -c "show bgp l2vpn evpn summary"'
+# four neighbours: three hub workers in AS 64512, the SNO in AS 64515.
+# The SNO's session is down until the command below has run - that is the
+# point of running it.
 ```
+
+Ask for the **`l2vpn evpn`** summary, not a bare `show bgp summary`. Every node
+neighbour is activated in two address families here - `ipv4 unicast` so it can
+learn its way to the other VTEPs, `l2vpn evpn` for the tenant routes - on one
+session, which is the whole point of the design. A flat summary prints a section
+per family, so four neighbours read as eight lines.
 
 **If the SNO was built after the fabric**, bring the fabric up to date first -
 this is a subset of `--tags fabric` and safe to re-run:
