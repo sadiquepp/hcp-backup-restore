@@ -1,105 +1,236 @@
+---
+## Tear the lab down.
+##
+##   ansible-playbook -i inventory/hosts cleanup.yaml
+##
+## Everything here is idempotent and safe to run against a partially-built
+## lab: a missing domain or a missing disk is not an error. Run it with no
+## tags to remove everything, or narrow it:
+##
+##   --tags sno      the single-node OpenShift cluster only
+##   --tags udnlab   the UDN/BGP/EVPN lab - clab VM, client VMs, fabric net
+##
+## The untagged tasks (hub, hub2, hosted clusters, helper, registry, minio,
+## ceph) have no tag of their own, so they run on an untagged invocation and
+## are skipped by either tag above.
+##
+## WHAT THIS DOES NOT TOUCH. The DHCP reservations these VMs hold on the
+## libvirt 'default' network are left in place. Every MAC in this lab is
+## derived from ip_list in vars.yaml, so a rebuild reuses the same MAC and the
+## setup roles skip re-adding a reservation that is already there. Deleting
+## them would be churn with a failure mode (a half-removed <host> entry) and
+## no benefit.
+##
+## ORDER MATTERS, and not the way the old version of this file had it. A
+## `virsh undefine` on a RUNNING domain succeeds by converting it to a
+## transient domain - it does not stop it - while `virsh destroy` on a domain
+## that is already off fails. Destroy first, then undefine, and tolerate both
+## failing: that is the only sequence that works whatever state the domain was
+## in. The commands are also separated by `;` rather than `&&`, because the
+## chained form stopped at the first VM that did not exist and left the rest
+## of the line unexecuted while the task still reported success, the trailing
+## `rm -f` having reset the return code.
 - name: Cleanup
   hosts: localhost
   become: true
+  vars_files:
+    - vars.yaml
   tasks:
   - name: Destroy Hub Workers
     shell: |
-      virsh undefine hub_worker1 && virsh undefine hub_worker2 && virsh undefine hub_worker3
-      virsh destroy hub_worker1 && virsh destroy hub_worker2 && virsh destroy hub_worker3
-      rm -f /var/lib/libvirt/images/hub/hub_worker1.qcow2 
-      rm -f /var/lib/libvirt/images/hub/hub_worker2.qcow2 
-      rm -f /var/lib/libvirt/images/hub/hub_worker3.qcow2 
-      rm -f /var/lib/libvirt/images/hub/storage_worker1.qcow2 
-      rm -f /var/lib/libvirt/images/hub/storage_worker2.qcow2 
-      rm -f /var/lib/libvirt/images/hub/storage_worker3.qcow2 
+      for d in hub_worker1 hub_worker2 hub_worker3; do
+        virsh destroy  "$d" >/dev/null 2>&1 || true
+        virsh undefine "$d" >/dev/null 2>&1 || true
+      done
+      rm -f /var/lib/libvirt/images/hub/hub_worker1.qcow2
+      rm -f /var/lib/libvirt/images/hub/hub_worker2.qcow2
+      rm -f /var/lib/libvirt/images/hub/hub_worker3.qcow2
+      rm -f /var/lib/libvirt/images/hub/storage_worker1.qcow2
+      rm -f /var/lib/libvirt/images/hub/storage_worker2.qcow2
+      rm -f /var/lib/libvirt/images/hub/storage_worker3.qcow2
 
   - name: Destroy Hub2 Workers
     shell: |
-      virsh undefine hub2_worker1 && virsh undefine hub2_worker2 && virsh undefine hub2_worker3
-      virsh destroy hub2_worker1 && virsh destroy hub2_worker2 && virsh destroy hub2_worker3
-      rm -f /var/lib/libvirt/images/hub2/hub2_worker1.qcow2 
-      rm -f /var/lib/libvirt/images/hub2/hub2_worker2.qcow2 
-      rm -f /var/lib/libvirt/images/hub2/hub2_worker3.qcow2 
-      rm -f /var/lib/libvirt/images/hub2/storage_worker1.qcow2 
-      rm -f /var/lib/libvirt/images/hub2/storage_worker2.qcow2 
+      for d in hub2_worker1 hub2_worker2 hub2_worker3; do
+        virsh destroy  "$d" >/dev/null 2>&1 || true
+        virsh undefine "$d" >/dev/null 2>&1 || true
+      done
+      rm -f /var/lib/libvirt/images/hub2/hub2_worker1.qcow2
+      rm -f /var/lib/libvirt/images/hub2/hub2_worker2.qcow2
+      rm -f /var/lib/libvirt/images/hub2/hub2_worker3.qcow2
+      rm -f /var/lib/libvirt/images/hub2/storage_worker1.qcow2
+      rm -f /var/lib/libvirt/images/hub2/storage_worker2.qcow2
 
   - name: Destroy Hub Masters
     shell: |
-      virsh undefine hub_master1 && virsh undefine hub_master2 && virsh undefine hub_master3
-      virsh destroy hub_master1 && virsh destroy hub_master2 && virsh destroy hub_master3
-      rm -f /var/lib/libvirt/images/hub/hub_master1.qcow2 
-      rm -f /var/lib/libvirt/images/hub/hub_master2.qcow2 
-      rm -f /var/lib/libvirt/images/hub/hub_master3.qcow2 
+      for d in hub_master1 hub_master2 hub_master3; do
+        virsh destroy  "$d" >/dev/null 2>&1 || true
+        virsh undefine "$d" >/dev/null 2>&1 || true
+      done
+      rm -f /var/lib/libvirt/images/hub/hub_master1.qcow2
+      rm -f /var/lib/libvirt/images/hub/hub_master2.qcow2
+      rm -f /var/lib/libvirt/images/hub/hub_master3.qcow2
 
   - name: Destroy Hub2 Masters
     shell: |
-      virsh undefine hub2_master1 && virsh undefine hub2_master2 && virsh undefine hub2_master3
-      virsh destroy hub2_master1 && virsh destroy hub2_master2 && virsh destroy hub2_master3
-      rm -f /var/lib/libvirt/images/hub2/hub2_master1.qcow2 
-      rm -f /var/lib/libvirt/images/hub2/hub2_master2.qcow2 
-      rm -f /var/lib/libvirt/images/hub2/hub2_master3.qcow2 
+      for d in hub2_master1 hub2_master2 hub2_master3; do
+        virsh destroy  "$d" >/dev/null 2>&1 || true
+        virsh undefine "$d" >/dev/null 2>&1 || true
+      done
+      rm -f /var/lib/libvirt/images/hub2/hub2_master1.qcow2
+      rm -f /var/lib/libvirt/images/hub2/hub2_master2.qcow2
+      rm -f /var/lib/libvirt/images/hub2/hub2_master3.qcow2
 
   - name: Destroy hosted cluster workers
     shell: |
-      virsh undefine c1_worker1 && virsh undefine c1_worker2 && virsh undefine c1_worker3
-      virsh destroy c1_worker1 && virsh destroy c1_worker2 && virsh destroy c1_worker3
-      rm -f /var/lib/libvirt/images/hosted_cluster/c1_worker1.qcow2 
-      rm -f /var/lib/libvirt/images/hosted_cluster/c1_worker2.qcow2 
-      rm -f /var/lib/libvirt/images/hosted_cluster/c1_worker3.qcow2 
+      for d in c1_worker1 c1_worker2 c1_worker3; do
+        virsh destroy  "$d" >/dev/null 2>&1 || true
+        virsh undefine "$d" >/dev/null 2>&1 || true
+      done
+      rm -f /var/lib/libvirt/images/hosted_cluster/c1_worker1.qcow2
+      rm -f /var/lib/libvirt/images/hosted_cluster/c1_worker2.qcow2
+      rm -f /var/lib/libvirt/images/hosted_cluster/c1_worker3.qcow2
 
   - name: Destroy disconnected hosted cluster workers
     shell: |
-      virsh undefine c1-d-worker1 && virsh undefine c1-d-worker2 && virsh undefine c1-d-worker3
-      virsh destroy c1-d-worker1 && virsh destroy c1-d-worker2 && virsh destroy c1-d-worker3
+      for d in c1-d-worker1 c1-d-worker2 c1-d-worker3; do
+        virsh destroy  "$d" >/dev/null 2>&1 || true
+        virsh undefine "$d" >/dev/null 2>&1 || true
+      done
       rm -f /var/lib/libvirt/images/hosted_cluster_disconnected/c1-d-worker1.qcow2
       rm -f /var/lib/libvirt/images/hosted_cluster_disconnected/c1-d-worker2.qcow2
       rm -f /var/lib/libvirt/images/hosted_cluster_disconnected/c1-d-worker3.qcow2
 
   - name: Destroy Hub Bootstrap
     shell: |
-      virsh undefine hub_bootstrap  && virsh destroy hub_bootstrap
-      rm -f /var/lib/libvirt/images/hub/hub_bootstrap.qcow2 
+      virsh destroy  hub_bootstrap >/dev/null 2>&1 || true
+      virsh undefine hub_bootstrap >/dev/null 2>&1 || true
+      rm -f /var/lib/libvirt/images/hub/hub_bootstrap.qcow2
 
   - name: Destroy Hub2 Bootstrap
     shell: |
-      virsh undefine hub2_bootstrap  && virsh destroy hub2_bootstrap
-      rm -f /var/lib/libvirt/images/hub2/hub2_bootstrap.qcow2 
+      virsh destroy  hub2_bootstrap >/dev/null 2>&1 || true
+      virsh undefine hub2_bootstrap >/dev/null 2>&1 || true
+      rm -f /var/lib/libvirt/images/hub2/hub2_bootstrap.qcow2
 
   - name: Destroy Helper VM
     shell: |
-      virsh undefine helper && virsh destroy helper
-      rm -f /var/lib/libvirt/images/helper_disk.qcow2 
+      virsh destroy  helper >/dev/null 2>&1 || true
+      virsh undefine helper >/dev/null 2>&1 || true
+      rm -f /var/lib/libvirt/images/helper_disk.qcow2
 
   - name: Destroy Mirror Registry VM
     shell: |
-      virsh undefine registry && virsh destroy registry
-      rm -f /var/lib/libvirt/images/registry_disk.qcow2 
+      virsh destroy  registry >/dev/null 2>&1 || true
+      virsh undefine registry >/dev/null 2>&1 || true
+      rm -f /var/lib/libvirt/images/registry_disk.qcow2
+      rm -f /var/lib/libvirt/images/registry_extra_disk.qcow2
 
   - name: Destroy Minio VM
     shell: |
-      virsh undefine minio && virsh destroy minio
-      rm -f /var/lib/libvirt/images/minio_disk.qcow2 
+      virsh destroy  minio >/dev/null 2>&1 || true
+      virsh undefine minio >/dev/null 2>&1 || true
+      rm -f /var/lib/libvirt/images/minio_disk.qcow2
 
   - name: Destroy Ceph VMs
     shell: |
-      virsh undefine ceph1 && virsh undefine ceph2 && virsh undefine ceph3 && virsh undefine cephadmin
-      virsh destroy ceph1 && virsh destroy ceph2 && virsh destroy ceph3 && virsh destroy cephadmin
-      rm -f /var/lib/libvirt/images/ceph1_disk.qcow2 
-      rm -f /var/lib/libvirt/images/ceph2_disk.qcow2 
-      rm -f /var/lib/libvirt/images/ceph3_disk.qcow2 
-      rm -f /var/lib/libvirt/images/cephadmin_disk.qcow2 
+      for d in ceph1 ceph2 ceph3 cephadmin; do
+        virsh destroy  "$d" >/dev/null 2>&1 || true
+        virsh undefine "$d" >/dev/null 2>&1 || true
+      done
+      rm -f /var/lib/libvirt/images/ceph1_disk.qcow2
+      rm -f /var/lib/libvirt/images/ceph2_disk.qcow2
+      rm -f /var/lib/libvirt/images/ceph3_disk.qcow2
+      rm -f /var/lib/libvirt/images/cephadmin_disk.qcow2
 
   - name: Destroy Ceph OSD Disks
     shell: |
-      rm -f /var/lib/libvirt/images/ceph1_osd1.qcow2 
-      rm -f /var/lib/libvirt/images/ceph1_osd2.qcow2 
-      rm -f /var/lib/libvirt/images/ceph1_osd3.qcow2 
-      rm -f /var/lib/libvirt/images/ceph2_osd1.qcow2 
-      rm -f /var/lib/libvirt/images/ceph2_osd2.qcow2 
-      rm -f /var/lib/libvirt/images/ceph2_osd3.qcow2 
-      rm -f /var/lib/libvirt/images/ceph3_osd1.qcow2 
-      rm -f /var/lib/libvirt/images/ceph3_osd2.qcow2 
-      rm -f /var/lib/libvirt/images/ceph3_osd3.qcow2 
+      rm -f /var/lib/libvirt/images/ceph1_osd1.qcow2
+      rm -f /var/lib/libvirt/images/ceph1_osd2.qcow2
+      rm -f /var/lib/libvirt/images/ceph1_osd3.qcow2
+      rm -f /var/lib/libvirt/images/ceph2_osd1.qcow2
+      rm -f /var/lib/libvirt/images/ceph2_osd2.qcow2
+      rm -f /var/lib/libvirt/images/ceph2_osd3.qcow2
+      rm -f /var/lib/libvirt/images/ceph3_osd1.qcow2
+      rm -f /var/lib/libvirt/images/ceph3_osd2.qcow2
+      rm -f /var/lib/libvirt/images/ceph3_osd3.qcow2
+
+  ## -------------------------------------------------------------------------
+  ## The single-node OpenShift cluster (setup_sno.yaml)
+  ## -------------------------------------------------------------------------
+  ## The install folder goes with the VM, deliberately. It holds the agent ISO
+  ## the domain boots from AND auth/kubeconfig - the only copy of the
+  ## credentials for a cluster that no longer exists. Leaving it behind is
+  ## worse than removing it: setup-sno wipes and rebuilds the folder on a fresh
+  ## install anyway, and a stale kubeconfig on this host is exactly what
+  ## setup_udn_bgp_lab.yaml's pre-flight exists to catch, because an `oc` that
+  ## silently falls through to the WRONG cluster looks like a working run.
+  - name: Destroy the single-node OpenShift VM
+    tags: [sno]
+    shell: |
+      virsh destroy  {{ sno_name }} >/dev/null 2>&1 || true
+      virsh undefine {{ sno_name }} --remove-all-storage >/dev/null 2>&1 || \
+        virsh undefine {{ sno_name }} >/dev/null 2>&1 || true
+      rm -f  {{ sno_vm_folder | default(download_dir ~ '/' ~ sno_name) }}/{{ sno_name }}_disk.qcow2
+      rm -rf {{ sno_install_folder }}
+
+  ## -------------------------------------------------------------------------
+  ## The UDN/BGP/EVPN lab (setup_udn_bgp_lab.yaml)
+  ## -------------------------------------------------------------------------
+  ## Names come from vars.yaml rather than being spelled out, so adding a
+  ## tenant client there does not leave an orphan VM here. udn_tenant_clients
+  ## is the same list tenant-client-vms.yml builds from.
+  - name: Destroy the UDN lab client VMs
+    tags: [udnlab]
+    shell: |
+      for d in {{ ([udn_client_vm_name, udn_nsclient_vm_name]
+                   + (udn_tenant_clients | map(attribute='name') | list))
+                  | join(' ') }}; do
+        virsh destroy  "$d" >/dev/null 2>&1 || true
+        virsh undefine "$d" >/dev/null 2>&1 || true
+        rm -f "{{ download_dir | regex_replace('/+$', '') }}/${d}_disk.qcow2"
+      done
+
+  ## In vm mode the routers live inside this VM, so destroying it destroys the
+  ## fabric. The lab directory ({{ clab_lab_dir }}) goes with it.
+  - name: Destroy the containerlab VM
+    tags: [udnlab]
+    shell: |
+      virsh destroy  {{ clab_vm_name }} >/dev/null 2>&1 || true
+      virsh undefine {{ clab_vm_name }} >/dev/null 2>&1 || true
+      rm -f {{ download_dir | regex_replace('/+$', '') }}/{{ clab_vm_disk }}
+
+  ## In host mode there is no VM to destroy and the containers are running on
+  ## THIS machine, holding veths into {{ clab_fabric_bridge }}. containerlab
+  ## has to remove them or the next deploy inherits half a fabric. Guarded on
+  ## the binary existing, so this is a no-op in vm mode.
+  - name: Destroy the containerlab topology if it runs on this host
+    tags: [udnlab]
+    shell: |
+      command -v containerlab >/dev/null 2>&1 || exit 0
+      [ -f {{ clab_lab_dir }}/{{ clab_lab_name }}.clab.yml ] || exit 0
+      containerlab destroy -t {{ clab_lab_dir }}/{{ clab_lab_name }}.clab.yml --cleanup || true
+      rm -rf {{ clab_lab_dir }}
+
+  ## Last, because the VMs above have interfaces on it and libvirt will not
+  ## destroy a network that is still in use. <forward mode='none'> - it carries
+  ## nothing but the fabric, so removing it cannot affect virbr0 or the lab's
+  ## egress.
+  - name: Remove the containerlab fabric network
+    tags: [udnlab]
+    shell: |
+      virsh net-destroy  {{ clab_fabric_network }} >/dev/null 2>&1 || true
+      virsh net-undefine {{ clab_fabric_network }} >/dev/null 2>&1 || true
+      exit 0
+
+  ## Rendered per-cluster manifests, which name pod addresses that will not
+  ## exist after this run. Harmless to keep, but they are the thing most likely
+  ## to be re-applied by hand against a rebuilt cluster.
+  - name: Remove the rendered UDN manifests
+    tags: [udnlab]
+    ansible.builtin.file:
+      path: "{{ playbook_dir }}/udn-bgp"
+      state: absent
 
   - name: Cleanup SSH Know Hostss
     shell: |
