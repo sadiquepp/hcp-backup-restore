@@ -1620,8 +1620,37 @@ udn_bgp_tenants:
     evpn_l2_excludes:
       hub:
         - "10.204.128.0/17"
+      ## The low /17 with 10.204.0.0/31 carved out, then the endpoint
+      ## reservation. The shape is not decoration: 10.204.0.1 is the Layer2
+      ## switch's own gateway and EVERY cluster on this subnet needs it.
+      ## Reserving it does not warn or degrade - ovn-kubernetes exits fatally
+      ##
+      ##   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
+      ##     failed to reserve IP 10.204.0.1: provided IP is already allocated
+      ##   F failed to run ovnkube
+      ##
+      ## which CrashLoopBackOffs ovnkube-node and takes out ALL pod networking
+      ## on that node, not just this UDN. An assert in setup-udn-bgp refuses to
+      ## render a reservation covering the gateway for that reason.
+      ##
+      ## That both clusters keep 10.204.0.1 is the point AND the remaining
+      ## problem: two OVN gateway routers on one address in one stretched
+      ## broadcast domain. No reservation scheme fixes that one.
       sno:
-        - "10.204.0.0/17"
+        - "10.204.0.2/31"
+        - "10.204.0.4/30"
+        - "10.204.0.8/29"
+        - "10.204.0.16/28"
+        - "10.204.0.32/27"
+        - "10.204.0.64/26"
+        - "10.204.0.128/25"
+        - "10.204.1.0/24"
+        - "10.204.2.0/23"
+        - "10.204.4.0/22"
+        - "10.204.8.0/21"
+        - "10.204.16.0/20"
+        - "10.204.32.0/19"
+        - "10.204.64.0/18"
         - "10.204.255.0/24"
     evpn_ip_vni: 401
 
@@ -1678,8 +1707,37 @@ udn_bgp_tenants:
     evpn_l2_excludes:
       hub:
         - "10.204.128.0/17"
+      ## The low /17 with 10.204.0.0/31 carved out, then the endpoint
+      ## reservation. The shape is not decoration: 10.204.0.1 is the Layer2
+      ## switch's own gateway and EVERY cluster on this subnet needs it.
+      ## Reserving it does not warn or degrade - ovn-kubernetes exits fatally
+      ##
+      ##   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
+      ##     failed to reserve IP 10.204.0.1: provided IP is already allocated
+      ##   F failed to run ovnkube
+      ##
+      ## which CrashLoopBackOffs ovnkube-node and takes out ALL pod networking
+      ## on that node, not just this UDN. An assert in setup-udn-bgp refuses to
+      ## render a reservation covering the gateway for that reason.
+      ##
+      ## That both clusters keep 10.204.0.1 is the point AND the remaining
+      ## problem: two OVN gateway routers on one address in one stretched
+      ## broadcast domain. No reservation scheme fixes that one.
       sno:
-        - "10.204.0.0/17"
+        - "10.204.0.2/31"
+        - "10.204.0.4/30"
+        - "10.204.0.8/29"
+        - "10.204.0.16/28"
+        - "10.204.0.32/27"
+        - "10.204.0.64/26"
+        - "10.204.0.128/25"
+        - "10.204.1.0/24"
+        - "10.204.2.0/23"
+        - "10.204.4.0/22"
+        - "10.204.8.0/21"
+        - "10.204.16.0/20"
+        - "10.204.32.0/19"
+        - "10.204.64.0/18"
         - "10.204.255.0/24"
     evpn_ip_vni: 501
 

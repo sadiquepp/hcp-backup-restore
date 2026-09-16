@@ -145,6 +145,62 @@
     udn_bgp_l2_reserve_field: "{{ udn_bgp_l2_reserve_raw.stdout | default('') | trim }}"
   when: udn_phase not in ['preflight', 'web']
 
+# A Layer2 UDN's own gateway is the first address of its subnet, and
+# ovn-kubernetes reserves it when it builds the switch. Reserve it here as well
+# and it does not warn, skip the network, or mark the CUDN degraded - it exits:
+#
+#   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
+#     failed to reserve IP 10.204.0.1: provided IP is already allocated
+#   F failed to run ovnkube
+#
+# ovnkube-node then CrashLoopBackOffs, which takes out ALL pod networking on
+# that node - every namespace, not just this UDN - and presents three steps
+# away as pods stuck in ContainerCreating with a CNI timeout. Far too sharp an
+# edge for a value someone edits in vars.yaml, so it is checked here.
+#
+# A CIDR contains <base>.1 in exactly two cases, which is what makes this
+# checkable without netaddr: it starts at the subnet base with a prefix of /31
+# or shorter, or it is <base>.1/32 exactly. Any aligned block of two or more
+# addresses that includes .1 must begin at .0.
+- name: Fail if a Layer2 reservation would swallow the network's own gateway
+  vars:
+    l2_base: "{{ item.udn_subnet.split('/')[0] }}"
+    l2_gateway: "{{ item.udn_subnet.split('/')[0].rsplit('.', 1)[0] }}.1"
+    l2_reserved: >-
+      {{ (item.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
+         or ([item.evpn_l2_exclude] if item.evpn_l2_exclude is defined else []) }}
+    l2_bad: >-
+      {{ l2_reserved
+         | select('match', '^' ~ (l2_base | replace('.', '\.')) ~ '/(?:[0-9]|[12][0-9]|3[01])$')
+         | list
+         + (l2_reserved | select('equalto', l2_gateway ~ '/32') | list) }}
+  ansible.builtin.assert:
+    that: l2_bad | length == 0
+    fail_msg: >-
+      Tenant '{{ item.name }}' on cluster '{{ udn_bgp_cluster }}' reserves
+      {{ l2_bad }}, which covers {{ l2_gateway }} - the Layer2 switch's own
+      gateway for {{ item.udn_subnet }}. ovn-kubernetes cannot then reserve it
+      and exits fatally, CrashLoopBackOffing ovnkube-node and taking out all
+      pod networking on every node that runs this network.
+
+      Split the reservation around the gateway instead. To reserve
+      {{ l2_base }}/17 while leaving the gateway free, that is
+      {{ l2_base }}/31 carved out of it - 14 CIDRs, well inside the API's
+      limit of 25. green and purple in vars.yaml show the shape.
+
+      Every cluster on a stretched Layer2 subnet needs this address, which is
+      itself worth knowing: they all end up with a gateway router on it.
+    success_msg: >-
+      {{ item.name }}: reservation leaves {{ l2_gateway }} free for the
+      gateway.
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - udn_phase == 'evpn'
+    - (item.topology | default('Layer3')) == 'Layer2'
+    - (item.evpn_l2_excludes is defined) or (item.evpn_l2_exclude is defined)
+
 - name: Report what the reservation field is called here
   ansible.builtin.debug:
     msg: >-
