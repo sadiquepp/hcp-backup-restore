@@ -2033,6 +2033,28 @@ udn_web_port: 8080
 ## tests: those run inside the namespaces, which this does not touch.
 udn_proxy_tenants: "{{ udn_web_tenants }}"
 
+## Which clusters the ingress fronts. One hostname per tenant per cluster, all
+## on one address, with haproxy picking the backend from the Host header.
+##
+## The FIRST entry keeps the bare hostname and the rest are suffixed, so
+## green.{{ udn_proxy_domain }} stays hub's and sno's becomes
+## green-sno.{{ udn_proxy_domain }}. That keeps every existing URL working and
+## makes the addition read as an addition.
+##
+## A cluster only contributes the tenants it actually builds - clab_clusters
+## limits the SNO to green and purple - so this produces five hub hostnames and
+## two sno ones rather than ten.
+##
+## The network namespace is chosen by TENANT, not by cluster, and that is the
+## whole reason this works with no new plumbing: green and green-sno are one
+## stretched L2VNI, so the green namespace reaches both clusters' pods on-link.
+## Only the backend address differs.
+##
+## Set to [hub] to go back to a single-cluster ingress.
+udn_proxy_clusters:
+  - hub
+  - sno
+
 ## Hostnames are <tenant>.<domain>, pointed at the namespace client's
 ## management address in whatever resolver the lab uses. No DNS? The proxy also
 ## routes on path, so http://<vm>/green/ works with no name resolution at all,

@@ -5,6 +5,13 @@
 # port and reach different pods, because 'namespace <name>' makes HAProxy open
 # that connection inside that network namespace, against that namespace's
 # routing table. Nothing else about this config is unusual.
+#
+# One route per (cluster, tenant), so a tenant that exists in two clusters gets
+# two hostnames - green.<domain> and green-sno.<domain>. The namespace is
+# chosen by TENANT and not by cluster, and that is what lets a second cluster
+# join with no new plumbing: green and green-sno are one stretched L2VNI, so
+# the green namespace reaches both clusters' pods on-link. Only the backend
+# address differs.
 
 global
     log         /dev/log local0
@@ -30,45 +37,50 @@ frontend tenants
 
     # Host-based. host_only strips any :port before comparing, so a request to
     # green.{{ udn_proxy_domain }}:{{ udn_proxy_port }} matches the same acl as one to the bare name.
-{% for t in udn_proxy_tenants %}
-    acl host_{{ t }}  req.hdr(host),host_only -i {{ t }}.{{ udn_proxy_domain }}
+{% for b in udn_proxy_backends %}
+    acl host_{{ b.label }}  req.hdr(host),host_only -i {{ b.label }}.{{ udn_proxy_domain }}
 {% endfor %}
 
-    # Path-based, so the demo works with no DNS at all: http://<vm>/{{ udn_proxy_tenants | first }}/
-{% for t in udn_proxy_tenants %}
-    acl path_{{ t }}  path /{{ t }}
-    acl path_{{ t }}  path_beg /{{ t }}/
+    # Path-based, so the demo works with no DNS at all:
+    #   http://<vm>/{{ udn_proxy_backends | map(attribute='label') | first }}/
+{% for b in udn_proxy_backends %}
+    acl path_{{ b.label }}  path /{{ b.label }}
+    acl path_{{ b.label }}  path_beg /{{ b.label }}/
 {% endfor %}
 
-{% for t in udn_proxy_tenants %}
-    use_backend be_{{ t }} if host_{{ t }} || path_{{ t }}
+{% for b in udn_proxy_backends %}
+    use_backend be_{{ b.label }} if host_{{ b.label }} || path_{{ b.label }}
 {% endfor %}
     default_backend be_unrouted
 
-{% for t in udn_proxy_tenants %}
-{# Sharers of this tenant's BACKEND ADDRESS, not of its subnet. Blue and red
+{% for b in udn_proxy_backends %}
+{# Sharers of this route's BACKEND ADDRESS, not of its subnet. Blue and red
    share 10.200.0.0/16 but hold different addresses in it, and a proxy does not
    care about the subnet - it dials one address. Only an identical address is
-   the case 'namespace' is load-bearing for. #}
+   the case 'namespace' is load-bearing for. Two CLUSTERS can land on one
+   address too, which is the same situation seen from further away. #}
 {% set sharers = [] %}
-{% for o in udn_proxy_tenants if o != t and udn_proxy_backend_addrs[o] == udn_proxy_backend_addrs[t] %}
-{% set _ = sharers.append(o) %}
+{% for o in udn_proxy_backends if o.label != b.label and o.addr == b.addr %}
+{% set _ = sharers.append(o.label) %}
 {% endfor %}
-backend be_{{ t }}
-    # Strip the /{{ t }} prefix when the path form was used; a Host-routed
+backend be_{{ b.label }}
+    # Strip the /{{ b.label }} prefix when the path form was used; a Host-routed
     # request has no prefix to strip and is unaffected.
-    http-request replace-path /{{ t }}/?(.*) /\1
-    http-request set-header X-UDN-Tenant {{ t }}
+    http-request replace-path /{{ b.label }}/?(.*) /\1
+    http-request set-header X-UDN-Tenant {{ b.tenant }}
+    http-request set-header X-UDN-Cluster {{ b.cluster }}
 {% if sharers %}
-    # {{ udn_proxy_backend_addrs[t] }} is ALSO {{ sharers | join(' and ') }}'s pod address, character for
+    # {{ b.addr }} is ALSO {{ sharers | join(' and ') }}'s pod address, character for
     # character. Without 'namespace' this server line and {{ sharers | join('/') }}'s would be
     # the same instruction, and one routing table would answer both.
 {% endif %}
-    server {{ t }}1 {{ udn_proxy_backend_addrs[t] }}:{{ udn_web_port }} namespace {{ t }} check
+    # namespace {{ b.tenant }}, not {{ b.label }} - the netns is per TENANT. This pod is in
+    # cluster {{ b.cluster }}, reached over the same L2VNI as every other {{ b.tenant }} pod.
+    server {{ b.label }}1 {{ b.addr }}:{{ udn_web_port }} namespace {{ b.tenant }} check
 
 {% endfor %}
 backend be_unrouted
-    http-request return status 404 content-type "text/plain" string "no tenant matched this request.\nUse http://<host>/<tenant>/ or Host: <tenant>.{{ udn_proxy_domain }}\ntenants: {{ udn_proxy_tenants | join(' ') }}\n"
+    http-request return status 404 content-type "text/plain" string "no route matched this request.\nUse http://<host>/<name>/ or Host: <name>.{{ udn_proxy_domain }}\nnames: {{ udn_proxy_backends | map(attribute='label') | join(' ') }}\n"
 
 listen stats
     bind {{ udn_proxy_bind_addr }}:{{ udn_proxy_stats_port }}

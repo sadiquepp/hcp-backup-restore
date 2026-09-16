@@ -23,45 +23,97 @@
 # the manifest, and the demo compares the two to tell a stale config from a
 # routing fault.
 # ---------------------------------------------------------------------------
-- name: Read each tenant's web pod address
+# One route per (cluster, tenant) the ingress will front. The label is what
+# becomes a hostname: bare for the first cluster in udn_proxy_clusters, suffixed
+# for the rest, so green.<domain> stays hub's and sno's is green-sno.<domain>.
+#
+# A cluster only contributes the tenants it builds - clab_clusters limits the
+# SNO to green and purple - so asking for a tenant it does not have is skipped
+# here rather than failing discovery below on a namespace that never existed.
+- name: Work out which (cluster, tenant) routes the ingress can front
+  ansible.builtin.set_fact:
+    udn_proxy_routes: >-
+      {{ (udn_proxy_routes | default([])) + [{
+           'cluster': item.0,
+           'tenant': item.1,
+           'label': item.1 if item.0 == udn_proxy_clusters[0]
+                    else item.1 ~ '-' ~ item.0 }] }}
+  loop: "{{ udn_proxy_clusters | product(udn_proxy_tenants) | list }}"
+  loop_control:
+    label: "{{ item.0 }}/{{ item.1 }}"
+  when: item.1 in (clab_clusters[item.0].tenants | default(udn_proxy_tenants))
+
+- name: Fail if no cluster offers any of the requested tenants
+  ansible.builtin.assert:
+    that: (udn_proxy_routes | default([])) | length > 0
+    fail_msg: >-
+      None of udn_proxy_clusters
+      ({{ udn_proxy_clusters | join(', ') }}) builds any of udn_proxy_tenants
+      ({{ udn_proxy_tenants | join(', ') }}). clab_clusters in vars.yaml says
+      which tenants each cluster builds.
+
+# ---------------------------------------------------------------------------
+# What to proxy to. The pod addresses are not stable - any --tags web re-run
+# replaces the pods and changes them - so they are read now and recorded in
+# the manifest, and the demo compares the two to tell a stale config from a
+# routing fault.
+#
+# KUBECONFIG is set per route rather than inherited: this task runs in the
+# FABRIC play, which sets no kubeconfig at all, so without this every route
+# would be read from whatever ambient kubeconfig the shell happens to have -
+# the hub's, silently, including for the SNO's routes.
+# ---------------------------------------------------------------------------
+- name: Read each tenant's web pod address in each cluster
   ansible.builtin.shell:
     # Literal block, not folded. A folded scalar keeps the newline before any
     # line that is MORE INDENTED than its first line, so the continuations here
     # survived into the shell and '-o jsonpath=...' ran as its own command
     # ("-o: command not found"), leaving stdout empty and rc 0.
     cmd: |
-      pod=$(oc -n udn-{{ item }} get pods -l app=udn-web -o jsonpath='{.items[0].metadata.name}')
-      [ -n "$pod" ] || { echo "no udn-web pod in udn-{{ item }}" >&2; exit 1; }
-      oc -n udn-{{ item }} exec "$pod" -c httpd -- cat /var/www/html/index.html 2>/dev/null |
+      pod=$(oc -n udn-{{ item.tenant }} get pods -l app=udn-web -o jsonpath='{.items[0].metadata.name}')
+      [ -n "$pod" ] || { echo "no udn-web pod in udn-{{ item.tenant }} on {{ item.cluster }}" >&2; exit 1; }
+      oc -n udn-{{ item.tenant }} exec "$pod" -c httpd -- cat /var/www/html/index.html 2>/dev/null |
         awk '/^udn:/ {split($2, a, "/"); print a[1]}'
-  loop: "{{ udn_proxy_tenants }}"
+  environment:
+    KUBECONFIG: "{{ clab_clusters[item.cluster].install_folder }}/auth/kubeconfig"
+  loop: "{{ udn_proxy_routes }}"
+  loop_control:
+    label: "{{ item.label }}"
   register: udn_proxy_addr_probe
   changed_when: false
   failed_when: false
   delegate_to: localhost
 
-- name: Fail if a tenant has no web pod to proxy to
+- name: Fail if a route has no web pod to proxy to
   ansible.builtin.assert:
     that:
       - item.rc == 0
       - item.stdout | trim | length > 0
     fail_msg: >-
-      No web pod address for tenant {{ item.item }}. The ingress proxies to the
-      per-tenant web workload, it does not create one - run --tags web first.
+      No web pod address for {{ item.item.label }} (tenant
+      {{ item.item.tenant }} on cluster {{ item.item.cluster }}). The ingress
+      proxies to the per-tenant web workload, it does not create one - run
+      --tags web against that cluster first:
+        ansible-playbook ... --tags web -e udn_bgp_cluster={{ item.item.cluster }}
       Note udn_proxy_tenants defaults to udn_web_tenants, so a tenant listed in
       one and not deployed by the other cannot work.
-    success_msg: "{{ item.item }} -> {{ item.stdout | trim }}"
+    success_msg: "{{ item.item.label }} -> {{ item.stdout | trim }}"
   loop: "{{ udn_proxy_addr_probe.results }}"
   loop_control:
-    label: "{{ item.item }}"
+    label: "{{ item.item.label }}"
   delegate_to: localhost
 
-- name: Record the backend address of each tenant
+- name: Record the backend address of each route
   ansible.builtin.set_fact:
-    udn_proxy_backend_addrs: >-
-      {{ dict(udn_proxy_addr_probe.results | map(attribute='item') | list
-              | zip(udn_proxy_addr_probe.results
-                    | map(attribute='stdout') | map('trim') | list)) }}
+    udn_proxy_backends: >-
+      {{ (udn_proxy_backends | default([]))
+         + [ item.item | combine({'addr': item.stdout | trim}) ] }}
+  loop: "{{ udn_proxy_addr_probe.results }}"
+  loop_control:
+    label: "{{ item.item.label }} -> {{ item.stdout | trim }}"
+
+- name: Record where the ingress listens
+  ansible.builtin.set_fact:
     udn_proxy_bind_addr: "{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}"
 
 - name: Record the ingress for the demo script
@@ -74,185 +126,11 @@
 # Two tenants SHARING a backend address is the case this exists for, so it is
 # not an error - but a tenant whose address is shared and whose namespace is
 # wrong would be undetectable by reading the config, so say it out loud.
-- name: Report which tenants share a backend address
+- name: Report the routes the ingress will front
   ansible.builtin.debug:
     msg: >-
-      {{ udn_proxy_backend_addrs }}
-      {{ 'Two or more tenants share one address - this is the case the proxy
-      exists for, and the only way to catch a wrong namespace keyword is to
-      check that each hostname returns the page naming the tenant that was
-      asked for. Verification below does exactly that.'
-      if (udn_proxy_backend_addrs.values() | list | length)
-         != (udn_proxy_backend_addrs.values() | list | unique | length)
-      else 'No two tenants currently share a backend address. The proxy still
-      works; it is just not proving anything a single routing table could
-      not.' }}
-  delegate_to: localhost
-
-# ---------------------------------------------------------------------------
-# On the VM
-# ---------------------------------------------------------------------------
-- name: Install haproxy and the SELinux tooling the fallback may need
-  ansible.builtin.dnf:
-    name:
-      - haproxy
-      - policycoreutils-python-utils
-    state: present
-
-# The namespace keyword is a compile-time option. Without it haproxy rejects
-# the config outright, so check the binary before rendering one it cannot read.
-- name: Check that haproxy was built with network namespace support
-  ansible.builtin.command:
-    cmd: haproxy -vv
-  register: udn_proxy_haproxy_vv
-  changed_when: false
-
-- name: Fail if haproxy has no namespace support
-  ansible.builtin.assert:
-    that: udn_proxy_haproxy_vv.stdout is search('(?i)USE_NS\s*=\s*1|namespace')
-    fail_msg: >-
-      This haproxy was not built with USE_NS=1, so 'namespace <name>' on a
-      server line does not exist and the config would not parse. Confirm with:
-        haproxy -vv | grep -i -E 'USE_NS|namespace'
-      Without it a single haproxy cannot reach two tenants that share a pod
-      address, because it would resolve both backends in one routing table.
-      The fallback is one haproxy INSIDE each namespace plus a dispatcher in
-      root, joined by a veth pair per tenant on unique link addresses - more
-      moving parts, no compile-time requirement.
-    success_msg: "haproxy supports network namespaces."
-
-- name: Install the tenant ingress config
-  ansible.builtin.template:
-    src: haproxy-tenants.cfg.j2
-    dest: /etc/haproxy/udn-tenants.cfg
-    mode: "0644"
-    validate: "/usr/sbin/haproxy -c -f %s"
-  register: udn_proxy_cfg
-
-- name: Install the tenant ingress unit
-  ansible.builtin.template:
-    src: udn-tenant-proxy.service.j2
-    dest: /etc/systemd/system/udn-tenant-proxy.service
-    mode: "0644"
-  register: udn_proxy_unit
-
-- name: Enable the tenant ingress
-  ansible.builtin.systemd:
-    name: udn-tenant-proxy.service
-    enabled: true
-    daemon_reload: true
-
-# Started softly, because of where SELinux bites. haproxy opens each namespace
-# file (/run/netns/<name>, labelled nsfs_t) while PARSING the config, and
-# haproxy_t has no read rule for nsfs_t, so the denial turns into
-#
-#   [ALERT] config : Fatal errors found in configuration.
-#
-# at parse time - not a connect-time EPERM, which is what this originally
-# expected and guarded against far too late.
-#
-# The `haproxy -c` in the template's validate= does NOT reproduce it: Ansible's
-# process never transitions into haproxy_t, so it reads the namespace files
-# happily and reports the config good. Only systemd's execution of the unit
-# transitions, which is why the first symptom is the service refusing to start.
-- name: Start the tenant ingress
-  ansible.builtin.systemd:
-    name: udn-tenant-proxy.service
-    state: "{{ 'restarted' if (udn_proxy_cfg is changed or udn_proxy_unit is changed) else 'started' }}"
-  register: udn_proxy_start
-  failed_when: false
-
-- name: Note whether it is actually running
-  ansible.builtin.command:
-    cmd: systemctl is-active udn-tenant-proxy.service
-  register: udn_proxy_active
-  changed_when: false
-  failed_when: false
-
-- name: Collect the SELinux denials if it did not start
-  ansible.builtin.shell:
-    cmd: "ausearch -m avc -ts recent 2>/dev/null | grep -i haproxy | tail -20 || true"
-  register: udn_proxy_avc
-  changed_when: false
-  when: udn_proxy_active.stdout | trim != 'active'
-
-# Scoped to the one domain on a disposable lab client VM; the system stays
-# enforcing. Two narrower options if that is not acceptable:
-#
-#   - a targeted module, which is what setroubleshoot itself suggests:
-#       ausearch -c haproxy --raw | audit2allow -M udn-haproxy-netns
-#       semodule -X 300 -i udn-haproxy-netns.pp
-#     Narrower, but audit2allow only sees the denials that have happened, and
-#     the first one masks the next, so it can take several rounds.
-#
-#   - SELinuxContext=system_u:system_r:unconfined_service_t:s0 in the unit,
-#     which runs THIS unit outside haproxy_t without touching the policy store
-#     or affecting the distro's own haproxy.service.
-- name: Make the haproxy domain permissive and start again
-  when:
-    - udn_proxy_active.stdout | trim != 'active'
-    - udn_proxy_avc.stdout | default('') | length > 0
-    - udn_proxy_selinux_permissive_fallback | bool
-  block:
-    - name: Report the denial
-      ansible.builtin.debug:
-        msg: >-
-          SELinux denied haproxy the namespace files it needs
-          (/run/netns/*, labelled nsfs_t) while parsing its config. Making
-          the haproxy_t domain permissive on this lab VM; the system stays
-          enforcing. Denial:
-          {{ udn_proxy_avc.stdout_lines | default([]) | join(' | ') }}
-
-    - name: Set haproxy_t permissive
-      ansible.builtin.command:
-        cmd: semanage permissive -a haproxy_t
-      changed_when: true
-
-    - name: Start the tenant ingress again
-      ansible.builtin.systemd:
-        name: udn-tenant-proxy.service
-        state: restarted
-
-- name: Fail if the ingress is still not running
-  ansible.builtin.command:
-    cmd: systemctl is-active udn-tenant-proxy.service
-  register: udn_proxy_active_final
-  changed_when: false
-  failed_when: udn_proxy_active_final.stdout | trim != 'active'
-
-# ---------------------------------------------------------------------------
-# Verify by identity, not by reachability. A 200 from the wrong tenant is the
-# failure this design can produce and a health check cannot see.
-# ---------------------------------------------------------------------------
-- name: Curl every tenant hostname through the proxy
-  ansible.builtin.command:
-    cmd: >-
-      curl -sS --max-time 10 -H "Host: {{ item }}.{{ udn_proxy_domain }}"
-      http://{{ udn_proxy_bind_addr }}:{{ udn_proxy_port }}/
-  loop: "{{ udn_proxy_tenants }}"
-  register: udn_proxy_probe
-  changed_when: false
-  failed_when: false
-  retries: 6
-  delay: 5
-  until: udn_proxy_probe.stdout is defined and ('I am ' ~ item) in udn_proxy_probe.stdout
-
-- name: Fail unless every hostname served its own tenant
-  ansible.builtin.assert:
-    that: ('I am ' ~ item.item) in (item.stdout | default(''))
-    fail_msg: >-
-      http://{{ item.item }}.{{ udn_proxy_domain }}/ did not return
-      {{ item.item }}'s page. It returned:
-      {{ (item.stdout | default('') | truncate(200)) or '(nothing)' }}
-      Three things produce this. The pod moved and the recorded backend
-      address is stale - re-run --tags clabnsproxy after any --tags web.
-      The namespace keyword names the wrong tenant, which is the failure mode
-      this design introduces and which returns the WRONG page rather than no
-      page. Or setns() was refused - check
-        ausearch -m avc -ts recent | grep haproxy
-      Read the backend state with:
-        curl -s http://{{ udn_proxy_bind_addr }}:{{ udn_proxy_stats_port }}/
-    success_msg: "{{ item.item }}.{{ udn_proxy_domain }} -> its own page."
-  loop: "{{ udn_proxy_probe.results }}"
-  loop_control:
-    label: "{{ item.item }}"
+      {% for b in udn_proxy_backends %}
+      {{ b.label }}.{{ udn_proxy_domain }} -> {{ b.addr }}
+      (tenant {{ b.tenant }} on {{ b.cluster }}, dialled inside netns
+      {{ b.tenant }}){{ "\n" }}
+      {% endfor %}

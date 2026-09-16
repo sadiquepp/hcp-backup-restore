@@ -77,7 +77,7 @@ if (( ! WITH_VMS && ! WITH_NETNS && ! WITH_PROXY )); then
     exit 1
 fi
 
-declare -A WEBADDR RESULT SERVES CLIENTIP ADDR_TENANTS PREFIX ANSWERED_BY
+declare -A WEBADDR RESULT SERVES CLIENTIP ADDR_TENANTS PREFIX ANSWERED_BY WEBCLUSTER
 tenants=(); clients=(); addrs=()
 
 on_client() {  # client-ip, command
@@ -96,8 +96,12 @@ for ns in $(oc get ns -l udn-tenant -o jsonpath='{range .items[*]}{.metadata.nam
     # iproute in it. The init container already read ovn-udn1 and wrote the
     # address into the page, which is also the more honest source - it is what
     # the pod that will answer says about itself.
-    addr=$(oc -n "$ns" exec "$pod" -c httpd -- cat /var/www/html/index.html 2>/dev/null \
-             | awk '/^udn:/ {print $2}')
+    page=$(oc -n "$ns" exec "$pod" -c httpd -- cat /var/www/html/index.html 2>/dev/null)
+    addr=$(printf '%s\n' "$page" | awk '/^udn:/ {print $2}')
+    # Which cluster this pod is in, straight off the page. Only routes in THIS
+    # cluster can be judged stale below - the others are served by a kubeconfig
+    # this run never looked at, and their recorded address is all we know.
+    WEBCLUSTER["$tenant"]=$(printf '%s\n' "$page" | awk '/^cluster:/ {print $2}')
     [[ -n "$addr" && "$addr" != "(no"* ]] || continue
     tenants+=("$tenant")
     a="${addr%%/*}"
@@ -138,25 +142,37 @@ done
 # that returns 200 from the wrong tenant is this design's characteristic
 # failure, and it is invisible to a health check.
 # ---------------------------------------------------------------------------
-declare -A PROXY_RECORDED PROXY_HOST_PAGE PROXY_PATH_PAGE
+declare -A PROXY_RECORDED PROXY_HOST_PAGE PROXY_PATH_PAGE PROXY_TENANT PROXY_CLUSTER
 PROXY_IP=""; PROXY_PORT=""; PROXY_DOMAIN=""; PROXY_VM=""
-proxy_tenants=()
+proxy_names=()
 
 read_proxy_manifest() {
-    local vm ip port domain pairs pair t a
+    local vm ip port domain pairs pair n t c a nf
     while IFS='|' read -r vm ip port domain pairs; do
         [[ -n "${vm:-}" && "$vm" != \#* ]] || continue
         PROXY_VM="$vm"; PROXY_IP="$ip"; PROXY_PORT="$port"; PROXY_DOMAIN="$domain"
         for pair in ${pairs//,/ }; do
-            t="${pair%%:*}"; a="${pair##*:}"
-            proxy_tenants+=("$t"); PROXY_RECORDED["$t"]="$a"
+            # name:tenant:cluster:addr once the ingress fronts more than one
+            # cluster, because the hostname and the network namespace stop
+            # being the same word - green-sno is served out of netns green.
+            # The older two-field form is still read, so a manifest rendered
+            # before that change does not have to be regenerated to be legible.
+            nf=$(awk -F: '{print NF}' <<<"$pair")
+            n="${pair%%:*}"; a="${pair##*:}"
+            if (( nf >= 4 )); then
+                t=$(cut -d: -f2 <<<"$pair"); c=$(cut -d: -f3 <<<"$pair")
+            else
+                t="$n"; c=""
+            fi
+            proxy_names+=("$n")
+            PROXY_RECORDED["$n"]="$a"; PROXY_TENANT["$n"]="$t"; PROXY_CLUSTER["$n"]="$c"
         done
     done < "$PROXY_ENV"
 }
 
 probe_proxy() {
     local t
-    for t in "${proxy_tenants[@]}"; do
+    for t in "${proxy_names[@]}"; do
         PROXY_HOST_PAGE["$t"]=$(curl -sS --max-time 10 -H "Host: ${t}.${PROXY_DOMAIN}" \
             "http://${PROXY_IP}:${PROXY_PORT}/" 2>/dev/null \
             | awk "/I am/ {print; exit}")
@@ -173,10 +189,10 @@ print_proxy() {
     echo
     echo "Tenant ingress on ${PROXY_VM} (${PROXY_IP}:${PROXY_PORT})"
     echo
-    printf '  %-26s %-14s %-16s %s\n' "hostname" "backend" "via Host:" "via /path/"
-    for t in "${proxy_tenants[@]}"; do
-        printf '  %-26s %-14s %-16s %s\n' \
-            "${t}.${PROXY_DOMAIN}" "${PROXY_RECORDED[$t]}" \
+    printf '  %-26s %-14s %-8s %-18s %s\n' "hostname" "backend" "netns" "via Host:" "via /path/"
+    for t in "${proxy_names[@]}"; do
+        printf '  %-26s %-14s %-8s %-18s %s\n' \
+            "${t}.${PROXY_DOMAIN}" "${PROXY_RECORDED[$t]}" "${PROXY_TENANT[$t]}" \
             "${PROXY_HOST_PAGE[$t]}" "${PROXY_PATH_PAGE[$t]}"
     done
 
@@ -191,23 +207,46 @@ print_proxy() {
     done
 
     echo
-    for t in "${proxy_tenants[@]}"; do
+    local tenant cluster
+    for t in "${proxy_names[@]}"; do
         got="${PROXY_HOST_PAGE[$t]}"
-        live="${WEBADDR[$t]:-}"
+        tenant="${PROXY_TENANT[$t]}"; cluster="${PROXY_CLUSTER[$t]}"
+        # Staleness is only answerable for routes in the cluster this run
+        # discovered. A route into the other cluster was read with a kubeconfig
+        # we never opened, so its recorded address is the only address we have
+        # and comparing it to this cluster's pod would report every one of them
+        # stale.
+        live=""
+        if [[ -z "$cluster" || "${WEBCLUSTER[$tenant]:-}" == "$cluster" ]]; then
+            live="${WEBADDR[$tenant]:-}"
+        fi
         if [[ -n "$live" && "$live" != "${PROXY_RECORDED[$t]}" ]]; then
             echo "  STALE   ${t}: proxy points at ${PROXY_RECORDED[$t]}, the pod is now ${live}."
             echo "          Re-run --tags clabnsproxy; any --tags web replaces the pods."
             stale=1; rc=1
         fi
-        if [[ "$got" != *"I am $t"* ]]; then
+        # Against the TENANT, not the hostname: green-sno's page says "I am
+        # green on sno", because the pod knows which tenant and cluster it is
+        # in and nothing about what hostname reached it.
+        if [[ ! "$got" =~ ^"I am $tenant"( on .+)?$ ]]; then
             if (( stale )); then
                 echo "  BROKEN  ${t}.${PROXY_DOMAIN} returned: ${got}  (see STALE above)"
             else
                 echo "  BROKEN  ${t}.${PROXY_DOMAIN} returned: ${got}"
-                echo "          A page naming ANOTHER tenant means the wrong"
-                echo "          'namespace' keyword on that backend - the failure"
-                echo "          this design introduces and the fabric cannot catch."
+                echo "          Expected a page from tenant '${tenant}'. A page naming"
+                echo "          ANOTHER tenant means the wrong 'namespace' keyword on"
+                echo "          that backend - the failure this design introduces and"
+                echo "          the fabric cannot catch."
             fi
+            rc=1
+        elif [[ -n "$cluster" && "$got" != *" on ${cluster}" ]]; then
+            echo "  WRONGCLUSTER  ${t}.${PROXY_DOMAIN} returned: ${got}"
+            echo "          Right tenant, wrong cluster - this route names ${cluster}."
+            echo "          Both clusters' pods are on one L2VNI and one subnet, so"
+            echo "          only the backend address separates them: check"
+            echo "          ${PROXY_RECORDED[$t]} is still ${cluster}'s pod and not the"
+            echo "          other cluster's. This is the failure a shared Layer2"
+            echo "          network introduces that a single-cluster ingress cannot."
             rc=1
         fi
         stale=0
