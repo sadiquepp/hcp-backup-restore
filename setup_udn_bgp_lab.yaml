@@ -118,19 +118,43 @@
   vars_files:
     - vars.yaml
     - vault.yaml
-  tags: [fabric]
+  # DELIBERATELY NOT `tags: [fabric]`. A tag on a PLAY is added to every task
+  # in it, so that made --tags fabric match the whole play - including the
+  # optional client VMs and the tenant ingress, which setup-clab-fabric tags
+  # clabclient / clabtenantclients / clabnsclient / clabnsproxy precisely so a
+  # routine fabric run does not touch them. The role's own comments say as
+  # much; the play tag quietly overrode all of them.
+  #
+  # It was invisible while the lab was already built, because those tasks
+  # succeeded against things that already existed. On a rebuilt lab --tags
+  # fabric fails in nsproxy.yml:
+  #
+  #   Fail if a route has no web pod to proxy to
+  #   no udn-web pod in udn-blue on hub
+  #
+  # which is correct - there is no web pod yet, --tags web has not been run,
+  # and the ingress had no business running at all.
+  #
+  # The role's tasks carry their own tags and import_role is static, so
+  # --tags fabric still reaches exactly the six fabric pieces.
   tasks:
     # Same pattern as setup_bm_host.yaml: the inventory Ansible parsed at
     # startup predates the [clab] group this lab needs, so render it and
     # re-read it before anything tries to delegate to the containerlab VM.
+    #
+    # tags: [always] because every subset of this play delegates somewhere -
+    # --tags clabnsproxy needs [clab] as much as --tags fabric does - and with
+    # the play tag gone there is nothing else to make these run.
     - name: Render inventory/hosts so the [clab] group exists
       ansible.builtin.template:
         src: "{{ playbook_dir }}/inventory/hosts.j2"
         dest: "{{ playbook_dir }}/inventory/hosts"
         mode: '0644'
+      tags: [always]
 
     - name: Re-read the inventory that was just rendered
       ansible.builtin.meta: refresh_inventory
+      tags: [always]
 
     - ansible.builtin.import_role:
         name: setup-clab-fabric
