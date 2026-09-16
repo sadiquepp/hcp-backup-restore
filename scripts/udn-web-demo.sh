@@ -77,7 +77,7 @@ if (( ! WITH_VMS && ! WITH_NETNS && ! WITH_PROXY )); then
     exit 1
 fi
 
-declare -A WEBADDR RESULT SERVES CLIENTIP ADDR_TENANTS PREFIX
+declare -A WEBADDR RESULT SERVES CLIENTIP ADDR_TENANTS PREFIX ANSWERED_BY
 tenants=(); clients=(); addrs=()
 
 on_client() {  # client-ip, command
@@ -315,8 +315,21 @@ for c in "${clients[@]}"; do
             case " ${SERVES[$c]} " in *" $t "*) expect="$t" ;; esac
         done
         if [[ -n "$expect" ]]; then
-            if [[ "$got" != "I am $expect" ]]; then
+            # The banner is "I am <tenant>", and once a second cluster joins the
+            # fabric "I am <tenant> on <cluster>" - because with a stretched
+            # Layer2 tenant the tenant name alone no longer says who answered.
+            # Both forms are correct here. Matching the first form exactly is
+            # what turned a perfect diagonal into two BROKEN lines: every cell
+            # was right and the string had simply grown a suffix.
+            if [[ ! "$got" =~ ^"I am $expect"( on .+)?$ ]]; then
                 echo "  BROKEN  $c serves $expect at $a but got: $got"; bad=$((bad+1))
+            else
+                # Which cluster answered, when the page says. Collected rather
+                # than checked: a client reaching a pod in ANOTHER cluster over
+                # a shared L2VNI is the thing the stretched tenant exists to do,
+                # so it is a result to report, not a fault to flag.
+                cl="${got#I am $expect}"; cl="${cl# on }"
+                [[ -n "$cl" ]] && ANSWERED_BY["$cl"]="${ANSWERED_BY[$cl]:-}${ANSWERED_BY[$cl]:+ }${c}->${expect}"
             fi
         else
             if [[ "$got" != "(no answer)" ]]; then
@@ -329,6 +342,20 @@ done
 if (( bad == 0 )); then
     echo "  clean: every page came from the tenant that was supposed to serve it,"
     echo "         and no page came from one that was not."
+    if (( ${#ANSWERED_BY[@]} > 0 )); then
+        echo
+        echo "  Answered by cluster:"
+        for cl in "${!ANSWERED_BY[@]}"; do
+            printf '    %-10s %s\n' "$cl" "${ANSWERED_BY[$cl]}"
+        done
+        if (( ${#ANSWERED_BY[@]} > 1 )); then
+            echo
+            echo "  More than one cluster answered. These clients are on the fabric,"
+            echo "  not in any cluster, and they reached pods in both - over one"
+            echo "  L2VNI, with every address inside one subnet. That is the"
+            echo "  stretched broadcast domain doing what it is for."
+        fi
+    fi
     echo
     echo "  Note every address curled above is inside one subnet. The only"
     echo "  difference between these machines is the VLAN tag on their fabric"
