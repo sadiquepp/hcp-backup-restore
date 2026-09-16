@@ -91,56 +91,19 @@ ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass \
 
 ### 1.2 The SNO
 
-**Only needed for section 8** (the second cluster on the EVPN fabric). Paths A
-and B, and path C on one cluster, do not use it.
+**Only needed for section 8** (the second cluster on the EVPN fabric).
 
 ```bash
 ansible-playbook -i inventory/hosts setup_sno.yaml --ask-vault-pass
 ```
 
-> **Heading for section 8? Start this in parallel with the hub.** The two are
-> independent installs of separate VMs - the SNO is not a member of the hub, is
-> not managed by it, and nothing in either build reads the other. Run them in
-> two terminals and the SNO is ready when the hub is, instead of adding its
-> install time to the end.
->
-> The fork is **after** `setup_bm_host.yaml`, not before it. That run creates the
-> helper and serves both zones, and the SNO's pre-flight checks for its own - so
-> the helper has to exist before either cluster starts. From there:
->
-> ```
-> setup_bm_host.yaml            (must finish first - helper, DNS, LB)
->         |
->         +---> setup_hub_cluster.yaml --skip-tags acm      terminal 1
->         +---> setup_sno.yaml                              terminal 2
-> ```
->
-> Both pull their release payloads from quay.io and both are sized for comfort
-> rather than minimum, so this is the moment the hypervisor is busiest - check
-> it has the RAM for a bootstrap, three masters, three workers and a 32GiB SNO
-> at once before starting. Each run prompts for the vault password separately.
+Run it in a second terminal **alongside** the hub install above, not after it -
+they are independent, and serialising adds the SNO's install time to the end for
+nothing. `setup_bm_host.yaml` must have finished first: it serves
+`api.sno.<base_domain>`, which this playbook requires and does not create.
 
-> **DNS is already done, if you ran 1.1 in order.** `setup_sno.yaml` hard-fails
-> when `api.sno.<base_domain>` does not resolve - deliberately, up front, rather
-> than forty minutes into an install whose certificate is issued for a name
-> nothing serves. It does not render the zone itself; `setup-dns` runs on the
-> helper, and one owner for DNS is the point. But `setup_bm_host.yaml` in 1.1
-> renders the SNO zone automatically whenever `vars.yaml` carries `sno_name` and
-> `ip_list.sno`, which it does by default - so the pre-flight passes.
->
-> Building the SNO later, or after changing `ip_list`, needs the zone refreshed
-> first:
-> ```bash
-> ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
-> ```
-
-> Rebuilding over an existing SNO needs `-e sno_force_reinstall=true`. The guard
-> is there because the rebuild deletes the only copy of that cluster's
-> kubeconfig.
-
-Useful subsets: `--tags snoimage` rebuilds the agent ISO alone, `--tags snovm`
-the VM from an ISO already built, `--tags snowait` just blocks until a running
-install finishes.
+Rebuilding over an existing SNO needs `-e sno_force_reinstall=true` - the
+rebuild deletes the only copy of that cluster's kubeconfig.
 
 ### 1.3 Check what you have
 
