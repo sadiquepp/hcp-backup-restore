@@ -45,6 +45,7 @@ where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
   - [Is this how it works in production?](#is-this-how-it-works-in-production)
 - [Phase 3: VRF-Lite](#phase-3-vrf-lite)
 - [Phase 4: EVPN](#phase-4-evpn)
+  - [Following one packet in phase 4, routed](#following-one-packet-in-phase-4-routed)
   - [Following one packet, cluster to cluster](#following-one-packet-cluster-to-cluster)
 - [Live migration on the Layer2 tenant](#live-migration-on-the-layer2-tenant)
 - [Teardown](#teardown)
@@ -3941,6 +3942,104 @@ node, read `oc get node <node> -o yaml | grep -i vtep` rather than trusting it.
 
 ---
 
+## Following one packet in phase 4, routed
+
+Phase 2's [walkthrough](#following-one-packet-in-phase-2) turns on **two**
+kernel routing tables and the `ip rule` that chooses between them. Phase 3 adds
+a VLAN and a VRF on the node to go with them. This one is worth reading for
+what it **removes**: under EVPN there is no tenant VRF in the kernel at all,
+no `l3mdev` lookup, and no per-tenant table. `--tags evpn` deletes the phase-3
+`vrflite-<tenant>-<node>` policies precisely so there is only one path.
+
+Worked with a **blue** pod reaching `blue-ext` at `10.210.10.10`. blue is
+Layer3, so its transport is an **ipVRF** on L3VNI 101 — prefixes, not MACs.
+
+```
+                        pod: 10.200.x.y/24    gateway: the UDN's router port
+worker1                 vtep0: 100.64.0.34     enp2s0: 192.168.140.34/24
+                        NO kernel VRF, NO VLAN subinterface - phase 4 removed them
+leaf1                   eth1: 192.168.140.1    underlay transit only, holds no tenant VRF
+spine                   lo0: 10.0.0.254        underlay transit
+leaf2                   lo0: 10.0.0.2          <- the VXLAN endpoint for this path
+                        vrf blue: table 1110   br101 enslaved to it
+                        blue-ext: 10.210.10.1/24 enslaved to vrf blue
+```
+
+Note the tunnel is **not** node-to-node here. It is `100.64.0.34 ↔ 10.0.0.2` —
+a node's VTEP to leaf2's loopback — where the
+[Layer2 walk](#following-one-packet-cluster-to-cluster) was `100.64.0.20 ↔
+100.64.0.36`, two nodes on one segment. That difference decides everything
+about step 5.
+
+### Out
+
+| # | Where | What decides the next hop |
+| --- | --- | --- |
+| 1 | Pod netns | `default via <blue's gateway> dev ovn-udn1`. A logical router port. Unlike the Layer2 case the destination is **off-subnet**, so the gateway is genuinely used |
+| 2 | veth → `br-int` | The pod's logical switch port |
+| 3 | blue's logical router | `10.210.10.0/24` is a **type-5 prefix route**, learned over EVPN with route target `65000:101`. Next hop: leaf2's VTEP, `10.0.0.2`. First TTL decrement |
+| 4 | VXLAN encapsulation | Outer `100.64.0.34 → 10.0.0.2`, **VNI 101** — the L3VNI, not a MAC VNI. Symmetric IRB: the packet was routed *into* the tunnel and will be routed *out* of it |
+| 5 | Host `main` table | The only kernel routing decision, and the phase-2 fork is simply absent — no `ip rule` 1000, no l3mdev, no table 1117, because phase 4 deleted the VRF that made those exist. `10.0.0.2/32` is BGP-learned from leaf1, so next hop `192.168.140.1` out the fabric NIC |
+| 6 | leaf1 → spine → leaf2 | Three underlay hops on the p2p links (`10.1.0.0/30`, `10.1.0.4/30`). leaf1 is pure transit: it holds `bgp retain route-target all` and no tenant VRF, so it passes the EVPN routes without importing them and forwards the outer packet without ever seeing the inner one |
+| 7 | leaf2, `vni101` → `br101` | Decapsulate into the L3VNI. `br101` is enslaved to `vrf blue`, so the inner packet lands in **table 1110** |
+| 8 | `vrf blue` | `10.210.10.0/24` is connected on `blue-ext`. Second TTL decrement, and out |
+| 9 | `blue-ext` | The container answers |
+
+### Back
+
+Symmetric, and that is the contrast with phase 2. leaf2's `vrf blue` holds a
+type-5 route for the pod's subnet pointing at `100.64.0.34`, learned from the
+same EVPN session that carried the outbound prefix. The reply is encapsulated
+in VNI 101 and routed back through the spine.
+
+Phase 2's return path needed a BGP-learned route on the leaf **and** forwarding
+on a NIC OVN-Kubernetes has never heard of. Here it needs one thing, and both
+directions need the same one: the EVPN session that exchanged the prefixes.
+
+### Two routing hops, and how to see them
+
+The inner packet is routed twice — once into the L3VNI at the node, once out of
+it at leaf2 — so the TTL arrives decremented by **two**. That is the cleanest
+way to tell this path from the Layer2 one without reading any state:
+
+```bash
+# Layer3 / ipVRF: routed twice, TTL arrives at 62
+oc -n udn-blue rsh deploy/udn-web ping -c1 10.210.10.10
+
+# Layer2 / macVRF: bridged, TTL arrives at 64
+oc -n udn-green rsh deploy/udn-web ping -c1 10.204.255.10
+```
+
+If the Layer3 ping comes back with TTL 64, it did not take this path at all.
+
+### Confirming each hop
+
+```bash
+# 3: the type-5 route and its route target
+oc debug node/worker1 --quiet -- chroot /host \
+  ovn-nbctl lr-route-list $(ovn-nbctl --bare --columns=name find logical_router name~blue)
+
+# 4-5: the outer packet on the wire, and that VNI 101 is what is inside it
+oc debug node/worker1 --quiet -- chroot /host \
+  timeout 5 tcpdump -ni enp2s0 udp port 4789 -c5
+
+# 5: the only kernel routing decision on the path
+oc debug node/worker1 --quiet -- chroot /host ip route get 10.0.0.2
+
+# 5 again, the negative: there is no tenant VRF left in the kernel
+oc debug node/worker1 --quiet -- chroot /host ip -d link show type vrf
+
+# 7-8: the VRF, the L3VNI enslaved to it, and the prefix
+docker exec clab-udnbgp-leaf2 vtysh -c 'show ip route vrf blue'
+docker exec clab-udnbgp-leaf2 vtysh -c 'show bgp l2vpn evpn vni 101'
+```
+
+The fourth one is the point of the whole section. In phase 3 it lists a VRF per
+tenant; in phase 4 it lists none, and the tenant separation that those VRFs
+used to provide is now carried entirely by the VNI and the route target.
+
+---
+
 ## Following one packet, cluster to cluster
 
 The phase-1 walk above crosses four routing decisions. This one crosses
@@ -4018,12 +4117,32 @@ docker exec clab-udnbgp-leaf1 vtysh -c 'show ip route 100.64.0.36'
 oc debug node/worker3 --quiet -- chroot /host ip -o addr show vtep0
 ```
 
-Step 5 is the one worth actually running rather than reading. Both VTEPs sit
-on one L2 segment (`virbr1`), so the node's route to `100.64.0.36` goes via
-leaf1 and leaf1 forwards it straight back out the interface it arrived on —
-which is what an ICMP redirect exists for. Whether your node has taken the
-redirect and is sending direct, or is still hairpinning through leaf1, shows
-up in that one command and in nothing else.
+Step 5 is worth running rather than reading, and on this lab it answers:
+
+```
+100.64.0.36 via 192.168.140.36 dev enp7s0 src 192.168.140.20
+    cache
+```
+
+**Direct to the far node, not via leaf1.** Both VTEPs are on one L2 segment
+(`virbr1`), and what BGP put in the table is the aggregate `100.64.0.0/24` via
+`192.168.140.1` — so leaf1 received the first packet, saw it had to send it
+back out the interface it arrived on, and issued an ICMP redirect. Everything
+after that goes node-to-node and leaf1 never sees it again.
+
+That is why `cache` is on the second line: it is a redirect exception, not a
+FIB entry. Tell the two apart with
+
+```bash
+oc debug node/sno --quiet -- chroot /host ip route show 100.64.0.0/24
+oc debug node/sno --quiet -- chroot /host ip route show cache
+```
+
+The first still says `via 192.168.140.1` — the BGP route is unchanged and the
+redirect sits in front of it. This is a property of putting every VTEP on one
+segment, which a real fabric would not do; with the nodes on separate leaves
+the outer packet would be routed the whole way and there would be no redirect
+to take.
 
 ## Live migration on the Layer2 tenant
 
