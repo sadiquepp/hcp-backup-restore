@@ -123,9 +123,12 @@
 - name: Ask the API what it calls the Layer2 address reservation
   ansible.builtin.shell:
     cmd: >-
-      oc explain clusteruserdefinednetwork.spec.network.layer2 2>/dev/null
-      | grep -oE '^[[:space:]]+(reservedSubnets|excludeSubnets)[[:space:]]'
-      | tr -d '[:space:]' | head -1
+      out=$(oc explain clusteruserdefinednetwork.spec.network.layer2 2>/dev/null)
+      for f in reservedSubnets excludeSubnets; do
+        if printf '%s' "$out" | grep -qE "(^|[[:space:]])${f}([[:space:]]|$)"; then
+          printf '%s' "$f"; break
+        fi
+      done
   register: udn_bgp_l2_reserve_raw
   changed_when: false
   failed_when: false
