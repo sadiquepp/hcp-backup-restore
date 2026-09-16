@@ -28,8 +28,9 @@ freshly built cluster does all of it.
 | **B** - tenant isolation on VLANs, no overlay | VRF-Lite, `targetVRF: auto` | 1, 2, 3, 4, **6** | `udn_subnet` - blue and red identical on purpose |
 | **C** - tenant isolation over VXLAN | EVPN, nodes as VTEPs | 1, 2, 3, 4, **7** (+ 8 for a second cluster) | `udn_subnet`, same as B |
 
-Then optionally **9** (web pages and the tenant ingress) on any path, and **10**
-to tear down.
+Section 1 builds the clusters themselves (helper, hub, and the SNO for
+section 8) - skip it if they are already up. Then optionally **9** (web pages
+and the tenant ingress) on any path, and **10** to tear down.
 
 **The one thing that must be decided before section 2**: the fabric is built in
 a different shape for C.
@@ -83,8 +84,7 @@ cp rhel-9.8-x86_64-kvm.qcow2 roles/setup-bm-host/files/
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
 
 # the hub. --skip-tags acm because ACM/MCE belongs to the hosted-cluster and
-# backup flows; nothing in this lab reads it, and installing it costs time and
-# a good deal of memory on the workers.
+# backup flows - nothing in this lab reads it, and it is not a small install.
 ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass \
   --skip-tags acm
 ```
@@ -97,6 +97,28 @@ and B, and path C on one cluster, do not use it.
 ```bash
 ansible-playbook -i inventory/hosts setup_sno.yaml --ask-vault-pass
 ```
+
+> **Heading for section 8? Start this in parallel with the hub.** The two are
+> independent installs of separate VMs - the SNO is not a member of the hub, is
+> not managed by it, and nothing in either build reads the other. Run them in
+> two terminals and the SNO is ready when the hub is, instead of adding its
+> install time to the end.
+>
+> The fork is **after** `setup_bm_host.yaml`, not before it. That run creates the
+> helper and serves both zones, and the SNO's pre-flight checks for its own - so
+> the helper has to exist before either cluster starts. From there:
+>
+> ```
+> setup_bm_host.yaml            (must finish first - helper, DNS, LB)
+>         |
+>         +---> setup_hub_cluster.yaml --skip-tags acm      terminal 1
+>         +---> setup_sno.yaml                              terminal 2
+> ```
+>
+> Both pull their release payloads from quay.io and both are sized for comfort
+> rather than minimum, so this is the moment the hypervisor is busiest - check
+> it has the RAM for a bootstrap, three masters, three workers and a 32GiB SNO
+> at once before starting. Each run prompts for the vault password separately.
 
 > **DNS is already done, if you ran 1.1 in order.** `setup_sno.yaml` hard-fails
 > when `api.sno.<base_domain>` does not resolve - deliberately, up front, rather
@@ -532,7 +554,8 @@ not doing what it is for. Full walkthroughs of both:
 ## 8. Path C, second cluster
 
 A second cluster on the same fabric, sharing the Layer2 tenants' broadcast
-domain over L2VNI 400. This lab uses a single-node cluster (`setup_sno.yaml`).
+domain over L2VNI 400. This lab uses a single-node cluster - build it first with
+[section 1.2](#12-the-sno) if you have not already.
 
 ### 8.1 The rule that is not optional
 
