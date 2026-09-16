@@ -7,8 +7,8 @@ that failed, or to reproduce the lab on a cluster this repo does not manage.
 
 Everything here is `oc` against one cluster. The fabric side — containerlab,
 libvirt, the bridges — is summarised in [Part 0](#part-0-the-fabric-side) and
-not broken down; it is a lab-specific convenience, and the cluster does not
-know or care how the router on the other end of the wire was built.
+taken apart the same way in **[clab-fabric.md](clab-fabric.md)**: what each
+piece is, what each phase uses, and the manual equivalent of `--tags fabric`.
 
 The playbook equivalent of this document is:
 

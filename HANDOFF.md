@@ -29,7 +29,9 @@ Verified working, measured not assumed:
   asking tenant in both directions
 
 Build instructions with the test and expected output after each phase, branched
-by transport: [udn-bgp-evpn-steps.md](udn-bgp-evpn-steps.md).
+by transport: [udn-bgp-evpn-steps.md](udn-bgp-evpn-steps.md). The fabric side
+taken apart - virbr1, the clab VM, the FRR configs, what each phase uses, and
+the manual equivalent: [clab-fabric.md](clab-fabric.md).
 
 ## Re-verify in five commands
 

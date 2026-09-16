@@ -4,7 +4,9 @@ Commands only, with the expected output beside each one. Pick a destination in
 section 0 and follow the sections it names.
 
 Why each phase is shaped the way it is, and every "following one packet"
-walkthrough: **[bgp-evpn.md](bgp-evpn.md)**. Design notes, constraints and the
+walkthrough: **[bgp-evpn.md](bgp-evpn.md)**. What the fabric in section 2
+actually builds, and how to build it by hand:
+**[clab-fabric.md](clab-fabric.md)**. Design notes, constraints and the
 troubleshooting table: **[README.md](README.md#udn-over-bgp-vrf-lite-and-evpn-containerlab-fabric)**.
 
 > **`ClusterUserDefinedNetwork`, never `cudn`.** The short name does not work

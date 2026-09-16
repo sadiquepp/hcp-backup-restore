@@ -1874,6 +1874,10 @@ Built by `setup_udn_bgp_lab.yaml` (roles `setup-clab-fabric` and
 or Ceph flows reads any of it, and none of those flows change whether or not
 you ever run it.
 
+**[clab-fabric.md](clab-fabric.md)** is the fabric side: what `virbr1`, the
+containerlab VM and the FRR containers actually are, what each phase uses, and
+how to build the whole fabric by hand.
+
 **[udn-bgp-evpn-steps.md](udn-bgp-evpn-steps.md)** is the one to follow if you
 just want to build it: pick shared VRF, VRF-Lite or EVPN up front, and it names
 the sections for that path with the test and expected output after each one.
