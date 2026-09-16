@@ -203,16 +203,33 @@
       {{ (lab_network_prefix ~ '.' ~ ip_list.clab) if clab_deploy_mode == 'vm' else 'localhost' }}
   tags: [always]
 
+# These three run on the lab host itself - libvirt operations, no delegation -
+# so apply carries nothing but tags. It is still required. A tag on an
+# include_tasks tags the INCLUDE, not the tasks inside it; without apply the
+# included tasks carry only the play's own 'fabric' tag. So --tags fabric has
+# always worked here and --tags network/nodenics/clabvm never did: the include
+# matched, printed "included: ...", and then every task inside was filtered
+# out. Nothing failed and nothing was skipped, so the run reported
+# ok=N changed=0 skipped=0 and looked like a successful no-op.
 - name: Build the fabric bridge
-  ansible.builtin.include_tasks: fabric-network.yml
+  ansible.builtin.include_tasks:
+    file: fabric-network.yml
+    apply:
+      tags: [fabric, network]
   tags: [fabric, network]
 
 - name: Attach a fabric NIC to each OCP node VM
-  ansible.builtin.include_tasks: node-nics.yml
+  ansible.builtin.include_tasks:
+    file: node-nics.yml
+    apply:
+      tags: [fabric, nodenics]
   tags: [fabric, nodenics]
 
 - name: Build the containerlab VM
-  ansible.builtin.include_tasks: clab-vm.yml
+  ansible.builtin.include_tasks:
+    file: clab-vm.yml
+    apply:
+      tags: [fabric, clabvm]
   when: clab_deploy_mode == 'vm'
   tags: [fabric, clabvm]
 
@@ -257,12 +274,15 @@
 # variables (ip_list, the tenant list) that belong to the controller's view,
 # and only the connection should move.
 #
-# The tags MUST be repeated inside apply, not only on the include. An
-# include_tasks without apply passes its tags down to the tasks it includes;
-# the moment apply appears, the apply block becomes the whole of what the
-# included tasks inherit, and tags left out of it are lost. The include then
-# still runs under --tags, prints "included: ...", and executes nothing -
-# which reads as a no-op run rather than as an error.
+# The tags MUST be repeated inside apply, and apply is required even when
+# there is nothing to delegate. Ansible does not give dynamic includes tag
+# inheritance: a tag on an include_tasks tags the include statement alone, and
+# the tasks inside inherit only what the play and any enclosing block give
+# them. apply is the documented way to push tags through. Get this wrong and
+# the include still matches --tags, still prints "included: ...", and then
+# executes nothing - ok=N changed=0 skipped=0, which reads as a successful
+# no-op rather than as an error. Filtered tasks are not skipped tasks, so
+# even skipped=0 does not give it away.
 - name: Install Docker and containerlab
   ansible.builtin.include_tasks:
     file: clab-install.yml
