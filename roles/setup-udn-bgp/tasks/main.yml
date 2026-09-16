@@ -236,6 +236,47 @@
     label: "{{ item.item.ip_key | default('?') }}"
   when: udn_phase not in ['preflight', 'web']
 
+# A NodeNetworkConfigurationEnactment that has failed does not retry. It is
+# keyed on the policy's metadata.generation, so nmstate re-enacts only when the
+# SPEC changes - and `oc apply` of an identical policy changes nothing, leaves
+# the generation alone, and reports "unchanged". The enactment therefore sits
+# at Failing indefinitely:
+#
+#   NAME                      STATUS    STATUS AGE   REASON
+#   sno.fabric-untagged-sno   Failing   39m          FailedToConfigure
+#
+# and the wait below times out again on a policy that is now perfectly
+# correct. That is exactly what happens after the usual cause is fixed: the
+# policy captured on a MAC that was not there, the fabric NIC got attached,
+# and nothing told nmstate to look again.
+#
+# Deleting the policy is the re-trigger. It is safe: removing an NNCP does not
+# revert configuration nmstate applied, and a Failing enactment applied none
+# in the first place. Only Failing ones are touched - an Available policy is
+# left alone so a re-run does not churn a working node's networking.
+- name: Look for enactments left Failing by an earlier run
+  ansible.builtin.shell:
+    cmd: |
+      oc get nnce {{ udn_bgp_node_names[item.ip_key] }}.fabric-untagged-{{ item.ip_key }} \
+        -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}' 2>/dev/null || true
+  loop: "{{ udn_bgp_cluster_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  register: udn_bgp_nnce_state
+  changed_when: false
+  failed_when: false
+  when: udn_phase not in ['preflight', 'web']
+
+- name: Delete a failed policy so nmstate enacts it again
+  ansible.builtin.command:
+    cmd: "oc delete nncp fabric-untagged-{{ item.item.ip_key }} --ignore-not-found"
+  loop: "{{ udn_bgp_nnce_state.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.ip_key | default('?') }}"
+  when:
+    - udn_phase not in ['preflight', 'web']
+    - item.stdout | default('') is search('Failing=True')
+
 - name: Address the fabric NICs
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-fabric-untagged-{{ item.ip_key }}.yaml"
