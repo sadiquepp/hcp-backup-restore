@@ -3809,9 +3809,19 @@ Two consequences worth stating before the first run:
   `NetworkAllocationSucceeded: True` — that condition covers cluster-level
   allocation and says nothing about the per-node switch.
 
-  So a per-cluster split reserves the other cluster's half *with the first /28
-  carved out*: 11 CIDRs instead of one, against an API limit of 25. An assert
-  in `roles/setup-udn-bgp` refuses to render a reservation that intrudes on it.
+  So a per-cluster split reserves the other cluster's half *starting just above
+  what ovn-kubernetes needs* — `.0`, `.1` and one management address per node
+  left free, and nothing else. For the single-node cluster that means reserving
+  from `.3` up: 14 CIDRs instead of one, against an API limit of 25.
+
+  The size of that hole is wrong in both directions, which is what makes it
+  worth an assert. Too few addresses and ovn-kubernetes cannot allocate its own
+  gateway, which is fatal. Too many and the leftovers are allocatable — IPAM
+  hands out the lowest free address, so a 16-wide hole put the second cluster's
+  pods on `.3` and `.5`, back inside the half the reservation exists to keep
+  them out of, with no error anywhere. That one is the more dangerous, because
+  it looks like it worked. `roles/setup-udn-bgp` checks the reservation starts
+  at exactly `2 + one per node`.
 
   Those 16 addresses are then shared by every cluster on the subnet and cannot
   be split, because each cluster puts its own gateway on `.1` and its own

@@ -145,63 +145,42 @@
     udn_bgp_l2_reserve_field: "{{ udn_bgp_l2_reserve_raw.stdout | default('') | trim }}"
   when: udn_phase not in ['preflight', 'web']
 
-# The bottom of a Layer2 UDN's subnet belongs to ovn-kubernetes, and every
-# cluster on that subnet needs it. .1 is the switch's gateway, .2 is the node's
-# management port, and a multi-node cluster takes one management address per
-# node. Reserve any of them and ovn-kubernetes does not warn, skip the network
-# or degrade the CUDN:
+# The bottom of a Layer2 UDN's subnet belongs to ovn-kubernetes: .1 is the
+# switch's gateway and .2 is the node's management port, one per node the
+# network runs on. How many addresses a per-cluster reservation leaves free
+# down there has to be exactly right, and it is wrong in both directions.
+#
+# TOO FEW and ovn-kubernetes cannot allocate what it needs:
 #
 #   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
 #     failed to reserve IP 10.204.0.1: provided IP is already allocated
 #
 # At start-up that is fatal - "F failed to run ovnkube" - and ovnkube-node
 # CrashLoopBackOffs, taking out ALL pod networking on the node rather than just
-# this UDN. Reached later it merely retries forever, and either way it presents
-# three steps away as pods stuck in ContainerCreating with a CNI annotation
-# timeout, while the CUDN still reports NetworkAllocationSucceeded: True.
+# this UDN. Reached later it retries forever. Either way it surfaces as pods
+# stuck in ContainerCreating with a CNI annotation timeout, while the CUDN
+# still reports NetworkAllocationSucceeded: True.
 #
-# Checked against a BLOCK rather than against the two addresses that were hit
-# first, because the second one only appeared once the first was fixed and
-# there is no reason to think the list ends there.
+# TOO MANY and the reservation achieves nothing. Anything unreserved is
+# allocatable and IPAM hands out the lowest free address, so a hole of 16 put
+# this cluster's pods on .3 and .5 - back inside the half the reservation
+# exists to keep them out of, with no error at all. That one is worse, because
+# it looks like it worked.
 #
-# The test is deliberately arithmetic rather than CIDR-aware, so this needs no
-# netaddr: a reservation intrudes on the block when it starts in the subnet's
-# first /24 at an offset below the block size. Any aligned CIDR overlapping the
-# bottom of the subnet must begin there.
-- name: Fail if a Layer2 reservation would swallow the network's infrastructure addresses
-  vars:
-    l2_base: "{{ item.udn_subnet.split('/')[0] }}"
-    l2_prefix24: "{{ item.udn_subnet.split('/')[0].rsplit('.', 1)[0] }}"
-    l2_reserved: >-
-      {{ (item.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
-         or ([item.evpn_l2_exclude] if item.evpn_l2_exclude is defined else []) }}
-    l2_bad: >-
-      {{ l2_reserved
-         | select('match', '^' ~ (l2_prefix24 | replace('.', '\\.'))
-                         ~ '\\.(?:[0-9]|1[0-5])(?:/|$)')
-         | list }}
-  ansible.builtin.assert:
-    that: l2_bad | length == 0
-    fail_msg: >-
-      Tenant '{{ item.name }}' on cluster '{{ udn_bgp_cluster }}' reserves
-      {{ l2_bad }}, which intrudes on {{ l2_base }}/28 - the addresses
-      ovn-kubernetes keeps for this Layer2 network's own gateway and for each
-      node's management port. It cannot then allocate them and fails, which at
-      start-up is fatal and CrashLoopBackOffs ovnkube-node, taking out all pod
-      networking on every node running this network.
-
-      Start the reservation at {{ l2_prefix24 }}.16 instead. To reserve
-      {{ l2_base }}/17 while leaving the block free, that is {{ l2_base }}/28
-      carved out of it - 11 CIDRs, well inside the API's limit of 25. green
-      and purple in vars.yaml show the shape.
-
-      Those 16 addresses are shared by every cluster on this subnet and cannot
-      be split: each one puts its own gateway on .1 and its own management port
-      on .2. That is a property of stretching a Layer2 network across
-      clusters, not something this lab can configure away.
-    success_msg: >-
-      {{ item.name }}: reservation leaves {{ l2_base }}/28 free for the
-      gateway and management ports.
+# So: check the lowest reserved offset is exactly 2 + one per node. Arithmetic
+# rather than CIDR-aware, so it still needs no netaddr - the octets come
+# straight out of the strings, and only reservations inside the subnet's first
+# /24 can bear on this.
+- name: Work out where each Layer2 reservation starts
+  ansible.builtin.set_fact:
+    udn_bgp_l2_floor: >-
+      {{ (udn_bgp_l2_floor | default({})) | combine({ item.name: {
+           'want': 2 + (udn_bgp_cluster_nodes | length),
+           'octets': ((item.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
+                      or ([item.evpn_l2_exclude] if item.evpn_l2_exclude is defined else []))
+                     | select('match', '^' ~ (item.udn_subnet.split('/')[0].rsplit('.', 1)[0] | replace('.', '\\.')) ~ '\\.')
+                     | map('regex_replace', '^.*\\.([0-9]+)/.*$', '\\1')
+                     | map('int') | list } }) }}
   loop: "{{ udn_bgp_tenants }}"
   loop_control:
     label: "{{ item.name }}"
@@ -209,6 +188,37 @@
     - udn_phase == 'evpn'
     - (item.topology | default('Layer3')) == 'Layer2'
     - (item.evpn_l2_excludes is defined) or (item.evpn_l2_exclude is defined)
+
+- name: Fail if a Layer2 reservation leaves the wrong number of addresses free
+  vars:
+    l2_prefix24: "{{ item.udn_subnet.split('/')[0].rsplit('.', 1)[0] }}"
+    l2_floor: "{{ udn_bgp_l2_floor[item.name].octets | min }}"
+    l2_want: "{{ udn_bgp_l2_floor[item.name].want }}"
+  ansible.builtin.assert:
+    that: (l2_floor | int) == (l2_want | int)
+    fail_msg: >-
+      Tenant '{{ item.name }}' on cluster '{{ udn_bgp_cluster }}' starts its
+      reservation at {{ l2_prefix24 }}.{{ l2_floor }}, and it must start at
+      {{ l2_prefix24 }}.{{ l2_want }} - leaving .0, .1 and one management
+      address for each of this cluster's
+      {{ udn_bgp_cluster_nodes | length }} node(s) free, and nothing else.
+
+      {{ 'Starting too LOW means ovn-kubernetes cannot allocate its own gateway or management port. That failure is fatal at start-up and CrashLoopBackOffs ovnkube-node, taking out all pod networking on the node.'
+         if (l2_floor | int) < (l2_want | int)
+         else 'Starting too HIGH leaves addresses this cluster will allocate pods from - IPAM takes the lowest free one - so the pods land in the other cluster you are splitting away from. Nothing reports this; it looks like it worked until two pods share an address.' }}
+
+      green and purple in vars.yaml show the shape.
+    success_msg: >-
+      {{ item.name }}: reservation starts at {{ l2_prefix24 }}.{{ l2_floor }},
+      leaving exactly the {{ l2_want }} addresses ovn-kubernetes needs.
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - udn_phase == 'evpn'
+    - (item.topology | default('Layer3')) == 'Layer2'
+    - udn_bgp_l2_floor is defined
+    - (udn_bgp_l2_floor[item.name].octets | default([]) | length) > 0
 
 - name: Report what the reservation field is called here
   ansible.builtin.debug:
