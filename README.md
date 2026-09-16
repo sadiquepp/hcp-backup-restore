@@ -2094,6 +2094,34 @@ limits what a cluster builds; the SNO builds `green` and `purple` only. A
 routed tenant that genuinely spans clusters needs its own subnet, VNI and
 route target, not a second copy of an existing one.
 
+### Testing it
+
+`scripts/udn-xcluster-curl.sh` asks the question from inside the clusters — a
+pod in one curling a pod in the other, with nothing in the path belonging to
+either cluster's host networking:
+
+```bash
+scripts/udn-xcluster-curl.sh \
+    /var/lib/libvirt/images/hub_install/auth/kubeconfig \
+    /var/lib/libvirt/images/sno_install/auth/kubeconfig
+```
+
+It curls rather than pings for a specific reason. Two tenants on a stretched
+Layer2 network can hold the same address — on this lab the SNO's green and
+purple pods are both `10.204.128.2` — and `scripts/udn-vrf-isolation.sh` has to
+mark those cells `AMBIG`, because ICMP cannot say which of the two answered. A
+page names its own tenant and its own cluster, so the cell that is
+unresolvable by ping is the most informative one here.
+
+A pass means same tenant reached same tenant in **both** clusters and nothing
+else answered at all, and the summary counts how many of those answers crossed
+a cluster boundary.
+
+The other two views are still per-cluster and still worth running:
+`scripts/udn-vrf-isolation.sh --pods` for the isolation matrix, and
+`scripts/udn-web-demo.sh --proxy` for the ingress, which fronts every cluster
+at once.
+
 ### What a stretched Layer2 UDN across two clusters actually does
 
 Measured on this lab, hub + SNO on L2VNI 400:
