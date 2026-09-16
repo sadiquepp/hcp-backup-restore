@@ -3784,8 +3784,23 @@ Two consequences worth stating before the first run:
 - **The external address has to be reserved.** OVN knows nothing about
   `10.204.255.10` and will happily allocate it to a pod, which is a duplicate
   address in one broadcast domain — not the deliberate cross-network overlap
-  this lab is about. `evpn_l2_exclude` becomes `excludeSubnets` on the Layer2
-  CUDN for that reason.
+  this lab is about. `evpn_l2_exclude` becomes the Layer2 CUDN's reservation
+  field for that reason.
+
+  **The field is not called `excludeSubnets` here.** That is the name on
+  `localnet`; `layer2` calls it something else, and sending the wrong one is
+  silent — Kubernetes prunes a field the CRD's structural schema does not
+  declare with no error, no warning and no event. `oc apply` reports
+  `configured`, the `last-applied-configuration` annotation shows the field
+  was sent, and the live spec simply does not have it. This went unnoticed for
+  a long time because the reservation is `10.204.255.0/24`, pods naturally
+  take low addresses, and nothing ever needed it to be there. Splitting the
+  prefix between two clusters is the first thing that does.
+
+  `roles/setup-udn-bgp` now asks the API what the field is called
+  (`oc explain clusteruserdefinednetwork.spec.network.layer2`) and reads the
+  reservation back off the created CUDN, so a pruned field is reported rather
+  than assumed.
 
 ### 4d. EVPN peering and advertisement
 

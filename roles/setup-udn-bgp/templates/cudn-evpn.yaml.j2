@@ -76,10 +76,16 @@ spec:
 #}
 {% set l2_excludes = (tenant.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
                      or ([tenant.evpn_l2_exclude] if tenant.evpn_l2_exclude is defined else []) %}
-{% if l2_excludes %}
+{% if l2_excludes and udn_bgp_l2_reserve_field | default('') %}
       # Reserved: see the note above. Cluster '{{ udn_bgp_cluster }}' allocates
       # from {{ tenant.udn_subnet }} minus these.
-      excludeSubnets:
+      #
+      # The field name comes from the cluster, not from here. It is
+      # excludeSubnets on localnet and something else on layer2, and getting it
+      # wrong is silent - Kubernetes prunes a field the CRD does not declare
+      # with no error, no warning and no event, so the manifest and the live
+      # object disagree and nothing says so.
+      {{ udn_bgp_l2_reserve_field }}:
 {% for x in l2_excludes %}
         - {{ x }}
 {% endfor %}

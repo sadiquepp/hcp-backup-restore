@@ -107,6 +107,47 @@
       {{ udn_web_tenants | intersect(clab_clusters[udn_bgp_cluster].tenants) }}
   when: clab_clusters[udn_bgp_cluster].tenants is defined
 
+# What this cluster's API calls the Layer2 address reservation.
+#
+# The template used to hardcode excludeSubnets, which is the name on localnet.
+# On layer2 it is something else, and the difference is invisible: Kubernetes
+# prunes a field a CRD's structural schema does not declare without an error,
+# a warning or an event. `oc apply` reports configured, the
+# last-applied-configuration annotation shows the field was sent, and the live
+# spec simply does not have it.
+#
+# Asked rather than assumed, because the name has changed once already and a
+# hardcoded guess fails the same silent way. If neither name is present the
+# manifest omits the block and the read-back check after the CUDNs are created
+# says what was lost.
+- name: Ask the API what it calls the Layer2 address reservation
+  ansible.builtin.shell:
+    cmd: >-
+      oc explain clusteruserdefinednetwork.spec.network.layer2 2>/dev/null
+      | grep -oE '^[[:space:]]+(reservedSubnets|excludeSubnets)[[:space:]]'
+      | tr -d '[:space:]' | head -1
+  register: udn_bgp_l2_reserve_raw
+  changed_when: false
+  failed_when: false
+  when: udn_phase not in ['preflight', 'web']
+
+- name: Record the field name the manifests should use
+  ansible.builtin.set_fact:
+    udn_bgp_l2_reserve_field: "{{ udn_bgp_l2_reserve_raw.stdout | default('') | trim }}"
+  when: udn_phase not in ['preflight', 'web']
+
+- name: Report what the reservation field is called here
+  ansible.builtin.debug:
+    msg: >-
+      {{ ("Layer2 address reservations go in '" ~ udn_bgp_l2_reserve_field ~ "' on this cluster.")
+         if udn_bgp_l2_reserve_field
+         else ("This cluster's Layer2 API declares neither reservedSubnets nor "
+               "excludeSubnets, so nothing can reserve an address inside a "
+               "Layer2 UDN subnet. The external endpoint and any second "
+               "cluster on the same L2VNI are both allocating blind - see the "
+               "warning after the CUDNs are created.") }}
+  when: udn_phase not in ['preflight', 'web']
+
 - name: Report which cluster this run is targeting
   ansible.builtin.debug:
     msg: >-
@@ -480,7 +521,7 @@
   ansible.builtin.command:
     cmd: >-
       oc get clusteruserdefinednetwork {{ item.name }}
-      -o jsonpath={.spec.network.layer2.excludeSubnets}
+      -o jsonpath={.spec.network.layer2.{{ udn_bgp_l2_reserve_field | default('excludeSubnets', true) }}}
   loop: "{{ udn_bgp_tenants }}"
   loop_control:
     label: "{{ item.name }}"
