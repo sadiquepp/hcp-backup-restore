@@ -544,17 +544,39 @@ other, so both hand out the low addresses and two pods land on one address.
 
 ### 8.2 Build
 
-```bash
-# once, on the lab host - NICs for every cluster's nodes, and a leaf1 that
-# knows all of them. Both clusters must be in clab_fabric_clusters.
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
-  --tags nodenics,clabdeploy -e clab_topology=evpn
+**If the SNO was already up when you ran section 2**, the fabric half is done -
+`--tags fabric` attaches a NIC to every node in `clab_fabric_clusters` and
+renders a leaf1 that knows all of them, SNO included. Only the cluster half is
+left:
 
-# then once per cluster, anywhere with the right kubeconfig
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
-  --tags evpn -e clab_topology=evpn -e udn_bgp_cluster=hub
+```bash
 ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags evpn -e clab_topology=evpn -e udn_bgp_cluster=sno
+```
+
+Confirm rather than assume - two commands, on the lab host:
+
+```bash
+virsh domiflist sno | grep 52:54:00:e2:55:20          # the SNO's fabric NIC
+ssh root@192.168.122.40 \
+  'docker exec clab-udnbgp-leaf1 vtysh -c "show bgp summary"' | grep -c 192.168.140
+# 4 - three hub workers and the SNO
+```
+
+**If the SNO was built after the fabric**, bring the fabric up to date first -
+this is a subset of `--tags fabric` and safe to re-run:
+
+```bash
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags nodenics,clabdeploy -e clab_topology=evpn
+```
+
+Section 7 already ran the hub's cluster half. Re-run it too if you are starting
+section 8 without having done that:
+
+```bash
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags evpn -e clab_topology=evpn -e udn_bgp_cluster=hub
 ```
 
 `-e udn_bgp_cluster=<name>` picks the kubeconfig from
