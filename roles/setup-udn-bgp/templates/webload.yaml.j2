@@ -26,7 +26,14 @@ metadata:
 data:
   ## Rendered into the page by the init container, which adds the parts only
   ## the running pod knows.
-  banner: "I am {{ tenant.name }}"
+  ##
+  ## The cluster is in the banner because with a stretched Layer2 tenant the
+  ## tenant name alone stops identifying the responder. green on the hub and
+  ## green on the SNO are one broadcast domain and one subnet - that is the
+  ## point of the L2VNI - so "I am green" would be returned by two different
+  ## pods in two different clusters, and the demo's whole premise is that the
+  ## answer says who answered.
+  banner: "I am {{ tenant.name }} on {{ udn_bgp_cluster }}"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -68,6 +75,7 @@ spec:
                   echo "${BANNER}"
                   echo
                   printf '%-9s %s\n' 'tenant:' '{{ tenant.name }}'
+                  printf '%-9s %s\n' 'cluster:' '{{ udn_bgp_cluster }}'
                   printf '%-9s %s\n' 'pod:'    "${POD_NAME}"
                   printf '%-9s %s\n' 'node:'   "${NODE_NAME}"
                   printf '%-9s %s\n' 'udn:'    "${udn:-(no ovn-udn1 - this pod is not on its UDN)}"
