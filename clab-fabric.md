@@ -22,6 +22,7 @@ starts there. To *build* the lab rather than understand it, follow
   - [Phases 1-2: the default VRF](#phases-1-2-the-default-vrf)
   - [Phase 3: VRF-Lite](#phase-3-vrf-lite)
   - [Phase 4: EVPN](#phase-4-evpn)
+- [The node side of the tunnel](#the-node-side-of-the-tunnel)
 - [Building it by hand](#building-it-by-hand)
 - [Verifying by hand](#verifying-by-hand)
 - [Things that bite](#things-that-bite)
@@ -423,6 +424,132 @@ anything, and every test would pass whether or not the overlay worked.
 
 ---
 
+## The node side of the tunnel
+
+Everything above is the fabric. This section is the other end, because the
+first thing anyone does is look for the tunnel on a node and not find it.
+
+### It is not in OVS, and it is not Geneve
+
+Two different overlays run on these nodes, doing unrelated jobs:
+
+| | Geneve | VXLAN |
+| --- | --- | --- |
+| Carries | pod traffic **between nodes of one cluster** | EVPN tenant traffic **off-cluster** |
+| Endpoint | the node's InternalIP, `192.168.122.x` | the VTEP, `100.64.0.x` |
+| Where | OVS tunnel ports, in `ovs-vsctl show` | a **kernel** netdev, not in OVS at all |
+
+So `ovs-vsctl show` will never show a VTEP or a VXLAN port, and a Geneve
+endpoint at `100.64.0.x` would never exist. On a single-node cluster it is
+emptier still: Geneve ports are created per *remote* node, so a SNO has none at
+all, and their absence says nothing about EVPN either way.
+
+### What is actually there
+
+The VTEP address is a kernel **dummy** interface placed by NMState:
+
+```bash
+$ oc debug node/sno --quiet -- chroot /host ip addr show vtep0
+inet 100.64.0.20/32 scope global vtep0
+```
+
+OVN-Kubernetes discovers it and annotates the node:
+
+```
+k8s.ovn.org/vteps: '{"evpn-vtep":{"ips":["100.64.0.20"]}}'
+```
+
+And the tunnel itself is a kernel VXLAN device that OVN-Kubernetes creates:
+
+```bash
+$ oc debug node/sno --quiet -- chroot /host ip -d link show type vxlan
+130: evx4-evpn-vtep: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1400
+        master evbr-evpn-vtep
+    vxlan id 0 local 100.64.0.20 srcport 0 0 dstport 4789 ttl auto
+        external vnifilter nolearning
+    bridge_slave ... learning off ... neigh_suppress on ... vlan_tunnel on
+    alias ovn-k8s-ndm:vxlan:evx4-evpn-vtep
+```
+
+Read that line by line, because four things in it matter:
+
+- **`alias ovn-k8s-ndm:...`** - the ovn-kubernetes *network device manager* built
+  this. It is not an OVS port and never was.
+- **`vxlan id 0 ... external vnifilter`** - one device for **every** VNI, not one
+  per VNI. `external` means the VNI comes from per-packet metadata rather than
+  being baked into the device, and `vnifilter` restricts which VNIs are accepted.
+  This is the interesting asymmetry with the fabric: leaf2 builds a *separate*
+  device per tenant (`vni400`, `vni101`, each with its own bridge), the node
+  builds **one**. Both are ordinary Linux VXLAN, configured two different ways,
+  and they interoperate without either end knowing.
+- **`neigh_suppress on`, `learning off`** - ARP is answered from EVPN type-2
+  routes rather than flooded, and MACs come from BGP rather than from data-plane
+  learning. That is what makes it EVPN rather than plain multicast VXLAN.
+- **`mtu 1400`** - conservative, and set by OVN-Kubernetes, not by this lab. The
+  fabric is at 9000; the inner packets are capped well under it. Safe, but it
+  does mean the jumbo fabric is not being used for what it could be.
+
+### What the wire looks like
+
+```bash
+oc debug node/sno --quiet -- chroot /host \
+  timeout 15 tcpdump -ni enp7s0 udp port 4789
+```
+
+Two distinct conversations show up on a working two-cluster fabric, and telling
+them apart is the quickest way to read the state of the whole thing.
+
+**Node to the far leaf** - a tenant reaching something behind `leaf2`:
+
+```
+IP 10.0.0.2.38207 > 100.64.0.20.vxlan: VXLAN, vni 400
+  IP 10.204.255.30.37008 > 10.204.128.2.webcache: Flags [S]
+IP 100.64.0.20.33045 > 10.0.0.2.vxlan: VXLAN, vni 400
+  IP 10.204.128.2.webcache > 10.204.255.30.37008: Flags [S.]
+```
+
+Outer `leaf2 loopback ↔ node VTEP`. Inner `10.204.255.30` is green's client
+namespace, an access port on the L2VNI - **in the pods' own subnet**, because a
+macVRF carries MACs and there is nothing to route.
+
+**Node to node, across clusters** - the stretched L2VNI doing its job:
+
+```
+IP 100.64.0.20.45144 > 100.64.0.36.vxlan: VXLAN, vni 400
+  IP 10.204.128.0 > 10.204.0.9: ICMP echo request
+IP 100.64.0.36.39715 > 100.64.0.20.vxlan: VXLAN, vni 400
+  IP 10.204.0.9 > 10.204.128.0: ICMP echo reply
+```
+
+Outer `SNO VTEP ↔ hub worker VTEP` - **the far leaf is not in this path at
+all**. Same VNI, different tunnel. And the ARP that set it up crosses the same
+way:
+
+```
+IP 100.64.0.36.33289 > 100.64.0.20.vxlan: VXLAN, vni 400
+  ARP, Request who-has 10.204.128.0 tell 10.204.0.9
+IP 100.64.0.20.34899 > 100.64.0.36.vxlan: VXLAN, vni 400
+  ARP, Reply 10.204.128.0 is-at 0a:58:0a:cc:80:00
+```
+
+`0a:58:0a:cc:80:00` is `0a:58` + `0a.cc.80.00` = `10.204.128.0`. That is the
+MAC-derived-from-IP scheme, visible on the wire - and the reason two clusters
+cannot both hold `10.204.0.1` without advertising the identical MAC from two
+VTEPs.
+
+> **One VNI per tenant, and the numbers are not decoration.** green is VNI 400
+> and purple is VNI 500 in the same capture, from `evpn_mac_vni`. Both tenants'
+> SNO pods sit on `10.204.128.2` - the same address in two different broadcast
+> domains, kept apart by the VNI alone.
+
+> **Regular SYN / SYN-ACK / RST every two seconds is not a fault.** That is the
+> tenant ingress health-checking its backends: `server ... check` in
+> `haproxy-tenants.cfg.j2`, default interval 2s. A plain TCP check does not
+> complete the handshake - it resets instead of closing politely. Seeing it
+> flow over the fabric, one conversation per tenant VNI, is a working ingress.
+
+---
+
 ## Building it by hand
 
 Equivalent to `--tags fabric`. Values are this lab's; substitute your own.
@@ -588,6 +715,9 @@ message; re-run it alone against a live fabric with `--tags clabverify`.
 | `--tags network` / `nodenics` / `clabvm` ran nothing | `include_tasks` needs `apply:` to pass tags. Fixed, but the pattern recurs |
 | Client namespaces got phase-3 shapes on an EVPN fabric | `clab_topology` defaults to `bgp`. The `.fabric-topology` marker now catches it |
 | Phase 2 cannot reach `10.210.10.10` | Correct. That endpoint is in leaf1's `blue` VRF; phase 2 is in the default VRF |
+| No VTEP or tunnel in `ovs-vsctl show` | Correct. The VTEP is a kernel dummy and the VXLAN is a kernel netdev; neither is an OVS port |
+| No Geneve endpoint at `100.64.0.x` | Geneve is the intra-cluster overlay on `192.168.122.x`. EVPN is VXLAN. On a SNO there are no Geneve ports at all |
+| SYN / SYN-ACK / RST every 2s on the fabric | The tenant ingress health check (`server ... check`). A TCP check resets rather than closing |
 
 ---
 
