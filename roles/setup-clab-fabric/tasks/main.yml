@@ -24,6 +24,89 @@
     fail_msg: "clab_topology must be 'bgp' or 'evpn', got '{{ clab_topology }}'"
   tags: [always]
 
+# clab_topology decides the SHAPE of almost everything this role renders, it
+# defaults to 'bgp', and it is deliberately not in vars.yaml - so it has to be
+# passed on every command line that touches the fabric. Forget it against an
+# EVPN fabric and nothing fails: the role renders phase-3 shapes instead. A
+# Layer2 tenant's client namespace gets a routed segment and a gateway on
+# leaf2 that is a bridge port under EVPN and answers nothing; the VRF leak
+# routes come back; fabric-verify asks a macVRF tenant for a Layer3 address.
+# The first sign is a ping to a gateway that was never built, three steps
+# later and in a file that looks unrelated.
+#
+# clab-deploy.yml writes the deployed topology to udn-bgp/.fabric-topology, so
+# the answer is on disk. Absent (nothing deployed from this checkout yet) this
+# says nothing and moves on - it is a guard, not a gate.
+- name: Read the topology the fabric was last deployed with
+  ansible.builtin.slurp:
+    src: "{{ playbook_dir }}/udn-bgp/.fabric-topology"
+  register: clab_deployed_topology
+  delegate_to: localhost
+  failed_when: false
+  changed_when: false
+  tags: [always]
+
+- name: Work out whether this run renders anything that depends on the topology
+  ansible.builtin.set_fact:
+    clab_deployed_as: >-
+      {{ (clab_deployed_topology.content | default('') | b64decode | trim)
+         if (clab_deployed_topology.content is defined) else '' }}
+    # Only the fabric half branches on clab_topology. The cluster half
+    # (preflight/default/shared/vrflite/evpn/web) never reads it, so a run
+    # that only touches the cluster must not be blocked for omitting a flag it
+    # has no use for - that would be the same trap in the other direction.
+    # 'all' is what ansible_run_tags holds when no --tags was given.
+    clab_renders_fabric: >-
+      {{ (ansible_run_tags | default(['all']))
+         | intersect(['all', 'fabric', 'network', 'nodenics', 'clabvm',
+                      'clabinstall', 'clabdeploy', 'clabverify', 'clabclient',
+                      'clabtenantclients', 'clabnsclient', 'clabnsproxy'])
+         | length > 0 }}
+  tags: [always]
+
+- name: Fail if clab_topology disagrees with the fabric that is actually deployed
+  ansible.builtin.assert:
+    that: clab_deployed_as == '' or clab_deployed_as == clab_topology
+    fail_msg: >-
+      The fabric on this host was deployed as '{{ clab_deployed_as }}', but
+      this run has clab_topology='{{ clab_topology }}'. Everything the fabric
+      half renders branches on that, so continuing would build
+      phase-'{{ clab_topology }}' shapes against a '{{ clab_deployed_as }}'
+      fabric: a routed client segment for a tenant that is now a macVRF, VRF
+      leak routes that no longer exist, verification that asks a Layer2 tenant
+      for a Layer3 address. None of it errors. The first symptom is traffic to
+      a gateway that was never built, several steps later.
+
+      Add the flag:
+        -e clab_topology={{ clab_deployed_as }}
+
+      To rebuild the fabric in the other topology instead, run --tags
+      clabdeploy with the new value; that is what rewrites this marker.
+    success_msg: >-
+      {{ 'Topology matches the deployed fabric: ' ~ clab_topology
+         if clab_deployed_as else
+         'No fabric deployed from this checkout yet; building '
+         ~ clab_topology ~ '.' }}
+  when: clab_renders_fabric | bool
+  tags: [always]
+
+# Not fatal here: this run does not render any of it. Still worth saying,
+# because the mismatch means the NEXT fabric command will be wrong too.
+- name: Note a topology mismatch on a cluster-only run
+  ansible.builtin.debug:
+    msg: >-
+      NOTE: the fabric was deployed as '{{ clab_deployed_as }}' and this run
+      has clab_topology='{{ clab_topology }}'. Nothing in the cluster half
+      reads it, so this run is unaffected - but add
+      -e clab_topology={{ clab_deployed_as }} to any --tags fabric,
+      clabdeploy, clabnsclient or clabtenantclients command, or it will render
+      the wrong shapes.
+  when:
+    - not (clab_renders_fabric | bool)
+    - clab_deployed_as | length > 0
+    - clab_deployed_as != clab_topology
+  tags: [always]
+
 # ---------------------------------------------------------------------------
 # The fabric-wide node list, built from the per-cluster lists.
 #

@@ -82,6 +82,19 @@
 ## Build the three-node EVPN fabric instead of the single border leaf:
 ##   ... --tags fabric -e clab_topology=evpn
 ##
+## clab_topology DEFAULTS TO 'bgp' AND MUST BE REPEATED ON EVERY FABRIC
+## COMMAND once the EVPN fabric is up - clabdeploy, clabverify, clabclient,
+## clabtenantclients, clabnsclient, clabnsproxy, nodenics. It decides the
+## shape of what is rendered, not just what gets built: a Layer2 tenant's
+## client namespace is an access port on the L2VNI under evpn and a routed
+## segment behind a gateway under bgp. Omit it and the run succeeds, renders
+## the phase-3 shape, and the first sign is a ping to a gateway that leaf2
+## never built. The fabric records what it was deployed as and the role
+## refuses a mismatched run, but the flag is still yours to pass.
+##
+## The cluster half (preflight/default/shared/vrflite/evpn/web) does NOT read
+## it, so those commands do not need it.
+##
 ## MORE THAN ONE CLUSTER ON THE FABRIC. vars.yaml declares clab_clusters (who
 ## is in each cluster, and its ASN) and clab_fabric_clusters (which of them
 ## are wired in). The fabric half builds for all of them at once; the cluster

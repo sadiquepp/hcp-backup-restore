@@ -104,3 +104,27 @@
       Sessions are expected to be DOWN at this point - the cluster side does
       not exist yet. What this proves is that leaf1 is up, its VRFs were
       created and FRR parsed its configuration.
+
+# Record which topology is actually on the wire, on the CONTROLLER rather than
+# on the clab host, so every later invocation can read it without an ssh round
+# trip and without the clab VM having to be up.
+#
+# clab_topology defaults to 'bgp' and is not in vars.yaml, so it has to be
+# passed on every single command line. Forget it against an EVPN fabric and
+# nothing errors: the role renders phase-3 shapes instead - a routed client
+# segment for a tenant that is now a macVRF, VRF leak routes that no longer
+# exist - and the first sign is a ping to a gateway that was never built. The
+# assert in main.yml reads this file and says so up front instead.
+- name: Make sure the directory the marker lives in exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/udn-bgp"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+
+- name: Record the deployed topology so later runs can check themselves
+  ansible.builtin.copy:
+    content: "{{ clab_topology }}\n"
+    dest: "{{ playbook_dir }}/udn-bgp/.fabric-topology"
+    mode: '0644'
+  delegate_to: localhost
