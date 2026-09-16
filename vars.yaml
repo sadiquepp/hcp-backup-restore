@@ -1620,14 +1620,22 @@ udn_bgp_tenants:
     evpn_l2_excludes:
       hub:
         - "10.204.128.0/17"
-      ## The low /17 with 10.204.0.0/31 carved out, then the endpoint
-      ## reservation. The shape is not decoration: 10.204.0.1 is the Layer2
-      ## switch's own gateway and EVERY cluster on this subnet needs it.
+      ## The low /17 with 10.204.0.0/28 carved out, then the endpoint
+      ## reservation. The shape is not decoration: the bottom of a Layer2 UDN
+      ## subnet is INFRASTRUCTURE, and every cluster on the subnet needs it.
+      ## .1 is the switch's gateway and .2 is the node's management port; a
+      ## multi-node cluster takes one management address per node, so the
+      ## block is sized at 16 rather than at the two addresses that happened
+      ## to be hit first.
       ## Reserving it does not warn or degrade - ovn-kubernetes exits fatally
       ##
       ##   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
       ##     failed to reserve IP 10.204.0.1: provided IP is already allocated
       ##   F failed to run ovnkube
+      ##
+      ## and, once the gateway was freed and the management port was not:
+      ##
+      ##   failed to exclude subnet 10.204.0.2/32 ... IP is already allocated
       ##
       ## which CrashLoopBackOffs ovnkube-node and takes out ALL pod networking
       ## on that node, not just this UDN. An assert in setup-udn-bgp refuses to
@@ -1637,9 +1645,6 @@ udn_bgp_tenants:
       ## problem: two OVN gateway routers on one address in one stretched
       ## broadcast domain. No reservation scheme fixes that one.
       sno:
-        - "10.204.0.2/31"
-        - "10.204.0.4/30"
-        - "10.204.0.8/29"
         - "10.204.0.16/28"
         - "10.204.0.32/27"
         - "10.204.0.64/26"
@@ -1707,14 +1712,22 @@ udn_bgp_tenants:
     evpn_l2_excludes:
       hub:
         - "10.204.128.0/17"
-      ## The low /17 with 10.204.0.0/31 carved out, then the endpoint
-      ## reservation. The shape is not decoration: 10.204.0.1 is the Layer2
-      ## switch's own gateway and EVERY cluster on this subnet needs it.
+      ## The low /17 with 10.204.0.0/28 carved out, then the endpoint
+      ## reservation. The shape is not decoration: the bottom of a Layer2 UDN
+      ## subnet is INFRASTRUCTURE, and every cluster on the subnet needs it.
+      ## .1 is the switch's gateway and .2 is the node's management port; a
+      ## multi-node cluster takes one management address per node, so the
+      ## block is sized at 16 rather than at the two addresses that happened
+      ## to be hit first.
       ## Reserving it does not warn or degrade - ovn-kubernetes exits fatally
       ##
       ##   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
       ##     failed to reserve IP 10.204.0.1: provided IP is already allocated
       ##   F failed to run ovnkube
+      ##
+      ## and, once the gateway was freed and the management port was not:
+      ##
+      ##   failed to exclude subnet 10.204.0.2/32 ... IP is already allocated
       ##
       ## which CrashLoopBackOffs ovnkube-node and takes out ALL pod networking
       ## on that node, not just this UDN. An assert in setup-udn-bgp refuses to
@@ -1724,9 +1737,6 @@ udn_bgp_tenants:
       ## problem: two OVN gateway routers on one address in one stretched
       ## broadcast domain. No reservation scheme fixes that one.
       sno:
-        - "10.204.0.2/31"
-        - "10.204.0.4/30"
-        - "10.204.0.8/29"
         - "10.204.0.16/28"
         - "10.204.0.32/27"
         - "10.204.0.64/26"

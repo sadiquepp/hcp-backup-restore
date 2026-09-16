@@ -145,54 +145,63 @@
     udn_bgp_l2_reserve_field: "{{ udn_bgp_l2_reserve_raw.stdout | default('') | trim }}"
   when: udn_phase not in ['preflight', 'web']
 
-# A Layer2 UDN's own gateway is the first address of its subnet, and
-# ovn-kubernetes reserves it when it builds the switch. Reserve it here as well
-# and it does not warn, skip the network, or mark the CUDN degraded - it exits:
+# The bottom of a Layer2 UDN's subnet belongs to ovn-kubernetes, and every
+# cluster on that subnet needs it. .1 is the switch's gateway, .2 is the node's
+# management port, and a multi-node cluster takes one management address per
+# node. Reserve any of them and ovn-kubernetes does not warn, skip the network
+# or degrade the CUDN:
 #
 #   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
 #     failed to reserve IP 10.204.0.1: provided IP is already allocated
-#   F failed to run ovnkube
 #
-# ovnkube-node then CrashLoopBackOffs, which takes out ALL pod networking on
-# that node - every namespace, not just this UDN - and presents three steps
-# away as pods stuck in ContainerCreating with a CNI timeout. Far too sharp an
-# edge for a value someone edits in vars.yaml, so it is checked here.
+# At start-up that is fatal - "F failed to run ovnkube" - and ovnkube-node
+# CrashLoopBackOffs, taking out ALL pod networking on the node rather than just
+# this UDN. Reached later it merely retries forever, and either way it presents
+# three steps away as pods stuck in ContainerCreating with a CNI annotation
+# timeout, while the CUDN still reports NetworkAllocationSucceeded: True.
 #
-# A CIDR contains <base>.1 in exactly two cases, which is what makes this
-# checkable without netaddr: it starts at the subnet base with a prefix of /31
-# or shorter, or it is <base>.1/32 exactly. Any aligned block of two or more
-# addresses that includes .1 must begin at .0.
-- name: Fail if a Layer2 reservation would swallow the network's own gateway
+# Checked against a BLOCK rather than against the two addresses that were hit
+# first, because the second one only appeared once the first was fixed and
+# there is no reason to think the list ends there.
+#
+# The test is deliberately arithmetic rather than CIDR-aware, so this needs no
+# netaddr: a reservation intrudes on the block when it starts in the subnet's
+# first /24 at an offset below the block size. Any aligned CIDR overlapping the
+# bottom of the subnet must begin there.
+- name: Fail if a Layer2 reservation would swallow the network's infrastructure addresses
   vars:
     l2_base: "{{ item.udn_subnet.split('/')[0] }}"
-    l2_gateway: "{{ item.udn_subnet.split('/')[0].rsplit('.', 1)[0] }}.1"
+    l2_prefix24: "{{ item.udn_subnet.split('/')[0].rsplit('.', 1)[0] }}"
     l2_reserved: >-
       {{ (item.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
          or ([item.evpn_l2_exclude] if item.evpn_l2_exclude is defined else []) }}
     l2_bad: >-
       {{ l2_reserved
-         | select('match', '^' ~ (l2_base | replace('.', '\.')) ~ '/(?:[0-9]|[12][0-9]|3[01])$')
-         | list
-         + (l2_reserved | select('equalto', l2_gateway ~ '/32') | list) }}
+         | select('match', '^' ~ (l2_prefix24 | replace('.', '\\.'))
+                         ~ '\\.(?:[0-9]|1[0-5])(?:/|$)')
+         | list }}
   ansible.builtin.assert:
     that: l2_bad | length == 0
     fail_msg: >-
       Tenant '{{ item.name }}' on cluster '{{ udn_bgp_cluster }}' reserves
-      {{ l2_bad }}, which covers {{ l2_gateway }} - the Layer2 switch's own
-      gateway for {{ item.udn_subnet }}. ovn-kubernetes cannot then reserve it
-      and exits fatally, CrashLoopBackOffing ovnkube-node and taking out all
-      pod networking on every node that runs this network.
+      {{ l2_bad }}, which intrudes on {{ l2_base }}/28 - the addresses
+      ovn-kubernetes keeps for this Layer2 network's own gateway and for each
+      node's management port. It cannot then allocate them and fails, which at
+      start-up is fatal and CrashLoopBackOffs ovnkube-node, taking out all pod
+      networking on every node running this network.
 
-      Split the reservation around the gateway instead. To reserve
-      {{ l2_base }}/17 while leaving the gateway free, that is
-      {{ l2_base }}/31 carved out of it - 14 CIDRs, well inside the API's
-      limit of 25. green and purple in vars.yaml show the shape.
+      Start the reservation at {{ l2_prefix24 }}.16 instead. To reserve
+      {{ l2_base }}/17 while leaving the block free, that is {{ l2_base }}/28
+      carved out of it - 11 CIDRs, well inside the API's limit of 25. green
+      and purple in vars.yaml show the shape.
 
-      Every cluster on a stretched Layer2 subnet needs this address, which is
-      itself worth knowing: they all end up with a gateway router on it.
+      Those 16 addresses are shared by every cluster on this subnet and cannot
+      be split: each one puts its own gateway on .1 and its own management port
+      on .2. That is a property of stretching a Layer2 network across
+      clusters, not something this lab can configure away.
     success_msg: >-
-      {{ item.name }}: reservation leaves {{ l2_gateway }} free for the
-      gateway.
+      {{ item.name }}: reservation leaves {{ l2_base }}/28 free for the
+      gateway and management ports.
   loop: "{{ udn_bgp_tenants }}"
   loop_control:
     label: "{{ item.name }}"

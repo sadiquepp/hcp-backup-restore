@@ -3797,6 +3797,29 @@ Two consequences worth stating before the first run:
   take low addresses, and nothing ever needed it to be there. Splitting the
   prefix between two clusters is the first thing that does.
 
+  **The bottom of the subnet is not yours to reserve.** ovn-kubernetes keeps
+  the first addresses of a Layer2 UDN subnet for itself — `.1` is the switch's
+  gateway, `.2` is the node's management port, and a multi-node cluster takes
+  one management address per node. Reserving any of them fails, and at
+  start-up the failure is fatal: `F failed to run ovnkube`, ovnkube-node
+  CrashLoopBackOffs, and **all** pod networking on that node goes with it, not
+  just the affected UDN. Reached later it retries forever instead. Either way
+  it presents as pods stuck in `ContainerCreating` with a CNI annotation
+  timeout, several steps from the cause, while the CUDN keeps reporting
+  `NetworkAllocationSucceeded: True` — that condition covers cluster-level
+  allocation and says nothing about the per-node switch.
+
+  So a per-cluster split reserves the other cluster's half *with the first /28
+  carved out*: 11 CIDRs instead of one, against an API limit of 25. An assert
+  in `roles/setup-udn-bgp` refuses to render a reservation that intrudes on it.
+
+  Those 16 addresses are then shared by every cluster on the subnet and cannot
+  be split, because each cluster puts its own gateway on `.1` and its own
+  management port on `.2`. **That is the real limit on stretching a Layer2 UDN
+  across clusters**: the pod ranges can be separated, the infrastructure
+  addresses cannot. Two OVN gateway routers answer for `10.204.0.1` in one
+  broadcast domain, and no configuration avoids it.
+
   `roles/setup-udn-bgp` now asks the API what the field is called
   (`oc explain clusteruserdefinednetwork.spec.network.layer2`) and reads the
   reservation back off the created CUDN, so a pruned field is reported rather
