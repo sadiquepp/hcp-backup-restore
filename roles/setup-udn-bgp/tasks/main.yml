@@ -120,13 +120,19 @@
 # hardcoded guess fails the same silent way. If neither name is present the
 # manifest omits the block and the read-back check after the CUDNs are created
 # says what was lost.
+# `|`, not `>-`. A folded scalar joins these lines with spaces, which turns
+# the first two into `out=$(...) for f in ...; do` - a shell syntax error that
+# failed_when: false then swallows, leaving stdout empty and the field name
+# unset. The manifest silently loses its reservation block, which is the exact
+# failure this task exists to prevent.
 - name: Ask the API what it calls the Layer2 address reservation
   ansible.builtin.shell:
-    cmd: >-
-      out=$(oc explain clusteruserdefinednetwork.spec.network.layer2 2>/dev/null)
+    cmd: |
+      out=$(oc explain clusteruserdefinednetwork.spec.network.layer2 2>&1) || exit 0
       for f in reservedSubnets excludeSubnets; do
         if printf '%s' "$out" | grep -qE "(^|[[:space:]])${f}([[:space:]]|$)"; then
-          printf '%s' "$f"; break
+          printf '%s' "$f"
+          exit 0
         fi
       done
   register: udn_bgp_l2_reserve_raw
@@ -144,11 +150,17 @@
     msg: >-
       {{ ("Layer2 address reservations go in '" ~ udn_bgp_l2_reserve_field ~ "' on this cluster.")
          if udn_bgp_l2_reserve_field
-         else ("This cluster's Layer2 API declares neither reservedSubnets nor "
-               "excludeSubnets, so nothing can reserve an address inside a "
-               "Layer2 UDN subnet. The external endpoint and any second "
-               "cluster on the same L2VNI are both allocating blind - see the "
-               "warning after the CUDNs are created.") }}
+         else ("WARNING: could not determine what this cluster's Layer2 API calls"
+               " the address reservation, so the CUDNs will be rendered WITHOUT"
+               " one. Nothing will then reserve the external endpoint, and two"
+               " clusters on one L2VNI will both allocate from the same range."
+               "\n  rc was " ~ (udn_bgp_l2_reserve_raw.rc | default('?') | string) ~
+               " and stderr was: " ~ (udn_bgp_l2_reserve_raw.stderr | default('') | trim or '(empty)') ~
+               "\n  Check by hand with:"
+               "\n    oc explain clusteruserdefinednetwork.spec.network.layer2"
+               "\n  An empty result here means either the field genuinely does not"
+               " exist on this API version, or the probe above failed - they are"
+               " not the same thing and the rc tells you which.") }}
   when: udn_phase not in ['preflight', 'web']
 
 - name: Report which cluster this run is targeting
