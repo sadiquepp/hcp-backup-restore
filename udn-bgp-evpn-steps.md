@@ -64,14 +64,71 @@ for. Two things happen that are worth knowing before you start:
 
 ## 1. Prerequisites
 
-All paths. Run on the **lab host**.
+All paths. Everything in this section runs on the **lab host**.
+
+### 1.1 The base lab
+
+Skip to 1.3 if the hub is already built.
 
 ```bash
-# a hub cluster that is already up, and its kubeconfig
+# vault.yaml first - pull secret, subscription credentials, resolver IPs
+ansible-vault create vault.yaml            # see steps.md section 3 for the keys
+
+# the RHEL9 image the helper, the clab VM and the client VMs are copied from
+cp rhel-9.8-x86_64-kvm.qcow2 roles/setup-bm-host/files/
+```
+
+```bash
+# the helper VM: DNS, load balancer, and the generated inventory/hosts
+ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
+
+# the hub. --skip-tags acm because ACM/MCE belongs to the hosted-cluster and
+# backup flows; nothing in this lab reads it, and installing it costs time and
+# a good deal of memory on the workers.
+ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass \
+  --skip-tags acm
+```
+
+### 1.2 The SNO
+
+**Only needed for section 8** (the second cluster on the EVPN fabric). Paths A
+and B, and path C on one cluster, do not use it.
+
+```bash
+ansible-playbook -i inventory/hosts setup_sno.yaml --ask-vault-pass
+```
+
+> **DNS is already done, if you ran 1.1 in order.** `setup_sno.yaml` hard-fails
+> when `api.sno.<base_domain>` does not resolve - deliberately, up front, rather
+> than forty minutes into an install whose certificate is issued for a name
+> nothing serves. It does not render the zone itself; `setup-dns` runs on the
+> helper, and one owner for DNS is the point. But `setup_bm_host.yaml` in 1.1
+> renders the SNO zone automatically whenever `vars.yaml` carries `sno_name` and
+> `ip_list.sno`, which it does by default - so the pre-flight passes.
+>
+> Building the SNO later, or after changing `ip_list`, needs the zone refreshed
+> first:
+> ```bash
+> ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
+> ```
+
+> Rebuilding over an existing SNO needs `-e sno_force_reinstall=true`. The guard
+> is there because the rebuild deletes the only copy of that cluster's
+> kubeconfig.
+
+Useful subsets: `--tags snoimage` rebuilds the agent ISO alone, `--tags snovm`
+the VM from an ISO already built, `--tags snowait` just blocks until a running
+install finishes.
+
+### 1.3 Check what you have
+
+```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
 oc get nodes                              # all Ready
 
-# the RHEL9 image the clab VM and the client VMs are copied from
+# and the SNO, if 1.2 was run
+oc --kubeconfig=/var/lib/libvirt/images/sno_install/auth/kubeconfig get nodes
+
 ls /var/lib/libvirt/images/rhel-9.8-x86_64-kvm.qcow2
 ```
 
