@@ -45,6 +45,7 @@ where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
   - [Is this how it works in production?](#is-this-how-it-works-in-production)
 - [Phase 3: VRF-Lite](#phase-3-vrf-lite)
 - [Phase 4: EVPN](#phase-4-evpn)
+  - [Following one packet, cluster to cluster](#following-one-packet-cluster-to-cluster)
 - [Live migration on the Layer2 tenant](#live-migration-on-the-layer2-tenant)
 - [Teardown](#teardown)
 - [Which file does what](#which-file-does-what)
@@ -3939,6 +3940,90 @@ on it. The annotation key varies by release; if the column is empty for every
 node, read `oc get node <node> -o yaml | grep -i vtep` rather than trusting it.
 
 ---
+
+## Following one packet, cluster to cluster
+
+The phase-1 walk above crosses four routing decisions. This one crosses
+**none** in the overlay, and that is the whole point of a macVRF: the two pods
+are in the same broadcast domain, so nothing routes them.
+
+Numbers from a real run — a pod on the SNO pinging a pod on hub1, both on
+`green`, L2VNI 400:
+
+```
+                        pod: 10.204.128.0/16   MAC 0a:58:0a:cc:80:00
+sno                     vtep0: 100.64.0.20      enp7s0: 192.168.140.20/24
+                        pod: 10.204.0.6/16     MAC 0a:58:0a:cc:00:06
+hub1 worker3            vtep0: 100.64.0.36      enp2s0: 192.168.140.36/24
+leaf1                   eth1: 192.168.140.1/24  (underlay only)
+leaf2                   br400 + green-ext       (in the L2VNI, not on this path)
+```
+
+The pod MACs are not arbitrary: ovn-kubernetes derives them from the address,
+so `0a:58:0a:cc:00:06` **is** `10.204.0.6` written in hex. That is what makes
+`show evpn mac vni 400` on leaf2 readable without cross-referencing anything.
+
+### Out
+
+| # | Where | What decides the next hop |
+| --- | --- | --- |
+| 1 | Pod network namespace | `10.204.0.6` is inside the pod's own `10.204.0.0/16`, so it is **on-link**. No gateway, no default route, no `10.204.0.1`. This is the step that makes everything below different from phase 1 |
+| 2 | ARP | The pod ARPs for `10.204.0.6`. OVN answers from the EVPN type-2 route it learned for that MAC/IP pair — the binding was installed by BGP, not by flooding |
+| 3 | Logical switch `cluster_udn_green_ovn_layer2_switch` | Destination MAC lookup, not an IP lookup. The FDB says `0a:58:0a:cc:00:06` is **remote**, behind VTEP `100.64.0.36` |
+| 4 | VXLAN encapsulation | Outer IP `100.64.0.20 → 100.64.0.36`, VNI 400. The inner frame is untouched — **this is why the TTL never decrements** |
+| 5 | Host main routing table | The first and only kernel routing decision, and it is about the *outer* packet. `100.64.0.0/24` is learned over BGP from leaf1 (`network 100.64.0.0/24` on leaf1, `toReceive: mode: all` on the node), so the next hop is `192.168.140.1` out `enp7s0` |
+| 6 | The wire | `enp7s0` → `virbr1` → leaf1's `eth1`. leaf1 holds a static `100.64.0.36/32 via 192.168.140.36 dev eth1`, written at deploy time from the same `ip_list` octet as everything else, and forwards it back onto the same segment to worker3 |
+| 7 | worker3 | The outer destination `100.64.0.36` is an address on its own `vtep0`, so this is **local delivery, not forwarding**. Decapsulate, and the inner frame is put on the same logical switch it left |
+| 8 | Pod | Delivered by MAC. TTL still 64 |
+
+### Back
+
+There is nothing to describe. The reply is steps 8→1 with the addresses
+swapped, and every decision is the mirror of the one that carried the request
+— because both ends learned the other's MAC from the same pair of type-2
+routes, and both VTEPs learned the other's address from the same aggregate.
+
+That symmetry is the contrast worth drawing with phase 1, where the return
+path needed **two** things the outbound path did not: a BGP-learned route on
+the leaf, and IP forwarding on a NIC ovn-kubernetes has never heard of. Here
+it needs neither:
+
+- Nothing is routed in the overlay, so the leaf never needs a route to a pod
+  subnet. leaf1 carries `100.64.0.0/24` and no tenant prefix at all.
+- The outer packet is addressed *to the node*, so it is delivered locally.
+  `net.ipv4.ip_forward` is not on this path. The Tuned profile in Part 5 is
+  still required — phases 1 to 3 route pod traffic through the fabric NIC, and
+  the Layer3 EVPN tenants still do — but a Layer2 tenant's pod-to-pod traffic
+  would survive without it.
+
+### Confirming each hop yourself
+
+```bash
+# 1-2: on-link, no gateway involved
+oc -n udn-green rsh deploy/udn-web ip route get 10.204.0.6
+
+# 3: the remote MAC and which VTEP it sits behind
+docker exec clab-udnbgp-leaf2 vtysh -c 'show evpn mac vni 400'
+
+# 4: the TTL. 64 means bridged; 63 would mean something routed it
+oc -n udn-green rsh deploy/udn-web ping -c1 10.204.0.6
+
+# 5: the underlay decision, and the only kernel routing table on the path
+oc debug node/sno --quiet -- chroot /host ip route get 100.64.0.36
+
+# 6: the static /32 leaf1 was rendered with
+docker exec clab-udnbgp-leaf1 vtysh -c 'show ip route 100.64.0.36'
+
+# 7: why it is local delivery rather than forwarding
+oc debug node/worker3 --quiet -- chroot /host ip -o addr show vtep0
+```
+
+Step 5 is the one worth actually running rather than reading. Both VTEPs sit
+on one L2 segment (`virbr1`), so the node's route to `100.64.0.36` goes via
+leaf1 and leaf1 forwards it straight back out the interface it arrived on —
+which is what an ICMP redirect exists for. Whether your node has taken the
+redirect and is sending direct, or is still hairpinning through leaf1, shows
+up in that one command and in nothing else.
 
 ## Live migration on the Layer2 tenant
 
