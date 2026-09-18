@@ -4433,13 +4433,45 @@ be — ovn-kubernetes derives the MAC from the IP, and `0a:58:0a:cc:00:09` is
 `0a:58` followed by `10.204.0.9` — so the MAC surviving is a consequence of the
 IP surviving, not a second result.
 
-The result is **which VTEP that MAC sits behind**. Before the migration the
-SNO's traffic for `0a:58:0a:cc:00:09` was encapsulated to `100.64.0.34`;
-afterwards, to `100.64.0.35`. Nothing in the SNO was reconfigured and nothing
-re-addressed: worker2 advertised a type-2 route for the MAC, worker1 withdrew
-its own, and the far cluster's forwarding followed. A MAC moving between VTEPs
-is precisely the event EVPN type-2 exists for, and here the observer is in a
-different cluster, in a different autonomous system, learning it over BGP.
+The result is **which VTEP that MAC sits behind**, and which end changed it.
+
+The SNO node builds the outer header itself: cross-cluster traffic on this
+L2VNI goes node VTEP to node VTEP directly, `100.64.0.20 > 100.64.0.36` in the
+[capture](#what-the-wire-looks-like), with no leaf in the path. So before the
+migration the SNO was encapsulating to `100.64.0.34` and afterwards to
+`100.64.0.35`, and **nothing between them could have made that change**:
+
+* leaf1 and the spine only ever see the outer packet, addressed to a `/32`
+  that points at worker1. leaf1 holds no VNI 400 and no tenant VRF - it is
+  transit with `bgp retain route-target all` - so there is no inner frame for
+  it to decide on.
+* worker1 could not have forwarded it onward either. That means decapsulating
+  a frame from one VTEP and re-encapsulating it to another, which EVPN
+  split-horizon exists to prevent.
+
+Which leaves the sender. worker2 advertised a type-2 route for the MAC with
+its own VTEP as next hop, worker1 withdrew its own, leaf1 passed both to the
+SNO - across an AS boundary, which is why the per-cluster ASNs matter - and
+the SNO's VXLAN FDB followed. A MAC moving between VTEPs is precisely the
+event EVPN type-2 exists for, and here the observer is in a different cluster
+learning it over BGP.
+
+> **Measured vs inferred.** The direct node-to-node path is measured. The
+> type-2 withdrawal and re-advertisement during *this* migration is inference -
+> sound by the elimination above, but not watched. To watch it, on the SNO:
+>
+> ```bash
+> oc debug node/sno --quiet -- chroot /host \
+>   bridge fdb show dev evx4-evpn-vtep | grep 0a:58:0a:cc:00:09
+> # dst 100.64.0.34 before, 100.64.0.35 after
+>
+> oc -n openshift-frr-k8s rsh <frr-k8s-pod> vtysh \
+>   -c 'show bgp l2vpn evpn route type macip' | grep -A3 0a:58:0a:cc:00:09
+> ```
+>
+> Both ends can advertise the MAC briefly during the cutover. EVPN settles that
+> with the **MAC Mobility** extended community, a sequence number that rises on
+> each move so the newer advertisement wins rather than the two flapping.
 
 Confirm the move on the far leaf, which sees both clusters:
 
