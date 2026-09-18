@@ -13,7 +13,7 @@ piece is, what each phase uses, and the manual equivalent of `--tags fabric`.
 The playbook equivalent of this document is:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags <phase>
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags <phase>
 ```
 
 where `<phase>` is `preflight`, `default`, `shared`, `vrflite` or `evpn`.
@@ -158,7 +158,7 @@ the one default VRF, where a prefix cannot belong to two networks.
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric
 > ```
 > Role: `roles/setup-clab-fabric` (all of it)
 >
@@ -198,7 +198,7 @@ at any BGP router on the same L2 segment and they work unchanged.
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags clabverify
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags clabverify
 > ```
 > Role: `roles/setup-clab-fabric/tasks/fabric-verify.yml`
 >
@@ -312,7 +312,7 @@ move between nodes. See
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags preflight
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags preflight
 > ```
 > Role: `tasks/preflight.yml`
 >
@@ -368,7 +368,7 @@ letting the MetalLB operator stand up a second instance.
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
 > ```
 > Role: `tasks/enable.yml`
 >
@@ -435,7 +435,7 @@ oc -n openshift-network-operator logs deploy/network-operator --tail=50
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
 > ```
 > Role: `tasks/node-names.yml`
 >
@@ -477,7 +477,7 @@ worker3. Use those names everywhere below.
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
 > ```
 > Role: `tasks/nmstate.yml`, `templates/nmstate-*.yaml.j2`
 >
@@ -551,7 +551,7 @@ oc -n openshift-nmstate get subscription kubernetes-nmstate-operator -o jsonpath
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
 > ```
 > Role: `tasks/main.yml`, `templates/nncp-fabric-untagged.yaml.j2`
 >
@@ -692,7 +692,7 @@ is on the fabric side, not in OVN-Kubernetes.
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
 > ```
 > Role: `tasks/main.yml`, `templates/frrconfiguration-default.yaml.j2`
 >
@@ -769,7 +769,7 @@ Expect `Established`. Sessions on the masters will not establish — see above.
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
 > ```
 > Role: `templates/routeadvertisements-default.yaml.j2`, `tasks/wait-ra.yml`
 >
@@ -1236,7 +1236,7 @@ session up first and confirm it before any pod route is involved.
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags shared
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags shared
 > ```
 > Role: `templates/cudn.yaml.j2`, `templates/workload.yaml.j2`, `templates/routeadvertisements-udn-shared.yaml.j2`
 >
@@ -1817,7 +1817,7 @@ about BGP at all.
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags clabclient
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags clabclient
 > ```
 > Files: `client-vm.yml`, `client-router.yml`, `client-config.yml` in `roles/setup-clab-fabric`
 >
@@ -2333,7 +2333,7 @@ working, not a regression. Phase 3's test is each tenant reaching **its own**
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags vrflite
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags vrflite
 > ```
 > Role: `tasks/vrflite-discover.yml`, `tasks/vrflite-apply.yml`, `templates/nncp-vrflite.yaml.j2`, `templates/frrconfiguration-vrflite.yaml.j2`, `templates/routeadvertisements-udn-vrflite.yaml.j2`
 >
@@ -2829,7 +2829,7 @@ later cannot quietly produce a meaningless result.
 #### Or one VM with a namespace per tenant
 
 ```bash
-ansible-playbook setup_udn_bgp_lab.yaml -i inventory/hosts --tags clabnsclient --ask-vault-pass
+ansible-playbook setup_udn_bgp_lab.yaml -i ../inventory/hosts --tags clabnsclient --ask-vault-pass
 scripts/udn-web-demo.sh --netns
 ```
 
@@ -2964,7 +2964,7 @@ machine for the same reason that row is possible.
 #### Curl it instead: a page that names the responder
 
 ```bash
-ansible-playbook setup_udn_bgp_lab.yaml -i inventory/hosts --tags web --ask-vault-pass
+ansible-playbook setup_udn_bgp_lab.yaml -i ../inventory/hosts --tags web --ask-vault-pass
 scripts/udn-web-demo.sh
 ```
 
@@ -3397,7 +3397,7 @@ multi-homed into every tenant reaches it on their behalf, and picks which one
 by a name. `--tags clabnsproxy` builds that on the namespace client:
 
 ```bash
-ansible-playbook setup_udn_bgp_lab.yaml -i inventory/hosts --tags clabnsproxy --ask-vault-pass
+ansible-playbook setup_udn_bgp_lab.yaml -i ../inventory/hosts --tags clabnsproxy --ask-vault-pass
 ```
 
 The load-bearing part is one keyword. HAProxy can open a backend connection
@@ -3606,7 +3606,7 @@ else — which is still the isolation result the phase exists to prove.
 
 > **Automate this step**
 > ```
-> ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags evpn
+> ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags evpn
 > ```
 > Role: `tasks/evpn.yml`, `templates/vtep.yaml.j2`, `templates/nncp-vtep.yaml.j2`, `templates/cudn-evpn.yaml.j2`, `templates/frrconfiguration-evpn.yaml.j2`, `templates/routeadvertisements-udn-evpn.yaml.j2`
 >

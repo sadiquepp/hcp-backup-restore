@@ -23,7 +23,7 @@
 
 - name: Report actual partition layout of the base image (verify mirror_registry_resize_partition matches)
   ansible.builtin.command:
-   cmd: "virt-filesystems --long --parts --blkdevs -h -a roles/setup-bm-host/files/{{ rhel9_kvm_image }}"
+   cmd: "virt-filesystems --long --parts --blkdevs -h -a {{ base_image_dir }}/{{ rhel9_kvm_image }}"
   register: base_image_filesystems
   changed_when: false
   when: not mirror_registry_disk_status.stat.exists
@@ -41,7 +41,7 @@
   ansible.builtin.command:
     cmd: >
       virt-resize --expand {{ mirror_registry_resize_partition }}
-      roles/setup-bm-host/files/{{ rhel9_kvm_image }}
+      {{ base_image_dir }}/{{ rhel9_kvm_image }}
       /var/lib/libvirt/images/{{ mirror_registry_disk }}
   when: not mirror_registry_disk_status.stat.exists
   tags:

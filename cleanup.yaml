@@ -229,7 +229,7 @@
   - name: Remove the rendered UDN manifests
     tags: [udnlab]
     ansible.builtin.file:
-      path: "{{ playbook_dir }}/udn-bgp"
+      path: "{{ playbook_dir }}/udn-bgp-evpn/udn-bgp"
       state: absent
 
   - name: Cleanup SSH Know Hostss

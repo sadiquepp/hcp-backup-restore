@@ -14,7 +14,7 @@ ansible-galaxy collection install community.crypto
 
 git clone https://github.com/sadiquepp/hcp-backup-restore.git
 cd hcp-backup-restore
-cp rhel-9.8-x86_64-kvm.qcow2 roles/setup-bm-host/files/
+cp rhel-9.8-x86_64-kvm.qcow2 /var/lib/libvirt/images/   # base_image_dir in vars.yaml
 ```
 
 ## 2. S3 bucket and IAM user (once per lab, not per hub)

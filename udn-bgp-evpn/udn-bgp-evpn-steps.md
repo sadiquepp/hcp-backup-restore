@@ -114,17 +114,30 @@ dns_forwarders:
 > `quay.io` SERVFAILs.
 
 ```bash
-# the RHEL9 image the helper, the clab VM and the client VMs are copied from
-cp rhel-9.8-x86_64-kvm.qcow2 roles/setup-bm-host/files/
+# the RHEL9 image the helper, the clab VM and the client VMs are copied from.
+# base_image_dir in vars.yaml, which defaults to download_dir.
+cp rhel-9.8-x86_64-kvm.qcow2 /var/lib/libvirt/images/
 ```
+
+> **Every command in this document runs from `udn-bgp-evpn/`.**
+>
+> ```bash
+> cd udn-bgp-evpn
+> ```
+>
+> That is why the inventory is `../inventory/hosts` and the cluster-build
+> playbooks are `../setup_*.yaml`, while this lab's own playbook and roles are
+> local. Do not add a wrapper or a symlink for the `../` ones - `playbook_dir`
+> follows the playbook, so calling them by relative path is what keeps their
+> own paths resolving.
 
 ```bash
 # the helper VM: DNS, load balancer, and the generated inventory/hosts
-ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
+ansible-playbook -i ../inventory/hosts ../setup_bm_host.yaml --ask-vault-pass
 
 # the hub. --skip-tags acm because ACM/MCE belongs to the hosted-cluster and
 # backup flows - nothing in this lab reads it, and it is not a small install.
-ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts ../setup_hub_cluster.yaml --ask-vault-pass \
   --skip-tags acm
 ```
 
@@ -133,7 +146,7 @@ ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass \
 **Only needed for section 8** (the second cluster on the EVPN fabric).
 
 ```bash
-ansible-playbook -i inventory/hosts setup_sno.yaml --ask-vault-pass
+ansible-playbook -i ../inventory/hosts ../setup_sno.yaml --ask-vault-pass
 ```
 
 Run it in a second terminal **alongside** the hub install above, not after it -
@@ -178,11 +191,11 @@ VM, the routers, and adds one NIC to each node.
 
 ```bash
 # paths A and B
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags fabric
 
 # path C
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags fabric -e clab_topology=evpn
 ```
 
@@ -229,7 +242,7 @@ virsh domiflist hub_worker1 | grep 52:54:00:e2:55
 Changes nothing. Run it anywhere with a kubeconfig.
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags preflight
 ```
 
@@ -246,7 +259,7 @@ not work, UDN is not the reason - which removes an entire class of explanation
 from whichever path you take next.
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags default
 ```
 
@@ -296,7 +309,7 @@ Primary UDNs advertised into the default VRF. Adds UDN; still no VLANs, no
 VRFs, no NMState policies beyond the fabric NIC.
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags shared
 ```
 
@@ -327,7 +340,7 @@ Needs the external client VM. Build it first - a **lab host** command, and it
 runs fine against an empty cluster, because everything it checks is fabric:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags clabclient
 ```
 
@@ -390,7 +403,7 @@ scripts/udn-snapshot.sh phaseA
 Per-tenant VRFs and VLANs, `targetVRF: auto`.
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags vrflite
 ```
 
@@ -441,12 +454,12 @@ on path C:
 
 ```bash
 # one client VM per isolation domain
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags clabtenantclients
 
 # or one VM holding one namespace per tenant - same test, a fifth of the RAM,
 # and what the tenant ingress in section 9 runs on
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags clabnsclient
 ```
 
@@ -504,11 +517,11 @@ Nodes as VTEPs. Needs OpenShift 4.22+ and the EVPN fabric from section 2.
 
 ```bash
 # the fabric, if section 2 was run without it
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags fabric -e clab_topology=evpn
 
 # the cluster half
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags evpn -e udn_bgp_cluster=hub
 ```
 
@@ -625,7 +638,7 @@ renders a leaf1 that knows all of them, SNO included. Only the cluster half is
 left:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags evpn -e clab_topology=evpn -e udn_bgp_cluster=sno
 ```
 
@@ -651,7 +664,7 @@ per family, so four neighbours read as eight lines.
 this is a subset of `--tags fabric` and safe to re-run:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags nodenics,clabdeploy -e clab_topology=evpn
 ```
 
@@ -659,7 +672,7 @@ Section 7 already ran the hub's cluster half. Re-run it too if you are starting
 section 8 without having done that:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags evpn -e clab_topology=evpn -e udn_bgp_cluster=hub
 ```
 
@@ -694,9 +707,9 @@ It reads the page each pod serves, so it needs the web pods in **both**
 clusters first - the same `--tags web` section 9 covers, run once per cluster:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags web -e udn_bgp_cluster=hub
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags web -e udn_bgp_cluster=sno
 ```
 
@@ -750,7 +763,7 @@ and a hostname per **(cluster, tenant)** pair.
 Needs the two `--tags web` runs above, then the ingress:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags clabnsproxy -e clab_topology=evpn
 ```
 
@@ -824,11 +837,11 @@ A web server per tenant, so the answer identifies the responder where a ping
 cannot. Additive and independent of transport.
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags web -e udn_bgp_cluster=hub
 
 # and once per extra cluster, if you did section 8
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags web -e udn_bgp_cluster=sno
 ```
 
@@ -848,12 +861,12 @@ Needs 9.1, and the namespace client - built in 6.1 if you came through path B,
 otherwise:
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags clabnsclient -e clab_topology=evpn
 ```
 
 ```bash
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags clabnsproxy -e clab_topology=evpn
 ```
 
@@ -891,13 +904,13 @@ names itself.
 
 ```bash
 # the UDN lab only - clab VM, client VMs, fabric network, rendered manifests
-ansible-playbook -i inventory/hosts cleanup.yaml --tags udnlab
+ansible-playbook -i ../inventory/hosts ../cleanup.yaml --tags udnlab
 
 # the SNO as well
-ansible-playbook -i inventory/hosts cleanup.yaml --tags sno
+ansible-playbook -i ../inventory/hosts ../cleanup.yaml --tags sno
 
 # everything
-ansible-playbook -i inventory/hosts cleanup.yaml
+ansible-playbook -i ../inventory/hosts ../cleanup.yaml
 ```
 
 The cluster-side objects are **not** removed by that - it destroys VMs. To

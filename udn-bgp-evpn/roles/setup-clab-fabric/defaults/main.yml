@@ -46,7 +46,7 @@ clab_topology: bgp
 clab_fabric_client_gw_octet: 50
 
 udn_client_vm_disk_path: "{{ download_dir | regex_replace('/+$', '') }}/{{ udn_client_vm_disk }}"
-udn_client_base_image_path: "{{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_client_base_image }}"
+udn_client_base_image_path: "{{ base_image_dir }}/{{ udn_client_base_image }}"
 
 ## The client VM's management MAC. Same 52:54:00:e2:54:<octet> scheme the lab's
 ## other guests use, which is what the default network's DHCP reservations are
@@ -62,7 +62,7 @@ udn_client_ssh_user: root
 udn_client_ssh_key: "~/.ssh/lab_rsa"
 
 ## Phase 3 per-tenant client VMs (--tags clabtenantclients).
-udn_tenant_client_base_image_path: "{{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_tenant_client_base_image }}"
+udn_tenant_client_base_image_path: "{{ base_image_dir }}/{{ udn_tenant_client_base_image }}"
 ## Same management-NIC OUI as the phase-2 client, so the two schemes do not
 ## collide: mgmt is ...:e2:54:<octet>, fabric is clab_fabric_mac_prefix:<octet>.
 udn_tenant_client_mgmt_mac_prefix: "52:54:00:e2:54"

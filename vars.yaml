@@ -43,9 +43,26 @@ base_domain: mylab.com
 download_dir: /var/lib/libvirt/images
 
 ## RHEL 9 KVM guest image for the helper, mirror registry, MinIO and Ceph VMs -
-## put it in download_dir before the first run. If you change it, check the
+## put it in base_image_dir before the first run. If you change it, check the
 ## *_resize_partition values further down: they are image-specific.
 rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
+
+## Where that base image actually lives.
+##
+## It is a RUNTIME ARTIFACT, not role content: *.qcow2 is gitignored, it is
+## several GB, and FIVE roles consume it - setup-bm-host, setup-ceph-vm,
+## setup-minio-vm, setup-mirror-registry-vm and setup-clab-fabric. Nothing
+## owns it, so it does not belong inside any one role's files/ directory.
+##
+## It used to be read out of roles/setup-bm-host/files/, which made every
+## other role reach across into a role it does not own - three of them with a
+## bare relative path that only resolved when ansible-playbook was run from
+## the repository root. Addressing it through one variable removes both
+## problems and makes relocating it a one-line change.
+##
+## MIGRATING an existing lab - move the image rather than re-downloading it:
+##   mv roles/setup-bm-host/files/*.qcow2 /var/lib/libvirt/images/
+base_image_dir: "{{ download_dir }}"
 
 ## --- OpenShift version -----------------------------------------------------
 
@@ -1397,13 +1414,13 @@ clab_alpine_image: "alpine:3.20"
 ##                tenant VRF. Only the nodes of the cluster being targeted.
 ##
 ## Reading the second from the first is what breaks the moment a second
-## cluster appears: roles/setup-udn-bgp/tasks/node-names.yml resolves every
+## cluster appears: udn-bgp-evpn/roles/setup-udn-bgp/tasks/node-names.yml resolves every
 ## entry against `oc get nodes` of the cluster it is pointed at, so a hub run
 ## with the SNO in the list fails with "No cluster node has internal address
 ## 192.168.122.20" - and a SNO run fails the same way on the three workers.
 ##
 ## So the per-cluster list is the source of truth and the fabric-wide one is
-## derived from it (roles/setup-clab-fabric/tasks/main.yml). Each entry:
+## derived from it (udn-bgp-evpn/roles/setup-clab-fabric/tasks/main.yml). Each entry:
 ##
 ##   install_folder  where this cluster's auth/kubeconfig lives.
 ##   asn             this cluster's BGP ASN. MUST be unique per cluster - see
@@ -1420,7 +1437,7 @@ clab_alpine_image: "alpine:3.20"
 ## right for every lab, because the node name is whatever the host sent as its
 ## hostname at install time, so the role looks it up instead: it matches
 ## ip_list's address against the nodes' InternalIP. See
-## roles/setup-udn-bgp/tasks/node-names.yml.
+## udn-bgp-evpn/roles/setup-udn-bgp/tasks/node-names.yml.
 clab_clusters:
   ## hub1 is a plain standalone cluster whose Network.operator.openshift.io CR
   ## you can patch directly, which is what every phase needs. Hosted-cluster
@@ -1934,7 +1951,7 @@ udn_bgp_vtep_iface: vtep0
 
 ## ---------------------------------------------------------------------------
 ## Optional external client VM for phase 2 reachability testing
-## (roles/setup-clab-fabric, --tags clabclient).
+## (udn-bgp-evpn/roles/setup-clab-fabric, --tags clabclient).
 ##
 ## One NIC on the management network and deliberately no fabric presence: a
 ## client on the fabric segment shares a broadcast domain with leaf1 and every

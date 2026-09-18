@@ -260,7 +260,7 @@
       BGP neighbour for its nodes and no static route to their VTEPs. The
       sessions below will sit in Active forever. Add it to
       clab_fabric_clusters in vars.yaml and re-run:
-        ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml \
+        ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml \
           --ask-vault-pass --tags nodenics,clabdeploy -e clab_topology=evpn
   when: udn_bgp_cluster not in (clab_fabric_clusters | default([]))
 
@@ -361,7 +361,7 @@
 
       If the MAC is absent there, attach it:
 
-        ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml \
+        ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml \
           --ask-vault-pass --tags nodenics
 
       If the MAC IS listed on the domain but the node still does not see it,

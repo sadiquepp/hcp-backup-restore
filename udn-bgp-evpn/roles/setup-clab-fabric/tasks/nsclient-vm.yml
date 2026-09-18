@@ -48,7 +48,7 @@
 
 - name: Look for the base image
   ansible.builtin.stat:
-    path: "{{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_nsclient_base_image }}"
+    path: "{{ base_image_dir }}/{{ udn_nsclient_base_image }}"
   register: udn_ns_base
 
 - name: Fail if the base image is missing
@@ -56,7 +56,7 @@
     that: udn_ns_base.stat.exists
     fail_msg: >-
       No base image at
-      {{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_nsclient_base_image }}.
+      {{ base_image_dir }}/{{ udn_nsclient_base_image }}.
     success_msg: "Base image {{ udn_nsclient_base_image }} found."
 
 - name: Record the namespace client for the test scripts
@@ -75,7 +75,7 @@
   ansible.builtin.command:
     cmd: >-
       cp --sparse=always
-      {{ playbook_dir }}/roles/setup-bm-host/files/{{ udn_nsclient_base_image }}
+      {{ base_image_dir }}/{{ udn_nsclient_base_image }}
       {{ download_dir | regex_replace('/+$', '') }}/{{ udn_nsclient_vm_name }}_disk.qcow2
   when: not udn_ns_disk.stat.exists
 

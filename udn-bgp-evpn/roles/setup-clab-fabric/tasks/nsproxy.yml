@@ -146,7 +146,7 @@
       the demo reaches them with an explicit Host header, so nothing here needs
       DNS. Resolving them - in a browser, or with plain curl - needs the hub
       zone regenerated, which is a different playbook:
-        ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass --tags dns
+        ansible-playbook -i ../inventory/hosts ../setup_bm_host.yaml --ask-vault-pass --tags dns
       Adding a cluster to udn_proxy_clusters adds names
       ({{ (udn_proxy_names | default('')).split() | join(', ') }}), so that run is
       needed again each time.

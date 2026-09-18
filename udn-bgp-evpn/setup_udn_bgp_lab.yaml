@@ -69,12 +69,30 @@
 ## first, typically "sudo: a password is required", which says nothing about
 ## the real problem. clabclient checks for virsh up front and says so instead.
 ##
-## Usage:
-##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric
-##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags preflight
-##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
-##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags shared
-##   ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags vrflite
+## Usage. RUN IT FROM THIS DIRECTORY (udn-bgp-evpn/):
+##
+##   cd udn-bgp-evpn
+##
+## The roles are in ./roles/ and Ansible finds them because they sit next to
+## this playbook. vars.yaml, vault.yaml and inventory/ stay in the repository
+## root and are shared with every other playbook, which is why they are ../.
+##
+##   ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric
+##   ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags preflight
+##   ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default
+##   ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags shared
+##   ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags vrflite
+##
+## The cluster-build playbooks stay in the repository root. Call them with a
+## relative path - NOT a wrapper playbook and NOT a symlink here:
+##
+##   ansible-playbook -i ../inventory/hosts ../setup_hub_cluster.yaml --ask-vault-pass
+##
+## `playbook_dir` follows the PLAYBOOK, not the working directory, so running
+## ../setup_hub_cluster.yaml from here still gives those plays a playbook_dir
+## of the repository root and their `{{ playbook_dir }}/inventory/hosts.j2`
+## and `roles/` keep resolving. An `import_playbook` wrapper or a symlink in
+## this directory would make playbook_dir point HERE instead and break both.
 ##
 ## Run containerlab on the bare-metal host instead of in a VM:
 ##   ... -e clab_deploy_mode=host
@@ -116,8 +134,19 @@
   become: true
   gather_facts: true
   vars_files:
-    - vars.yaml
-    - vault.yaml
+    # One directory up: this lab lives in udn-bgp-evpn/ but shares the
+    # repository's vars.yaml and vault.yaml with every other playbook.
+    - ../vars.yaml
+    - ../vault.yaml
+  vars:
+    # The repository root, one level up from this playbook. Used for the
+    # things that are shared with the rest of the repo and deliberately did
+    # NOT move into udn-bgp-evpn/ - the inventory being the only one now.
+    #
+    # Note {{ playbook_dir }} on its own is still correct for anything this
+    # lab owns (the rendered manifests under udn-bgp/), because playbook_dir
+    # follows the playbook and this playbook moved with them.
+    lab_repo_root: "{{ playbook_dir }}/.."
   # DELIBERATELY NOT `tags: [fabric]`. A tag on a PLAY is added to every task
   # in it, so that made --tags fabric match the whole play - including the
   # optional client VMs and the tenant ingress, which setup-clab-fabric tags
@@ -147,8 +176,8 @@
     # the play tag gone there is nothing else to make these run.
     - name: Render inventory/hosts so the [clab] group exists
       ansible.builtin.template:
-        src: "{{ playbook_dir }}/inventory/hosts.j2"
-        dest: "{{ playbook_dir }}/inventory/hosts"
+        src: "{{ lab_repo_root }}/inventory/hosts.j2"
+        dest: "{{ lab_repo_root }}/inventory/hosts"
         mode: '0644'
       tags: [always]
 
@@ -167,8 +196,10 @@
   become: true
   gather_facts: false
   vars_files:
-    - vars.yaml
-    - vault.yaml
+    # One directory up: this lab lives in udn-bgp-evpn/ but shares the
+    # repository's vars.yaml and vault.yaml with every other playbook.
+    - ../vars.yaml
+    - ../vault.yaml
   vars:
     # Which cluster's kubeconfig this half runs against. Read from
     # clab_clusters in vars.yaml rather than from a ternary over two hub

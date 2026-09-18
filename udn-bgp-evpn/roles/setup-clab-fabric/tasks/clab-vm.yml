@@ -31,7 +31,7 @@
   ansible.builtin.command:
     cmd: >
       virt-resize --expand {{ clab_vm_resize_partition }}
-      {{ playbook_dir }}/roles/setup-bm-host/files/{{ rhel9_kvm_image }}
+      {{ base_image_dir }}/{{ rhel9_kvm_image }}
       {{ clab_vm_disk_path }}
   when: not clab_disk_status.stat.exists
 

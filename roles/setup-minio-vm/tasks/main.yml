@@ -24,7 +24,7 @@
   ansible.builtin.command:
     cmd: >
       virt-resize --expand {{ minio_resize_partition }}
-      roles/setup-bm-host/files/{{ rhel9_kvm_image }}
+      {{ base_image_dir }}/{{ rhel9_kvm_image }}
       /var/lib/libvirt/images/{{ minio_disk }}
   when: not minio_disk_status.stat.exists
   tags:
