@@ -741,7 +741,43 @@ oc --kubeconfig=<sno> -n udn-green exec <pod> -- ping -c3 10.204.0.9
 # 0% loss, ttl=64 - no gateway, no route, no NAT anywhere in the path
 ```
 
-### 8.5 What this does *not* give you
+### 8.5 Test: the same question from outside
+
+8.4 asks from inside the clusters. The tenant ingress asks from outside, and on
+a two-cluster fabric it is the sharper test of the two: one address, one port,
+and a hostname per **(cluster, tenant)** pair.
+
+Needs the two `--tags web` runs above, then the ingress and its DNS:
+
+```bash
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabnsproxy -e clab_topology=evpn
+
+ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
+```
+
+```bash
+scripts/udn-web-demo.sh --proxy
+```
+
+Five hostnames become seven, and the two section 8 adds are the interesting
+ones:
+
+```
+green-sno.hub.mylab.com    I am green on sno
+purple-sno.hub.mylab.com   I am purple on sno
+```
+
+Both resolve to the **same address** as `green.` and `purple.`, and both
+backends dial the **same pod address** - the SNO's `10.204.128.x`, which green
+and purple share. Four hostnames, two addresses, four different pages, and the
+only thing separating them is the `namespace` keyword on each haproxy server
+line. Full output and what a wrong answer means: [9.2](#92-the-tenant-ingress).
+
+> Re-run `--tags clabnsproxy` after any `--tags web`; it proxies to pod
+> addresses and those change.
+
+### 8.6 What this does *not* give you
 
 Measured, and worth stating because the lab looks like it works:
 
@@ -770,7 +806,7 @@ Measured, and worth stating because the lab looks like it works:
 
 **Come here after any phase**, not only at the end. Everything below attaches to
 whichever primary UDN the tenant already has, so it works the same in A, B and C
-- and section 8.4 needs 9.1 before it will run at all.
+- and sections 8.4 and 8.5 will not run without 9.1 and 9.2 respectively.
 
 Which parts are worth doing depends on the path you took:
 
@@ -779,7 +815,7 @@ Which parts are worth doing depends on the path you took:
 | **A** shared VRF | yes - names the responder where a ping cannot | little to show: no two tenants share an address in phase A |
 | **B** VRF-Lite | yes | **yes** - blue/red and green/purple share subnets, which is the case it exists for |
 | **C** EVPN, one cluster | yes | yes |
-| **C** EVPN, two clusters | **required** by 8.4 | yes - and it is what puts `green-sno` and `purple-sno` on one address |
+| **C** EVPN, two clusters | **required** by 8.4 | **required** by 8.5 - it is what puts `green-sno` and `purple-sno` on one address |
 
 All of these are **lab host** commands and all need `-e clab_topology=evpn` on
 path C.
