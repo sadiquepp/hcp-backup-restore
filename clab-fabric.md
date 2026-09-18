@@ -340,6 +340,109 @@ but cannot answer - which looks like a one-way fabric fault.
 The topology changes shape. `leaf1 ─ spine ─ leaf2`, and **leaf1's role gets
 narrower, not wider.**
 
+#### Why there are suddenly three routers
+
+The short version: **leaf2 inherits the job leaf1 used to do**, and leaf1 is
+left holding only the parts that make the overlay possible.
+
+In phases 1-3 leaf1 *is* the provider edge. The nodes are L2-adjacent to it on
+the fabric bridge, and it terminates the tenants itself:
+
+```
+   worker1 ─┐
+   worker2 ─┼─ virbr1 / br-fabric ───┐    untagged 192.168.140.0/24
+   worker3 ─┘                        │  + VLAN 110 blue, 120 red, ...
+                              ┌──────┴──────┐
+                              │    leaf1    │  AS 64513  THE PROVIDER EDGE
+                              └──┬───────┬──┘    vrf blue (table 1110) ┐ tenant
+                                 │       │       vrf red  (table 1120) ┘ VRFs
+                                 │       │       eth1.110 → vrf blue 10.210.10.1/24
+                                 │       │       eth1.120 → vrf red
+                             blue-ext  red-ext
+                                  ↑
+                     the endpoints hang off leaf1
+```
+
+A pod reaching `blue-ext` is **two hops**: node → leaf1 (VLAN-tagged) → the
+endpoint. There is no overlay, so a second leaf would add nothing.
+
+Phase 4 makes the **nodes** the VTEPs. That pulls the tenant VRFs out of leaf1
+entirely, and they have to land somewhere — so the tenants, their external
+networks and their client segments all move to a new far-end leaf:
+
+```
+   worker1 ─┐  vtep0 100.64.0.34
+   worker2 ─┼─ virbr1 / br-fabric ───┐    untagged only — no tenant VLANs
+   worker3 ─┘  vtep0 100.64.0.36     │
+                              ┌──────┴──────┐
+                              │    leaf1    │  AS 64513  BORDER LEAF
+                              └──────┬──────┘    no tenant VRFs
+                                     │           no VXLAN devices
+                                     │           ip route 100.64.0.34/32 via .140.34
+                                     │           bgp retain route-target all
+                                     │ 10.1.0.0/30
+                              ┌──────┴──────┐
+                              │    spine    │  AS 65000
+                              └──────┬──────┘    no VTEP, no VRFs
+                                     │           reflects EVPN between leaves
+                                     │           set ip next-hop unchanged
+                                     │ 10.1.0.4/30
+                              ┌──────┴──────┐
+                              │    leaf2    │  AS 64514  FAR-END LEAF
+                              └──┬───────┬──┘    lo0 10.0.0.2 ← fabric-side VTEP
+                                 │       │       vrf blue + vni101  (L3VNI, ipVRF)
+                                 │       │       br400   + vni400   (L2VNI, macVRF)
+                             blue-ext  green-ext
+                                  ↑
+                        the endpoints moved HERE
+```
+
+#### The tunnel does not stop at leaf1
+
+This is the part that misleads people, so it is worth drawing separately. The
+VXLAN tunnel runs **node ↔ leaf2**. leaf1 and the spine are on the physical
+path, but they are not endpoints — they forward the outer packet and never see
+the inner one:
+
+```
+         ┌──────────── VXLAN, VNI 101, one tunnel ────────────┐
+         │                                                    │
+   worker1 vtep0                                        leaf2 lo0
+   100.64.0.34  ──▶  leaf1  ──▶  spine  ──▶  leaf2      10.0.0.2
+                       │           │
+                    outer      outer only
+                    only       (opaque payload)
+```
+
+So leaf1's two remaining jobs both exist to serve a tunnel it is not part of:
+
+| leaf1 does | Why |
+|---|---|
+| **Underlay reachability** — static `/32`s to each node's VTEP, plus the `100.64.0.0/24` aggregate | The VTEPs live on dummy interfaces. Without a route in, sessions come up, both ends hold the right routes, and **no tunnel ever forms** |
+| **EVPN transit** — `l2vpn evpn` with every node and the spine, `bgp retain route-target all` | It imports nothing, so without `retain` it would discard every route it is supposed to be passing along |
+
+#### Why leaf2 has to exist
+
+Not for capacity — for **test integrity**.
+
+If the endpoints had stayed on leaf1, they would be reachable from the nodes at
+layer 2, the way they were in phase 3. EVPN would be fully configured and never
+carry a packet, and **every test would pass whether or not the overlay worked**.
+
+Moving them three underlay hops away makes the tunnel the only path. A pod
+reaching `blue-ext` now has to encapsulate, cross the fabric, and be
+decapsulated into the right VRF at the far end — so when the test passes, the
+overlay is what made it pass.
+
+That is also why there is no leaf2 in phases 1-3: with no overlay to prove,
+a second leaf would be scenery.
+
+> **The spine is eBGP, not iBGP.** It is AS 65000 and the leaves are 64513 and
+> 64514, so these are eBGP sessions — which would normally rewrite the next hop
+> to self and drag every tunnel through the spine. `set ip next-hop unchanged`
+> on both neighbours is what prevents that, and it is what makes the spine a
+> control-plane reflector rather than a data-plane gateway.
+
 With the OCP nodes acting as VTEPs, leaf1 is not a tunnel endpoint for tenant
 traffic at all. VXLAN flows **node ↔ leaf2 directly**. leaf1 holds no tenant
 VRFs and provides exactly two things:

@@ -11,8 +11,10 @@
              only carries EVPN routes between the leaves and forwards VXLAN.
     leaf2  - the far-end leaf. The tenant external endpoints move behind it,
              so a pod reaching {{ udn_bgp_tenants[0].external_host }} now
-             genuinely crosses the fabric, gets VXLAN-encapsulated on leaf1,
-             decapsulated on leaf2, and lands in the right VRF.
+             genuinely crosses the fabric: VXLAN-encapsulated on the NODE
+             (the node is the VTEP, not leaf1), carried through leaf1 and the
+             spine as an opaque outer packet, decapsulated here, and landed in
+             the right VRF.
 
   That last point is the reason for a three-node fabric rather than two: with
   the endpoints hanging off leaf1, EVPN would be configured and never
@@ -20,9 +22,12 @@
   overlay worked.
 
   Underlay: point-to-point /30s between each leaf and the spine, eBGP for
-  IPv4 unicast (so loopbacks are reachable), iBGP inside the spine's ASN for
-  l2vpn evpn with the spine as route reflector. That is the conventional
-  arrangement and it is what lets the leaves keep next hops intact.
+  IPv4 unicast (so loopbacks are reachable). The l2vpn evpn sessions are eBGP
+  too - loopback-sourced, multihop - with the spine reflecting between the
+  leaves. Being eBGP, the spine would normally rewrite the next hop to itself
+  and drag every tunnel through it; 'set ip next-hop unchanged' on both
+  neighbours is what keeps the next hops intact, so it stays a control-plane
+  reflector rather than a data-plane gateway.
 
     leaf1 lo0 10.0.0.1   leaf1:eth10 <-> spine:eth1   10.1.0.0/30
     leaf2 lo0 10.0.0.2   leaf2:eth10 <-> spine:eth2   10.1.0.4/30

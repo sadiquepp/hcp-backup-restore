@@ -1,11 +1,13 @@
 {#
   Far-end leaf.
 
-  Holds the tenants' external networks and is the other end of every VXLAN
-  tunnel. It never talks to the cluster - its whole job is to prove the
-  overlay carries traffic: a pod on the blue UDN reaching
-  {{ udn_bgp_tenants[0].external_host }} gets encapsulated on leaf1,
-  decapsulated here, and delivered inside the blue VRF.
+  Holds the tenants' external networks and is the fabric-side end of every
+  VXLAN tunnel - the other end is the NODE, which is the VTEP under this
+  topology. leaf1 terminates nothing and only carries the outer packet. leaf2
+  never talks to the cluster; its whole job is to prove the overlay carries
+  traffic: a pod on the blue UDN reaching {{ udn_bgp_tenants[0].external_host }}
+  is encapsulated on its own node, decapsulated here, and delivered inside the
+  blue VRF.
 
   Per-tenant route targets are the only thing keeping blue and red apart
   here. They are distinct values, so a route exported by blue on leaf1 is
