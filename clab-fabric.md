@@ -712,6 +712,7 @@ message; re-run it alone against a live fabric with `--tags clabverify`.
 | Cluster shows `Active`, `MsgRcvd` 0, `Last write never` | BFD configured on one side only |
 | Node loses the API the moment BGP comes up | `192.168.122.0/24` crossed the fabric. That is what `LAB-MGMT` prevents |
 | A second run "did not take" | `containerlab deploy` without `--reconfigure` |
+| Layer2 EVPN tenants work, Layer3 are black-holed | Not EVPN. On OpenShift < 4.22.10 the node's iptables FORWARD policy is DROP with no ACCEPT for the per-tenant VRF devices. Layer2 is bridged and never traverses FORWARD, which is why it is unaffected |
 | `--tags fabric` built client VMs and ran the tenant ingress | A tag on a PLAY is added to every task in it, so `tags: [fabric]` on the play matched the whole thing. Removed; the role's own tags decide now |
 | `--tags fabric` failed in `nsproxy.yml` with `no udn-web pod` | Same cause. Correct failure - `--tags web` had not been run - from a task that should never have been running |
 | `Destination directory .../udn-bgp does not exist` | The role writes its output there but never created it - masked for as long as `setup-udn-bgp` created it and nothing removed it. `cleanup.yaml --tags udnlab` removes it, so a clean tree found it |

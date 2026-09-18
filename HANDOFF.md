@@ -68,7 +68,17 @@ In descending order of interest. None of these is a lab misconfiguration.
    cluster-level allocation and says nothing about the per-node switch, which
    made it actively misleading during diagnosis.
 
-4. **Not a finding, deliberately:** the `advertised-network-subnets` ACL does
+4. **A platform version breaks exactly half of phase 4.** On OpenShift 4.22.8
+   the node's iptables FORWARD chain has policy DROP with ACCEPTs for
+   `ovn-k8s-mp0`, the cluster network and the service network - and none for the
+   per-tenant VRF devices a Layer3 EVPN tenant forwards through. Layer2 tenants
+   are bridged, never traverse FORWARD, and work perfectly in both clusters. So
+   the lab comes up looking healthy with half of it silently black-holed, and
+   the symptom points at EVPN rather than at a firewall default. Fixed in
+   4.22.10, where the policy is ACCEPT. `vars.yaml` now pins .10 and the
+   preflight names the symptom below it.
+
+5. **Not a finding, deliberately:** the `advertised-network-subnets` ACL does
    **not** block cross-cluster same-UDN traffic, and could not — it matches
    source and destination against the advertised-subnet set on addresses
    alone, so cross-cluster is indistinguishable from intra-cluster.

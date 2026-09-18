@@ -75,6 +75,44 @@
       off to it with VRF-Lite at the border leaf - see the README.
       {% endif %}
 
+# A SECOND version gate, and a different question from the one above. That one
+# asks whether the EVPN API exists; this asks whether a Layer3 tenant's packets
+# are forwarded once it does.
+#
+# NOT APPLIED AUTOMATICALLY, deliberately. The fix is an `iptables -I` on each
+# node, which lives in the running kernel and nothing more: it does not survive
+# a reboot, and an RHCOS node reboots for every MachineConfig update. Automating
+# it would mean the lab works until the next reboot and then fails exactly the
+# way it fails now - Layer2 fine, Layer3 black-holed - with the added confusion
+# that the automation reported success. A rule that cannot be relied on should
+# not be applied by something that looks like it can.
+#
+# Making it persist means a MachineConfig with a oneshot unit, which costs a
+# rolling reboot of every node to work around a defect that .10 already fixes.
+# Pinning is cheaper and honest.
+- name: Warn if this cluster's version black-holes Layer3 EVPN tenants
+  ansible.builtin.debug:
+    msg: >-
+      {{ udn_bgp_cluster_version.stdout }} is below
+      {{ udn_bgp_evpn_l3_min_version }}. Phase 4 will come up looking healthy
+      and HALF of it will work: Layer2 tenants pass traffic, Layer3 tenants are
+      silently black-holed. The cause is not EVPN - this build ships iptables
+      FORWARD with policy DROP and no ACCEPT for the per-tenant VRF devices a
+      Layer3 tenant forwards through. Confirm with:
+        oc debug node/<node> --quiet -- chroot /host iptables -nvL FORWARD | head -3
+      A 'policy DROP' on the first line is this. The fix is to install
+      {{ udn_bgp_evpn_l3_min_version }}+. To carry on regardless, on every node:
+        for vrf in {{ udn_bgp_tenants | selectattr('topology', 'defined')
+                      | rejectattr('topology', 'equalto', 'Layer2')
+                      | map(attribute='name') | join(' ') }}; do
+          iptables -C FORWARD -i $vrf -j ACCEPT 2>/dev/null || iptables -I FORWARD -i $vrf -j ACCEPT
+          iptables -C FORWARD -o $vrf -j ACCEPT 2>/dev/null || iptables -I FORWARD -o $vrf -j ACCEPT
+        done
+      That lasts until the node reboots and no longer.
+  when:
+    - udn_bgp_has_evpn | bool
+    - udn_bgp_cluster_version.stdout is version(udn_bgp_evpn_l3_min_version, '<')
+
 # Informational only. Absent is the expected answer on a cluster that has not
 # been enabled yet; present means a previous run already did it.
 - name: Check whether the feature has already been enabled
