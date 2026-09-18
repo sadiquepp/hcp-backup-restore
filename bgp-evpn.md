@@ -4305,8 +4305,96 @@ UDN, not of BGP. What changes is how far the illusion extends:
 The EVPN case is the interesting one for migration specifically: the L2 domain
 no longer stops at the cluster. A VM moving between nodes is a MAC moving
 between VTEPs, which is a thing EVPN has a type-2 route for and an answer to.
-That is also why `evpn_mac_vni` exists in `vars.yaml` and had nothing using it
-until this tenant.
+
+### Measured: a migration watched from the other cluster
+
+Run on the two-cluster fabric, and this is the strongest result the lab
+produces. The VM is on **hub**; the thing pinging it is a pod in the **SNO**,
+on the same `green` UDN across L2VNI 400.
+
+Before:
+
+```
+# oc -n udn-green get vmi green-vm -o custom-columns=\
+NAME:.metadata.name,IP:.status.interfaces[0].ipAddress,MAC:.status.interfaces[0].mac,NODE:.status.nodeName
+NAME       IP           MAC                 NODE
+green-vm   10.204.0.9   0a:58:0a:cc:00:09   worker1
+```
+
+The migration:
+
+```
+# oc -n udn-green get vmim green-vm-migrate-1 -w
+NAME                 PHASE             VMI
+green-vm-migrate-1   Scheduling        green-vm
+green-vm-migrate-1   Scheduled         green-vm
+green-vm-migrate-1   PreparingTarget   green-vm
+green-vm-migrate-1   TargetReady       green-vm
+green-vm-migrate-1   Running           green-vm
+green-vm-migrate-1   Succeeded         green-vm
+```
+
+The ping, from the SNO pod, spanning the whole thing:
+
+```
+--- 10.204.0.9 ping statistics ---
+144 packets transmitted, 144 received, 0% packet loss, time 145983ms
+rtt min/avg/max/mdev = 0.501/0.783/3.973/0.361 ms
+```
+
+After:
+
+```
+NAME       IP           MAC                 NODE
+green-vm   10.204.0.9   0a:58:0a:cc:00:09   worker2
+```
+
+**What that actually demonstrates**, and it is more than "live migration
+works":
+
+The address and the MAC are identical either side. They were always going to
+be — ovn-kubernetes derives the MAC from the IP, and `0a:58:0a:cc:00:09` is
+`0a:58` followed by `10.204.0.9` — so the MAC surviving is a consequence of the
+IP surviving, not a second result.
+
+The result is **which VTEP that MAC sits behind**. Before the migration the
+SNO's traffic for `0a:58:0a:cc:00:09` was encapsulated to `100.64.0.34`;
+afterwards, to `100.64.0.35`. Nothing in the SNO was reconfigured and nothing
+re-addressed: worker2 advertised a type-2 route for the MAC, worker1 withdrew
+its own, and the far cluster's forwarding followed. A MAC moving between VTEPs
+is precisely the event EVPN type-2 exists for, and here the observer is in a
+different cluster, in a different autonomous system, learning it over BGP.
+
+Confirm the move on the far leaf, which sees both clusters:
+
+```bash
+docker exec clab-udnbgp-leaf2 vtysh -c 'show evpn mac vni 400' | grep 0a:cc:00:09
+# the VTEP in the last column is 100.64.0.35 after the migration, .34 before
+```
+
+**Why zero loss is not as surprising as it looks**, and what it does and does
+not prove.
+
+The probe interval is the default one second — 144 packets over 145983 ms. A
+single outage of duration *w* only costs a packet if a probe falls inside it,
+which at this rate happens with probability roughly *w*. So a 150 ms gap goes
+unseen about 85% of the time, and a 700 ms gap about 30%. Zero loss across 144
+probes is therefore *evidence* the gap was short, not proof it was absent.
+
+There is also less to be down than you might expect. The migration phases do
+the network work **before** the cutover: by `TargetReady` the new
+`virt-launcher` pod exists on worker2 and its logical switch port is already
+programmed, so the switchover is OVN changing which port the MAC is behind
+rather than building a new path. What remains is the VM's own memory-cutover
+pause, which for a 1Gi idle guest is tens of milliseconds.
+
+The one visible trace is in the numbers: `max` 3.973 ms against an average of
+0.783 is almost certainly the probe that crossed the cutover — delayed by
+roughly 3 ms rather than dropped.
+
+To put a real bound on it, ping at `-i 0.2` as the `What to watch` section
+above does, or `-i 0.01` to resolve single-digit milliseconds. At one second
+you are measuring "no visible interruption", which is the honest claim here.
 
 ---
 
