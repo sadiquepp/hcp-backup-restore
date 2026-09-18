@@ -114,6 +114,18 @@ udn_bgp_ovnkube_namespace: openshift-ovn-kubernetes
 # node is going to be annotated on its own, it happens quickly. What follows
 # it is a targeted restart of the agents that did not, and the second wait is
 # the generous one that covers the restart.
+## The fabric NIC forwarding check in verify.yml. main.yml repairs the sysctl
+## directly, but something on the node can still put it back to 0 afterwards -
+## the cluster is converging at that point (Tuned rolling out its profile, the
+## NNCP settling) and the repair lands in the middle of it. Observed on two
+## workers in one run, with the very next run clean.
+##
+## So the check waits rather than sampling once. These bound that wait; when it
+## expires the assert below it still fires with the full diagnostic, so a real
+## fault is reported exactly as before - just not a transient one.
+udn_bgp_fwd_check_retries: 12
+udn_bgp_fwd_check_delay: 10
+
 udn_bgp_vtep_annotation_retries: 12
 udn_bgp_vtep_annotation_delay: 10
 udn_bgp_vtep_annotation_retries_after_restart: 30

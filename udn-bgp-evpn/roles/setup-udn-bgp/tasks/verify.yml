@@ -89,13 +89,31 @@
   register: udn_bgp_fwd
   changed_when: false
   failed_when: false
+  # WAIT, do not sample once. main.yml already writes this sysctl directly,
+  # and it was still read back as 0 here on two workers in a run whose very
+  # next run was clean - so something on the node puts it back after the
+  # repair, while the cluster is still converging around it.
+  #
+  # `until` inside a loop retries EACH node independently, and udn_bgp_fwd in
+  # the condition is that node's current attempt, not the whole results list.
+  #
+  # failed_when: false is deliberate and load-bearing here. When the retries
+  # run out this task stays "ok" instead of dying with Ansible's bare
+  # "Timeout when waiting", and the assert below gets to report the real
+  # diagnostic - which node, which NIC, what to look at. A genuine fault is
+  # therefore reported exactly as before; only the transient one is absorbed.
+  until: udn_bgp_fwd.stdout | default('') is search(' 1\s*$')
+  retries: "{{ udn_bgp_fwd_check_retries }}"
+  delay: "{{ udn_bgp_fwd_check_delay }}"
 
 - name: Fail if a fabric NIC has forwarding disabled
   ansible.builtin.assert:
     that: item.stdout is search(' 1\s*$')
     fail_msg: >-
-      On {{ udn_bgp_node_names[item.item.ip_key] }} the fabric NIC reports
-      '{{ item.stdout | trim }}' (interface, net.ipv4.conf.<nic>.forwarding).
+      On {{ udn_bgp_node_names[item.item.ip_key] }} the fabric NIC still
+      reports '{{ item.stdout | trim }}' (interface,
+      net.ipv4.conf.<nic>.forwarding) after waiting
+      {{ udn_bgp_fwd_check_retries | int * udn_bgp_fwd_check_delay | int }}s.
       It must be 1. Traffic from the fabric to a pod arrives on this NIC and
       has to be forwarded to ovn-k8s-mpN; with forwarding off the kernel
       drops it in the routing decision and the only direct evidence is
@@ -105,6 +123,11 @@
       `oc get tuned {{ udn_bgp_tuned_name }} -n {{ udn_bgp_tuned_namespace }}`
       and `oc get profile -n {{ udn_bgp_tuned_namespace }}
       {{ udn_bgp_node_names[item.item.ip_key] }} -o yaml`.
+      main.yml also writes this sysctl directly, so reaching this message
+      means it was put BACK to 0 and left there - if that profile is applied
+      and current, look for whatever re-created or reconfigured the netdev
+      rather than at Tuned. A one-line repair on the node is
+      `sysctl -w net.ipv4.conf.<nic>.forwarding=1`.
     success_msg: >-
       {{ udn_bgp_node_names[item.item.ip_key] }}: {{ item.stdout | trim }} (forwarding on)
   loop: "{{ udn_bgp_fwd.results }}"

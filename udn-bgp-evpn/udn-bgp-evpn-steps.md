@@ -966,6 +966,7 @@ the return code**.
 | A shell probe always returns empty | `cmd: >-` folds lines with spaces and breaks any multi-line script. Use `cmd: \|` |
 | Client namespaces get phase-3 addressing on an EVPN fabric | `clab_topology` defaults to `bgp` and must be passed on every fabric command |
 | A hot-plugged fabric NIC has forwarding off | `net.ipv4.ip_forward` reaches interfaces existing at that moment and does not set `conf.default.forwarding` |
+| `the fabric NIC reports 'enpXsY 0'` on the first run, clean on a re-run | A race, not a fault. The playbook writes the sysctl itself, but the cluster is still converging around it - Tuned rolling its profile out, the NNCP settling - and something puts it back before the check reads it. The check now waits (`udn_bgp_fwd_check_retries` x `udn_bgp_fwd_check_delay`, 120s) instead of sampling once. If it still fails after that wait, it is real: something re-created or reconfigured the netdev |
 | `-e cluster=sno` | No such variable. It is `-e udn_bgp_cluster=sno` |
 
 Full troubleshooting table:
