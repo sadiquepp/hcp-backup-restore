@@ -66,18 +66,16 @@ rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
 ## back to 4.21, set these three to "4.21" / 15 / 0 and drop the evpn phase.
 ocp_major_version: "4.22"
 
-## THESE TWO ARE NOT THE SAME NUMBER AND MUST NOT BE KEPT IN STEP.
-##
 ## ocp_minor_version is the OpenShift RELEASE - it picks the openshift-install
 ## binary from clients/ocp/<major>.<minor>/ and the hosted clusters' release
-## image. coreos_minor_version is the RHCOS BOOT MEDIA, which is published on
-## its own cadence and lags: 4.22.10 is a released OpenShift version with no
-## RHCOS 4.22.10 behind it, and 4.22.8 is the newest boot image there is.
+## image. It is NOT the RHCOS version, and the two are published on separate
+## cadences: 4.22.10 is a released OpenShift version with no RHCOS 4.22.10
+## behind it. That is normal, not a mismatch - a node boots on whatever RHCOS
+## media it is given and the cluster then brings the OS to what this release
+## pins. Setting a coreos version to match this one just 404s.
 ##
-## That is fine and is how it is meant to work. The installer boots a node on
-## whatever RHCOS media it is given, then the cluster pulls the release payload
-## for ocp_minor_version and brings the OS to match. Pinning coreos to a version
-## that was never published just fails the download.
+## RHCOS is chosen by coreos_minor_version further down, which defaults to
+## "latest" for exactly that reason.
 ##
 ## 10 here because a Layer3 EVPN tenant is black-holed on 4.22.8 by the node's
 ## iptables FORWARD policy - see udn_bgp_evpn_l3_min_version further down for
@@ -85,26 +83,46 @@ ocp_major_version: "4.22"
 ## half working and the half that fails looks like an EVPN fault.
 ocp_minor_version: 10
 
-## The RHCOS qemu image every hub node VM is built on, as a backing file.
+## The RHCOS boot media for every hub node VM, used as a qcow2 backing file.
 ##
-## NO VERSION HERE, deliberately, and this replaces the old coreos_minor_version.
-## The mirror publishes a `latest/` directory per stream carrying UNVERSIONED
-## filenames - rhcos-qemu.x86_64.qcow2.gz - so the URL never has to be edited
-## when a new RHCOS lands. The old pin had to be maintained by hand against a
-## cadence that is not ours, and the failure when it went stale was a 404 from
-## a version that was never published.
+## "latest" by default, which is a directory the mirror publishes per stream:
+##   .../dependencies/rhcos/4.22/latest/rhcos-qemu.x86_64.qcow2.gz
+## so nothing here needs editing when a new RHCOS lands. Set it to a z-stream
+## number to pin instead - 8 gives 4.22.8 - and both the directory and the
+## FILENAME change, because the versioned builds carry the version in the name
+## and latest/ does not. The two expressions below handle that; it is the reason
+## this is not a straight directory swap.
 ##
-## Floating is safe HERE in a way it would not be for the release, and the
-## difference is worth being clear about. This image is only a boot medium: the
+## Floating is safe for THIS file in a way it is not for the release, and the
+## difference is worth being explicit about. This is only a boot medium: the
 ## node comes up on it and the cluster immediately brings the OS to whatever
-## ocp_minor_version's payload specifies. It has no bearing on what the cluster
-## ends up running. ocp_minor_version stays pinned precisely because it does.
+## ocp_minor_version's payload specifies, so it has no bearing on what the
+## cluster ends up running. ocp_minor_version stays pinned precisely because it
+## does decide that.
 ##
-## The download is also guarded on the local file already existing, so a lab
-## host that has fetched this once keeps it until the file is deleted - "latest"
-## is resolved when you first download, not on every run.
-rhcos_qemu_image: "rhcos-qemu.x86_64.qcow2"
-rhcos_qemu_url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/{{ ocp_major_version }}/latest/{{ rhcos_qemu_image }}.gz"
+## Two things to know before leaving it on "latest":
+##
+##  * latest/ can be NEWER than the release - 4.22.20 media under a 4.22.10
+##    payload. That is bounded, since rhcos/4.22/latest/ only ever serves
+##    4.22.x and the ignition spec therefore always matches, and it installs.
+##    But it inverts the supported direction: boot images are expected to lag
+##    and be reconciled forward, not lead and be rolled back. Pin if a run has
+##    to be reproducible, or if an install starts behaving oddly for no reason
+##    the diff explains.
+##  * The download is guarded on the local file already existing, so "latest"
+##    is resolved the first time a lab host fetches it and not on every run.
+##    Delete {{ download_dir }}/rhcos-qemu.x86_64.qcow2 to pick up a newer one.
+coreos_minor_version: "latest"
+
+## Derived, so the four hub roles carry no version arithmetic of their own.
+rhcos_qemu_image: >-
+  {{ 'rhcos-qemu.x86_64.qcow2'
+     if coreos_minor_version | string == 'latest'
+     else 'rhcos-' ~ ocp_major_version ~ '.' ~ coreos_minor_version ~ '-x86_64-qemu.x86_64.qcow2' }}
+rhcos_qemu_url: >-
+  https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/{{ ocp_major_version }}/{{
+    'latest' if coreos_minor_version | string == 'latest'
+    else ocp_major_version ~ '.' ~ coreos_minor_version }}/{{ rhcos_qemu_image }}.gz
 
 ## --- VM sizing -------------------------------------------------------------
 
