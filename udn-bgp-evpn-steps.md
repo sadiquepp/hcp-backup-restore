@@ -747,13 +747,11 @@ oc --kubeconfig=<sno> -n udn-green exec <pod> -- ping -c3 10.204.0.9
 a two-cluster fabric it is the sharper test of the two: one address, one port,
 and a hostname per **(cluster, tenant)** pair.
 
-Needs the two `--tags web` runs above, then the ingress and its DNS:
+Needs the two `--tags web` runs above, then the ingress:
 
 ```bash
 ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags clabnsproxy -e clab_topology=evpn
-
-ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
 ```
 
 ```bash
@@ -857,16 +855,15 @@ ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
 ```bash
 ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags clabnsproxy -e clab_topology=evpn
-
-# DNS for the names - a SEPARATE playbook, on the helper
-ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
 ```
 
 > **Re-run `--tags clabnsproxy` after every `--tags web`.** It proxies to pod
 > addresses, and those change.
 >
-> **Do not skip the DNS step.** The demo sends `Host:` headers, so it passes
-> without it - which is how the gap went unnoticed once already.
+> DNS is already done: all seven names come from `udn_proxy_names` in
+> `vars.yaml`, so `setup_bm_host.yaml` in 1.1 wrote them. Only editing
+> `udn_proxy_clusters` or `udn_proxy_tenants` needs the zone re-rendered
+> (`setup_bm_host.yaml --tags dns`).
 
 ```bash
 scripts/udn-web-demo.sh --proxy
