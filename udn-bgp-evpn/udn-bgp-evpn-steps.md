@@ -811,9 +811,20 @@ oc --kubeconfig=<sno> -n udn-green exec <pod> -- ping -c3 10.204.0.9
 a two-cluster fabric it is the sharper test of the two: one address, one port,
 and a hostname per **(cluster, tenant)** pair.
 
-Needs the two `--tags web` runs above, then the ingress:
+Needs the two `--tags web` runs above, then **two runs in this order** - the
+ingress runs *on* the namespace client VM, so that VM has to exist first:
 
 ```bash
+# 1. the namespace client VM - one network namespace per tenant.
+#    ALREADY BUILT if you came through path B (6.1). Skip it then; running it
+#    again is harmless. Coming straight here from path C, it does not exist
+#    yet and --tags clabnsproxy below has nothing to install haproxy on.
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabnsclient -e clab_topology=evpn
+```
+
+```bash
+# 2. the ingress itself
 ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
   --tags clabnsproxy -e clab_topology=evpn
 ```
