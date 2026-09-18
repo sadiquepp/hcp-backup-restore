@@ -84,7 +84,27 @@ ocp_major_version: "4.22"
 ## the measurement. Layer2 is unaffected, so a lab built on .8 comes up looking
 ## half working and the half that fails looks like an EVPN fault.
 ocp_minor_version: 10
-coreos_minor_version: 8  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
+
+## The RHCOS qemu image every hub node VM is built on, as a backing file.
+##
+## NO VERSION HERE, deliberately, and this replaces the old coreos_minor_version.
+## The mirror publishes a `latest/` directory per stream carrying UNVERSIONED
+## filenames - rhcos-qemu.x86_64.qcow2.gz - so the URL never has to be edited
+## when a new RHCOS lands. The old pin had to be maintained by hand against a
+## cadence that is not ours, and the failure when it went stale was a 404 from
+## a version that was never published.
+##
+## Floating is safe HERE in a way it would not be for the release, and the
+## difference is worth being clear about. This image is only a boot medium: the
+## node comes up on it and the cluster immediately brings the OS to whatever
+## ocp_minor_version's payload specifies. It has no bearing on what the cluster
+## ends up running. ocp_minor_version stays pinned precisely because it does.
+##
+## The download is also guarded on the local file already existing, so a lab
+## host that has fetched this once keeps it until the file is deleted - "latest"
+## is resolved when you first download, not on every run.
+rhcos_qemu_image: "rhcos-qemu.x86_64.qcow2"
+rhcos_qemu_url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/{{ ocp_major_version }}/latest/{{ rhcos_qemu_image }}.gz"
 
 ## --- VM sizing -------------------------------------------------------------
 

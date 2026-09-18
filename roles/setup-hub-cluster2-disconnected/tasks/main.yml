@@ -72,18 +72,18 @@
 
 - name: Check existence of CoreOS Image
   stat:
-    path: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2"
+    path: "{{ download_dir }}/{{ rhcos_qemu_image }}"
   register: coreos_image_status
 
 - name: Get the CoreOS qemu image
   get_url:
-    url: "https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/{{ ocp_major_version }}/{{ ocp_major_version }}.{{coreos_minor_version}}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
-    dest: "{{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz"
+    url: "{{ rhcos_qemu_url }}"
+    dest: "{{ download_dir }}/{{ rhcos_qemu_image }}.gz"
   when: coreos_image_status.stat.exists == false
 
 - name: Unzip CoreOS KVM Image
   shell: |
-    gunzip {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2.gz
+    gunzip {{ download_dir }}/{{ rhcos_qemu_image }}.gz
   when: coreos_image_status.stat.exists == false
 
 # Check Existence of oc
@@ -575,7 +575,7 @@
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    -b {{ download_dir }}/{{ rhcos_qemu_image }}  \
     {{ hub2_disconnected_vm_folder }}/hub2d_bootstrap.qcow2 \
     100G
 
@@ -609,21 +609,21 @@
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    -b {{ download_dir }}/{{ rhcos_qemu_image }}  \
     {{ hub2_disconnected_vm_folder }}/hub2d_master1.qcow2 \
     100G
 
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    -b {{ download_dir }}/{{ rhcos_qemu_image }}  \
     {{ hub2_disconnected_vm_folder }}/hub2d_master2.qcow2 \
     100G
 
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    -b {{ download_dir }}/{{ rhcos_qemu_image }}  \
     {{ hub2_disconnected_vm_folder }}/hub2d_master3.qcow2 \
     100G
 
@@ -691,21 +691,21 @@
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    -b {{ download_dir }}/{{ rhcos_qemu_image }}  \
     {{ hub2_disconnected_vm_folder }}/hub2d_worker1.qcow2 \
     100G
 
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    -b {{ download_dir }}/{{ rhcos_qemu_image }}  \
     {{ hub2_disconnected_vm_folder }}/hub2d_worker2.qcow2 \
     100G
 
     qemu-img create \
     -f qcow2 \
     -F qcow2 \
-    -b {{ download_dir }}/rhcos-{{ocp_major_version}}.{{coreos_minor_version}}-x86_64-qemu.x86_64.qcow2  \
+    -b {{ download_dir }}/{{ rhcos_qemu_image }}  \
     {{ hub2_disconnected_vm_folder }}/hub2d_worker3.qcow2 \
     100G
 
