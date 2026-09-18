@@ -4500,9 +4500,51 @@ shows it made the change **because of a route**, not because a packet arrived.
 > running bgpd - and is distinct from the cosmetic `frr.conf` parse warning
 > that appears even on a healthy pod.
 
-Both ends can advertise the MAC briefly during the cutover. EVPN settles that
-with the **MAC Mobility** extended community, a sequence number that rises on
-each move so the newer advertisement wins rather than the two flapping.
+That returns the routes behind the FDB entry:
+
+```
+ *>  [2]:[0]:[48]:[0a:58:0a:cc:00:09]
+                    100.64.0.35                            0 64513 64512 i
+                    RT:65000:400 ET:8 MM:1
+ *>  [2]:[0]:[48]:[0a:58:0a:cc:00:09]:[32]:[10.204.0.9]
+                    100.64.0.35                            0 64513 64512 i
+                    RT:65000:400 ET:8 MM:1
+Route Distinguisher: 192.168.140.35:6
+```
+
+**There are two routes for one MAC, and that is not a duplicate.** A type-2
+NLRI may carry a MAC alone or a MAC with an IP:
+
+| NLRI | Programs | Purpose |
+|---|---|---|
+| `[2]:[0]:[48]:[mac]` | the VXLAN FDB | Bridging - which VTEP to encapsulate to. This is the entry seen above |
+| `[2]:[0]:[48]:[mac]:[32]:[ip]` | the neighbour table | **ARP suppression.** The SNO answers ARP for `10.204.0.9` locally from this route instead of flooding, which is what `neigh_suppress on` is for |
+
+The `[48]` and `[32]` are the MAC and IP lengths in bits, and the `[0]` after
+`[2]` is the Ethernet Tag ID.
+
+Decoding the rest:
+
+| Field | Meaning |
+|---|---|
+| `100.64.0.35` | Next hop - worker2's VTEP, matching the FDB exactly |
+| `64513 64512` | AS_PATH, most recent first: **leaf1** (`clab_leaf1_asn`) re-advertised it, origin is the **hub cluster** (`clab_cluster_asn`). The SNO is `64515`, so it is absent from the path and the route is not dropped as a loop - the failure mode `vars.yaml` warns about at length |
+| `RT:65000:400` | Route target. `65000` is the **spine** ASN, not either cluster's - deliberately, so both clusters import the same value; `400` is the tenant's MAC VNI |
+| `ET:8` | Encapsulation extended community, tunnel type 8 = **VXLAN** (RFC 8365) |
+| `MM:1` | **MAC Mobility, sequence 1** |
+| `RD 192.168.140.35:6` | Route distinguisher, derived from worker2's fabric address |
+
+**`MM:1` is the prediction landing.** The mobility sequence was absent before
+the VM had ever moved; this is the first migration, so it reads 1. The next
+one makes it 2.
+
+It matters because of the RD. The route distinguisher is **per-VTEP**, so
+worker1's advertisement and worker2's are different NLRI in the BGP table -
+the second does not overwrite the first, and during the cutover both can be
+present for the same MAC. Something has to decide which one forwards, and
+without a tiebreaker two VTEPs claiming one MAC is exactly the flap EVPN would
+otherwise produce. MAC Mobility is that tiebreaker: highest sequence wins,
+worker1's older advertisement loses and is withdrawn.
 
 Confirm the move on the far leaf, which sees both clusters:
 
