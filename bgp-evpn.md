@@ -3937,12 +3937,121 @@ plane — sessions up, type-5 routes on both sides, and no tunnel, because
 neither VTEP can reach the other.
 
 ```bash
-oc get nodes -o custom-columns=NODE:.metadata.name,VTEP:.metadata.annotations.k8s\\.ovn\\.org/node-vtep-ips
+oc get nodes -o custom-columns=NODE:.metadata.name,VTEP:.metadata.annotations.k8s\\.ovn\\.org/vteps
 ```
 
-Empty for a node means OVN-Kubernetes found no address inside `100.64.0.0/24`
-on it. The annotation key varies by release; if the column is empty for every
-node, read `oc get node <node> -o yaml | grep -i vtep` rather than trusting it.
+The key is `k8s.ovn.org/vteps`. Empty for a node means OVN-Kubernetes found no
+address inside `100.64.0.0/24` on it - check that node's NMState policy and its
+`vtep0` dummy interface.
+
+---
+
+### 4g. The route types, side by side
+
+Three route types carry this lab, and which ones a tenant produces is decided
+entirely by its `topology:`.
+
+```bash
+FRR="oc -n openshift-frr-k8s exec ds/frr-k8s -c frr -- vtysh -c"
+
+# Type-3, Inclusive Multicast (IMET) - one per VTEP per L2VNI
+$FRR 'show bgp l2vpn evpn route type multicast'
+
+# Type-2, MAC/IP - one per endpoint
+$FRR 'show bgp l2vpn evpn route type macip'
+
+# Type-5, IP prefix - for contrast, the Layer3 tenants
+$FRR 'show bgp l2vpn evpn route type prefix'
+```
+
+**Which tenant gives you which.** The Layer2 tenants (`green` VNI 400,
+`purple` VNI 500) have a macVRF, so they produce type-2 and type-3. The Layer3
+tenants (`blue` 101, `red` 201, `orange` 301) have an ipVRF and produce type-5.
+Looking for a type-3 on blue and finding none is not a fault - an L3VNI carries
+routed prefixes and has no broadcast domain to flood into.
+
+#### The NLRI tells you which is which
+
+```
+[2]:[0]:[48]:[0a:58:0a:cc:00:09]                    type-2, MAC only
+[2]:[0]:[48]:[0a:58:0a:cc:00:09]:[32]:[10.204.0.9]  type-2, MAC+IP
+[3]:[0]:[32]:[100.64.0.35]                          type-3
+[5]:[0]:[24]:[10.210.10.0]                          type-5
+```
+
+The first bracket is the route type. After that the fields are lengths and
+values: `[48]` a MAC, `[32]` an IPv4 address, `[24]` a prefix length. A type-3
+carries **no MAC at all** - just the originating VTEP.
+
+#### What actually differs
+
+| | **Type-2** - MAC/IP Advertisement | **Type-3** - Inclusive Multicast |
+|---|---|---|
+| Answers | "*where* is this MAC?" | "*who else* is in this VNI?" |
+| One per | endpoint (per MAC, and per MAC+IP) | **VTEP, per L2VNI** |
+| Count in this lab | grows with every pod and VM | exactly one per node per Layer2 tenant |
+| Programs | the bridge FDB (unicast) and the neighbour table (ARP suppression) | the **flood list** - the `00:00:00:00:00:00` FDB entries |
+| Key attribute | **MAC Mobility** (`MM:n`), so a move beats a stale advert | **PMSI Tunnel**, declaring ingress replication and the VNI label |
+| Sent when | an endpoint appears, moves, or goes away | a VTEP joins or leaves the VNI - so, at tenant setup |
+| Withdrawn when | that endpoint goes | the VTEP stops participating |
+| Missing it looks like | unicast to that MAC floods everywhere, but works | **nothing works** - see below |
+
+#### Type-3 comes first, and that ordering is the point
+
+A type-3 is not an optimisation on top of type-2. It is what makes type-2
+reachable in the first place.
+
+An endpoint the fabric has never seen is reached by **BUM** traffic - broadcast,
+unknown unicast, multicast. ARP is broadcast. There is no multicast underlay
+here, so BUM is delivered by **ingress replication**: the sender unicasts one
+VXLAN copy to every other VTEP in that VNI. The list of "every other VTEP" is
+built from nothing but type-3 routes.
+
+So:
+
+```
+type-3 from each VTEP   ->  flood list exists
+                        ->  ARP can cross the fabric
+                        ->  the reply produces a type-2
+                        ->  unicast, and ARP suppression from then on
+```
+
+Lose the type-3s and the chain never starts. The symptom is the familiar one:
+sessions up, VNIs instantiated, and **no connectivity at all** on that tenant -
+which reads like a data-plane fault and is a missing control-plane route.
+
+#### Seeing both in the kernel
+
+This is the clearest way to tell them apart, because they land in the same
+table and look nothing alike:
+
+```bash
+# type-2: real MACs, each behind a specific VTEP
+oc debug node/sno --quiet -- chroot /host \
+  bridge fdb show dev evx4-evpn-vtep | grep -v '^00:00:00:00:00:00'
+
+# type-3: the all-zeros flood entries, one per remote VTEP per VNI
+oc debug node/sno --quiet -- chroot /host \
+  bridge fdb show dev evx4-evpn-vtep | grep '^00:00:00:00:00:00'
+```
+
+The all-zeros MAC is not a real address - it is the kernel's way of saying
+"copy BUM traffic for this VNI to this destination". Count those entries and
+you have counted the type-3 routes the node accepted.
+
+> The exact flag set on the all-zeros entries differs between a per-VNI vxlan
+> device and the single `external vnifilter` device the cluster nodes use, so
+> read what your node prints rather than matching a remembered string. What
+> does not vary: an all-zeros MAC means flooding, a real MAC means a learned
+> endpoint.
+
+And the fabric's own view, which aggregates both:
+
+```bash
+# "Remote VTEPs" is built from type-3; the MAC count from type-2
+docker exec clab-udnbgp-leaf2 vtysh -c 'show evpn vni 400'
+docker exec clab-udnbgp-leaf2 vtysh -c 'show evpn mac vni 400'
+```
 
 ---
 

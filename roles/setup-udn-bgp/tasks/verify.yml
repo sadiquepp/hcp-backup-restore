@@ -182,7 +182,7 @@
 - name: Show which VTEP address each node was assigned
   ansible.builtin.command:
     cmd: >-
-      oc get nodes -o custom-columns=NODE:.metadata.name,VTEP:.metadata.annotations.k8s\.ovn\.org/node-vtep-ips
+      oc get nodes -o custom-columns=NODE:.metadata.name,VTEP:.metadata.annotations.k8s\.ovn\.org/vteps
   register: udn_bgp_node_vteps
   changed_when: false
   failed_when: false
