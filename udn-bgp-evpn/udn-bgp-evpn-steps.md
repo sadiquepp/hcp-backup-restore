@@ -14,6 +14,51 @@ troubleshooting table: **[README.md](README.md#udn-over-bgp-vrf-lite-and-evpn-co
 
 ---
 
+## Contents
+
+- [0. Pick your destination](#0-pick-your-destination)
+  - [Moving between paths later](#moving-between-paths-later)
+- [1. Prerequisites](#1-prerequisites)
+  - [1.1 The base lab](#11-the-base-lab)
+  - [1.2 The SNO](#12-the-sno)
+  - [1.3 Check what you have](#13-check-what-you-have)
+- [2. The fabric](#2-the-fabric)
+  - [Test](#test)
+- [3. Pre-flight](#3-pre-flight)
+- [4. Phase 1: advertise the default pod network](#4-phase-1-advertise-the-default-pod-network)
+  - [Test](#test-1)
+- [5. Path A: shared VRF](#5-path-a-shared-vrf)
+  - [5.1 Test: the objects took effect](#51-test-the-objects-took-effect)
+  - [5.2 Test: reachability, both directions](#52-test-reachability-both-directions)
+  - [5.3 Test: egress is not SNATed](#53-test-egress-is-not-snated)
+  - [5.4 Snapshot before moving on](#54-snapshot-before-moving-on)
+- [6. Path B: VRF-Lite](#6-path-b-vrf-lite)
+  - [6.1 Test: the isolation matrix](#61-test-the-isolation-matrix)
+  - [6.2 Test: by hand, one cell at a time](#62-test-by-hand-one-cell-at-a-time)
+  - [6.3 Test: the routing tables that produce it](#63-test-the-routing-tables-that-produce-it)
+- [7. Path C: EVPN](#7-path-c-evpn)
+  - [7.1 Test: underlay first](#71-test-underlay-first)
+  - [7.2 Test: isolation still holds](#72-test-isolation-still-holds)
+  - [7.3 Test: routed vs bridged, the TTL tells you which](#73-test-routed-vs-bridged-the-ttl-tells-you-which)
+- [8. Path C, second cluster](#8-path-c-second-cluster)
+  - [8.1 The rule that is not optional](#81-the-rule-that-is-not-optional)
+  - [8.2 Build](#82-build)
+  - [8.3 Test: both clusters are on the fabric](#83-test-both-clusters-are-on-the-fabric)
+  - [8.4 Test: pod to pod, across clusters](#84-test-pod-to-pod-across-clusters)
+  - [8.5 Test: the same question from outside](#85-test-the-same-question-from-outside)
+  - [8.6 What this does not give you](#86-what-this-does-not-give-you)
+- [9. Web pages and the tenant ingress](#9-web-pages-and-the-tenant-ingress)
+  - [9.1 Web pages](#91-web-pages)
+  - [9.2 The tenant ingress](#92-the-tenant-ingress)
+- [10. Teardown](#10-teardown)
+- [Things that report success while doing nothing](#things-that-report-success-while-doing-nothing)
+
+Sections **5**, **6** and **7** are alternatives, not a sequence - the table in
+section 0 says which one you want. Everything before them is common to all
+three; **9** is written to be used after any of them.
+
+---
+
 ## 0. Pick your destination
 
 Three transports, each a complete stopping point. **You do not have to walk
