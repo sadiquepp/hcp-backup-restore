@@ -29,8 +29,9 @@ freshly built cluster does all of it.
 | **C** - tenant isolation over VXLAN | EVPN, nodes as VTEPs | 1, 2, 3, 4, **7** (+ 8 for a second cluster) | `udn_subnet`, same as B |
 
 Section 1 builds the clusters themselves (helper, hub, and the SNO for
-section 8) - skip it if they are already up. Then optionally **9** (web pages
-and the tenant ingress) on any path, and **10** to tear down.
+section 8) - skip it if they are already up. Section **9** (web pages and the
+tenant ingress) is written to be used *after any phase*, not only at the end,
+and section 8.4 requires it. **10** tears everything down.
 
 **The one thing that must be decided before section 2**: the fabric is built in
 a different shape for C.
@@ -170,24 +171,42 @@ clab-udnbgp-spine
 clab-udnbgp-leaf2
 ```
 
-The node NICs, from the cluster:
+The node NICs, from the lab host - libvirt has attached them, and that is all
+this section does to a node:
 
 ```bash
-oc get nncp
-# NAME                     STATUS
-# fabric-untagged-worker1  Available
-# fabric-untagged-worker2  Available
-# fabric-untagged-worker3  Available
+virsh domiflist hub_worker1 | grep 52:54:00:e2:55
 ```
 
-**`Available` is the only acceptable value.** `Degraded` means the NNCE failed,
-and a failed enactment **never retries on its own** - nmstate re-enacts on
-`metadata.generation`, so re-applying an identical policy changes nothing.
-Delete the policy and re-run; the role does this for you now.
+> **There are no NNCPs yet, and there should not be.** NMState is installed and
+> the `fabric-untagged-*` policies are written by the CLUSTER half, in whichever
+> phase you run next - not by `--tags fabric`. `oc get nncp` here returns
+> nothing, which is correct rather than a missing step. Check them in section 4
+> onward, where they exist.
+
+### Optional: the test clients
+
+Machines to run the later tests from. All are **lab host** commands, all are
+additive, and all need `-e clab_topology=evpn` on path C. Build the ones the
+path you picked in section 0 actually uses:
 
 ```bash
-oc get nnce           # <node>.fabric-untagged-<node>  Available
+# one external client VM - needed by 5.2 (path A reachability matrix)
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabclient
+
+# one client VM per isolation domain - paths B and C
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabtenantclients -e clab_topology=evpn
+
+# or one VM holding one namespace per tenant: same test, a fifth of the RAM,
+# and what the tenant ingress in section 9 runs on
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabnsclient -e clab_topology=evpn
 ```
+
+`clabnsclient` is built *alongside* `clabtenantclients`, not instead of it - the
+namespaces take `.21` on each client segment and the VMs take `.20`.
 
 ---
 
@@ -290,7 +309,7 @@ oc -n udn-blue exec <pod> -- ip -br addr show eth0
 
 ### 5.2 Test: reachability, both directions
 
-This needs the external client VM (`--tags clabclient`, section 9.1).
+This needs the external client VM from section 2 (`--tags clabclient`).
 
 ```bash
 scripts/udn-reachability.sh --both
@@ -473,14 +492,19 @@ Neighbor        V   AS    MsgRcvd  MsgSent  Up/Down  State/PfxRcd
 VTEP addresses as the cluster sees them:
 
 ```bash
-oc get nodes -o custom-columns=\
-NODE:.metadata.name,VTEP:.metadata.annotations.k8s\\.ovn\\.org/node-vtep-ips
+oc get nodes -o custom-columns=NODE:.metadata.name,VTEP:.metadata.annotations.k8s\\.ovn\\.org/vteps
 ```
 
-Empty for a node means OVN-Kubernetes found no address inside `100.64.0.0/24`
-on it. The annotation key varies by release - if the column is empty for
-*every* node, read `oc get node <node> -o yaml | grep -i vtep` rather than
-trusting it.
+```
+NODE      VTEP
+worker1   {"evpn-vtep":{"ips":["100.64.0.34"]}}
+worker2   {"evpn-vtep":{"ips":["100.64.0.35"]}}
+worker3   {"evpn-vtep":{"ips":["100.64.0.36"]}}
+```
+
+The value is the whole annotation, which names the VTEP CR as well as the
+address. `<none>` for a node means OVN-Kubernetes found no address inside
+`100.64.0.0/24` on it - check that node's `vtep0`.
 
 ### 7.2 Test: isolation still holds
 
@@ -615,6 +639,16 @@ The one that asks the question from **inside** the clusters - a pod in one
 curling a pod in the other, with nothing in the path belonging to either
 cluster's host networking.
 
+It reads the page each pod serves, so it needs the web pods in **both**
+clusters first - the same `--tags web` section 9 covers, run once per cluster:
+
+```bash
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags web -e udn_bgp_cluster=hub
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags web -e udn_bgp_cluster=sno
+```
+
 ```bash
 scripts/udn-xcluster-curl.sh \
     /var/lib/libvirt/images/hub_install/auth/kubeconfig \
@@ -681,35 +715,36 @@ Measured, and worth stating because the lab looks like it works:
 
 ---
 
-## 9. Clients, web pages and the tenant ingress
+## 9. Web pages and the tenant ingress
 
-Optional on any path. All of these are **lab host** commands, and all of them
-need `-e clab_topology=evpn` on path C.
+**Come here after any phase**, not only at the end. Everything below attaches to
+whichever primary UDN the tenant already has, so it works the same in A, B and C
+- and section 8.4 needs 9.1 before it will run at all.
 
-### 9.1 The clients
+Which parts are worth doing depends on the path you took:
 
-```bash
-# one external client VM, for the section 5.2 reachability matrix
-... --tags clabclient
+| After | 9.1 web pages | 9.2 tenant ingress |
+| --- | --- | --- |
+| **A** shared VRF | yes - names the responder where a ping cannot | little to show: no two tenants share an address in phase A |
+| **B** VRF-Lite | yes | **yes** - blue/red and green/purple share subnets, which is the case it exists for |
+| **C** EVPN, one cluster | yes | yes |
+| **C** EVPN, two clusters | **required** by 8.4 | yes - and it is what puts `green-sno` and `purple-sno` on one address |
 
-# one client VM per isolation domain (paths B and C)
-... --tags clabtenantclients
+All of these are **lab host** commands and all need `-e clab_topology=evpn` on
+path C. The client VMs they run from are built in section 2.
 
-# or one VM holding one namespace per tenant - same test, a fifth of the RAM
-... --tags clabnsclient
-```
-
-`clabnsclient` is built *alongside* `clabtenantclients`, not instead of it: the
-namespaces take `.21` on each client segment and the VMs take `.20`.
-
-### 9.2 Web pages
+### 9.1 Web pages
 
 A web server per tenant, so the answer identifies the responder where a ping
 cannot. Additive and independent of transport.
 
 ```bash
-... --tags web -e udn_bgp_cluster=hub
-... --tags web -e udn_bgp_cluster=sno       # second cluster, if section 8
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags web -e udn_bgp_cluster=hub
+
+# and once per extra cluster, if you did section 8
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags web -e udn_bgp_cluster=sno
 ```
 
 ```bash
@@ -717,15 +752,18 @@ scripts/udn-web-demo.sh --netns
 # a clean diagonal: each tenant's client reaches that tenant's pod and no other
 ```
 
-### 9.3 The tenant ingress
+### 9.2 The tenant ingress
 
 One hostname per tenant, **all resolving to one address**, with haproxy choosing
 the namespace from the `Host` header. This answers the question the overlapping
 subnets provoke: how does an end user reach a tenant whose pod address another
 tenant also holds?
 
+Needs the namespace client from section 2 (`--tags clabnsclient`) and 9.1.
+
 ```bash
-... --tags clabnsproxy -e clab_topology=evpn
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabnsproxy -e clab_topology=evpn
 
 # DNS for the names - a SEPARATE playbook, on the helper
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
