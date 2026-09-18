@@ -73,9 +73,47 @@ All paths. Everything in this section runs on the **lab host**.
 Skip to 1.3 if the hub is already built.
 
 ```bash
-# vault.yaml first - pull secret, subscription credentials, resolver IPs
-ansible-vault create vault.yaml            # see steps.md section 3 for the keys
+ansible-vault create vault.yaml
+```
 
+Five keys, and only five - this lab needs none of the OADP or Ceph credentials
+`steps.md` lists, because it runs neither:
+
+```yaml
+## Red Hat subscription, for the helper and the containerlab VM. Both are bare
+## RHEL9 images and dnf installs nothing until they are registered.
+org_id: "XXXXXXXX"
+activation_key: "your-activation-key"
+
+## The cluster pull secret, from console.redhat.com/openshift/install/pull-secret.
+## Connected installs pull their release payload from quay.io with this.
+pull_secret: '{"auths":{...}}'
+
+## Your SSH PUBLIC key, one line. Goes into the hub's install-config as sshKey,
+## so `core@<node>` works. (The SNO does not read this one - it takes the key
+## from sno_ssh_public_key_file on the lab host.)
+ssh_key: "ssh-ed25519 AAAA... you@host"
+
+## Where the helper's named forwards anything it is not authoritative for.
+dns_forwarders:
+  - 10.x.x.x
+  - 10.x.x.x
+```
+
+> **`dns_forwarders` is the one with a working default**, so it is optional in
+> the strict sense: leave it out and the role forwards to
+> `<lab_network_prefix>.1`, libvirt's dnsmasq, which in turn uses the
+> hypervisor's own resolvers. Set it when you want queries to go straight to
+> site resolvers. It belongs in vault rather than `vars.yaml` because resolver
+> addresses are internal infrastructure and `vars.yaml` is committed.
+>
+> Whatever it ends up as **must actually answer**. named returns SERVFAIL for
+> every external name when its forwarder does not, while the lab's own zones
+> keep resolving - so the failure is invisible until something needs an outside
+> name. That is how it shows up: a connected install refusing to start because
+> `quay.io` SERVFAILs.
+
+```bash
 # the RHEL9 image the helper, the clab VM and the client VMs are copied from
 cp rhel-9.8-x86_64-kvm.qcow2 roles/setup-bm-host/files/
 ```
