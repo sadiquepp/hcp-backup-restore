@@ -130,6 +130,12 @@ cp rhel-9.8-x86_64-kvm.qcow2 /var/lib/libvirt/images/
 > local. Do not add a wrapper or a symlink for the `../` ones - `playbook_dir`
 > follows the playbook, so calling them by relative path is what keeps their
 > own paths resolving.
+>
+> The `cd` is load-bearing. `ansible.cfg` is read from the working directory,
+> and this directory's copy carries a `roles_path` that reaches the shared
+> roles at the repository root - `setup-rhsm`, which registers the containerlab
+> VM. Run the playbook from the root instead and it fails with
+> `the role 'setup-rhsm' was not found`.
 
 ```bash
 # the helper VM: DNS, load balancer, and the generated inventory/hosts

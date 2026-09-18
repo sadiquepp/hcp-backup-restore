@@ -77,6 +77,13 @@
 ## this playbook. vars.yaml, vault.yaml and inventory/ stay in the repository
 ## root and are shared with every other playbook, which is why they are ../.
 ##
+## The `cd` is LOAD-BEARING, not cosmetic. setup-clab-fabric includes
+## setup-rhsm, which is shared with the helper, the mirror registry, MinIO and
+## the Ceph VMs and so stays at the repository root. It resolves through
+## roles_path in ./ansible.cfg - and ansible.cfg is read from the working
+## directory, so running this playbook from the root reads ../ansible.cfg
+## instead and fails with "the role 'setup-rhsm' was not found".
+##
 ##   ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric
 ##   ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags preflight
 ##   ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags default

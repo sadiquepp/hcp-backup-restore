@@ -362,6 +362,13 @@
   when: clab_deploy_mode == 'vm'
   tags: [fabric, clabvm, rhsm, clabinstall]
 
+# setup-rhsm lives at the REPOSITORY ROOT, not in udn-bgp-evpn/roles/. It is
+# shared with the helper, the mirror registry, MinIO and the Ceph VMs, so it
+# is not duplicated here. It resolves through roles_path in
+# udn-bgp-evpn/ansible.cfg, which is why this lab has to be run from its own
+# directory - `cd udn-bgp-evpn` first. Running it from the repository root
+# reads ../ansible.cfg instead and fails here with "the role 'setup-rhsm' was
+# not found".
 - name: Register the containerlab VM with subscription-manager
   ansible.builtin.include_role:
     name: setup-rhsm
