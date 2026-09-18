@@ -4456,22 +4456,53 @@ the SNO's VXLAN FDB followed. A MAC moving between VTEPs is precisely the
 event EVPN type-2 exists for, and here the observer is in a different cluster
 learning it over BGP.
 
-> **Measured vs inferred.** The direct node-to-node path is measured. The
-> type-2 withdrawal and re-advertisement during *this* migration is inference -
-> sound by the elimination above, but not watched. To watch it, on the SNO:
+Confirm it on the SNO's own forwarding table, which is where the claim lives:
+
+```bash
+oc debug node/sno --quiet -- chroot /host \
+  bridge fdb show dev evx4-evpn-vtep | grep 0a:58:0a:cc:00:09
+```
+
+```
+0a:58:0a:cc:00:09 vlan 2 extern_learn master evbr-evpn-vtep
+0a:58:0a:cc:00:09 dst 100.64.0.35 src_vni 400 self extern_learn
+```
+
+Three fields carry the whole result:
+
+| Field | What it settles |
+|---|---|
+| `dst 100.64.0.35` | The SNO is encapsulating to **worker2's** VTEP. Before the migration this read `100.64.0.34` |
+| `src_vni 400` | On the L2VNI for the green tenant, so this is the MAC VNI - a bridged frame, not the symmetric-IRB L3VNI path |
+| `extern_learn` | **The control plane programmed it.** The VXLAN device is enslaved to `evbr-evpn-vtep` with `learning off` on that bridge port, so the data plane *cannot* populate this entry by observing traffic. Only zebra, acting on a BGP route, could have put it there |
+
+That last flag is the one that closes the argument. Elimination shows the SNO
+must have made the change; `extern_learn` on a port with learning disabled
+shows it made the change **because of a route**, not because a packet arrived.
+
+> **Reading FRR's side.** The natural next command does not work from the node:
 >
 > ```bash
-> oc debug node/sno --quiet -- chroot /host \
->   bridge fdb show dev evx4-evpn-vtep | grep 0a:58:0a:cc:00:09
-> # dst 100.64.0.34 before, 100.64.0.35 after
->
-> oc -n openshift-frr-k8s rsh <frr-k8s-pod> vtysh \
->   -c 'show bgp l2vpn evpn route type macip' | grep -A3 0a:58:0a:cc:00:09
+> oc debug node/sno --quiet -- chroot /host vtysh -c '...'
+> # % Can't open configuration file /etc/frr/vtysh.conf due to 'Permission denied'.
+> # Exiting: failed to connect to any daemons.
 > ```
 >
-> Both ends can advertise the MAC briefly during the cutover. EVPN settles that
-> with the **MAC Mobility** extended community, a sequence number that rises on
-> each move so the newer advertisement wins rather than the two flapping.
+> There is no FRR on the host. In OpenShift it runs in a pod, and vtysh has to
+> run in that pod's namespace:
+>
+> ```bash
+> oc -n openshift-frr-k8s exec ds/frr-k8s -c frr -- \
+>   vtysh -c 'show bgp l2vpn evpn route type macip' | grep -A3 0a:58:0a:cc:00:09
+> ```
+>
+> "failed to connect to any daemons" always means this - vtysh reached no
+> running bgpd - and is distinct from the cosmetic `frr.conf` parse warning
+> that appears even on a healthy pod.
+
+Both ends can advertise the MAC briefly during the cutover. EVPN settles that
+with the **MAC Mobility** extended community, a sequence number that rises on
+each move so the newer advertisement wins rather than the two flapping.
 
 Confirm the move on the far leaf, which sees both clusters:
 
