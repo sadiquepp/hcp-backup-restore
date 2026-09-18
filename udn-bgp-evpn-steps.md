@@ -246,6 +246,18 @@ ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
 `clabnsclient` is built *alongside* `clabtenantclients`, not instead of it - the
 namespaces take `.21` on each client segment and the VMs take `.20`.
 
+> **These run fine before any UDN exists**, which is why they are here rather
+> than at the end. Nothing in them talks to a cluster. The reachability check
+> each one ends with targets the fabric only: for a Layer3 tenant the segment
+> gateway on the leaf (`10.215.10.1` for blue), and for a Layer2 tenant under
+> EVPN the `<tenant>-ext` container on-link across the L2VNI
+> (`10.204.255.10` for green). Both ends are containerlab.
+>
+> Running them now is worth doing for that reason - a green result here means a
+> later phase failure cannot be the client segment. The one client-side tag that
+> *does* need a cluster is `--tags clabnsproxy`, which reads live pod addresses;
+> it is in section 9 with its prerequisites.
+
 ---
 
 ## 3. Pre-flight
