@@ -222,42 +222,6 @@ virsh domiflist hub_worker1 | grep 52:54:00:e2:55
 > nothing, which is correct rather than a missing step. Check them in section 4
 > onward, where they exist.
 
-### Optional: the test clients
-
-Machines to run the later tests from. All are **lab host** commands, all are
-additive, and all need `-e clab_topology=evpn` on path C. Build the ones the
-path you picked in section 0 actually uses:
-
-```bash
-# one external client VM - needed by 5.2 (path A reachability matrix)
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
-  --tags clabclient
-
-# one client VM per isolation domain - paths B and C
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
-  --tags clabtenantclients -e clab_topology=evpn
-
-# or one VM holding one namespace per tenant: same test, a fifth of the RAM,
-# and what the tenant ingress in section 9 runs on
-ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
-  --tags clabnsclient -e clab_topology=evpn
-```
-
-`clabnsclient` is built *alongside* `clabtenantclients`, not instead of it - the
-namespaces take `.21` on each client segment and the VMs take `.20`.
-
-> **These run fine before any UDN exists**, which is why they are here rather
-> than at the end. Nothing in them talks to a cluster. The reachability check
-> each one ends with targets the fabric only: for a Layer3 tenant the segment
-> gateway on the leaf (`10.215.10.1` for blue), and for a Layer2 tenant under
-> EVPN the `<tenant>-ext` container on-link across the L2VNI
-> (`10.204.255.10` for green). Both ends are containerlab.
->
-> Running them now is worth doing for that reason - a green result here means a
-> later phase failure cannot be the client segment. The one client-side tag that
-> *does* need a cluster is `--tags clabnsproxy`, which reads live pod addresses;
-> it is in section 9 with its prerequisites.
-
 ---
 
 ## 3. Pre-flight
@@ -359,7 +323,13 @@ oc -n udn-blue exec <pod> -- ip -br addr show eth0
 
 ### 5.2 Test: reachability, both directions
 
-This needs the external client VM from section 2 (`--tags clabclient`).
+Needs the external client VM. Build it first - a **lab host** command, and it
+runs fine against an empty cluster, because everything it checks is fabric:
+
+```bash
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabclient
+```
 
 ```bash
 scripts/udn-reachability.sh --both
@@ -461,7 +431,38 @@ Reading it:
 | A whole row `FAIL` including the diagonal | That tenant's handoff is broken, not its isolation. |
 | Everything `FAIL` | A broken phase, not isolation. |
 
-Add `--pods` for the pod-to-pod matrix as well.
+Add `--pods` for the pod-to-pod matrix as well. Neither of those needs a client
+VM - they run from the pods to the `*-ext` containers, both of which already
+exist.
+
+The `--vms` and `--netns` matrices do, and add real machines behind the leaf to
+the same result. Either is a **lab host** command; add `-e clab_topology=evpn`
+on path C:
+
+```bash
+# one client VM per isolation domain
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabtenantclients
+
+# or one VM holding one namespace per tenant - same test, a fifth of the RAM,
+# and what the tenant ingress in section 9 runs on
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabnsclient
+```
+
+```bash
+scripts/udn-vrf-isolation.sh --netns
+```
+
+They coexist rather than replacing each other: the namespaces take `.21` on
+each client segment and the VMs take `.20`.
+
+> Both run fine before any UDN exists - nothing in them talks to a cluster. The
+> check each ends with targets the fabric only: for a Layer3 tenant the segment
+> gateway on the leaf (`10.215.10.1` for blue), and for a Layer2 tenant under
+> EVPN the `<tenant>-ext` container on-link across the L2VNI (`10.204.255.10`
+> for green). So a green result here means a later failure cannot be the client
+> segment.
 
 ### 6.2 Test: by hand, one cell at a time
 
@@ -781,7 +782,7 @@ Which parts are worth doing depends on the path you took:
 | **C** EVPN, two clusters | **required** by 8.4 | yes - and it is what puts `green-sno` and `purple-sno` on one address |
 
 All of these are **lab host** commands and all need `-e clab_topology=evpn` on
-path C. The client VMs they run from are built in section 2.
+path C.
 
 ### 9.1 Web pages
 
@@ -809,7 +810,13 @@ the namespace from the `Host` header. This answers the question the overlapping
 subnets provoke: how does an end user reach a tenant whose pod address another
 tenant also holds?
 
-Needs the namespace client from section 2 (`--tags clabnsclient`) and 9.1.
+Needs 9.1, and the namespace client - built in 6.1 if you came through path B,
+otherwise:
+
+```bash
+ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
+  --tags clabnsclient -e clab_topology=evpn
+```
 
 ```bash
 ansible-playbook -i inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
