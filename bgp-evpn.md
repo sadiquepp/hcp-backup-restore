@@ -4164,8 +4164,84 @@ migration work at all, because a migration **replaces the pod**: a new
 `virt-launcher` starts on the target node and takes over. Without persistent
 IPAM the VM arrives with a different address.
 
-Needs OpenShift Virtualization installed. Everything else is already in place
-after any phase from `shared` on.
+Everything else is already in place after any phase from `shared` on.
+
+### Install OpenShift Virtualization
+
+The one prerequisite this lab does not build for you. Three objects, then the
+CR that actually deploys it - the same shape as every other operator here (see
+`roles/setup-udn-bgp/templates/nmstate-operator.yaml.j2`).
+
+```bash
+cat <<'EOF' | oc apply -f -
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-cnv
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: kubevirt-hyperconverged-group
+  namespace: openshift-cnv
+spec:
+  targetNamespaces:
+    - openshift-cnv
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: hco-operatorhub
+  namespace: openshift-cnv
+spec:
+  channel: stable
+  name: kubevirt-hyperconverged
+  installPlanApproval: Automatic
+  # On a disconnected hub these become the mirrored catalog, exactly as
+  # udn_bgp_catalog_source / udn_bgp_catalog_source_namespace do.
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
+```
+
+Wait for the operator before applying the CR - the `HyperConverged` CRD does
+not exist until the CSV has installed, and applying it early fails with
+`no matches for kind`:
+
+```bash
+oc -n openshift-cnv get csv -w
+# kubevirt-hyperconverged-operator.v4.x.y   ...   Succeeded
+```
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: hco.kubevirt.io/v1beta1
+kind: HyperConverged
+metadata:
+  name: kubevirt-hyperconverged
+  namespace: openshift-cnv
+spec: {}
+EOF
+```
+
+`spec: {}` is deliberate - the defaults are what this lab wants, and live
+migration is enabled in them. Then:
+
+```bash
+oc -n openshift-cnv get hyperconverged kubevirt-hyperconverged \
+  -o jsonpath='{.status.conditions[?(@.type=="Available")].status}{"\n"}'
+# True
+
+oc get pods -n openshift-cnv | grep -c Running     # a couple of dozen
+```
+
+> **Nested virtualisation.** These nodes are themselves KVM guests, so the VM
+> in the next section is nested. `virt-install` gives them
+> `--cpu host-passthrough`, which exposes VMX and is what makes that work. A
+> node built without it reports no virtualisation support and KubeVirt refuses
+> to schedule; check with
+> `oc get nodes -l kubevirt.io/schedulable=true`.
 
 ### Build a VM on it
 
