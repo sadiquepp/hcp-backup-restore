@@ -65,12 +65,26 @@ rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
 ## in this lab works on either; see the UDN/BGP section of the README. To go
 ## back to 4.21, set these three to "4.21" / 15 / 0 and drop the evpn phase.
 ocp_major_version: "4.22"
-## 10, not 8. A Layer3 EVPN tenant is black-holed on 4.22.8 by the node's
+
+## THESE TWO ARE NOT THE SAME NUMBER AND MUST NOT BE KEPT IN STEP.
+##
+## ocp_minor_version is the OpenShift RELEASE - it picks the openshift-install
+## binary from clients/ocp/<major>.<minor>/ and the hosted clusters' release
+## image. coreos_minor_version is the RHCOS BOOT MEDIA, which is published on
+## its own cadence and lags: 4.22.10 is a released OpenShift version with no
+## RHCOS 4.22.10 behind it, and 4.22.8 is the newest boot image there is.
+##
+## That is fine and is how it is meant to work. The installer boots a node on
+## whatever RHCOS media it is given, then the cluster pulls the release payload
+## for ocp_minor_version and brings the OS to match. Pinning coreos to a version
+## that was never published just fails the download.
+##
+## 10 here because a Layer3 EVPN tenant is black-holed on 4.22.8 by the node's
 ## iptables FORWARD policy - see udn_bgp_evpn_l3_min_version further down for
-## the measurement. Layer2 is unaffected, so a lab built on .8 looks half
-## working and the half that fails looks like an EVPN fault.
+## the measurement. Layer2 is unaffected, so a lab built on .8 comes up looking
+## half working and the half that fails looks like an EVPN fault.
 ocp_minor_version: 10
-coreos_minor_version: 10  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
+coreos_minor_version: 8  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
 
 ## --- VM sizing -------------------------------------------------------------
 
@@ -146,9 +160,11 @@ agent_service_os_images:
     version: "4.21.0"
     url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.21/4.21.0/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
     cpuArchitecture: "x86_64"
+  ## RHCOS boot media, so 4.22.8 even though ocp_minor_version is 10 - there is
+  ## no RHCOS 4.22.10. See the note at coreos_minor_version.
   - openshiftVersion: "4.22"
-    version: "4.22.10"
-    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.10/rhcos-4.22.10-x86_64-live-iso.x86_64.iso"
+    version: "4.22.8"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
     cpuArchitecture: "x86_64"
   - openshiftVersion: "4.20"
     version: "4.20.13"
