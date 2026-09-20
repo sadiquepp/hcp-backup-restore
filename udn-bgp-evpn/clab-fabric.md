@@ -443,6 +443,185 @@ a second leaf would be scenery.
 > on both neighbours is what prevents that, and it is what makes the spine a
 > control-plane reflector rather than a data-plane gateway.
 
+#### The underlay, with the real addresses
+
+Every address a packet is matched against between the client and the pod.
+Nothing here is the overlay - this is the layer that carries the outer header.
+
+```
+   nsclient netns "green"                                       worker3
+   10.204.255.30/16                                             vtep0 100.64.0.36/32
+   eth1.240 (VLAN 240)                                          enp8s0 192.168.140.36/24
+        │                                                              ▲
+        │  tagged 240                                       untagged   │
+        ▼                                                              │
+ ┌──────────────┐        ┌──────────────┐        ┌──────────────┐      │
+ │    leaf2     │        │    spine     │        │    leaf1     │      │
+ │ AS 64514     │        │ AS 65000     │        │ AS 64513     │      │
+ │              │        │              │        │              │      │
+ │ lo0 10.0.0.2 │        │ lo0          │        │ lo0 10.0.0.1 │      │
+ │  = the VTEP  │        │  10.0.0.254  │        │              │      │
+ │              │        │              │        │ eth1         │──────┘
+ │ eth1  (no IP,│        │              │        │ 192.168.140.1/24
+ │  VLAN trunk) │        │              │        │
+ │              │        │              │        │
+ │ eth10        │        │ eth2    eth1 │        │ eth10        │
+ │ 10.1.0.6/30 ─┼────────┼ 10.1.0.5  10.1.0.2 ───┼ 10.1.0.1/30  │
+ └──────────────┘  /30   └──────────────┘   /30  └──────────────┘
+                 10.1.0.4/30            10.1.0.0/30
+```
+
+**There is no leaf1 ↔ leaf2 link.** Each leaf has exactly one p2p /30 to the
+spine, on a different subnet, so the spine is the only way across. A common
+first guess is that `10.1.0.5` lives on leaf1 - it does not, it is the spine's
+`eth2`, and leaf1's side of its own /30 is `10.1.0.1`.
+
+Note also that **leaf2's `eth1` carries no address**. It is on the same bridge
+as leaf1 and the nodes, but its only job there is to terminate the tagged
+client VLANs; it is not on `192.168.140.0/24` and has no route to it.
+
+#### The three routing tables
+
+Management (`172.30.30.0/24`, containerlab's own network) omitted - no lab
+traffic crosses it.
+
+```bash
+docker exec clab-udnbgp-leaf2 ip r
+```
+```
+10.0.0.1       via 10.1.0.5 dev eth10 proto bgp      # leaf1's loopback
+10.0.0.254     via 10.1.0.5 dev eth10 proto bgp      # the spine's
+10.1.0.4/30    dev eth10 proto kernel src 10.1.0.6   # its own p2p link
+100.64.0.0/24  via 10.1.0.5 dev eth10 proto bgp      # every VTEP is that way
+100.64.0.20    via 10.1.0.5 dev eth10 proto bgp      #   sno
+100.64.0.34/35/36  via 10.1.0.5 dev eth10 proto bgp  #   worker1/2/3
+```
+
+Everything leaves by one link, because leaf2 has one. Note there is **no**
+`192.168.140.0/24` here at all.
+
+```bash
+docker exec clab-udnbgp-spine ip r
+```
+```
+10.0.0.1       via 10.1.0.1 dev eth1 proto bgp       # leaf1  <- eth1 side
+10.0.0.2       via 10.1.0.6 dev eth2 proto bgp       # leaf2  <- eth2 side
+10.1.0.0/30    dev eth1 proto kernel src 10.1.0.2
+10.1.0.4/30    dev eth2 proto kernel src 10.1.0.5
+100.64.0.0/24  via 10.1.0.1 dev eth1 proto bgp       # all VTEPs are behind leaf1
+100.64.0.20/34/35/36  via 10.1.0.1 dev eth1 proto bgp
+```
+
+The spine is the hinge: one interface per leaf, and every VTEP resolves out
+`eth1` because leaf1 is the only router adjacent to the nodes.
+
+```bash
+docker exec clab-udnbgp-leaf1 ip r
+```
+```
+10.0.0.2       via 10.1.0.2 dev eth10 proto bgp      # leaf2, via the spine
+10.0.0.254     via 10.1.0.2 dev eth10 proto bgp
+10.1.0.0/30    dev eth10 proto kernel src 10.1.0.1
+blackhole 100.64.0.0/24                              # so 'network' can originate it
+100.64.0.20    via 192.168.140.20 dev eth1           # sno      - STATIC, from exec:
+100.64.0.34    via 192.168.140.34 dev eth1           # worker1
+100.64.0.35    via 192.168.140.35 dev eth1           # worker2
+100.64.0.36    via 192.168.140.36 dev eth1           # worker3
+192.168.140.0/24  dev eth1 proto kernel src 192.168.140.1
+```
+
+leaf1 is where the underlay stops being BGP and becomes an L2 adjacency. The
+`/32`s are static, written from `ip_list`, and beat the blackhole on longest
+match.
+
+#### leaf2's tenant side, and the two shapes in one listing
+
+`ip a` on leaf2 shows the Layer3/Layer2 split directly - same parent `eth1`,
+same MAC on every sub-interface, completely different treatment:
+
+| Sub-interface | Tenant | `master` | Address |
+| --- | --- | --- | --- |
+| `eth1.210` | blue | **`blue`** (a VRF) | `10.215.10.1/24` |
+| `eth1.220` | red | **`red`** (a VRF) | `10.216.10.1/24` |
+| `eth1.230` | orange | **`orange`** (a VRF) | `10.217.10.1/24` |
+| `eth1.240` | green | **`br400`** (a bridge) | **none** |
+| `eth1.250` | purple | **`br500`** (a bridge) | **none** |
+
+The Layer3 three are **VRF slaves with a gateway address** - a client on VLAN
+210 has a default route to `10.215.10.1` and is routed into `blue`. The Layer2
+two are **bridge ports with no address** - the client is in the pods' own
+subnet and there is nothing to route to.
+
+The endpoint containers follow the same rule: `blue-ext` holds `10.210.10.1/24`
+in VRF `blue`, while `green-ext` is an address-less port on `br400`.
+
+And `ip link show type vrf` lists `blue`, `red`, `orange` - **no `green`, no
+`purple`**. That absence is the whole Layer2 story in one line.
+
+> **The `-ext` veths come up at MTU 9500**, not `clab_fabric_mtu`'s 9000, because
+> the topology never sets MTU on them and containerlab's default is higher.
+> They are ports on 9000 bridges, so the bridge caps what actually crosses.
+> Harmless here - the inner MTU is 1400 - but it is an inconsistency, not a
+> design choice.
+
+#### Following one packet: nsclient → a pod on worker3
+
+The client is in the pods' own subnet with no default route, so this is
+bridged at the edges and routed only in the middle - by the **outer** header.
+
+| # | Where | What decides the next hop |
+|---|---|---|
+| 1 | `green` netns | `10.204.0.0/16 dev eth1.240 proto kernel scope link` - on-link, no gateway. ARP for the pod is answered by **leaf2** from an EVPN type-2 MAC/IP route (`neigh_suppress on`), not flooded |
+| 2 | `eth1.240` → leaf2 | Tagged 240 on the fabric bridge. Every port receives it; only leaf2 has an `eth1.240`, so only leaf2 keeps it. The tag is **stripped** here and never enters the tunnel |
+| 3 | `br400` | An ordinary bridge FDB lookup. `0a:58:0a:cc:00:08 dev vni400 dst 100.64.0.36` - `extern_learn`, programmed by zebra from the type-2 route, since `vni400` is enslaved `learning off` |
+| 4 | `vni400` | Encapsulate. Outer **`10.0.0.2 → 100.64.0.36`**, VNI 400. `10.0.0.2` is the device's `local` parameter, which lives on `lo0` - `vni400` itself has no address |
+| 5 | leaf2 routing | `100.64.0.36 via 10.1.0.5 dev eth10 proto bgp` - out the p2p link to the spine |
+| 6 | spine | `100.64.0.36 via 10.1.0.1 dev eth1 proto bgp`. Pure transit: it has no VNI 400, no VRF and no VTEP, so it never sees the frame inside |
+| 7 | leaf1 | `100.64.0.36 via 192.168.140.36 dev eth1` - the **static** `/32` from the topology's `exec:` block. It beats `blackhole 100.64.0.0/24` on longest match |
+| 8 | `192.168.140.36` | Directly connected. leaf1 and the nodes share the fabric bridge, so this is one L2 hop |
+| 9 | worker3 | `evx4-evpn-vtep` decapsulates VNI 400 and OVN-Kubernetes delivers to the pod |
+
+The reply is symmetric: worker3's FDB holds the client's MAC behind its own
+VXLAN device with `dst 10.0.0.2`, and the outer header runs the other way.
+
+> **leaf1 and the spine are on the path but are not endpoints.** Steps 5-8 move
+> an opaque outer packet. Only steps 4 and 9 touch VNI 400. That is the same
+> point the tunnel diagram above makes, in addresses rather than boxes.
+
+#### The VTEP /32s are advertised, not just the aggregate
+
+The spine holds both:
+
+```
+100.64.0.0/24  nhid 24 via 10.1.0.1 dev eth1 proto bgp metric 20
+100.64.0.20    nhid 24 via 10.1.0.1 dev eth1 proto bgp metric 20
+100.64.0.34    nhid 24 via 10.1.0.1 dev eth1 proto bgp metric 20
+100.64.0.35    nhid 24 via 10.1.0.1 dev eth1 proto bgp metric 20
+100.64.0.36    nhid 24 via 10.1.0.1 dev eth1 proto bgp metric 20
+```
+
+The aggregate is leaf1's, originated against the blackhole. The per-node `/32`s
+are **not** configured anywhere in this repo - `frrconfiguration-evpn.yaml.j2`
+advertises only `100.64.0.0/24` from each node. They are reaching the fabric
+by some other route, most likely the second, OVN-Kubernetes-generated
+`FRRConfiguration` that the template mentions but this repo never renders.
+
+On leaf1 itself the `/32`s show as static, not BGP, because a static route wins
+on administrative distance - but bgpd keeps its own best path independently of
+what zebra installs for forwarding, so leaf1 can still re-advertise them.
+
+The AS path says whose they are:
+
+```bash
+docker exec clab-udnbgp-spine vtysh -c 'show bgp ipv4 unicast 100.64.0.36/32'
+# 64513        -> leaf1 originated it
+# 64513 64512  -> a hub node originated it and leaf1 passed it on
+```
+
+Worth knowing which, because it decides what happens when a node is added: if
+the nodes advertise their own VTEP, a new one appears by itself; if leaf1 does,
+it appears only after `--tags fabric` rewrites the static routes.
+
 With the OCP nodes acting as VTEPs, leaf1 is not a tunnel endpoint for tenant
 traffic at all. VXLAN flows **node ↔ leaf2 directly**. leaf1 holds no tenant
 VRFs and provides exactly two things:
