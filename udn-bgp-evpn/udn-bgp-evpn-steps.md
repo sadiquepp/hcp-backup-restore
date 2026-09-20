@@ -73,6 +73,25 @@ cd udn-bgp-evpn
 ./build-lab.sh --only web           # re-run one step
 ```
 
+**The vault password comes from a file**, so the script does not prompt nine
+times. Create it once:
+
+```bash
+# 0600 from the moment it exists - touch-then-chmod leaves a readable window,
+# and `echo <password> > file` puts the password in your shell history.
+install -m 600 /dev/null ~/.vault_pass
+read -rsp 'Vault password: ' pw && printf '%s' "$pw" > ~/.vault_pass && unset pw; echo
+
+# prove it before a build depends on it
+ansible-vault view ../vault.yaml --vault-password-file ~/.vault_pass >/dev/null && echo OK
+```
+
+`~/.vault_pass` is the default. Override with `--vault-password-file PATH`, or
+export `ANSIBLE_VAULT_PASSWORD_FILE` - Ansible honours that one natively, so it
+also lets you drop `--ask-vault-pass` from the per-step commands below. Keep the
+file **outside this repository**: it is public, and only `vault.yaml` itself is
+in `.gitignore`.
+
 > **A bare `./build-lab.sh` builds the clusters**, and the cluster playbooks
 > are **not idempotent** - `qemu-img create` overwrites an existing disk and
 > `virt-install` fails on an existing domain, so re-running them against a live
