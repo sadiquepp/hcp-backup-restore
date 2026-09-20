@@ -56,6 +56,32 @@
   sets is the same one anything else on the node can zero, and a write to it
   propagates to every interface. See the comment at the top of that file.
 
+  THIS PROFILE CANNOT WIN AN ARGUMENT, AND FOR A LONG TIME IT WAS LOSING ONE
+
+  The Node Tuning Operator runs tuned in no_daemon mode: it applies the
+  profile once and exits. `tuned-adm verify` inside the tuned pod answers
+  "Not supported in no_daemon mode - cannot talk to TuneD daemon via DBus",
+  which is the whole story. Nothing re-asserts these values, so the last
+  process to write them keeps them forever, and the Profile CR's
+  Applied=True is a receipt for one write minutes ago rather than a statement
+  about the node now.
+
+  What it was losing to is ovnkube-node under the default
+  gatewayConfig.ipForwarding=Restricted, which holds net.ipv4.ip_forward at 0
+  and forwards only across br-ex and ovn-k8s-mpN. Since that value is
+  conf.all.forwarding and a write to it propagates to every interface, each
+  ovnkube-node restart re-zeroed the fabric NIC. Three identically configured
+  workers were found disagreeing - 1 on one of them, 0 on the other two -
+  purely by restart ordering, with every control-plane signal green.
+
+  That is fixed where it belongs, on the Network operator CR: see
+  udn_bgp_set_ip_forwarding and tasks/enable.yml. With ipForwarding=Global,
+  OVN-Kubernetes sets ip_forward=1 itself and there is no writer to lose to.
+  This profile's net.ipv4.ip_forward=1 is then redundant and kept only so the
+  lab still works with udn_bgp_set_ip_forwarding=false; the line that still
+  earns its place is conf.default.forwarding, which covers a NIC hot-plugged
+  later and which OVN-Kubernetes does not set.
+
   The cost is that forwarding is on for every interface on these nodes rather
   than the one that needs it. On a node already routing pod traffic through
   br-ex and mp0 that is a small widening, and it is what the node would have

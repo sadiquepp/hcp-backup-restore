@@ -1881,6 +1881,35 @@ udn_bgp_cluster: "{{ udn_bgp_target_hub | default('hub') }}"
 ## than something the phase-3 tasks do silently.
 udn_bgp_set_local_gateway: true
 
+## Host IP forwarding, via OVN-Kubernetes rather than a sysctl.
+##
+## gatewayConfig.ipForwarding defaults to 'Restricted', and under Restricted
+## ovnkube-node holds net.ipv4.ip_forward at 0 - forwarding only what it
+## manages itself (br-ex, ovn-k8s-mpN). The fabric NIC is not one of those, so
+## the return path from the fabric to a pod is dropped in the routing decision
+## with every control-plane signal green.
+##
+## Writing the sysctl instead does not hold. ip_forward and
+## conf.all.forwarding are the same value, and a write to it propagates to
+## EVERY interface, so each ovnkube-node restart re-zeroes the fabric NIC. The
+## Tuned profile that also sets it cannot win either: the Node Tuning Operator
+## runs tuned in no_daemon mode - it applies the profile once and exits, with
+## nothing left to re-assert it - so whoever writes last keeps the value
+## forever. That is why three identically configured workers were observed
+## disagreeing, and why re-running the role 'fixed' it each time.
+##
+## 'Global' makes OVN-Kubernetes itself set ip_forward=1 and stop reverting
+## it, which removes the race rather than out-running it. The cost is that the
+## node forwards IP traffic generally rather than only Kubernetes traffic -
+## which is exactly what the Tuned profile was already asking for, stated
+## honestly. Set this false on a cluster where that is not acceptable; the
+## direct sysctl write in the role still runs, and will still be undone by the
+## next ovnkube-node restart.
+##
+## Patched in the same task block as the gateway mode above, so a first run
+## costs one ovnkube-node rollout rather than two.
+udn_bgp_set_ip_forwarding: true
+
 ## Minimum cluster version for BGP route advertisements. Checked against the
 ## cluster's VERSION, not against whether routeadvertisements.k8s.ovn.org
 ## exists: that CRD is installed by the Cluster Network Operator when the

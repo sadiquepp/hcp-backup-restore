@@ -52,21 +52,24 @@
       - >-
         nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ && !f {gsub(":","",$2); print $2; f=1}');
         [ -n "$nic" ] || { echo "NONE"; exit 0; };
-        sysctl -qw net.ipv4.conf.$nic.forwarding=1 net.ipv4.conf.default.forwarding=1;
+        err=$(sysctl -w net.ipv4.conf.$nic.forwarding=1 net.ipv4.conf.default.forwarding=1 2>&1 >/dev/null); rc=$?;
         echo "$nic $(cat /proc/sys/net/ipv4/conf/$nic/forwarding)
         all=$(cat /proc/sys/net/ipv4/conf/all/forwarding)
-        default=$(cat /proc/sys/net/ipv4/conf/default/forwarding)"
+        default=$(cat /proc/sys/net/ipv4/conf/default/forwarding)
+        write_rc=$rc${err:+ write_err=$err}"
   loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
   register: udn_bgp_fwd_fix
   changed_when: false
 
-# A 0 in THIS report - read back in the same shell that just wrote it - means
-# the write itself did not take, which is a different problem from the one
-# above: no propagation window, nothing to race with. Look at whether the
-# debug pod is privileged and whether /proc/sys is mounted read-only, not at
-# what else is running on the node.
+# The write is no longer silenced with -qw. It was, and that made a failed
+# write indistinguishable from a reverted one: sysctl's error went nowhere,
+# the `;` chain let the echo succeed anyway, and the task reported the same
+# "0" either way. write_rc says which happened. A non-zero rc here - read back
+# in the same shell that just wrote it - means the write did not take at all:
+# look at whether the debug pod is privileged and whether /proc/sys is mounted
+# read-only, not at what else is running on the node.
 - name: Report the fabric NIC forwarding state
   ansible.builtin.debug:
     msg: >-
@@ -77,3 +80,33 @@
   loop_control:
     label: "{{ item.item.ip_key | default('?') }}"
   when: item.skipped is not defined
+
+# all=0 means net.ipv4.ip_forward is off on this node, and that is a finding,
+# not noise: it is the same value as conf.all.forwarding, a write to it
+# propagates to every interface, and this role's per-interface write cannot
+# survive the next one. It was 0 on two of three identically configured
+# workers for the life of this lab, silently, because nothing looked at it -
+# the per-interface value happened to be right often enough.
+#
+# Not fatal. The per-interface write above is what the assert in verify.yml
+# tests, and the data path works while it holds. This says the node is one
+# ovnkube-node restart away from losing it.
+- name: Warn when the node is not forwarding globally
+  ansible.builtin.debug:
+    msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] }}: net.ipv4.ip_forward is 0.
+      The fabric NIC is set to forward, but a write to the global knob
+      propagates to every interface, so the next ovnkube-node restart will
+      undo it and nothing will put it back - the Node Tuning Operator runs
+      tuned in no_daemon mode, so its profile is applied once and never
+      re-asserted, however green its Profile CR reads. The fix is
+      udn_bgp_set_ip_forwarding (gatewayConfig.ipForwarding: Global), which
+      makes OVN-Kubernetes set it instead of reverting it. Check with
+      `oc get network.operator cluster
+      -o jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig}'`.
+  loop: "{{ udn_bgp_fwd_fix.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.ip_key | default('?') }}"
+  when:
+    - item.skipped is not defined
+    - item.stdout | default('') is search('all=0')

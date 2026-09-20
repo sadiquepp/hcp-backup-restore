@@ -326,6 +326,24 @@ nothing. `udn_bgp_set_local_gateway` (default `true`) makes the switch; it is
 a separate patch from the enablement one precisely because it is a second
 full rollout and changes how all pod egress leaves the node.
 
+**The nodes also need `gatewayConfig.ipForwarding: Global`**
+(`udn_bgp_set_ip_forwarding`, default `true`). Under the default
+`Restricted`, ovnkube-node holds `net.ipv4.ip_forward` at 0 and forwards only
+across the interfaces it manages - `br-ex` and `ovn-k8s-mpN`. The fabric NIC
+is not one of them, so replies from the fabric are dropped in the routing
+decision while every control-plane signal stays green.
+
+Setting the sysctl instead does not survive. `ip_forward` and
+`conf.all.forwarding` are the same value and a write to it propagates to
+*every* interface, so each ovnkube-node restart re-zeroes the fabric NIC. The
+Tuned profile that also sets it cannot re-assert it either: the Node Tuning
+Operator runs tuned in **no_daemon mode** - it applies the profile once and
+exits - so `Applied=True` on the Profile CR is a receipt for one past write,
+not a claim about the current value. Last writer wins, permanently. Three
+identically configured workers were found disagreeing for exactly this
+reason. `Global` makes OVN-Kubernetes set the value itself, so there is no
+writer to lose to.
+
 **MetalLB is already on this cluster** for the hosted clusters' API VIPs, in
 **L2 mode**, so it is not competing for BGP sessions. MetalLB also ships an
 FRR-K8s; the Cluster Network Operator deploys its own into

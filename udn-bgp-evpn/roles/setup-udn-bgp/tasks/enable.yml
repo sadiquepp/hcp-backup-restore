@@ -45,6 +45,43 @@
   register: udn_bgp_gateway_patch
   changed_when: "'patched' in udn_bgp_gateway_patch.stdout and 'no change' not in udn_bgp_gateway_patch.stdout"
 
+# The one that makes the fabric NIC forward, and the reason the sysctl route
+# never held.
+#
+# gatewayConfig.ipForwarding defaults to Restricted, under which ovnkube-node
+# keeps net.ipv4.ip_forward at 0 and forwards only across the interfaces it
+# manages - br-ex and ovn-k8s-mpN. The fabric NIC is not one of those. Because
+# ip_forward and conf.all.forwarding are the same value, and a write to it
+# propagates to every interface, each ovnkube-node restart re-zeroed the
+# fabric NIC that this role had just set to 1.
+#
+# Nothing put it back, because nothing was watching: the Node Tuning Operator
+# runs tuned in no_daemon mode (tuned-adm in the tuned pod answers "Not
+# supported in no_daemon mode"), so the profile is applied once and no daemon
+# remains to re-assert it. Its Profile CR still reports Applied=True, which is
+# a receipt for that one write and says nothing about the current value. Last
+# writer wins permanently - which is how three workers with identical config
+# came to disagree, ovnkube-node having restarted on some and not others.
+#
+# Global makes OVN-Kubernetes set ip_forward=1 itself, so there is no writer
+# to lose to. Deliberately placed before the rollout wait below, so enabling
+# it and the gateway mode together costs one ovnkube-node rollout.
+- name: Let the host forward traffic that OVN-Kubernetes does not manage
+  ansible.builtin.command:
+    cmd: >-
+      oc patch network.operator.openshift.io cluster --type=merge
+      -p {{ patch | to_json | quote }}
+  vars:
+    patch:
+      spec:
+        defaultNetwork:
+          ovnKubernetesConfig:
+            gatewayConfig:
+              ipForwarding: Global
+  when: udn_bgp_set_ip_forwarding | bool
+  register: udn_bgp_ipfwd_patch
+  changed_when: "'patched' in udn_bgp_ipfwd_patch.stdout and 'no change' not in udn_bgp_ipfwd_patch.stdout"
+
 - name: Wait for the network operator to finish rolling out
   ansible.builtin.command:
     cmd: >-
