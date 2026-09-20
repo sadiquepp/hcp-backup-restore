@@ -8,6 +8,14 @@
 #   ./build-lab.sh --list                # what the steps are
 #   ./build-lab.sh --dry-run             # print the commands, run nothing
 #
+# RUN IT UNDER tmux (or screen). A full build installs two OpenShift
+# clusters and takes hours; if the ssh session drops, the shell gets
+# SIGHUP and takes the build with it, usually mid-install, leaving VMs
+# half-provisioned that --from cannot resume cleanly.
+#
+#   tmux new -s lab      then  ./build-lab.sh
+#   ctrl-b d             detach;  tmux attach -t lab  to come back
+#
 # A bare ./build-lab.sh runs all nine steps and therefore BUILDS THE
 # CLUSTERS. That is only right on a bare lab host: the cluster playbooks
 # are not idempotent, so it refuses if a hub kubeconfig or the libvirt
@@ -267,6 +275,25 @@ run_step() {
 
 trap 'echo; echo "FAILED at step: ${CURRENT:-?}" >&2;
       echo "  resume with: $0 --from ${CURRENT:-?}" >&2' ERR
+
+# Warn, do not block: someone may be running this under nohup, or from a
+# console, or re-running a single quick step where it does not matter.
+if (( ! DRY_RUN )) && [[ -z "${TMUX:-}" && "${TERM:-}" != screen* && -z "$ONLY" ]]; then
+    cat >&2 <<'EOF'
+
+NOT running under tmux or screen.
+
+A full build installs two OpenShift clusters and takes hours. If this ssh
+session drops, the shell is sent SIGHUP and the build dies with it - usually
+mid-install, leaving VMs that --from cannot cleanly resume.
+
+  tmux new -s lab     then re-run this
+  ctrl-b d            detach;  tmux attach -t lab  to come back
+
+Continuing in 10s - ctrl-c to stop.
+EOF
+    sleep 10
+fi
 
 for step in "${STEPS[@]}"; do
     CURRENT="$step"

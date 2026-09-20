@@ -107,6 +107,27 @@
       virsh undefine hub_bootstrap >/dev/null 2>&1 || true
       rm -f /var/lib/libvirt/images/hub/hub_bootstrap.qcow2
 
+  ## The install folders, for the same reason the SNO's goes below: each holds
+  ## auth/kubeconfig - the only copy of the credentials for a cluster that no
+  ## longer exists - plus the agent ISO its domain booted from. A stale
+  ## kubeconfig left on this host is what setup_udn_bgp_lab.yaml's pre-flight
+  ## exists to catch, because an `oc` that silently falls through to the WRONG
+  ## cluster looks exactly like a working run.
+  ##
+  ## The VM folders go too. The tasks above delete the disks they know the
+  ## names of; anything else in there belongs to the cluster being removed.
+  ##
+  ## setup-hub-cluster recreates both on a fresh install, so this costs nothing.
+  - name: Remove the hub install and VM folders
+    ansible.builtin.file:
+      path: "{{ item }}"
+      state: absent
+    loop:
+      - "{{ hub_install_folder }}"
+      - "{{ hub_vm_folder }}"
+      - "{{ hub2_install_folder }}"
+      - "{{ hub2_vm_folder }}"
+
   - name: Destroy Hub2 Bootstrap
     shell: |
       virsh destroy  hub2_bootstrap >/dev/null 2>&1 || true
@@ -171,7 +192,7 @@
       virsh destroy  {{ sno_name }} >/dev/null 2>&1 || true
       virsh undefine {{ sno_name }} --remove-all-storage >/dev/null 2>&1 || \
         virsh undefine {{ sno_name }} >/dev/null 2>&1 || true
-      rm -f  {{ sno_vm_folder | default(download_dir ~ '/' ~ sno_name) }}/{{ sno_name }}_disk.qcow2
+      rm -rf {{ sno_vm_folder | default(download_dir ~ '/' ~ sno_name) }}
       rm -rf {{ sno_install_folder }}
 
   ## -------------------------------------------------------------------------

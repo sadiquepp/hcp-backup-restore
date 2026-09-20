@@ -63,6 +63,14 @@ three; **9** is written to be used after any of them.
 
 Everything below, for the two-cluster EVPN lab, is also a single script:
 
+> **Start tmux first.** A full build installs two OpenShift clusters and runs
+> for hours; if your ssh session drops, the shell is SIGHUPed and the build dies
+> with it, usually mid-install. The script warns if it is not under tmux.
+>
+> ```bash
+> tmux new -s lab          # ctrl-b d to detach, tmux attach -t lab to return
+> ```
+
 ```bash
 cd udn-bgp-evpn
 ./build-lab.sh                      # all nine steps, from a BARE lab host
