@@ -51,8 +51,10 @@
 
   Tuned still does not re-apply when an interface appears, so a NIC attached to
   a node whose profile is already current is missed even with the default set.
-  roles/setup-udn-bgp/tasks/main.yml writes both values directly for exactly
-  that case, before the verification that would otherwise fail on it.
+  roles/setup-udn-bgp/tasks/fabric-forwarding.yml writes both values directly
+  for exactly that case - twice per run, because the global knob this profile
+  sets is the same one anything else on the node can zero, and a write to it
+  propagates to every interface. See the comment at the top of that file.
 
   The cost is that forwarding is on for every interface on these nodes rather
   than the one that needs it. On a node already routing pod traffic through

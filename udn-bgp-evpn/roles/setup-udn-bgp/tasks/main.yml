@@ -476,51 +476,13 @@
   when: udn_phase not in ['preflight', 'web']
   changed_when: false
 
-# Tuned sets net.ipv4.ip_forward, which reaches every interface that existed
-# when it last applied. A fabric NIC hot-plugged after that inherits
-# conf.default.forwarding instead - and until the profile above started setting
-# that too, it was 0. Even with it set, Tuned does not re-apply when an
-# interface appears, so a NIC attached to a node whose profile is already
-# current is still missed.
-#
-# Repaired here rather than left to the assert in verify.yml, which reports it
-# accurately and then stops the run on something a one-line sysctl fixes. Both
-# values are written: the interface, for the NIC that is already up, and the
-# default, so this survives until Tuned's own copy takes over.
-- name: Turn on forwarding for any fabric NIC the Tuned profile did not reach
-  ansible.builtin.command:
-    argv:
-      - oc
-      - debug
-      - "node/{{ udn_bgp_node_names[item.ip_key] }}"
-      - --quiet
-      - --
-      - chroot
-      - /host
-      - bash
-      - -c
-      - >-
-        nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ && !f {gsub(":","",$2); print $2; f=1}');
-        [ -n "$nic" ] || { echo "NONE"; exit 0; };
-        sysctl -qw net.ipv4.conf.$nic.forwarding=1 net.ipv4.conf.default.forwarding=1;
-        echo "$nic $(cat /proc/sys/net/ipv4/conf/$nic/forwarding)"
-  loop: "{{ udn_bgp_cluster_nodes }}"
-  loop_control:
-    label: "{{ item.ip_key }}"
-  register: udn_bgp_fwd_fix
-  changed_when: false
+# Forwarding on the fabric NIC. See tasks/fabric-forwarding.yml for why this
+# is repaired here AND again in verify.yml rather than once: the EVPN phase
+# that runs between the two puts it back to 0, and the check in verify.yml
+# only reads.
+- name: Repair forwarding on the fabric NICs
+  ansible.builtin.include_tasks: fabric-forwarding.yml
   when: udn_phase not in ['preflight', 'web']
-
-- name: Report the fabric NIC forwarding state
-  ansible.builtin.debug:
-    msg: >-
-      {{ udn_bgp_node_names[item.item.ip_key] }}:
-      {{ item.stdout | default('(not checked)') | trim }}
-      (interface, net.ipv4.conf.<nic>.forwarding - must be 1)
-  loop: "{{ udn_bgp_fwd_fix.results | default([]) }}"
-  loop_control:
-    label: "{{ item.item.ip_key | default('?') }}"
-  when: item.skipped is not defined
 
 # Before the first FRRConfiguration that may reference it. A neighbor whose
 # passwordSecret names a Secret that does not exist yet does not come up, and

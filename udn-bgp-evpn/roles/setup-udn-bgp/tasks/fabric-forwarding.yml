@@ -1,0 +1,79 @@
+---
+# Make the fabric NIC forward, and say what its neighbours look like.
+#
+# Included TWICE on purpose - once from main.yml right after the NNCP that
+# addresses the NIC, and again from verify.yml immediately before the check
+# that asserts on it. The second pass is not belt-and-braces; it is the whole
+# point, and it exists because of a failure the first pass could not survive.
+#
+# WHY ONE REPAIR IS NOT ENOUGH
+#
+# Between the two include points the entire EVPN phase runs: a VTEP NNCP, the
+# tenant CUDNs, and the ovnkube-node reconfiguration those provoke. A run that
+# repaired forwarding early was still read back as 0 on worker2 here - 120s of
+# retries later, because the check only READS. Nothing between the repair and
+# the check writes the value, so a loop waiting for it to become 1 waits for
+# something that is not coming. The clue was that re-running the role fixed
+# it: the rerun's repair pass wrote it again.
+#
+# WHAT ZEROES IT
+#
+# Almost certainly a write to a GLOBAL knob rather than anything touching this
+# NIC. net.ipv4.ip_forward and net.ipv4.conf.all.forwarding are the same knob,
+# and the kernel propagates a write to it onto EVERY interface
+# (inet_forward_change), so one `sysctl -w net.ipv4.ip_forward=0` resets a
+# per-device value that was deliberately set to 1 - with no event on the
+# device, no NetworkManager reactivation, and nothing in the journal about the
+# interface. OVN-Kubernetes enables forwarding per interface (br-ex,
+# ovn-k8s-mpN) and keeps the global one off, so it re-enables the interfaces it
+# knows about and leaves the fabric NIC at the 0 it just wrote. That is
+# consistent with every symptom seen: only the fabric NIC, only on nodes the
+# EVPN phase reconfigured, and repaired by any pass that writes it again.
+#
+# Which is why the echo below reports all= and default= alongside the
+# interface's own value. If the interface reads 0 while all reads 0 too, that
+# is the global-knob path. If the interface reads 0 while all reads 1, the
+# device itself was re-created and inherited default=. Those are different
+# faults with different fixes, and the previous version of this check could
+# not tell them apart - it reported the symptom and left the cause to another
+# round trip.
+- name: Turn on forwarding for any fabric NIC that is not forwarding
+  ansible.builtin.command:
+    argv:
+      - oc
+      - debug
+      - "node/{{ udn_bgp_node_names[item.ip_key] }}"
+      - --quiet
+      - --
+      - chroot
+      - /host
+      - bash
+      - -c
+      - >-
+        nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ && !f {gsub(":","",$2); print $2; f=1}');
+        [ -n "$nic" ] || { echo "NONE"; exit 0; };
+        sysctl -qw net.ipv4.conf.$nic.forwarding=1 net.ipv4.conf.default.forwarding=1;
+        echo "$nic $(cat /proc/sys/net/ipv4/conf/$nic/forwarding)
+        all=$(cat /proc/sys/net/ipv4/conf/all/forwarding)
+        default=$(cat /proc/sys/net/ipv4/conf/default/forwarding)"
+  loop: "{{ udn_bgp_cluster_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  register: udn_bgp_fwd_fix
+  changed_when: false
+
+# A 0 in THIS report - read back in the same shell that just wrote it - means
+# the write itself did not take, which is a different problem from the one
+# above: no propagation window, nothing to race with. Look at whether the
+# debug pod is privileged and whether /proc/sys is mounted read-only, not at
+# what else is running on the node.
+- name: Report the fabric NIC forwarding state
+  ansible.builtin.debug:
+    msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] }}:
+      {{ item.stdout | default('(not checked)') | trim }}
+      (interface, net.ipv4.conf.<nic>.forwarding - the first value must be 1)
+  loop: "{{ udn_bgp_fwd_fix.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.ip_key | default('?') }}"
+  when: item.skipped is not defined
