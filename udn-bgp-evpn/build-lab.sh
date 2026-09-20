@@ -8,6 +8,12 @@
 #   ./build-lab.sh --list                # what the steps are
 #   ./build-lab.sh --dry-run             # print the commands, run nothing
 #
+# A bare ./build-lab.sh runs all nine steps and therefore BUILDS THE
+# CLUSTERS. That is only right on a bare lab host: the cluster playbooks
+# are not idempotent, so it refuses if a hub kubeconfig or the libvirt
+# domains are already there. With clusters already up, start at --from
+# fabric; to really rebuild them, pass --rebuild-clusters.
+#
 # WHY A SCRIPT AND NOT A PLAYBOOK. This orchestrates eight ansible-playbook
 # INVOCATIONS, not eight plays, and four things make that un-foldable:
 #
@@ -40,6 +46,7 @@ TOPOLOGY="evpn"
 KUBECONFIG_HUB="${KUBECONFIG_HUB:-/var/lib/libvirt/images/hub_install/auth/kubeconfig}"
 LOGDIR="${LOGDIR:-./build-logs}"
 PARALLEL_EVPN=0
+REBUILD_CLUSTERS=0
 DRY_RUN=0
 FROM=""
 ONLY=""
@@ -68,6 +75,7 @@ while [[ $# -gt 0 ]]; do
         --from)                FROM="$2"; shift 2 ;;
         --only)                ONLY="$2"; shift 2 ;;
         --parallel-evpn)       PARALLEL_EVPN=1; shift ;;
+        --rebuild-clusters)    REBUILD_CLUSTERS=1; shift ;;
         --dry-run)             DRY_RUN=1; shift ;;
         --list)                list_steps; exit 0 ;;
         -h|--help)             usage; exit 0 ;;
@@ -164,14 +172,53 @@ should_run() {
     return 0
 }
 
+# setup_hub_cluster.yaml and setup_sno.yaml are NOT idempotent. Their VM
+# creation is unguarded shell: `qemu-img create` OVERWRITES an existing disk
+# and `virt-install` fails on a domain that already exists. Run them against a
+# built cluster and you do not get a no-op, you get a destroyed one.
+#
+# So a bare ./build-lab.sh is only safe on a bare lab host. With the clusters
+# already up, the entry point is --from fabric.
+guard_clusters() {
+    (( REBUILD_CLUSTERS )) && return 0
+    (( DRY_RUN )) && return 0
+    local -a found=()
+    [[ -r "$KUBECONFIG_HUB" ]] && found+=("a hub kubeconfig at $KUBECONFIG_HUB")
+    if command -v virsh >/dev/null 2>&1; then
+        local d
+        for d in hub_master1 sno; do
+            virsh dominfo "$d" >/dev/null 2>&1 && found+=("libvirt domain '$d'")
+        done
+    fi
+    (( ${#found[@]} == 0 )) && return 0
+    cat >&2 <<EOF
+
+REFUSING to rebuild the clusters - this lab looks already built:
+$(printf '  - %s\n' "${found[@]}")
+
+setup_hub_cluster.yaml and setup_sno.yaml are not idempotent. qemu-img create
+overwrites an existing disk and virt-install fails on an existing domain, so
+re-running them against a live cluster destroys it rather than skipping.
+
+  ./build-lab.sh --from fabric        build the UDN lab on the clusters you have
+  ./build-lab.sh --rebuild-clusters   really rebuild them, from scratch
+
+EOF
+    # exit, not return: the ERR trap would otherwise append
+    # "resume with: --from bmhost", which is the very thing just refused.
+    exit 1
+}
+
 run_step() {
     local step="$1"
     should_run "$step" || { skip "$step"; return 0; }
     case "$step" in
     bmhost)
+        guard_clusters
         say "1/9  helper VM (DNS, LB, inventory)"
         play ../setup_bm_host.yaml ;;
     clusters)
+        guard_clusters
         say "2/9  hub and SNO, in parallel"
         play_bg hub ../setup_hub_cluster.yaml --skip-tags acm
         play_bg sno ../setup_sno.yaml

@@ -65,12 +65,20 @@ Everything below, for the two-cluster EVPN lab, is also a single script:
 
 ```bash
 cd udn-bgp-evpn
-./build-lab.sh                      # the whole thing
+./build-lab.sh                      # all nine steps, from a BARE lab host
+./build-lab.sh --from fabric        # clusters already up - the usual entry point
 ./build-lab.sh --list               # the nine steps
 ./build-lab.sh --dry-run            # print every command, run nothing
 ./build-lab.sh --from evpn          # resume after a failure
 ./build-lab.sh --only web           # re-run one step
 ```
+
+> **A bare `./build-lab.sh` builds the clusters**, and the cluster playbooks
+> are **not idempotent** - `qemu-img create` overwrites an existing disk and
+> `virt-install` fails on an existing domain, so re-running them against a live
+> cluster destroys it rather than skipping. The script refuses if it finds a
+> hub kubeconfig or the libvirt domains, and points at `--from fabric`. Pass
+> `--rebuild-clusters` only when you really mean from scratch.
 
 It reads the vault password from a file - `--vault-password-file PATH`, or
 `$ANSIBLE_VAULT_PASSWORD_FILE` - rather than prompting nine times. The hub and
