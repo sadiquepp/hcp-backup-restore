@@ -352,6 +352,11 @@
   until: udn_bgp_fabric_nic_present.rc == 0
   retries: "{{ udn_bgp_nic_check_retries }}"
   delay: "{{ udn_bgp_nic_check_delay }}"
+  # Same guard as the node-names.yml include above, and for the same reason:
+  # that include is what SETS udn_bgp_node_names, so any task referencing it
+  # has to be gated identically. Without this the task runs under --tags web,
+  # where node-names.yml never ran, and dies on an undefined variable.
+  when: udn_phase not in ['preflight', 'web']
 
 # Two different failures, reported separately, because they have nothing to do
 # with each other and only one of them is about the NIC.
