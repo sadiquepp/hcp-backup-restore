@@ -55,6 +55,15 @@ done
 [[ ${#positional[@]} -ge 2 ]] && COUNT="${positional[1]}"
 
 command -v oc >/dev/null || { echo "oc not found in PATH" >&2; exit 1; }
+# oc being on PATH says nothing about whether it can reach a cluster. There is
+# no `set -e` here, so without a usable KUBECONFIG every oc call below fails
+# quietly, the discovery loops iterate over nothing, and the run finishes
+# looking clean while having checked nothing at all.
+oc get ns >/dev/null 2>&1 || {
+    echo "oc cannot reach a cluster - is KUBECONFIG exported?" >&2
+    echo "  export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig" >&2
+    exit 1
+}
 
 # Associative arrays and namerefs are bash 4. macOS still ships 3.2 as
 # /bin/bash, where this would fail in ways that look like a cluster problem.

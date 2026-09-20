@@ -91,6 +91,15 @@ done
 RUN_CLIENTS=$(( WITH_VMS || WITH_NETNS ))
 
 command -v oc >/dev/null || { echo "oc not found in PATH" >&2; exit 1; }
+# oc being on PATH says nothing about whether it can reach a cluster. There is
+# no `set -e` here, so without a usable KUBECONFIG every oc call below fails
+# quietly, the discovery loops iterate over nothing, and the run finishes
+# looking clean while having checked nothing at all.
+oc get ns >/dev/null 2>&1 || {
+    echo "oc cannot reach a cluster - is KUBECONFIG exported?" >&2
+    echo "  export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig" >&2
+    exit 1
+}
 if (( BASH_VERSINFO[0] < 4 )); then
     echo "This needs bash 4+; found ${BASH_VERSION}." >&2
     echo "On macOS: brew install bash, then run it with /opt/homebrew/bin/bash" >&2

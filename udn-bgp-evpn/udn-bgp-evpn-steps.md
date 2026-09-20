@@ -830,6 +830,9 @@ ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
 ```
 
 ```bash
+# KUBECONFIG must be exported - the script discovers each pod's live address
+# with `oc`, and that is what its STALE check compares the proxy against.
+export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
 scripts/udn-web-demo.sh --proxy
 ```
 
@@ -941,6 +944,10 @@ ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass \
 > (`setup_bm_host.yaml --tags dns`).
 
 ```bash
+# KUBECONFIG must be exported. Every mode of this script reads the pods'
+# live addresses with `oc` first; for --proxy that is what the STALE check
+# compares against, so without it that check silently never fires.
+export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
 scripts/udn-web-demo.sh --proxy
 ```
 

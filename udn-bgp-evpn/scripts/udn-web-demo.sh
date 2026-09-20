@@ -27,6 +27,15 @@
 # VLAN tag on their fabric interface.
 #
 # Needs --tags web for the pods and --tags clabtenantclients for the VMs.
+#
+# EXPORT KUBECONFIG FIRST. Every mode, --proxy included, discovers the pods
+# and their live addresses with `oc` before it probes anything:
+#
+#   export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
+#
+# For --proxy it is what makes the STALE check possible - the comparison
+# between where the proxy points and where the pod actually is. Without it
+# that check has nothing to compare against and silently never fires.
 set -uo pipefail
 
 PORT="${UDN_WEB_PORT:-8080}"
@@ -47,12 +56,24 @@ for arg in "$@"; do
         --netns|--netns-only) (( EXPLICIT )) || WITH_VMS=0; EXPLICIT=1; WITH_NETNS=1 ;;
         --vms|--vms-only)     (( EXPLICIT )) || WITH_NETNS=0; EXPLICIT=1; WITH_VMS=1 ;;
         --proxy)              (( EXPLICIT )) || { WITH_VMS=0; WITH_NETNS=0; }; EXPLICIT=1; WITH_PROXY=1 ;;
-        -h|--help)    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        # Print the whole comment header rather than a fixed line range: a
+        # hard-coded '2,30p' silently truncated --help the moment the header
+        # grew. sed stops at the first line that is not a comment.
+        -h|--help)    sed -n '2,/^[^#]/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
     esac
 done
 
 command -v oc >/dev/null || { echo "oc not found in PATH" >&2; exit 1; }
+# oc being on PATH says nothing about whether it can reach a cluster. There is
+# no `set -e` here, so without a usable KUBECONFIG every oc call below fails
+# quietly, the discovery loops iterate over nothing, and the run finishes
+# looking clean while having checked nothing at all.
+oc get ns >/dev/null 2>&1 || {
+    echo "oc cannot reach a cluster - is KUBECONFIG exported?" >&2
+    echo "  export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig" >&2
+    exit 1
+}
 if (( BASH_VERSINFO[0] < 4 )); then
     echo "This needs bash 4+; found ${BASH_VERSION}." >&2; exit 1
 fi

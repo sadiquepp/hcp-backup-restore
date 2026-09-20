@@ -23,6 +23,15 @@ SSH_KEY="${UDN_CLIENT_SSH_KEY:-$HOME/.ssh/lab_rsa}"
 SSH_USER="${UDN_CLIENT_SSH_USER:-root}"
 
 command -v oc >/dev/null || { echo "oc not found in PATH" >&2; exit 1; }
+# oc being on PATH says nothing about whether it can reach a cluster. There is
+# no `set -e` here, so without a usable KUBECONFIG every oc call below fails
+# quietly, the discovery loops iterate over nothing, and the run finishes
+# looking clean while having checked nothing at all.
+oc get ns >/dev/null 2>&1 || {
+    echo "oc cannot reach a cluster - is KUBECONFIG exported?" >&2
+    echo "  export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig" >&2
+    exit 1
+}
 mkdir -p "$OUT"
 echo "Writing to $OUT"
 
