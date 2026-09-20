@@ -152,6 +152,15 @@ udn_bgp_ovnkube_namespace: openshift-ovn-kubernetes
 ## So the check waits rather than sampling once. These bound that wait; when it
 ## expires the assert below it still fires with the full diagnostic, so a real
 ## fault is reported exactly as before - just not a transient one.
+## `oc debug` has to schedule a pod on the node, and that fails transiently
+## - most often while the node is still rolling out after the Network CR
+## patch. The failure is `unable to create the debug pod`, and it leaves
+## stdout empty, which looks exactly like the thing being checked for being
+## absent. These bound the retry on the POD; whether the NIC is there is a
+## separate assert that only runs once the command actually executed.
+udn_bgp_nic_check_retries: 6
+udn_bgp_nic_check_delay: 10
+
 udn_bgp_fwd_check_retries: 12
 udn_bgp_fwd_check_delay: 10
 

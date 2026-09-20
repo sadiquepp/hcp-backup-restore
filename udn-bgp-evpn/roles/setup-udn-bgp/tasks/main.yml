@@ -340,7 +340,41 @@
   register: udn_bgp_fabric_nic_present
   changed_when: false
   failed_when: false
-  when: udn_phase not in ['preflight', 'web']
+  # Retry the DEBUG POD, not the MAC. `oc debug` has to schedule a pod on the
+  # node, and that fails transiently - the node may still be rolling out after
+  # the Network CR patch, or the API may simply be busy:
+  #
+  #   error: unable to create the debug pod "worker3-debug-vxp7t"
+  #
+  # When it fails, stdout is EMPTY, and an empty stdout is indistinguishable
+  # from "the MAC is not there" unless rc is looked at. That sent a reader to
+  # `virsh domiflist` for a NIC that was present and correct.
+  until: udn_bgp_fabric_nic_present.rc == 0
+  retries: "{{ udn_bgp_nic_check_retries }}"
+  delay: "{{ udn_bgp_nic_check_delay }}"
+
+# Two different failures, reported separately, because they have nothing to do
+# with each other and only one of them is about the NIC.
+- name: Fail if a node could not be inspected at all
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      Could not inspect node {{ udn_bgp_node_names[item.item.ip_key] }} -
+      `oc debug` never ran the command, so this says NOTHING about its fabric
+      NIC. It reported: {{ item.stderr | default('') | trim }}
+      -- "unable to create the debug pod" means the pod could not be
+      scheduled, usually because the node is still rolling out after the
+      Network CR patch, or the API server is busy. This already retried
+      {{ udn_bgp_nic_check_retries }} times at
+      {{ udn_bgp_nic_check_delay }}s. Check `oc get node
+      {{ udn_bgp_node_names[item.item.ip_key] }}` is Ready and re-run; do not
+      go looking at libvirt for this one.
+    success_msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] }}: inspected.
+  loop: "{{ udn_bgp_fabric_nic_present.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.ip_key | default('?') }}"
+  when: item.skipped is not defined
 
 - name: Fail with the command that fixes it if a fabric NIC is missing
   ansible.builtin.assert:
