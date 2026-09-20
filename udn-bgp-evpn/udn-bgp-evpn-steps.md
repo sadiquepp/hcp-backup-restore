@@ -59,6 +59,35 @@ three; **9** is written to be used after any of them.
 
 ---
 
+## One command, for path C
+
+Everything below, for the two-cluster EVPN lab, is also a single script:
+
+```bash
+cd udn-bgp-evpn
+./build-lab.sh                      # the whole thing
+./build-lab.sh --list               # the nine steps
+./build-lab.sh --dry-run            # print every command, run nothing
+./build-lab.sh --from evpn          # resume after a failure
+./build-lab.sh --only web           # re-run one step
+```
+
+It reads the vault password from a file - `--vault-password-file PATH`, or
+`$ANSIBLE_VAULT_PASSWORD_FILE` - rather than prompting nine times. The hub and
+the SNO install **in parallel**, each to its own log under `build-logs/`,
+because two Ansible runs sharing a terminal interleave line by line. On a
+failure it names the step and prints the `--from` that resumes it.
+
+It is **not** a playbook, and `import_playbook` cannot replace it: each phase
+here is tagged `never`, so it runs only when its tag is named on the command
+line, and an import has no way to name one. The details are in the script's own
+header.
+
+The per-step commands below are still the ones to use when a phase fails -
+the script runs exactly these, in this order.
+
+---
+
 ## 0. Pick your destination
 
 Three transports, each a complete stopping point. **You do not have to walk
