@@ -35,7 +35,7 @@ spec:
         neighbors:
           - address: {{ t.vrf_prefix }}.{{ clab_fabric_router_octet }}
             asn: {{ clab_leaf1_asn }}
-{%- if udn_bgp_password | default('') | length > 0 %}
+{% if udn_bgp_password | default('') | length > 0 %}
             # TCP-MD5 on this session. Emitted only when udn_bgp_password is
             # set in vault.yaml; with it unset this block is absent entirely
             # and the manifest is byte-identical to an unauthenticated lab.
@@ -47,7 +47,7 @@ spec:
             passwordSecret:
               name: {{ udn_bgp_password_secret }}
               namespace: {{ udn_bgp_frrk8s_namespace }}
-{%- endif %}
+{% endif %}
             holdTime: 9s
             keepaliveTime: 3s
             port: 179

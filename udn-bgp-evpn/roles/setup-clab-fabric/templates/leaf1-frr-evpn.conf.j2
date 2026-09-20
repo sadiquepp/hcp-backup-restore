@@ -50,18 +50,18 @@ router bgp {{ clab_leaf1_asn }}
  ! Underlay to the spine - carries loopbacks and the VTEP aggregate.
  neighbor 10.1.0.2 remote-as {{ clab_spine_asn }}
  neighbor 10.1.0.2 description spine-underlay
-{%- if udn_bgp_password | default('') | length > 0 %}
+{% if udn_bgp_password | default('') | length > 0 %}
  neighbor 10.1.0.2 password {{ udn_bgp_password }}
-{%- endif %}
+{% endif %}
  !
  ! Overlay to the spine, sourced from the loopback (not on the p2p link).
  neighbor 10.0.0.254 remote-as {{ clab_spine_asn }}
  neighbor 10.0.0.254 description spine-evpn
  neighbor 10.0.0.254 update-source lo0
  neighbor 10.0.0.254 ebgp-multihop 3
-{%- if udn_bgp_password | default('') | length > 0 %}
+{% if udn_bgp_password | default('') | length > 0 %}
  neighbor 10.0.0.254 password {{ udn_bgp_password }}
-{%- endif %}
+{% endif %}
  !
  ! The OCP nodes. One session each, carrying BOTH address families: ipv4
  ! unicast so the node can learn its way to the other VTEPs, and l2vpn evpn
@@ -70,9 +70,9 @@ router bgp {{ clab_leaf1_asn }}
 {% for n in clab_fabric_nodes %}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ n.asn | default(clab_cluster_asn) }}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }} [{{ n.cluster | default('?') }}]
-{%- if udn_bgp_password | default('') | length > 0 %}
+{% if udn_bgp_password | default('') | length > 0 %}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} password {{ udn_bgp_password }}
-{%- endif %}
+{% endif %}
 {% endfor %}
  !
  address-family ipv4 unicast

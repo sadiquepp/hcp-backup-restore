@@ -25,6 +25,19 @@ udn_bgp_frrk8s_namespace: openshift-frr-k8s
 ##
 ## The CRD requires this Secret to be type kubernetes.io/basic-auth with the
 ## key 'password', in the frr-k8s namespace - one Secret serves every node.
+##
+## The guards around it are plain `{% if %}` / `{% endif %}` and MUST STAY
+## that way. Ansible's template module sets trim_blocks=True, which already
+## eats the newline after a block tag, so a plain tag on its own line emits
+## nothing at all when false. Adding `{%- ` on top of that also eats the
+## newline BEFORE the tag, which splices the previous line onto the next:
+##
+##   neighbor .34 description worker1 [hub] neighbor .34 password x neighbor .35 remote-as 64512
+##
+## FRR then never sees worker2's remote-as, and every later line for it
+## fails with 'Specify remote-as or peer-group commands first'. Plain jinja
+## defaults trim_blocks to False, so this does NOT reproduce in a bare
+## render - it has to be checked with trim_blocks=True.
 udn_bgp_password_secret: udn-bgp-fabric-key
 
 ## Label that marks the FRRConfiguration objects RouteAdvertisements is
