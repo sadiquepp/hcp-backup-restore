@@ -46,6 +46,19 @@ spec:
         neighbors:
           - address: {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
             asn: {{ clab_leaf1_asn }}
+{%- if udn_bgp_password | default('') | length > 0 %}
+            # TCP-MD5 on this session. Emitted only when udn_bgp_password is
+            # set in vault.yaml; with it unset this block is absent entirely
+            # and the manifest is byte-identical to an unauthenticated lab.
+            #
+            # passwordSecret, not password: the plain field would put the key
+            # into this rendered file under udn-bgp/, which is on disk in the
+            # clear. The CRD makes them mutually exclusive, so it is one or
+            # the other and this is the one worth having.
+            passwordSecret:
+              name: {{ udn_bgp_password_secret }}
+              namespace: {{ udn_bgp_frrk8s_namespace }}
+{%- endif %}
             # Short timers so a lab session converges in seconds. The leaf
             # runs FRR's 'datacenter' defaults, which match.
             holdTime: 9s

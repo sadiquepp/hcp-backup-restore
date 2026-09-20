@@ -11,6 +11,22 @@
 ## silently inert: the CR is accepted and nothing ever reads it.
 udn_bgp_frrk8s_namespace: openshift-frr-k8s
 
+## Optional TCP-MD5 on every BGP session, cluster<->leaf1 and leaf<->spine.
+##
+## OFF unless udn_bgp_password is set, and it is deliberately NOT given a
+## default here: `| default('')` in the templates covers it being absent, and
+## every place that consumes it is wrapped in a conditional, so an unset key
+## renders manifests and frr.conf byte-identical to an unauthenticated lab.
+## No Secret is created either - an EMPTY password is not the same as none.
+## FRR still adds the MD5 option to the TCP segments, so a session with an
+## empty key fails against a peer with no key, and nothing logs why.
+##
+## The key belongs in vault.yaml. vars.yaml is committed to a public repo.
+##
+## The CRD requires this Secret to be type kubernetes.io/basic-auth with the
+## key 'password', in the frr-k8s namespace - one Secret serves every node.
+udn_bgp_password_secret: udn-bgp-fabric-key
+
 ## Label that marks the FRRConfiguration objects RouteAdvertisements is
 ## allowed to build on. RouteAdvertisements refuses to act if its
 ## frrConfigurationSelector matches more than one FRRConfiguration, so this

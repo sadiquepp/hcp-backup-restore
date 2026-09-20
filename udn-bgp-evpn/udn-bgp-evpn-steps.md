@@ -121,8 +121,9 @@ Skip to 1.3 if the hub is already built.
 ansible-vault create vault.yaml
 ```
 
-Five keys, and only five - this lab needs none of the OADP or Ceph credentials
-`steps.md` lists, because it runs neither:
+Five required keys, and only five - this lab needs none of the OADP or Ceph
+credentials `steps.md` lists, because it runs neither. A sixth, optional one
+follows them:
 
 ```yaml
 ## Red Hat subscription, for the helper and the containerlab VM. Both are bare
@@ -144,6 +145,24 @@ dns_forwarders:
   - 10.x.x.x
   - 10.x.x.x
 ```
+
+```yaml
+## OPTIONAL, and off unless you set it. A shared key (TCP-MD5) on every BGP
+## session - cluster<->leaf1 and leaf<->spine alike. Leave it out and every
+## session is unauthenticated, which is this lab's default and what all the
+## output below assumes.
+udn_bgp_password: "a-shared-key"
+```
+
+> **If you set it, both halves must be re-run.** The fabric's copy comes from
+> `--tags fabric` and the cluster's from the phase tag, and a session where
+> only one end has the key **does not come up, and neither end logs why** - the
+> same shape of silent failure as giving two clusters one ASN. After adding or
+> changing the key, re-run `--tags fabric` *and* your phase tag.
+>
+> It is stored as a Secret (`kubernetes.io/basic-auth`, key `password`) in
+> `openshift-frr-k8s` and referenced with `passwordSecret`, so the key never
+> appears in the manifests written under `udn-bgp/`.
 
 > **`dns_forwarders` is the one with a working default**, so it is optional in
 > the strict sense: leave it out and the role forwards to
@@ -1031,6 +1050,7 @@ the return code**.
 | A hot-plugged fabric NIC has forwarding off | `net.ipv4.ip_forward` reaches interfaces existing at that moment and does not set `conf.default.forwarding` |
 | `the fabric NIC reports 'enpXsY 0'` on the first run, clean on a re-run | A race, not a fault. The playbook writes the sysctl itself, but the cluster is still converging around it - Tuned rolling its profile out, the NNCP settling - and something puts it back before the check reads it. The check now waits (`udn_bgp_fwd_check_retries` x `udn_bgp_fwd_check_delay`, 120s) instead of sampling once. If it still fails after that wait, it is real: something re-created or reconfigured the netdev |
 | `-e cluster=sno` | No such variable. It is `-e udn_bgp_cluster=sno` |
+| Every BGP session goes Idle/Active after setting `udn_bgp_password` | Only one half was re-run. The key has to be on both ends of each session - re-run `--tags fabric` **and** the phase tag. TCP-MD5 mismatches are not logged by either peer |
 
 Full troubleshooting table:
 [README.md](README.md#udn-over-bgp-vrf-lite-and-evpn-containerlab-fabric).

@@ -81,6 +81,9 @@ router bgp {{ clab_leaf1_asn }}
 {% for n in clab_fabric_nodes %}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ n.asn | default(clab_cluster_asn) }}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }} [{{ n.cluster | default('?') }}]
+{%- if udn_bgp_password | default('') | length > 0 %}
+ neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} password {{ udn_bgp_password }}
+{%- endif %}
 {% endfor %}
  !
  address-family ipv4 unicast
@@ -111,6 +114,9 @@ router bgp {{ clab_leaf1_asn }} vrf {{ t.name }}
 {% for n in clab_fabric_nodes %}
  neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ n.asn | default(clab_cluster_asn) }}
  neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }} [{{ n.cluster | default('?') }}] ({{ t.name }})
+{%- if udn_bgp_password | default('') | length > 0 %}
+ neighbor {{ t.vrf_prefix }}.{{ ip_list[n.ip_key] }} password {{ udn_bgp_password }}
+{%- endif %}
 {% endfor %}
  !
  address-family ipv4 unicast

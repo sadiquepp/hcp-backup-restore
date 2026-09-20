@@ -24,16 +24,28 @@ router bgp {{ clab_spine_asn }}
  bgp log-neighbor-changes
  neighbor 10.1.0.1 remote-as {{ clab_leaf1_asn }}
  neighbor 10.1.0.1 description leaf1-underlay
+{%- if udn_bgp_password | default('') | length > 0 %}
+ neighbor 10.1.0.1 password {{ udn_bgp_password }}
+{%- endif %}
  neighbor 10.1.0.6 remote-as {{ clab_leaf2_asn }}
  neighbor 10.1.0.6 description leaf2-underlay
+{%- if udn_bgp_password | default('') | length > 0 %}
+ neighbor 10.1.0.6 password {{ udn_bgp_password }}
+{%- endif %}
  neighbor 10.0.0.1 remote-as {{ clab_leaf1_asn }}
  neighbor 10.0.0.1 description leaf1-evpn
  neighbor 10.0.0.1 update-source lo0
  neighbor 10.0.0.1 ebgp-multihop 3
+{%- if udn_bgp_password | default('') | length > 0 %}
+ neighbor 10.0.0.1 password {{ udn_bgp_password }}
+{%- endif %}
  neighbor 10.0.0.2 remote-as {{ clab_leaf2_asn }}
  neighbor 10.0.0.2 description leaf2-evpn
  neighbor 10.0.0.2 update-source lo0
  neighbor 10.0.0.2 ebgp-multihop 3
+{%- if udn_bgp_password | default('') | length > 0 %}
+ neighbor 10.0.0.2 password {{ udn_bgp_password }}
+{%- endif %}
  !
  address-family ipv4 unicast
   network 10.0.0.254/32

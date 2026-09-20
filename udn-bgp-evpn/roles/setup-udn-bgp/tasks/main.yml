@@ -483,6 +483,42 @@
     label: "{{ item.item.ip_key | default('?') }}"
   when: item.skipped is not defined
 
+# Before the first FRRConfiguration that may reference it. A neighbor whose
+# passwordSecret names a Secret that does not exist yet does not come up, and
+# frr-k8s does not retry it on a schedule you would want to wait for.
+#
+# Skipped entirely when udn_bgp_password is unset, which is the default. An
+# empty Secret would be worse than none: FRR still adds the MD5 option to the
+# TCP segments, so the session would fail against a leaf with no key and
+# nothing would log why.
+#
+# --dry-run=client | oc apply rather than `oc create`, so re-running with a
+# changed key updates it instead of failing on AlreadyExists.
+- name: Create the BGP authentication secret
+  ansible.builtin.shell:
+    cmd: >-
+      oc create secret generic {{ udn_bgp_password_secret }}
+      -n {{ udn_bgp_frrk8s_namespace }}
+      --type=kubernetes.io/basic-auth
+      --from-literal=password='{{ udn_bgp_password }}'
+      --dry-run=client -o yaml | oc apply -f -
+  no_log: true
+  when:
+    - udn_phase not in ['preflight', 'web']
+    - udn_bgp_password | default('') | length > 0
+
+- name: Report whether BGP sessions are authenticated
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'BGP TCP-MD5 is ON - secret ' ~ udn_bgp_password_secret ~ ' in '
+         ~ udn_bgp_frrk8s_namespace ~ '. The FABRIC half must carry the same
+         key: re-run --tags fabric after changing it, or every session drops
+         with nothing logged on either end.'
+         if (udn_bgp_password | default('') | length > 0)
+         else 'BGP sessions are unauthenticated (udn_bgp_password unset in
+               vault.yaml). This is the default.' }}
+  when: udn_phase not in ['preflight', 'web']
+
 - name: Create the base BGP peering in the default VRF
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/frrconfiguration-default.yaml"
