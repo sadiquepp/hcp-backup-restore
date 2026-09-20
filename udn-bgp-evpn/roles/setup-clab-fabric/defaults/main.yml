@@ -66,3 +66,14 @@ udn_tenant_client_base_image_path: "{{ base_image_dir }}/{{ udn_tenant_client_ba
 ## Same management-NIC OUI as the phase-2 client, so the two schemes do not
 ## collide: mgmt is ...:e2:54:<octet>, fabric is clab_fabric_mac_prefix:<octet>.
 udn_tenant_client_mgmt_mac_prefix: "52:54:00:e2:54"
+
+## How long fabric-verify.yml waits for leaf1's bgpd to hold every node as a
+## neighbour after a deploy. `vtysh -b` pushes frr.conf into a bgpd that is
+## still starting, so the summary can be read while the config is half
+## applied - and a partly applied config looks identical to a rejected one.
+##
+## 12 x 5s. Raised from a single sample when enabling udn_bgp_password made
+## the window wider: every `neighbor ... password` resets that peer and sets
+## TCP_MD5SIG on its socket.
+clab_leaf1_bgp_retries: 12
+clab_leaf1_bgp_delay: 5
