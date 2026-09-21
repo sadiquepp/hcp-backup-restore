@@ -73,9 +73,9 @@ Everything below, for the two-cluster EVPN lab, is also a single script:
 
 ```bash
 cd udn-bgp-evpn
-./build-lab.sh                      # all nine steps, from a BARE lab host
+./build-lab.sh                      # all ten steps, from a BARE lab host
 ./build-lab.sh --from fabric        # clusters already up - the usual entry point
-./build-lab.sh --list               # the nine steps
+./build-lab.sh --list               # the ten steps
 ./build-lab.sh --dry-run            # print every command, run nothing
 ./build-lab.sh --from evpn          # resume after a failure
 ./build-lab.sh --only web           # re-run one step
