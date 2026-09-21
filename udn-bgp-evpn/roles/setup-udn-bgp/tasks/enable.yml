@@ -175,10 +175,14 @@
 # This task used to be named "Confirm FRR-K8s is running on every node" and
 # check `oc get daemonset ... -o wide` for rc == 0 - which confirms that the
 # DaemonSet OBJECT EXISTS, and nothing else. A DaemonSet with 2 of 3 pods
-# ready passed it, every downstream task passed too, and the first sign of
-# trouble was a node whose BGP session to the leaf never came up: no frr-k8s
-# pod there means nothing is listening on TCP/179, and the leaf sits in
-# Connect with 0 messages exchanged in either direction forever.
+# ready passes it, and so does every downstream task. The failure it lets
+# through: no frr-k8s pod on a node means nothing is listening on TCP/179,
+# so the leaf sits in Connect with 0 messages exchanged in either direction
+# forever, while the cluster stays green.
+#
+# To be clear about provenance - this was found while chasing a different
+# bug with those exact symptoms, and was NOT its cause; that cluster had
+# every pod Running. The check is wrong on its own terms.
 #
 # Compare desiredNumberScheduled against numberReady instead, and wait for
 # them to converge - a rollout legitimately takes a moment. Nothing below
