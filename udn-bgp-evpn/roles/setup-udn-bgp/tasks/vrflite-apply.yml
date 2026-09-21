@@ -6,6 +6,70 @@
 # rendered file shows the full port list that will be written, which is the
 # thing worth checking with your own eyes at least once.
 
+# Fail here rather than fifteen minutes later, on the thing this phase cannot
+# work without: the border leaf holding each tenant's gateway address.
+#
+# VRF-Lite peers every node to <vrf_prefix>.1 on leaf1, one session per tenant
+# over a VLAN sub-interface. Only the 'bgp' containerlab topology puts those
+# addresses on leaf1. The 'evpn' topology does not - there the tenant VRFs and
+# their external networks live on leaf2, leaf1 holds no tenant VRF at all, and
+# `vrf_prefix` appears nowhere in its topology file.
+#
+# So running this phase against an EVPN fabric peers every node at an address
+# that does not exist. Every session sits in Active/Connect forever, and the
+# rebind logic below dutifully restarts frr-k8s and re-checks, because from
+# the cluster's side that is indistinguishable from bgpd having failed to bind
+# to the kernel VRF. It is not a cluster fault and no restart can fix it.
+#
+# build-lab.sh builds the evpn topology, so this is the state anyone lands in
+# who builds the lab with it and then tries VRF-Lite.
+- name: Ask the border leaf for its addresses
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-leaf1 ip -o addr show"
+  delegate_to: "{{ clab_exec_host }}"
+  register: udn_bgp_leaf_addrs
+  changed_when: false
+  failed_when: false
+
+- name: Fail if the fabric is not the VRF-Lite topology
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_leaf_addrs.rc == 0
+      - udn_bgp_missing_gateways | length == 0
+    fail_msg: >-
+      {{ 'The border leaf could not be reached at all: `docker exec
+      clab-' ~ clab_lab_name ~ '-leaf1 ip -o addr show` failed on
+      ' ~ clab_exec_host ~ '. Check the fabric is deployed
+      (`--tags fabric`) before this phase.'
+      if udn_bgp_leaf_addrs.rc != 0 else
+      'leaf1 does not hold the tenant gateway address for:
+      ' ~ (udn_bgp_missing_gateways | join(", ")) ~ '.
+      VRF-Lite peers every node to <vrf_prefix>.1 on leaf1, one session per
+      tenant over a VLAN sub-interface, and only the bgp topology puts those
+      addresses there. The evpn topology keeps the tenant VRFs on leaf2 and
+      gives leaf1 none, so every tenant session would sit in Active or
+      Connect forever and no amount of restarting frr-k8s would change it -
+      the peer does not exist.
+      Rebuild the fabric for this phase and run it again:
+        ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml
+          --tags fabric -e clab_topology=bgp
+        ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml
+          --tags vrflite -e udn_bgp_cluster=' ~ udn_bgp_cluster ~ '
+      Note build-lab.sh builds the evpn topology, so a lab built with it is
+      in exactly this state. Going back to EVPN afterwards is the same move
+      with -e clab_topology=evpn.' }}
+    success_msg: >-
+      leaf1 holds a gateway for every tenant
+      ({{ udn_bgp_tenants | map(attribute='name') | join(', ') }}).
+  vars:
+    udn_bgp_missing_gateways: >-
+      {{ udn_bgp_tenants
+         | rejectattr('vrf_prefix', 'in',
+                      udn_bgp_leaf_addrs.stdout | default('')
+                      | regex_findall('inet (\d+\.\d+\.\d+)\.'
+                                      ~ clab_fabric_router_octet ~ '/'))
+         | map(attribute='name') | list }}
+
 - name: Render a VRF-Lite policy per node and tenant
   ansible.builtin.template:
     src: nncp-vrflite.yaml.j2
