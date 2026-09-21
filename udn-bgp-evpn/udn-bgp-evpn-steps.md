@@ -9,6 +9,10 @@ actually builds, and how to build it by hand:
 **[clab-fabric.md](clab-fabric.md)**. Design notes, constraints and the
 troubleshooting table: **[README.md](README.md#udn-over-bgp-vrf-lite-and-evpn-containerlab-fabric)**.
 
+Not using the simulated fabric at all - a real fabric the network team has
+already configured? **[real-fabric.md](real-fabric.md)** is the cluster side
+on its own, with the lab scaffolding removed.
+
 > **`ClusterUserDefinedNetwork`, never `cudn`.** The short name does not work
 > reliably against this API. Every `oc` line below spells it out.
 

@@ -19,6 +19,12 @@ how to build the whole fabric by hand.
 just want to build it: pick shared VRF, VRF-Lite or EVPN up front, and it names
 the sections for that path with the test and expected output after each one.
 
+**[real-fabric.md](real-fabric.md)** is for the other case: no containerlab at
+all, a real fabric the network team has already configured for the tenants.
+The cluster-side objects on their own, with the lab scaffolding removed and
+the places a real fabric legitimately differs - `Managed` VTEP allocation
+above all - called out.
+
 **[bgp-evpn.md](bgp-evpn.md)** takes `setup-udn-bgp` apart into the `oc`
 commands it runs, phase by phase, with every manifest shown filled in rather
 than as a template. Read that to understand the mechanism, to debug a phase
