@@ -164,6 +164,14 @@ udn_bgp_nic_check_delay: 10
 udn_bgp_fwd_check_retries: 12
 udn_bgp_fwd_check_delay: 10
 
+# How long to wait for each of this cluster's BGP sessions to the border leaf
+# to reach Established. Three minutes. Once TCP works the session comes up in
+# seconds - holdTime is 9s and keepaliveTime 3s - so this is not waiting for
+# BGP, it is waiting for whatever is still converging around it: an
+# ovnkube-node rollout, frr-k8s reloading, an NNCP landing the fabric address.
+udn_bgp_session_check_retries: 18
+udn_bgp_session_check_delay: 10
+
 udn_bgp_vtep_annotation_retries: 12
 udn_bgp_vtep_annotation_delay: 10
 udn_bgp_vtep_annotation_retries_after_restart: 30

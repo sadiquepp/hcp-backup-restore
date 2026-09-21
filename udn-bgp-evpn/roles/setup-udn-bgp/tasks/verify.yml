@@ -174,6 +174,80 @@
   ansible.builtin.debug:
     msg: "{{ udn_bgp_leaf_summary.stdout_lines }}"
 
+# The summary above is PRINTED, and for a long time that was all. A build
+# once ran to completion with two of five sessions in Connect - one hub
+# worker and the whole SNO - because nothing looked at the output. The first
+# sign was two unreachable tenants found by hand, ten hours later.
+#
+# `show bgp neighbor <addr>` rather than parsing the summary table: the
+# summary's State/PfxRcd column holds a NUMBER when the session is up and a
+# STATE WORD when it is not, in a field whose width moves with the peer's
+# hostname, which is exactly the kind of parsing that reports the wrong thing
+# under a format change. 'BGP state = Established' is one stable string.
+#
+# Scoped to THIS cluster's nodes, not every node on the fabric. leaf1 peers
+# with both clusters, and running the hub's phase on a lab where the SNO half
+# has not been built yet must not fail on the SNO's session legitimately
+# being down. Between the hub run and the sno run every session is covered.
+- name: Wait for each of this cluster's BGP sessions to the border leaf
+  ansible.builtin.command:
+    cmd: >-
+      docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
+      -c 'show bgp neighbor {{ clab_fabric_prefix }}.{{ ip_list[item.ip_key] }}'
+  delegate_to: "{{ clab_exec_host }}"
+  loop: "{{ udn_bgp_cluster_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  register: udn_bgp_session
+  changed_when: false
+  # As elsewhere in this file: absorb the timeout so the assert below reports
+  # which node and what to run, instead of Ansible's bare "Timeout when
+  # waiting for ...".
+  failed_when: false
+  until: udn_bgp_session.stdout | default('') is search('BGP state = Established')
+  retries: "{{ udn_bgp_session_check_retries }}"
+  delay: "{{ udn_bgp_session_check_delay }}"
+
+- name: Fail with the node whose session to the border leaf never came up
+  ansible.builtin.assert:
+    that: item.stdout | default('') is search('BGP state = Established')
+    fail_msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] | default(item.item.ip_key) }}
+      ({{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}) is
+      '{{ item.stdout | default('') | regex_search('BGP state = \S+')
+          | default('not reported by the leaf at all', true) }}'
+      after {{ udn_bgp_session_check_retries | int * udn_bgp_session_check_delay | int }}s.
+      Nothing this node advertises reaches the fabric and nothing from the
+      fabric reaches its pods, while every cluster-side object stays green -
+      the CUDN is realised, the VTEP annotation is present, the
+      FRRConfiguration is applied. Work it in this order.
+      (1) `docker exec clab-{{ clab_lab_name }}-leaf1 ping -c2
+      {{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}` - no reply
+      means the fabric NIC has no address or is not on the bridge, which is
+      an NNCP or a libvirt problem, not a BGP one.
+      (2) Ping works but the session does not: it is TCP/179 specifically.
+      `oc debug node/{{ udn_bgp_node_names[item.item.ip_key] | default('<node>') }}
+      --quiet -- chroot /host timeout 20 tcpdump -ni <fabric nic> 'tcp port 179'`.
+      SYNs arriving with no reply means the node's kernel is dropping them;
+      SYN answered by RST means nothing is listening; nothing at all means
+      the leaf is not trying and the fault is on the leaf.
+      (3) A kernel that drops the SYN while ICMP works is the TCP-MD5
+      signature - the signature rides in the TCP header, so ping is
+      unaffected, and a key on one end only is discarded before BGP ever sees
+      it, silently, at both ends. Compare
+      `docker exec clab-{{ clab_lab_name }}-leaf1 vtysh -c 'show running-config'
+      | grep {{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}
+      against `oc get frrnodestate <node> -o jsonpath='{.status.runningConfig}'`
+      - both ends must have a password line or neither.
+      Known to have happened once with identical config at both ends and no
+      cause found; a rebuild cleared it.
+    success_msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] | default(item.item.ip_key) }}
+      ({{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}): Established.
+  loop: "{{ udn_bgp_session.results }}"
+  loop_control:
+    label: "{{ item.item.ip_key }}"
+
 - name: Show each tenant VRF's routing table on the border leaf
   ansible.builtin.command:
     cmd: >-
