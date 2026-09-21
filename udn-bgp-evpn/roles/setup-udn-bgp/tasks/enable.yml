@@ -172,14 +172,71 @@
     - udn_bgp_has_evpn | bool
     - udn_bgp_vtep_crd_after.rc | default(1) != 0
 
-- name: Confirm FRR-K8s is running on every node
+# This task used to be named "Confirm FRR-K8s is running on every node" and
+# check `oc get daemonset ... -o wide` for rc == 0 - which confirms that the
+# DaemonSet OBJECT EXISTS, and nothing else. A DaemonSet with 2 of 3 pods
+# ready passed it, every downstream task passed too, and the first sign of
+# trouble was a node whose BGP session to the leaf never came up: no frr-k8s
+# pod there means nothing is listening on TCP/179, and the leaf sits in
+# Connect with 0 messages exchanged in either direction forever.
+#
+# Compare desiredNumberScheduled against numberReady instead, and wait for
+# them to converge - a rollout legitimately takes a moment. Nothing below
+# this point means anything on a node without frr-k8s.
+- name: Confirm FRR-K8s is ready on every node
+  ansible.builtin.command:
+    cmd: >-
+      oc get daemonset frr-k8s -n {{ udn_bgp_frrk8s_namespace }}
+      -o jsonpath={.status.desiredNumberScheduled}/{.status.numberReady}
+  register: udn_bgp_frrk8s_ready
+  retries: 20
+  delay: 15
+  # Jinja's `and` short-circuits, so the length test guards the two that
+  # index into the split.
+  until: >-
+    udn_bgp_frrk8s_ready.rc == 0
+    and ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | length == 2)
+    and (((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | first | int) > 0)
+    and (((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | last | int)
+         == ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | first | int))
+  changed_when: false
+  # Same reason as the forwarding check in verify.yml: let the assert below
+  # report which node and what to run, rather than dying on Ansible's bare
+  # "Timeout when waiting for ...".
+  failed_when: false
+
+- name: Fail with the pod to look at if FRR-K8s is not ready everywhere
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_frrk8s_ready.rc == 0
+      - (udn_bgp_frrk8s_ready.stdout | default('')).split('/') | length == 2
+      - ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | first | int) > 0
+      - ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | last | int)
+        == ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | first | int)
+    fail_msg: >-
+      The frr-k8s DaemonSet in {{ udn_bgp_frrk8s_namespace }} reports
+      '{{ udn_bgp_frrk8s_ready.stdout | default('(no output)') | trim }}'
+      (desired, ready) after waiting
+      {{ 20 * 15 }}s. Every node needs an frr-k8s pod: it is what holds the
+      BGP session to the leaf, so a node without one leaves the leaf in
+      Connect with 0 messages sent and 0 received - a session that looks
+      configured from both sides and has never existed. Nothing this role
+      does after this point is meaningful on such a node, and the cluster
+      stays green while its pods are unreachable over the fabric.
+      Find the node with `oc get pods -n {{ udn_bgp_frrk8s_namespace }}
+      -o wide` and read that pod's events; a Pending pod is usually a taint
+      or a resource limit, CrashLoopBackOff is usually the FRR container.
+    success_msg: >-
+      frr-k8s ready on all
+      {{ (udn_bgp_frrk8s_ready.stdout | default('0/0')).split('/') | first }}
+      nodes.
+
+- name: Read the FRR-K8s daemonset for the report
   ansible.builtin.command:
     cmd: "oc get daemonset frr-k8s -n {{ udn_bgp_frrk8s_namespace }} -o wide"
   register: udn_bgp_frrk8s_ds
-  retries: 20
-  delay: 15
-  until: udn_bgp_frrk8s_ds.rc == 0
   changed_when: false
+  failed_when: false
 
 - name: Show the FRR-K8s daemonset
   ansible.builtin.debug:
