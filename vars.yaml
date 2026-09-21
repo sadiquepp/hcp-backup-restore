@@ -1446,6 +1446,17 @@ clab_clusters:
   hub:
     install_folder: "{{ hub_install_folder }}"
     asn: 64512
+    ## Explicit, and it has to be: a cluster with no tenants list builds
+    ## EVERY tenant in udn_bgp_tenants, which since violet was added would
+    ## put the SNO's tenant on the hub as well. violet exists precisely to be
+    ## the one network that is on one cluster only.
+    tenants:
+      - blue
+      - red
+      - orange
+      - green
+      - purple
+
     nodes:
       - domain: hub_worker1
         ip_key: worker1
@@ -1508,6 +1519,19 @@ clab_clusters:
     tenants:
       - green
       - purple
+
+    ## Per-phase override. `tenants_<phase>` wins over `tenants` for that
+    ## phase; any phase without one falls back to the list above.
+    ##
+    ## Needed because this cluster's two jobs want different tenants. Under
+    ## EVPN it shares green and purple with the hub, which is the stretched
+    ## Layer2 test. Under VRF-Lite that same sharing is the problem: no VNI,
+    ## no route target, so both clusters advertise 10.204.0.0/16 into leaf1's
+    ## green VRF and one of them loses. violet is this cluster's own routed
+    ## tenant and is the whole of what it builds under VRF-Lite.
+    tenants_vrflite:
+      - violet
+
     nodes:
       - domain: "{{ sno_name }}"
         ip_key: sno
@@ -1847,6 +1871,40 @@ udn_bgp_tenants:
         - "10.204.64.0/18"
         - "10.204.255.0/24"
     evpn_ip_vni: 501
+
+  ## violet - the SNO's own tenant, and the only one that is not on the hub.
+  ##
+  ## Added for cross-cluster VRF-Lite. green and purple cannot serve that
+  ## purpose: they are Layer2 and deliberately share 10.204.0.0/16 across both
+  ## clusters, which is what makes them a stretched broadcast domain under
+  ## EVPN and what makes them unusable under VRF-Lite, where there is no VNI
+  ## to keep two clusters' identical prefixes apart. Both clusters would
+  ## advertise 10.204.0.0/16 into leaf1's green VRF from different next hops
+  ## and leaf1 would pick a winner.
+  ##
+  ## violet is Layer3 with a subnet of its own, so the fabric holds one
+  ## unambiguous route to it, and the hub's tenants can be leaked into it and
+  ## it into them - see udn_vrf_leaks.
+  ##
+  ## Every number here is outside every existing band: VLAN 160 (tenant
+  ## handoffs are 110-150, client segments 210-250), vrf_prefix .146 (tenants
+  ## are .141-.145), subnet 10.206 (10.200, 10.202 and 10.204 taken), shared
+  ## 10.225 (10.220-10.224 taken), VNIs 600/601. external_prefix is
+  ## 10.226.10.0/24 rather than continuing the 10.210-10.214 band, because
+  ## 10.215-10.219 immediately above it is already the client segments.
+  - name: violet
+    topology: Layer3
+    vlan: 160
+    vrf_prefix: "192.168.146"
+    udn_subnet: "10.206.0.0/16"
+    udn_subnet_shared: "10.225.0.0/16"
+    udn_host_subnet: 24
+    external_prefix: "10.226.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.226.10.1"
+    external_host: "10.226.10.10"
+    evpn_mac_vni: 600
+    evpn_ip_vni: 601
 
 ## Where the rendered containerlab topology and FRR configs are staged, on
 ## whichever host clab_deploy_mode selected.
@@ -2275,3 +2333,31 @@ udn_proxy_selinux_permissive_fallback: true
 udn_vrf_leaks:
   - [blue, green]
   - [red, purple]
+
+  ## violet (SNO) <-> the hub. One partner per DISTINCT subnet, which is the
+  ## condition `import vrf` needs: violet's table must hold exactly one route
+  ## per destination. blue and red both carry 10.200.0.0/16 and green and
+  ## purple both carry 10.204.0.0/16, so importing both halves of either pair
+  ## would put two routes for one prefix into violet's table and FRR would
+  ## install whichever won - reachability that changes on a session flap.
+  ##
+  ## So: orange for 10.202.0.0/16, blue for 10.200.0.0/16, green for
+  ## 10.204.0.0/16. red and purple stay isolated from violet on purpose, and
+  ## are the control - they prove the opening is per-VRF rather than a
+  ## general one, which is the thing a leak test has to distinguish.
+  - [violet, orange]
+  - [violet, blue]
+  - [violet, green]
+
+  ## ONE THING TO CHECK ON THE FIRST RUN, because blue and green already leak
+  ## to each other above. If FRR re-exports a leaked route - imports into
+  ## violet the routes blue itself imported from green - then violet receives
+  ## 10.204.0.0/16 twice, once directly from green and once through blue, and
+  ## the ambiguity this list was built to avoid comes back by the side door.
+  ## If it does not, [violet, green] is doing the work it looks like it is.
+  ##
+  ##   docker exec clab-udnbgp-leaf1 vtysh \
+  ##     -c 'show bgp vrf violet ipv4 unicast 10.204.0.0/16'
+  ##
+  ## One path: as intended, leave this alone. Two paths: drop [violet, green]
+  ## - green arrives through blue regardless - and re-run --tags fabric.
