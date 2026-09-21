@@ -2225,6 +2225,22 @@ udn_web_port: 8080
 ## tests: those run inside the namespaces, which this does not touch.
 udn_proxy_tenants: "{{ udn_web_tenants }}"
 
+## Which phase's tenant lists the ingress should mirror.
+##
+## A cluster can build different tenants in different phases - see
+## clab_clusters.sno.tenants_vrflite - and the ingress has to front what is
+## actually deployed, not what the default list says. This role has no
+## udn_phase of its own (it is the fabric role, run with --tags clabnsproxy),
+## so it derives one from the topology it built: the evpn topology serves the
+## evpn phase, and the bgp topology serves VRF-Lite.
+##
+## The one case that derivation gets wrong is the SHARED phase, which also
+## runs on the bgp topology. Override it there:
+##   -e udn_proxy_phase=shared
+## Getting it wrong is not silent - the ingress fails on the first tenant it
+## cannot find a web pod for, naming the cluster.
+udn_proxy_phase: "{{ 'evpn' if clab_topology | default('bgp') == 'evpn' else 'vrflite' }}"
+
 ## Which clusters the ingress fronts. One hostname per tenant per cluster, all
 ## on one address, with haproxy picking the backend from the Host header.
 ##
@@ -2262,7 +2278,7 @@ udn_proxy_clusters:
 ## The rule: bare name for the first cluster in udn_proxy_clusters, suffixed
 ## for the rest, and a cluster only contributes the tenants it actually builds.
 udn_proxy_names: >-
-  {% for c in udn_proxy_clusters %}{% for t in udn_proxy_tenants %}{% if t in (clab_clusters[c].tenants | default(udn_proxy_tenants)) %}{{ t if c == udn_proxy_clusters[0] else t ~ '-' ~ c }} {% endif %}{% endfor %}{% endfor %}
+  {% for c in udn_proxy_clusters %}{% for t in udn_proxy_tenants %}{% if t in (clab_clusters[c]['tenants_' ~ udn_proxy_phase] | default(clab_clusters[c].tenants | default(udn_proxy_tenants), true)) %}{{ t if c == udn_proxy_clusters[0] else t ~ '-' ~ c }} {% endif %}{% endfor %}{% endfor %}
 
 ## Hostnames are <tenant>.<domain>, pointed at the namespace client's
 ## management address in whatever resolver the lab uses. No DNS? The proxy also

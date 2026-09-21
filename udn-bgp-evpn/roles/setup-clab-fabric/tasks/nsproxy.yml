@@ -27,9 +27,19 @@
 # becomes a hostname: bare for the first cluster in udn_proxy_clusters, suffixed
 # for the rest, so green.<domain> stays hub's and sno's is green-sno.<domain>.
 #
-# A cluster only contributes the tenants it builds - clab_clusters limits the
-# SNO to green and purple - so asking for a tenant it does not have is skipped
-# here rather than failing discovery below on a namespace that never existed.
+# A cluster only contributes the tenants it builds, so asking for a tenant it
+# does not have is skipped here rather than failing discovery below on a
+# namespace that never existed.
+#
+# PER PHASE, not just per cluster. The SNO builds green and purple under EVPN
+# and violet under VRF-Lite (clab_clusters.sno.tenants_vrflite), because a
+# stretched Layer2 tenant cannot work without a VNI to keep two clusters'
+# identical prefixes apart. Reading only `.tenants` sent the ingress looking
+# for a purple web pod on a cluster that, in this phase, has no purple at all
+# - and the failure named --tags web, which would not have helped.
+#
+# udn_proxy_phase carries the phase; see vars.yaml for how it is derived and
+# when to override it.
 - name: Work out which (cluster, tenant) routes the ingress can front
   ansible.builtin.set_fact:
     udn_proxy_routes: >-
@@ -41,7 +51,10 @@
   loop: "{{ udn_proxy_clusters | product(udn_proxy_tenants) | list }}"
   loop_control:
     label: "{{ item.0 }}/{{ item.1 }}"
-  when: item.1 in (clab_clusters[item.0].tenants | default(udn_proxy_tenants))
+  when: >-
+    item.1 in (clab_clusters[item.0]['tenants_' ~ udn_proxy_phase]
+               | default(clab_clusters[item.0].tenants
+                         | default(udn_proxy_tenants), true))
 
 - name: Fail if no cluster offers any of the requested tenants
   ansible.builtin.assert:
