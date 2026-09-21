@@ -229,13 +229,45 @@
     udn_bgp_notpeering_re: >-
       (?m)^({{ udn_bgp_peer_addrs | map('regex_escape') | join('|') }})\s+4\s+.*\b(Idle|Active|Connect|OpenSent|OpenConfirm)\b
 
-- name: List the frr-k8s pods
+# FABRIC NODES ONLY, and that is the whole point of this task.
+#
+# It used to list every frr-k8s pod in the namespace. frr-k8s runs on the
+# masters too, and the FRRConfiguration this phase applies has
+# `nodeSelector: {}`, so a master is told to peer with the border leaf in
+# every tenant VRF. A master has no fabric NIC. It cannot reach
+# <vrf_prefix>.1 in any VRF - or 192.168.x.1 in the default one - and leaf1
+# is not configured to peer with it either; its neighbour list is the fabric
+# nodes and nothing else.
+#
+# So a master sits at `never / Active` in every VRF, permanently and
+# correctly, and the check read that as a broken tenant session: it
+# restarted frr-k8s cluster-wide, waited, saw the same thing, and failed the
+# phase with a message about stale nexthop caches - while every fabric node
+# was Established with prefixes flowing both ways.
+#
+# The VRFs themselves DO exist on a master (real vrf-ids, not -1) because
+# OVN-Kubernetes creates them cluster-wide, so neither of the two faults this
+# check names was present. It was reporting on nodes that were never in scope.
+- name: Resolve this cluster's fabric node names
+  ansible.builtin.set_fact:
+    udn_bgp_fabric_node_names: >-
+      {{ udn_bgp_cluster_nodes | map(attribute='ip_key')
+         | map('extract', udn_bgp_node_names) | list }}
+
+- name: List the frr-k8s pod on each fabric node
   ansible.builtin.command:
     cmd: >-
       oc -n {{ udn_bgp_frrk8s_namespace }} get pods -l component=frr-k8s
-      -o name
-  register: udn_bgp_frrk8s_pods
+      --field-selector spec.nodeName={{ item }} -o name
+  loop: "{{ udn_bgp_fabric_node_names }}"
+  register: udn_bgp_frrk8s_pods_raw
   changed_when: false
+
+- name: Keep the fabric nodes' pods
+  ansible.builtin.set_fact:
+    udn_bgp_frrk8s_pod_names: >-
+      {{ udn_bgp_frrk8s_pods_raw.results | map(attribute='stdout_lines')
+         | flatten | select | list }}
 
 # Give the sessions a chance to come up before concluding anything. Timers are
 # 3s/9s, so a minute is generous; restarting a daemonset because a peer had not
@@ -245,7 +277,7 @@
     cmd: >-
       oc -n {{ udn_bgp_frrk8s_namespace }} exec {{ item }} -c frr --
       vtysh -c "show bgp vrf all summary"
-  loop: "{{ udn_bgp_frrk8s_pods.stdout_lines }}"
+  loop: "{{ udn_bgp_frrk8s_pod_names }}"
   register: udn_bgp_vrf_bgp
   changed_when: false
   failed_when: false
@@ -295,21 +327,30 @@
   changed_when: false
 
 # The pod names change on a restart, so this cannot reuse the list above.
-- name: List the frr-k8s pods again
+- name: List the frr-k8s pod on each fabric node again
   ansible.builtin.command:
     cmd: >-
       oc -n {{ udn_bgp_frrk8s_namespace }} get pods -l component=frr-k8s
-      -o name
-  register: udn_bgp_frrk8s_pods_after
+      --field-selector spec.nodeName={{ item }} -o name
+  loop: "{{ udn_bgp_fabric_node_names }}"
+  register: udn_bgp_frrk8s_pods_raw_after
   when: udn_bgp_needs_rebind | bool
   changed_when: false
+
+- name: Keep the fabric nodes' pods again
+  ansible.builtin.set_fact:
+    udn_bgp_frrk8s_pod_names_after: >-
+      {{ udn_bgp_frrk8s_pods_raw_after.results | default([])
+         | rejectattr('skipped', 'defined')
+         | map(attribute='stdout_lines') | flatten | select | list }}
+  when: udn_bgp_needs_rebind | bool
 
 - name: Confirm every tenant VRF is bound and peering
   ansible.builtin.command:
     cmd: >-
       oc -n {{ udn_bgp_frrk8s_namespace }} exec {{ item }} -c frr --
       vtysh -c "show bgp vrf all summary"
-  loop: "{{ udn_bgp_frrk8s_pods_after.stdout_lines | default([], true) }}"
+  loop: "{{ udn_bgp_frrk8s_pod_names_after | default([], true) }}"
   register: udn_bgp_vrf_bgp_after
   when: udn_bgp_needs_rebind | bool
   changed_when: false
@@ -327,14 +368,27 @@
       {{ (udn_bgp_vrf_bgp_after if udn_bgp_needs_rebind | bool
           else udn_bgp_vrf_bgp).results | default([], true) }}
     udn_bgp_final_out: "{{ udn_bgp_final | map(attribute='stdout', default='') | list }}"
+    # Name the pods, so the next failure does not start with "which one?".
+    # Both patterns carry (?m), which Python requires at the start of a
+    # pattern, so they cannot be combined by alternation - two passes.
+    udn_bgp_bad_pods: >-
+      {{ ((udn_bgp_final | selectattr('stdout', 'defined')
+           | selectattr('stdout', 'search', udn_bgp_unbound_re)
+           | map(attribute='item') | list)
+        + (udn_bgp_final | selectattr('stdout', 'defined')
+           | selectattr('stdout', 'search', udn_bgp_notpeering_re)
+           | map(attribute='item') | list)) | unique | list }}
   ansible.builtin.assert:
     that:
       - udn_bgp_final_out | select('search', udn_bgp_unbound_re) | list | length == 0
       - udn_bgp_final_out | select('search', udn_bgp_notpeering_re) | list | length == 0
     fail_msg: >-
-      A tenant BGP session is still not up after restarting frr-k8s. Read it
-      with:
-        oc -n {{ udn_bgp_frrk8s_namespace }} exec <frr-k8s pod> -c frr --
+      A tenant BGP session is still not up after restarting frr-k8s, on:
+      {{ udn_bgp_bad_pods | join(', ') }}.
+      These are pods on this cluster's FABRIC nodes only - a master has no
+      fabric NIC and sits in Active in every VRF by design, which is not a
+      fault and is not counted here. Read it with:
+        oc -n {{ udn_bgp_frrk8s_namespace }} exec {{ udn_bgp_bad_pods | first | default('<frr-k8s pod>', true) }} -c frr --
           vtysh -c 'show bgp vrf all summary'
       Two different faults print here. 'vrf-id -1' means bgpd never attached to
       the kernel VRF - compare the VRF names against 'show vrf'. A real vrf-id
