@@ -210,6 +210,16 @@ dns_forwarders:
   - 10.x.x.x
 ```
 
+Both Red Hat credentials come from the Hybrid Cloud Console, and both need a
+Red Hat account (a free Developer Subscription is enough for this lab):
+
+- **`pull_secret`** - [console.redhat.com/openshift/install/pull-secret](https://console.redhat.com/openshift/install/pull-secret).
+  Copy the whole JSON document, on one line, in single quotes.
+- **`org_id` and `activation_key`** - [console.redhat.com/insights/connector/activation-keys](https://console.redhat.com/insights/connector/activation-keys).
+  Create a key if you have none; the page shows your organisation ID alongside
+  it. Both the helper and the containerlab VM are bare RHEL9 images, and dnf
+  installs nothing on either until they are registered with these.
+
 ```yaml
 ## OPTIONAL, and off unless you set it. A shared key (TCP-MD5) on every BGP
 ## session - cluster<->leaf1 and leaf<->spine alike. Leave it out and every
