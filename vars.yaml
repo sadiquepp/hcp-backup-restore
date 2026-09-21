@@ -1532,6 +1532,17 @@ clab_clusters:
     tenants_vrflite:
       - violet
 
+    ## The web phase is the union, on purpose. It runs after whichever
+    ## transport phase was last applied, and a static list cannot know which
+    ## that was. webload.yml deploys the tenants whose namespace exists right
+    ## now and skips the rest with a note, so this is correct after EVPN
+    ## (green, purple) and after VRF-Lite (violet) without being edited
+    ## between runs.
+    tenants_web:
+      - green
+      - purple
+      - violet
+
     nodes:
       - domain: "{{ sno_name }}"
         ip_key: sno
@@ -2092,6 +2103,15 @@ udn_client_segments:
   orange: {vlan: 230, prefix: "10.217.10"}
   green:  {vlan: 240, prefix: "10.218.10"}
   purple: {vlan: 250, prefix: "10.219.10"}
+  ## violet lives on the SNO, but its client segment is on leaf1 like every
+  ## other one: the netns reaches violet's pods through leaf1's violet VRF and
+  ## the BGP session to the SNO, exactly as the hub's tenants are reached
+  ## through theirs. Nothing about this is cluster-specific.
+  ##
+  ## 10.227.10 because everything nearer is taken: externals 10.210-10.214,
+  ## client segments 10.215-10.219, udn_subnet_shared 10.220-10.225, violet's
+  ## own external network 10.226.10.0/24.
+  violet: {vlan: 260, prefix: "10.227.10"}
 
 udn_client_segment_gw_octet: 1
 udn_client_segment_host_octet: 20
@@ -2182,7 +2202,7 @@ udn_nsclient_segment_host_octet: 21
 ## answer is what licenses reading its four blanks as isolation rather than as
 ## breakage - and with orange/worker1 among the sessions currently stuck in
 ## Active, the blank row was hiding a real failure, not demonstrating one.
-udn_web_tenants: [blue, red, orange, green, purple]
+udn_web_tenants: [blue, red, orange, green, purple, violet]
 
 ## UBI, not registry.redhat.io: this needs no entitlement, and unlike the ping
 ## DaemonSet it needs no privileged SCC either - httpd-24 listens on 8080 as a
