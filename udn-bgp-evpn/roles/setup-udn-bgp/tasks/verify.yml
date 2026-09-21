@@ -433,6 +433,7 @@
       {% if udn_phase in ['vrflite', 'evpn'] %}
       {% set ns.step = ns.step + 1 %}
 
+      {% if udn_bgp_tenants | length > 1 %}
       {{ ns.step }}. Tenant isolation - the tests that matter, and the ones that must FAIL:
       {% for t in udn_bgp_tenants[1:] %}
            oc -n udn-{{ udn_bgp_tenants[0].name }} exec <pod> -- ping -c3 -W2 {{ t.external_host }}
@@ -442,6 +443,7 @@
          keeping them apart. If any succeeds, the VRFs are leaking and
          VRF-Lite is not doing its job - check that targetVRF is 'auto' and
          the cluster is in local gateway mode.
+      {% if udn_bgp_tenants[0].udn_subnet == udn_bgp_tenants[1].udn_subnet %}
 
          These failures do not say the same thing, which is why there is
          more than one. {{ udn_bgp_tenants[0].name }} and {{ udn_bgp_tenants[1].name }} carry the same pod
@@ -449,6 +451,18 @@
          rather than isolation. {{ udn_bgp_tenants[2].name if udn_bgp_tenants | length > 2 else 'A non-overlapping third tenant' }} overlaps with nothing
          anywhere, so a failure to reach it can only be the VRF. That is
          the one to take as the result.
+      {% endif %}
+      {% else %}
+      {{ ns.step }}. Tenant isolation is not testable on this cluster: it builds
+         one tenant ({{ udn_bgp_tenants[0].name }}), so there is nothing here to be
+         isolated from. Run the isolation tests on the cluster that carries
+         several - they are what proves the VRFs are real.
+
+         What IS worth checking here is the opposite: that the deliberate
+         openings work. If {{ udn_bgp_tenants[0].name }} is leaked to tenants on another
+         cluster (see udn_vrf_leaks in vars.yaml), those are reachable BY
+         DESIGN and everything else still must not be.
+      {% endif %}
       {% set ns.step = ns.step + 1 %}
 
       {{ ns.step }}. And the positive half - every tenant reaching its own:
@@ -463,12 +477,21 @@
            scripts/udn-vrf-isolation.sh
          Two matrices - pod to endpoint and endpoint to pod - expecting ok on
          the diagonal and FAIL everywhere else, plus the one check ping alone
-         cannot make. {{ udn_bgp_tenants[0].name }} and {{ udn_bgp_tenants[1].name }} share a subnet, so a reply to a
+         cannot make.
+      {% if udn_bgp_tenants | length > 1 and udn_bgp_tenants[0].udn_subnet == udn_bgp_tenants[1].udn_subnet %}
+         {{ udn_bgp_tenants[0].name }} and {{ udn_bgp_tenants[1].name }} share a subnet, so a reply to a
          ping proves something answered, not which pod answered - and the
          wrong tenant answering is the leak VRF-Lite exists to prevent. Where
          two tenants hold the same pod address it reads ICMP InEchos from
          /proc/net/snmp on both pods either side of one ping and names the
          responder.
+      {% else %}
+         Where two tenants hold the same pod address - which happens on the
+         cluster that carries the overlapping pair - a reply proves something
+         answered, not which pod answered, so it reads ICMP InEchos from
+         /proc/net/snmp on both pods either side of one ping and names the
+         responder.
+      {% endif %}
       {% endif %}
       {% set ns.step = ns.step + 1 %}
 
