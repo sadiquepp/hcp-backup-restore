@@ -7,6 +7,8 @@
 #   ./build-lab.sh --only evpn           # one step
 #   ./build-lab.sh --list                # what the steps are
 #   ./build-lab.sh --dry-run             # print the commands, run nothing
+#   ./build-lab.sh --rebuild-clusters    # cleanup.yaml first, then all of it
+#   ./build-lab.sh --rebuild-clusters -y # ... without the 10s abort window
 #
 # RUN IT UNDER tmux (or screen). A full build installs two OpenShift
 # clusters and takes hours; if the ssh session drops, the shell gets
@@ -20,7 +22,10 @@
 # CLUSTERS. That is only right on a bare lab host: the cluster playbooks
 # are not idempotent, so it refuses if a hub kubeconfig or the libvirt
 # domains are already there. With clusters already up, start at --from
-# fabric; to really rebuild them, pass --rebuild-clusters.
+# fabric; to really rebuild them, pass --rebuild-clusters, which runs
+# cleanup.yaml first - destroying every VM of this lab on the host, the helper
+# and the containerlab VM included - and then builds the lot. It warns and
+# waits 10s before doing so; -y skips the wait.
 #
 # WHY A SCRIPT AND NOT A PLAYBOOK. This orchestrates eight ansible-playbook
 # INVOCATIONS plus two test scripts, not ten plays, and four things make that
@@ -57,13 +62,15 @@ KUBECONFIG_SNO="${KUBECONFIG_SNO:-/var/lib/libvirt/images/sno_install/auth/kubec
 LOGDIR="${LOGDIR:-./build-logs}"
 PARALLEL_EVPN=0
 REBUILD_CLUSTERS=0
+ASSUME_YES=0
+CLEANED=0
 DRY_RUN=0
 FROM=""
 ONLY=""
 
 STEPS=(bmhost clusters fabric preflight evpn web nsclient nsproxy verify xcluster)
 
-usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
+usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
 list_steps() {
     cat <<EOF
@@ -88,6 +95,7 @@ while [[ $# -gt 0 ]]; do
         --only)                ONLY="$2"; shift 2 ;;
         --parallel-evpn)       PARALLEL_EVPN=1; shift ;;
         --rebuild-clusters)    REBUILD_CLUSTERS=1; shift ;;
+        -y|--yes)              ASSUME_YES=1; shift ;;
         --dry-run)             DRY_RUN=1; shift ;;
         --list)                list_steps; exit 0 ;;
         -h|--help)             usage; exit 0 ;;
@@ -191,8 +199,47 @@ should_run() {
 #
 # So a bare ./build-lab.sh is only safe on a bare lab host. With the clusters
 # already up, the entry point is --from fabric.
+# --rebuild-clusters used to mean only "skip the guard", which walked straight
+# into the failure the guard describes: qemu-img create overwrites the disks -
+# destroying the clusters - and then virt-install fails on the domain that is
+# still defined, leaving a lab that is neither the old one nor a new one and
+# has to be cleaned up by hand anyway.
+#
+# So do the cleanup first and properly. cleanup.yaml destroys and undefines
+# every domain before removing its storage, in that order, because `virsh
+# undefine` on a running domain quietly converts it to a transient one instead
+# of stopping it.
+#
+# It takes out more than the clusters - the helper, the containerlab VM and
+# the tenant client VMs included - which is correct here: --rebuild-clusters
+# starts at step 1, and step 1 is what rebuilds the helper.
+wipe_lab() {
+    (( CLEANED )) && return 0      # guard_clusters is called by two steps
+    CLEANED=1
+    if (( ! DRY_RUN )) && (( ! ASSUME_YES )); then
+        cat >&2 <<EOF
+
+--rebuild-clusters: running cleanup.yaml first. This DESTROYS, on this host:
+
+  - the hub cluster (masters, workers, bootstrap) and its install folder
+  - the SNO and its install folder
+  - the helper VM, and the containerlab VM with the fabric inside it
+  - the tenant client VMs
+  - hub2, the mirror registry, minio and the Ceph VMs, if you have them
+
+There is no undo and no snapshot. If anything on this host matters and is not
+part of this lab, stop now and check cleanup.yaml.
+
+Continuing in 10s - ctrl-c to stop.  (-y skips this wait)
+EOF
+        sleep 10
+    fi
+    say "0/10  cleanup.yaml - destroying the existing lab"
+    play ../cleanup.yaml
+}
+
 guard_clusters() {
-    (( REBUILD_CLUSTERS )) && return 0
+    (( REBUILD_CLUSTERS )) && { wipe_lab; return 0; }
     (( DRY_RUN )) && return 0
     local -a found=()
     [[ -r "$KUBECONFIG_HUB" ]] && found+=("a hub kubeconfig at $KUBECONFIG_HUB")
@@ -213,7 +260,7 @@ overwrites an existing disk and virt-install fails on an existing domain, so
 re-running them against a live cluster destroys it rather than skipping.
 
   ./build-lab.sh --from fabric        build the UDN lab on the clusters you have
-  ./build-lab.sh --rebuild-clusters   really rebuild them, from scratch
+  ./build-lab.sh --rebuild-clusters   run cleanup.yaml, then build from scratch
 
 EOF
     # exit, not return: the ERR trap would otherwise append
