@@ -82,6 +82,32 @@
   register: udn_bgp_ipfwd_patch
   changed_when: "'patched' in udn_bgp_ipfwd_patch.stdout and 'no change' not in udn_bgp_ipfwd_patch.stdout"
 
+# Waiting for Progressing=False immediately after a patch is a race, and it
+# reads as a wait while doing nothing. The operator has not necessarily
+# observed the change yet, so the condition is still False from the previous
+# steady state and `oc wait` returns at once - after which this phase builds
+# the VTEP and the tenant CUDNs on top of an ovnkube-node that is about to
+# restart underneath them.
+#
+# On the hub, three nodes roll one at a time and a long phase usually absorbs
+# it. On the SNO there is one node, and its restart lands directly on the work.
+#
+# So wait for the rollout to START first. It may legitimately never start - a
+# no-change patch rolls nothing - which is why this tolerates its own timeout
+# rather than failing on it, and why it is skipped entirely when none of the
+# three patches above reported a change.
+- name: Wait for the network operator to pick up the patch
+  ansible.builtin.command:
+    cmd: >-
+      oc wait clusteroperator/network --for=condition=Progressing=True
+      --timeout=60s
+  changed_when: false
+  failed_when: false
+  when: >-
+    (udn_bgp_enable_patch.changed | default(false))
+    or (udn_bgp_gateway_patch.changed | default(false))
+    or (udn_bgp_ipfwd_patch.changed | default(false))
+
 - name: Wait for the network operator to finish rolling out
   ansible.builtin.command:
     cmd: >-
