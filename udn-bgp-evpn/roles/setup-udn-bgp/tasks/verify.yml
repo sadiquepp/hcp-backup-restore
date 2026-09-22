@@ -208,6 +208,12 @@
   retries: "{{ udn_bgp_session_check_retries }}"
   delay: "{{ udn_bgp_session_check_delay }}"
 
+# One class of failure here is repairable and has cost this lab several
+# rebuilds, so try the repair before reporting. It restarts frr-k8s only on
+# the specific signature and leaves every other cause to the assert below.
+- name: Try to recover a session that is down for a stale nexthop
+  ansible.builtin.include_tasks: stale-nexthop.yml
+
 - name: Fail with the node whose session to the border leaf never came up
   ansible.builtin.assert:
     that: item.stdout | default('') is search('BGP state = Established')
@@ -231,16 +237,26 @@
       SYNs arriving with no reply means the node's kernel is dropping them;
       SYN answered by RST means nothing is listening; nothing at all means
       the leaf is not trying and the fault is on the leaf.
-      (3) A kernel that drops the SYN while ICMP works is the TCP-MD5
-      signature - the signature rides in the TCP header, so ping is
-      unaffected, and a key on one end only is discarded before BGP ever sees
-      it, silently, at both ends. Compare
+      (3) The stale-nexthop repair has already run and did not fix this,
+      so it is not that fault - but confirm from the node rather than
+      assuming: `oc -n {{ udn_bgp_frrk8s_namespace }} exec <frr pod> -c frr
+      -- vtysh -c 'show bgp summary' -c 'show bgp nexthop'`. A peer that is
+      'Active' with 'No path to specified Neighbor', and a nexthop printed
+      'invalid ... Must be Connected' while the kernel has the route, is
+      zebra holding stale interface state; a frr-k8s restart clears it. In
+      that state bgpd has no socket at all ('FD used: -1'), nothing listens
+      on 179, and the leaf's signed SYN is dropped without an RST because
+      the kernel cannot sign one.
+      (4) bgpd holds a real socket and is sending SYNs of its own, but the
+      session still will not form: it is the TCP-MD5 signature. The
+      signature rides in the TCP header, so ICMP is unaffected, and a key on
+      one end only is discarded before BGP ever sees it, silently, at both
+      ends. `tcpdump -M '<key>'` on the node prints 'md5 valid' or 'md5
+      invalid' per packet and settles it outright; otherwise compare
       `docker exec clab-{{ clab_lab_name }}-leaf1 vtysh -c 'show running-config'
-      | grep {{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}
+      | grep {{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}`
       against `oc get frrnodestate <node> -o jsonpath='{.status.runningConfig}'`
       - both ends must have a password line or neither.
-      Known to have happened once with identical config at both ends and no
-      cause found; a rebuild cleared it.
     success_msg: >-
       {{ udn_bgp_node_names[item.item.ip_key] | default(item.item.ip_key) }}
       ({{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}): Established.

@@ -1,0 +1,139 @@
+# Recover the default-VRF session from a stale zebra nexthop.
+#
+# The symptom, seen on the SNO and once on worker3: the leaf's session sits
+# in Connect for hours while every cluster-side object stays green. The
+# node's own bgpd has the peer 'Active' with 'No path to specified
+# Neighbor' and 'FD used: -1', and 'show bgp nexthop' prints
+#
+#     192.168.140.1 invalid, #paths 0, peer 192.168.140.1
+#       Must be Connected
+#
+# while the KERNEL on that node has both the address and the route:
+#
+#     inet 192.168.140.20/24 noprefixroute
+#     Routing entry for 192.168.140.0/24
+#       Known via "kernel", distance 0, metric 101, best
+#
+# A single-hop eBGP peer needs its nexthop to resolve over a CONNECTED
+# route. The fabric NIC is hot-plugged and then addressed by NNCP, so it
+# flaps after frr-k8s has started; zebra loses its connected entry for the
+# interface and never rebuilds one, leaving only NetworkManager's
+# proto-kernel route, which does not satisfy the check. bgpd therefore never
+# opens a socket, so nothing listens on 179 - and because the leaf's SYN
+# carries a TCP-MD5 option that the kernel cannot sign a reply to, it is
+# dropped without even an RST. Both halves of the silence, one cause.
+#
+# Restarting frr-k8s makes zebra re-read the kernel; the session comes up in
+# seconds with no config change at either end. That is the whole repair, and
+# it is why every past sighting was 'cleared by a rebuild' - a rebuild
+# restarts frr-k8s as a side effect and the real fault was never seen.
+#
+# Deliberately NOT a restart-on-any-failure. The restart happens only when
+# the nexthop is actually invalid on a node whose session is actually down.
+# Every other cause - a real MD5 mismatch, a missing address, a dead fabric -
+# falls through to the assert with its diagnosis intact. A daemonset restart
+# that 'fixes' the symptom of a different fault is exactly the kind of check
+# that reports on the wrong thing, which this lab has paid for more than once.
+
+- name: Note which of this cluster's sessions are still down
+  ansible.builtin.set_fact:
+    udn_bgp_session_down: >-
+      {{ udn_bgp_session.results
+         | rejectattr('stdout', 'search', 'BGP state = Established')
+         | list }}
+
+- name: Resolve the node behind each session that is down
+  ansible.builtin.set_fact:
+    udn_bgp_down_nodes: >-
+      {{ udn_bgp_session_down | map(attribute='item.ip_key')
+         | map('extract', udn_bgp_node_names) | list }}
+
+- name: List the frr-k8s pod on each node whose session is down
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} get pods -l component=frr-k8s
+      --field-selector spec.nodeName={{ item }} -o name
+  loop: "{{ udn_bgp_down_nodes }}"
+  register: udn_bgp_down_pods_raw
+  changed_when: false
+
+- name: Keep those pods
+  ansible.builtin.set_fact:
+    udn_bgp_down_pod_names: >-
+      {{ udn_bgp_down_pods_raw.results | default([])
+         | map(attribute='stdout_lines') | flatten | select | list }}
+
+# The leaf's own address on the untagged fabric segment - the nexthop every
+# one of these sessions has to resolve.
+- name: Build the pattern that identifies a stale nexthop
+  ansible.builtin.set_fact:
+    udn_bgp_stale_nexthop_re: >-
+      (?m)^\s*{{ (clab_fabric_prefix ~ '.' ~ clab_fabric_router_octet) | regex_escape }}\s+invalid
+
+- name: Ask each of those nodes' bgpd whether it can resolve the leaf
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} exec {{ item }} -c frr --
+      vtysh -c "show bgp nexthop"
+  loop: "{{ udn_bgp_down_pod_names }}"
+  register: udn_bgp_down_nexthop
+  changed_when: false
+  failed_when: false
+
+- name: Decide whether a restart is the right repair
+  ansible.builtin.set_fact:
+    udn_bgp_stale_nexthop: >-
+      {{ udn_bgp_down_nexthop.results | default([])
+         | map(attribute='stdout', default='')
+         | select('search', udn_bgp_stale_nexthop_re) | list | length > 0 }}
+
+- name: Report what the down nodes' bgpd says
+  ansible.builtin.debug:
+    msg: >-
+      {{ udn_bgp_down_nodes | join(', ') }}:
+      {{ 'bgpd cannot resolve ' ~ clab_fabric_prefix ~ '.' ~ clab_fabric_router_octet ~
+         ' - the nexthop is invalid while the kernel has the route, which is
+         zebra holding stale interface state after the fabric NIC flapped.
+         Restarting frr-k8s and waiting again.'
+         if udn_bgp_stale_nexthop | bool else
+         'bgpd resolves the leaf fine, so this is not the stale-nexthop fault
+         and a restart would only hide whatever it is. Falling through to the
+         assert.' }}
+  when: udn_bgp_session_down | length > 0
+
+- name: Restart frr-k8s so zebra re-reads the kernel
+  ansible.builtin.command:
+    cmd: "oc -n {{ udn_bgp_frrk8s_namespace }} rollout restart daemonset/frr-k8s"
+  when: udn_bgp_stale_nexthop | bool
+
+- name: Wait for frr-k8s to come back
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} rollout status daemonset/frr-k8s
+      --timeout=300s
+  when: udn_bgp_stale_nexthop | bool
+  changed_when: false
+
+- name: Wait again for this cluster's BGP sessions to the border leaf
+  ansible.builtin.command:
+    cmd: >-
+      docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
+      -c 'show bgp neighbor {{ clab_fabric_prefix }}.{{ ip_list[item.ip_key] }}'
+  delegate_to: "{{ clab_exec_host }}"
+  loop: "{{ udn_bgp_cluster_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  register: udn_bgp_session_retry
+  changed_when: false
+  failed_when: false
+  until: udn_bgp_session_retry.stdout | default('') is search('BGP state = Established')
+  retries: "{{ udn_bgp_session_check_retries }}"
+  delay: "{{ udn_bgp_session_check_delay }}"
+  when: udn_bgp_stale_nexthop | bool
+
+# Only when the retry actually ran. Overwriting unconditionally would hand
+# the assert below a skipped result and fail every node for the wrong reason.
+- name: Let the assert judge the post-restart state
+  ansible.builtin.set_fact:
+    udn_bgp_session: "{{ udn_bgp_session_retry }}"
+  when: udn_bgp_stale_nexthop | bool
