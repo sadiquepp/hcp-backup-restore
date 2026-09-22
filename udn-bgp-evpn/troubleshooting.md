@@ -377,17 +377,57 @@ it for the separate MTU defect below; it cannot drop an 84-byte ACK.
 
 **4. Compare the NAT rules against a tenant that works.**
 
-```bash
-# sno, broken
-ovn-nbctl lr-nat-list GR_cluster_udn_violet_sno
-TYPE   GATEWAY_PORT   MATCH   EXTERNAL_IP     EXTERNAL_PORT   LOGICAL_IP
-snat                          169.254.0.13    32768-60999     10.206.0.0/16
+`ovn-nbctl` lives in the `ovnkube-controller` container of an `ovnkube-node`
+pod. The NB database is cluster-wide, so on the SNO any pod will do; on the
+hub, pick the pod on the node whose gateway router you are naming, because
+the router name ends in that node's name.
 
-# hub, working
-ovn-nbctl lr-nat-list GR_cluster_udn_blue_worker1
+First find the gateway routers:
+
+```bash
+OVN=$(oc -n openshift-ovn-kubernetes get pod -l app=ovnkube-node -o name | head -1)
+oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN \
+  ovn-nbctl --bare --columns=name list Logical_Router | grep '^GR_cluster_udn_'
+```
+
+```
+GR_cluster_udn_violet_sno
+```
+
+Then the broken tenant, on the SNO:
+
+```bash
+oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN \
+  ovn-nbctl lr-nat-list GR_cluster_udn_violet_sno
+```
+
+```
+TYPE   GATEWAY_PORT   MATCH   EXTERNAL_IP     EXTERNAL_PORT   LOGICAL_IP
+snat                          169.254.0.13    32768-60999     100.65.0.2
+snat                          169.254.0.13    32768-60999     10.206.0.0/16
+```
+
+And a working tenant, on the hub:
+
+```bash
+export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
+NODE=worker1
+OVN_HUB=$(oc -n openshift-ovn-kubernetes get pod -l app=ovnkube-node \
+            --field-selector spec.nodeName=$NODE -o name | head -1)
+oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN_HUB \
+  ovn-nbctl lr-nat-list GR_cluster_udn_blue_$NODE
+```
+
+```
 TYPE   GATEWAY_PORT   MATCH               EXTERNAL_IP     EXTERNAL_PORT   LOGICAL_IP
+snat                  ip4.dst == $a10426  169.254.0.11    32768-60999     100.65.0.6
 snat                  ip4.dst == $a10426  169.254.0.11    32768-60999     10.200.0.0/16
 ```
+
+To sweep every router and its routes in one go - which is how the four
+routers on the SNO were found, and how it became clear violet was the only
+UDN on that node - see the loop in the appendix under *What is OVN's logical
+topology?*.
 
 **The `MATCH` column.** Blue's SNAT is *conditional* — it applies only when
 the destination is in that address set, which is how OVN-Kubernetes excludes
@@ -436,10 +476,17 @@ and it sent this investigation down several wrong paths.
 ```bash
 oc -n openshift-ovn-kubernetes rollout restart daemonset/ovnkube-node
 oc -n openshift-ovn-kubernetes rollout status daemonset/ovnkube-node --timeout=300s
+
+# re-resolve the pod: the restart gave it a new name
+OVN=$(oc -n openshift-ovn-kubernetes get pod -l app=ovnkube-node -o name | head -1)
+oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN \
+  ovn-nbctl lr-nat-list GR_cluster_udn_violet_sno
 ```
 
 ```
-snat   ip4.dst == $a10426   169.254.0.13   32768-60999   10.206.0.0/16
+TYPE   GATEWAY_PORT   MATCH               EXTERNAL_IP     EXTERNAL_PORT   LOGICAL_IP
+snat                                      169.254.0.13    32768-60999     100.65.0.2
+snat                  ip4.dst == $a10426  169.254.0.13    32768-60999     10.206.0.0/16
 ```
 
 The `MATCH` appears. `scripts/udn-web-demo.sh --proxy` → `I am violet on sno`,
