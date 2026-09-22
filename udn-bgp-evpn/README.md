@@ -25,6 +25,13 @@ The cluster-side objects on their own, with the lab scaffolding removed and
 the places a real fabric legitimately differs - `Managed` VTEP allocation
 above all - called out.
 
+**[troubleshooting.md](troubleshooting.md)** is the case files: long-form
+records of faults that were hard to find, with the real command output, what
+was ruled out and by what evidence, and the wrong turns. Kept apart from the
+other docs deliberately so they stay about how the lab works. Read its
+opening table before starting any hunt - every case in it is an instance of
+one of six recurring shapes.
+
 **[bgp-evpn.md](bgp-evpn.md)** takes `setup-udn-bgp` apart into the `oc`
 commands it runs, phase by phase, with every manifest shown filled in rather
 than as a template. Read that to understand the mechanism, to debug a phase
@@ -637,3 +644,4 @@ required for `Layer3`.
 | **[udn-bgp-evpn-steps.md](udn-bgp-evpn-steps.md)** | Build it step by step, branched by transport. Start here |
 | **[bgp-evpn.md](bgp-evpn.md)** | The cluster side: every phase, every CR, packet walks, live migration |
 | **[clab-fabric.md](clab-fabric.md)** | The fabric side: what containerlab builds, and the manual equivalent |
+| **[troubleshooting.md](troubleshooting.md)** | Case files: hard faults, the traces that found them, and the wrong turns |
