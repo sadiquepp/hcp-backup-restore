@@ -4,6 +4,7 @@
 #
 #   ./build-lab.sh                       # everything, from scratch (EVPN)
 #   ./build-lab.sh --vrflite             # the VRF-Lite lab instead
+#   ./build-lab.sh --shared              # the shared-VRF lab (phase 2)
 #   ./build-lab.sh --from fabric         # resume at a step
 #   ./build-lab.sh --only tenants        # one step
 #   ./build-lab.sh --list                # what the steps are
@@ -13,8 +14,15 @@
 #
 # TWO LABS, ONE SCRIPT. --evpn (the default) builds the stretched-Layer2
 # EVPN lab; --vrflite builds the VRF-Lite one. They share every step but
-# two: the containerlab topology (evpn vs bgp) and the tag the cluster phase
-# runs (evpn vs vrflite). The step lists are now identical.
+# the containerlab topology, the tag the cluster phase runs, and - for the
+# shared phase only - which steps make sense at all.
+#
+# --shared is the odd one. It leaks every UDN into the ONE default VRF, so
+# there are no per-tenant VRFs for a client VLAN to enter and no two tenants
+# behind one address for an ingress to separate. It therefore has no nsproxy
+# step, and its verify curls every pod from ONE client (--host) instead of
+# asking an ingress by hostname. The namespace client VM is still built: its
+# ROOT namespace carries the phase-2 routes, so one VM serves all three labs.
 #
 # The cross-cluster test runs in both, asking a different question in each.
 # Under EVPN: does a tenant reach ITSELF in the other cluster over one
@@ -93,7 +101,7 @@ STEPS=()
 # --from/--only still accept the phase names. 'evpn' named this step before
 # there was a second mode, and 'vrflite' is what the equivalent run is called
 # by hand, so both resolve to it rather than erroring as unknown steps.
-declare -A STEP_ALIAS=([evpn]=tenants [vrflite]=tenants)
+declare -A STEP_ALIAS=([evpn]=tenants [vrflite]=tenants [shared]=tenants)
 
 usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
@@ -107,8 +115,10 @@ list_steps() {
              --tags evpn under --evpn, --tags vrflite under --vrflite
   web        one web pod per tenant, hub then sno
   nsclient   the namespace client VM - one netns per tenant
-  nsproxy    the tenant ingress, on that VM. Needs nsclient and web
-  verify     scripts/udn-web-demo.sh --proxy - the ingress, from outside
+  nsproxy    the tenant ingress, on that VM. Needs nsclient and web.
+             NOT in --shared: nothing to separate behind one address
+  verify     scripts/udn-web-demo.sh - the ingress by hostname (--proxy), or
+             under --shared every pod from one client (--host)
   xcluster   scripts/udn-xcluster-curl.sh - pod to pod ACROSS the two
              clusters. Needs both kubeconfigs and web on both. Under EVPN,
              same tenant over the stretched L2; under VRF-Lite, the
@@ -124,6 +134,7 @@ while [[ $# -gt 0 ]]; do
         --only)                ONLY="$2"; shift 2 ;;
         --evpn)                MODE="evpn"; shift ;;
         --vrflite)             MODE="vrflite"; shift ;;
+        --shared)              MODE="shared"; shift ;;
         --parallel-tenants|--parallel-evpn)
                                PARALLEL_TENANTS=1; shift ;;
         --rebuild-clusters)    REBUILD_CLUSTERS=1; shift ;;
@@ -144,6 +155,14 @@ case "$MODE" in
              STEPS=(bmhost clusters fabric preflight tenants web nsclient nsproxy verify xcluster) ;;
     vrflite) TOPOLOGY="bgp"
              STEPS=(bmhost clusters fabric preflight tenants web nsclient nsproxy verify xcluster) ;;
+    shared)  TOPOLOGY="bgp"
+             STEPS=(bmhost clusters fabric preflight tenants web nsclient verify xcluster) ;;
+esac
+
+# What the last two steps ask, which is the other thing the mode decides.
+case "$MODE" in
+    shared) DEMO_FLAG="--host";  XCLUSTER_FLAG="--shared" ;;
+    *)      DEMO_FLAG="--proxy"; XCLUSTER_FLAG="" ;;
 esac
 TOTAL=${#STEPS[@]}
 
@@ -382,11 +401,15 @@ run_step() {
         say "$(pos nsproxy)  tenant ingress"
         play setup_udn_bgp_lab.yaml --tags clabnsproxy -e "clab_topology=$TOPOLOGY" ;;
     verify)
-        say "$(pos verify)  the tenant ingress, from outside"
-        if (( DRY_RUN )); then
-            printf '    KUBECONFIG=%s scripts/udn-web-demo.sh --proxy\n' "$KUBECONFIG_HUB"
+        if [[ "$DEMO_FLAG" == "--host" ]]; then
+            say "$(pos verify)  every web pod, from one client"
         else
-            KUBECONFIG="$KUBECONFIG_HUB" scripts/udn-web-demo.sh --proxy
+            say "$(pos verify)  the tenant ingress, from outside"
+        fi
+        if (( DRY_RUN )); then
+            printf '    KUBECONFIG=%s scripts/udn-web-demo.sh %s\n' "$KUBECONFIG_HUB" "$DEMO_FLAG"
+        else
+            KUBECONFIG="$KUBECONFIG_HUB" scripts/udn-web-demo.sh "$DEMO_FLAG"
         fi ;;
     # The only test in the build with a POD at both ends, which is what makes
     # it worth its runtime in either mode. Step 9 asks from the fabric client,
@@ -415,10 +438,11 @@ run_step() {
             return 0
         fi
         if (( DRY_RUN )); then
-            printf '    scripts/udn-xcluster-curl.sh %s %s\n' \
-                   "$KUBECONFIG_HUB" "$KUBECONFIG_SNO"
+            printf '    scripts/udn-xcluster-curl.sh %s%s %s\n' \
+                   "${XCLUSTER_FLAG:+$XCLUSTER_FLAG }" "$KUBECONFIG_HUB" "$KUBECONFIG_SNO"
         else
-            scripts/udn-xcluster-curl.sh "$KUBECONFIG_HUB" "$KUBECONFIG_SNO"
+            scripts/udn-xcluster-curl.sh ${XCLUSTER_FLAG:+"$XCLUSTER_FLAG"} \
+                "$KUBECONFIG_HUB" "$KUBECONFIG_SNO"
         fi ;;
     esac
 }

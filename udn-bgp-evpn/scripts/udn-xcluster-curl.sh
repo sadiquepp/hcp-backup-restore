@@ -64,6 +64,7 @@ while (( $# )); do
         -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --evpn)    MODE="evpn"; shift ;;
         --vrflite) MODE="vrflite"; shift ;;
+        --shared)  MODE="shared"; shift ;;
         --leaks)   LEAKS="$2"; shift 2 ;;
         -*) echo "unknown option: $1" >&2; exit 1 ;;
         *)  kubeconfigs+=("$1"); shift ;;
@@ -142,6 +143,11 @@ fi
 # one stretched UDN spans both; under VRF-Lite each tenant lives in exactly
 # one cluster. That makes the detection a property of the lab rather than a
 # flag someone has to remember to pass.
+#
+# Shared is the one it cannot detect: like VRF-Lite it has no tenant in two
+# clusters, and telling them apart would mean recognising which subnet range
+# the pods came from, which is a guess about this lab's numbering rather than
+# a property of the network. --shared has to be passed.
 # ---------------------------------------------------------------------------
 if [[ -z "$MODE" ]]; then
     dupes=$(printf '%s\n' "${keys[@]}" | cut -d/ -f2 | sort | uniq -d)
@@ -150,6 +156,10 @@ fi
 echo
 if [[ "$MODE" == "evpn" ]]; then
     echo "Mode: EVPN - tenants present in both clusters: $(tr '\n' ' ' <<<"${dupes:-}")"
+elif [[ "$MODE" == "shared" ]]; then
+    echo "Mode: shared VRF - every UDN is leaked into the one default VRF, so"
+    echo "      the question is whether the ONLY separation left, the"
+    echo "      same-cluster ACL, still holds."
 else
     echo "Mode: VRF-Lite - no tenant is in more than one cluster, so the"
     echo "      question is which of the udn_vrf_leaks openings are real."
@@ -249,6 +259,69 @@ if [[ "$MODE" == "evpn" ]]; then
         done
     done
 
+elif [[ "$MODE" == "shared" ]]; then
+    # ---------------------------------------------------------------------
+    # Shared VRF. Every UDN is leaked into the one default VRF, so routing
+    # separates nothing: any pod can route to any other pod's prefix. The
+    # only separation left is the advertised-network-subnets ACL, and that
+    # is built from ONE CLUSTER'S advertised subnets - so it drops a pair
+    # where both sides are local, and cannot see a pair that spans the two
+    # clusters.
+    #
+    #   same cluster, same tenant        answers
+    #   same cluster, different tenant   silent   the ACL, the only thing left
+    #   other cluster, any tenant        answers  one table, and the ACL does
+    #                                             not span clusters
+    #
+    # The last row is the honest result of this phase rather than a defect:
+    # a shared VRF gives no tenant separation across a cluster boundary, and
+    # this is the test that says so out loud.
+    # ---------------------------------------------------------------------
+    for src in "${keys[@]}"; do
+        src_cluster="${src%%/*}"; src_tenant="${src#*/}"
+        [[ -n "${SRCPOD[$src]}" ]] || continue
+        for a in "${addrs[@]}"; do
+            got="${RESULT[$src,$a]:-}"
+            expect=""; why=""; ambig=""; same_cluster_holder=""
+            for holder in ${TARGETS[$a]}; do
+                [[ "${holder%%/*}" == "$src_cluster" ]] && same_cluster_holder=yes
+                [[ "${holder%%/*}" == "$src_cluster" && "${holder#*/}" == "$src_tenant" ]] \
+                    && { expect="$holder"; why="its own UDN"; }
+            done
+            if [[ -z "$expect" ]]; then
+                for holder in ${TARGETS[$a]}; do
+                    [[ "${holder%%/*}" == "$src_cluster" ]] && continue
+                    [[ -n "$expect" ]] && ambig="$expect ${holder}"
+                    expect="$holder"; why="one default VRF, ACL does not span clusters"
+                done
+            fi
+
+            if [[ -n "$ambig" ]]; then
+                echo "  AMBIG   $src -> $a  held by ($ambig) in the other cluster."
+                echo "          Phase 2 requires udn_subnet_shared unique across ALL"
+                echo "          tenants; two holders of one address means it is not."
+                bad=$((bad+1))
+            elif [[ -n "$expect" ]]; then
+                want_tenant="${expect#*/}"; want_cluster="${expect%%/*}"
+                if [[ ! "$got" =~ ^"I am $want_tenant"( on .+)?$ ]]; then
+                    echo "  BROKEN  $src -> $a  expected ${want_tenant} (${why}), got: $got"
+                    bad=$((bad+1))
+                elif [[ "$got" != *" on ${want_cluster}" ]]; then
+                    echo "  WRONGCLUSTER  $src -> $a  expected ${want_cluster}, got: $got"
+                    bad=$((bad+1))
+                elif [[ "$want_cluster" != "$src_cluster" ]]; then
+                    crossed=$((crossed+1))
+                fi
+            elif [[ "$got" != "(no answer)" ]]; then
+                echo "  ACL BREACH  $src -> $a  a different tenant in the SAME cluster"
+                echo "              answered: $got"
+                echo "              In this phase the ACL is the only separation there"
+                echo "              is. If it is not holding, nothing is."
+                bad=$((bad+1))
+            fi
+        done
+    done
+
 else
     # ---------------------------------------------------------------------
     # VRF-Lite. For each cell work out who SHOULD answer, in this order:
@@ -336,6 +409,20 @@ if [[ "$MODE" == "evpn" ]]; then
             echo "  page said so."
         fi
     done
+elif [[ "$MODE" == "shared" ]]; then
+    echo "  clean: every tenant reached its own pods, every same-cluster pair of"
+    echo "         DIFFERENT tenants stayed silent, and every cross-cluster pair"
+    echo "         answered."
+    echo
+    echo "  ${crossed} answers crossed a cluster boundary, and under this phase that"
+    echo "  is the expected result, not a leak. One default VRF holds every"
+    echo "  tenant's prefixes from both clusters, so routing separates nothing;"
+    echo "  the advertised-network-subnets ACL is the only thing left, and it is"
+    echo "  built from one cluster's own advertised subnets, so it cannot see a"
+    echo "  pair that spans the two."
+    echo
+    echo "  If you want tenant separation that survives a cluster boundary, that"
+    echo "  is VRF-Lite with udn_vrf_leaks, or EVPN. This phase does not offer it."
 else
     echo "  clean: every tenant reached its own pods, every pair in udn_vrf_leaks"
     echo "         reached each other POD TO POD across the cluster boundary, and"
