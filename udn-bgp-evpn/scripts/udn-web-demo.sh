@@ -7,11 +7,19 @@
 #   scripts/udn-web-demo.sh --netns          # the one VM's per-tenant namespaces
 #   scripts/udn-web-demo.sh --vms --netns    # both sets, side by side
 #   scripts/udn-web-demo.sh --proxy          # the tenant ingress, by hostname
+#   scripts/udn-web-demo.sh --host           # ONE client, every pod - shared VRF
 #
 # The flags are additive and none implies another: --netns alone runs the
 # namespaces INSTEAD OF the VMs. Ask for several explicitly to get several.
 #
-# --proxy is a different axis from the other two. They ask "can a machine on
+# --host is for the SHARED phase, and it is the only one that fits there. That
+phase leaks every UDN into the one default VRF, so there are no per-tenant
+VRFs for a VLAN to enter and no isolation for a per-tenant client to prove -
+one off-segment client reaches every tenant through one table. It curls every
+web pod from the namespace client's ROOT namespace and asserts each address
+returned its own tenant's page. No namespaces, no ingress.
+
+--proxy is a different axis from the other two. They ask "can a machine on
 # tenant X reach anything but X"; it asks how an end user reaches EITHER of two
 # tenants that share an address, which is the question the first answer
 # provokes. Needs --tags clabnsproxy.
@@ -47,6 +55,7 @@ PROXY_ENV="${UDN_PROXY_ENV:-$(dirname "$0")/../udn-bgp/tenant-proxy.env}"
 WITH_NETNS=0
 WITH_VMS=1
 WITH_PROXY=0
+WITH_HOST=0
 EXPLICIT=0
 for arg in "$@"; do
     case "$arg" in
@@ -56,6 +65,10 @@ for arg in "$@"; do
         --netns|--netns-only) (( EXPLICIT )) || WITH_VMS=0; EXPLICIT=1; WITH_NETNS=1 ;;
         --vms|--vms-only)     (( EXPLICIT )) || WITH_NETNS=0; EXPLICIT=1; WITH_VMS=1 ;;
         --proxy)              (( EXPLICIT )) || { WITH_VMS=0; WITH_NETNS=0; }; EXPLICIT=1; WITH_PROXY=1 ;;
+        # The namespace client's ROOT namespace, curling every tenant directly.
+        # For the shared phase, where there are no per-tenant VRFs to enter and
+        # no ingress to prove: one client, one table, every pod.
+        --host|--shared)      (( EXPLICIT )) || { WITH_VMS=0; WITH_NETNS=0; }; EXPLICIT=1; WITH_HOST=1 ;;
         # Print the whole comment header rather than a fixed line range: a
         # hard-coded '2,30p' silently truncated --help the moment the header
         # grew. sed stops at the first line that is not a comment.
@@ -302,6 +315,21 @@ if (( WITH_NETNS )); then
     done < "$NETNS_ENV"
 fi
 
+# --host: one pseudo-client, the namespace client's ROOT namespace. Under the
+# shared phase every UDN is leaked into the one default VRF, so a single
+# off-segment client reaches every tenant through one table - there are no
+# per-tenant VLANs to tag and no ingress in the path. The routes come from
+# udn-client-routes.sh, which nsclient-config.yml installs alongside the
+# namespaces; PREFIX is empty because the commands run in the root namespace.
+if (( WITH_HOST )); then
+    while IFS='|' read -r name ip _rest; do
+        [[ -n "${name:-}" && "$name" != \#* ]] || continue
+        clients+=("host/${name}"); CLIENTIP["host/${name}"]="$ip"
+        SERVES["host/${name}"]="${tenants[*]}"; PREFIX["host/${name}"]=""
+        break
+    done < "$NETNS_ENV"
+fi
+
 echo "Web pods"
 for t in "${tenants[@]}"; do
     printf '  %-8s http://%s:%s/\n' "$t" "${WEBADDR[$t]}" "$PORT"
@@ -424,11 +452,22 @@ for c in "${clients[@]}"; do
         # Which tenant on this address does this client actually serve? At most
         # one - two tenants sharing an address can never share a client, since
         # one host holds one route to the prefix.
-        expect=""
+        expect=""; nmatch=0
         for t in ${ADDR_TENANTS[$a]}; do
-            case " ${SERVES[$c]} " in *" $t "*) expect="$t" ;; esac
+            case " ${SERVES[$c]} " in *" $t "*) expect="$t"; nmatch=$((nmatch + 1)) ;; esac
         done
-        if [[ -n "$expect" ]]; then
+        # A per-tenant client can only ever serve one holder of an address, so
+        # this cannot fire for them. A --host client serves every tenant, and
+        # under EVPN two of them really can share one address - there is then
+        # no right answer to assert, and picking one silently is how a test
+        # starts reporting on the wrong thing.
+        if (( nmatch > 1 )); then
+            echo "  AMBIG   $c serves ${ADDR_TENANTS[$a]}, which share $a."
+            echo "          A page names its tenant, but with one client and one"
+            echo "          address there is nothing to compare it against. Use"
+            echo "          --netns, where each tenant is asked separately."
+            bad=$((bad + 1))
+        elif [[ -n "$expect" ]]; then
             # The banner is "I am <tenant>", and once a second cluster joins the
             # fabric "I am <tenant> on <cluster>" - because with a stretched
             # Layer2 tenant the tenant name alone no longer says who answered.

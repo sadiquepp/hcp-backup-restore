@@ -1564,6 +1564,19 @@ clab_clusters:
     tenants_vrflite:
       - violet
 
+    ## Phase 2 has the same problem as VRF-Lite and the same answer. It leaks
+    ## every UDN into the ONE default VRF, so green and purple built here
+    ## would originate the same udn_subnet_shared prefixes the hub already
+    ## originates, into the same table - two origins for one prefix and no
+    ## VNI or route target to tell them apart. violet's udn_subnet_shared
+    ## (10.225.0.0/16) is unique and built nowhere else, so it is the only
+    ## tenant this cluster can safely bring to phase 2.
+    ##
+    ## Without this list the phase would fall back to `tenants` above and
+    ## build green and purple, which is exactly the collision described.
+    tenants_shared:
+      - violet
+
     ## The web phase is the union, on purpose. It runs after whichever
     ## transport phase was last applied, and a static list cannot know which
     ## that was. webload.yml deploys the tenants whose namespace exists right

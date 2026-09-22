@@ -9,6 +9,43 @@
       - curl
     state: present
 
+# Phase 2 reaches the pods a different way, and this VM has to be able to do
+# both. VRF-Lite and EVPN put each tenant behind its own VLAN into leaf1's
+# tenant VRF, which is what the namespaces below are for. The shared phase has
+# no tenant VRFs to enter: every UDN is leaked into the one default VRF, and a
+# client gets there off-segment, routed by the clab VM and then by leaf1 on
+# what BGP told it - exactly as the separate udnclient VM does.
+#
+# So the ROOT namespace carries the phase-2 routes and the namespaces carry
+# the per-tenant ones. They do not interact: different tables, different
+# interfaces. Installed unconditionally because a route to a prefix no phase
+# has advertised is inert - the clab VM simply has nothing to forward it to -
+# and making it conditional would mean knowing here which phase runs next,
+# which this role cannot know.
+- name: Install the shared-phase routing script in the root namespace
+  ansible.builtin.template:
+    src: udn-client-routes.sh.j2
+    dest: /usr/local/sbin/udn-client-routes.sh
+    mode: "0755"
+  register: udn_nsclient_routes_script
+
+- name: Install the shared-phase routing unit
+  ansible.builtin.template:
+    src: udn-client-routes.service.j2
+    dest: /etc/systemd/system/udn-client-routes.service
+    mode: "0644"
+  register: udn_nsclient_routes_unit
+
+- name: Enable and run the shared-phase routing unit
+  ansible.builtin.systemd:
+    name: udn-client-routes.service
+    enabled: true
+    state: >-
+      {{ 'restarted'
+         if (udn_nsclient_routes_script is changed or udn_nsclient_routes_unit is changed)
+         else 'started' }}
+    daemon_reload: true
+
 - name: Install the namespace script
   ansible.builtin.template:
     src: udn-netns-client.sh.j2
