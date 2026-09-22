@@ -256,7 +256,9 @@ route target, not a second copy of an existing one.
 
 `scripts/udn-xcluster-curl.sh` asks the question from inside the clusters — a
 pod in one curling a pod in the other, with nothing in the path belonging to
-either cluster's host networking:
+either cluster's host networking. It runs under VRF-Lite too, where it asks a
+different question and detects which lab it is looking at; see
+[udn-bgp-evpn-steps.md](udn-bgp-evpn-steps.md) section 6.4:
 
 ```bash
 scripts/udn-xcluster-curl.sh \

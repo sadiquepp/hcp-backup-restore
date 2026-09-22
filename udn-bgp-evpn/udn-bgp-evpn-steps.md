@@ -654,6 +654,42 @@ oc debug node/worker1 -- chroot /host ip route show proto bgp
 scripts/udn-snapshot.sh phaseB
 ```
 
+### 6.4 Test: the leak matrix from inside a pod, across clusters
+
+Needs web pods on both clusters (section 9) and a second cluster carrying a
+tenant of its own - on this lab, `violet` on the SNO.
+
+```bash
+scripts/udn-xcluster-curl.sh \
+    /var/lib/libvirt/images/hub_install/auth/kubeconfig \
+    /var/lib/libvirt/images/sno_install/auth/kubeconfig
+```
+
+It detects VRF-Lite on its own: no tenant is present in more than one
+cluster, which is only possible when there is no stretched Layer2. It reads
+the pairs from `vars.yaml:udn_vrf_leaks` and asserts four things.
+
+| From → to | Expected | Why |
+| --- | --- | --- |
+| same cluster, same tenant | answers | its own UDN |
+| same cluster, different tenant | silent | the `advertised-network-subnets` ACL, whatever the leaks say |
+| other cluster, leaked pair | answers | leaf1 imports the route, and neither cluster's ACL sees both sides as locally advertised |
+| other cluster, not leaked | silent | no route in that tenant's VRF |
+
+**This is the only test in the lab with a pod at both ends.** Section 6.1 and
+the ingress ask from the fabric netns clients, whose addresses are *not*
+advertised UDN subnets and therefore never meet that ACL at all. So it is the
+only one that can distinguish "isolated because the leak is absent" from
+"isolated because the ACL caught it" - and the only one that would notice if
+a leak started opening something within a cluster, which no `udn_vrf_leaks`
+entry is allowed to do.
+
+One limit it reports rather than hides: where two tenants share a pod address
+- `green` and `purple` both on `10.204.0.7` - and only one of them is leaked
+to the source, the test can show the answer came from the leaked one, but
+there is no second address to prove the other is shut. Those cells prove the
+route lands in the right VRF, not isolation.
+
 **Stop here for path B.** Section 9 adds web pages and the tenant ingress -
 which is where the overlapping `10.200.0.0/16` gets interesting.
 

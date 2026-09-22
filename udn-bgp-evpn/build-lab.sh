@@ -13,15 +13,19 @@
 #
 # TWO LABS, ONE SCRIPT. --evpn (the default) builds the stretched-Layer2
 # EVPN lab; --vrflite builds the VRF-Lite one. They share every step but
-# three: the containerlab topology (evpn vs bgp), the tag the cluster phase
-# runs (evpn vs vrflite), and the cross-cluster test, which exists only
-# under EVPN - VRF-Lite has no stretched Layer2 for a pod in one cluster to
-# reach a pod in the other over, so that step is not in its step list at
-# all rather than being a step that always passes.
+# two: the containerlab topology (evpn vs bgp) and the tag the cluster phase
+# runs (evpn vs vrflite). The step lists are now identical.
 #
-# The mode also decides the step list, so --list and the N/N counters follow
-# it. The step formerly called 'evpn' is now 'tenants'; --from evpn and
-# --only vrflite still work and name the same step.
+# The cross-cluster test runs in both, asking a different question in each.
+# Under EVPN: does a tenant reach ITSELF in the other cluster over one
+# stretched Layer2 domain. Under VRF-Lite there is no stretched Layer2 and no
+# tenant is in both clusters, so it asks whether the openings in
+# udn_vrf_leaks are real pod to pod and - the part worth having - whether the
+# pairs left out are shut. The script detects which lab it is looking at.
+#
+# The mode still decides the topology, so --list and the N/N counters stay
+# derived from it. The step formerly called 'evpn' is now 'tenants'; --from
+# evpn and --only vrflite still work and name the same step.
 #
 # RUN IT UNDER tmux (or screen). A full build installs two OpenShift
 # clusters and takes hours; if the ssh session drops, the shell gets
@@ -106,7 +110,9 @@ list_steps() {
   nsproxy    the tenant ingress, on that VM. Needs nsclient and web
   verify     scripts/udn-web-demo.sh --proxy - the ingress, from outside
   xcluster   scripts/udn-xcluster-curl.sh - pod to pod ACROSS the two
-             clusters. Needs both kubeconfigs and web on both. EVPN ONLY
+             clusters. Needs both kubeconfigs and web on both. Under EVPN,
+             same tenant over the stretched L2; under VRF-Lite, the
+             udn_vrf_leaks matrix with the shut pairs asserted shut
 EOF
     printf '\n  this run (--%s): %s\n' "$MODE" "${STEPS[*]}"
 }
@@ -137,7 +143,7 @@ case "$MODE" in
     evpn)    TOPOLOGY="evpn"
              STEPS=(bmhost clusters fabric preflight tenants web nsclient nsproxy verify xcluster) ;;
     vrflite) TOPOLOGY="bgp"
-             STEPS=(bmhost clusters fabric preflight tenants web nsclient nsproxy verify) ;;
+             STEPS=(bmhost clusters fabric preflight tenants web nsclient nsproxy verify xcluster) ;;
 esac
 TOTAL=${#STEPS[@]}
 
@@ -382,14 +388,20 @@ run_step() {
         else
             KUBECONFIG="$KUBECONFIG_HUB" scripts/udn-web-demo.sh --proxy
         fi ;;
-    # The only test in the build that crosses a cluster boundary from INSIDE.
-    # Step 9 asks from the fabric client, which reaches a pod the same way any
-    # external host would; this one has a pod in one cluster curl a pod in the
-    # other over the tenant's L2VNI, with nothing in the path belonging to
-    # either cluster's host networking. It is therefore the step that actually
-    # fails when the stretched Layer2 domain is only half built - the case
-    # where each cluster's tenants answer locally and neither can see the
-    # other's, which every earlier step passes.
+    # The only test in the build with a POD at both ends, which is what makes
+    # it worth its runtime in either mode. Step 9 asks from the fabric client,
+    # whose address is not an advertised UDN subnet and therefore never meets
+    # the advertised-network-subnets ACL at all.
+    #
+    # Under EVPN it is the step that fails when the stretched Layer2 domain is
+    # only half built - each cluster's tenants answer locally and neither sees
+    # the other's, which every earlier step passes.
+    #
+    # Under VRF-Lite it is the only check on the udn_vrf_leaks matrix from
+    # inside a pod: the openings must work across the cluster boundary, the
+    # pairs left out must stay silent, and two tenants of the SAME cluster
+    # must stay silent whatever the leaks say, because the ACL is the backstop
+    # there. The script reads the pairs from vars.yaml and detects the mode.
     #
     # It needs BOTH kubeconfigs, so it is guarded rather than assumed: a lab
     # built with the SNO skipped should say so and move on, not fail nine
