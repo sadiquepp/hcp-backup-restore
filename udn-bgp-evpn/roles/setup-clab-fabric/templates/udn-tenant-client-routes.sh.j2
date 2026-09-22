@@ -28,6 +28,10 @@ trap 'echo "udn-tenant-client-routes.sh: failed at line $LINENO with status $?" 
 
 MAC="{{ (clab_fabric_mac_prefix ~ ':' ~ ip_list[client.name]) | lower }}"
 MTU={{ clab_fabric_mtu }}
+# The VLAN children are the last hop to a POD, whose interface is capped by
+# the cluster MTU. The parent keeps the fabric MTU; a child may be smaller
+# than its parent and here it has to be. See vars.yaml:clab_client_mtu.
+CLIENT_MTU={{ clab_client_mtu | default(1400) }}
 
 # No `exit` in the awk program: exiting on the first match closes the pipe
 # while `ip` is still writing, `ip` takes SIGPIPE, and with `set -o pipefail`
@@ -72,7 +76,7 @@ for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 2 > "$i"; done
 VLAN{{ seg.vlan }}="$NIC.{{ seg.vlan }}"
 ip link show "$VLAN{{ seg.vlan }}" >/dev/null 2>&1 || \
     ip link add link "$NIC" name "$VLAN{{ seg.vlan }}" type vlan id {{ seg.vlan }}
-ip link set "$VLAN{{ seg.vlan }}" mtu "$MTU" up
+ip link set "$VLAN{{ seg.vlan }}" mtu "$CLIENT_MTU" up
 
 # Flush before configuring, every run. This device survives a re-run by design, and neither `ip addr replace` nor `ip route
 # replace` removes anything: replace only overwrites an address of the SAME

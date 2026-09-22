@@ -346,6 +346,60 @@ for c in "${clients[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# Path MTU. Every page above would pass whether this is right or wrong, so it
+# has to be asked separately.
+#
+# TCP is protected by MSS clamping: each end sends no more than the other
+# advertised, so a client whose segment is far larger than the pod's interface
+# still exchanges small segments and every curl succeeds. Nothing else is
+# protected. A UDP datagram, or any DF-set packet above the real path MTU, is
+# dropped at the OVN gateway's check_pkt_len - and on this lab the ICMP
+# too-big did not come back, so path-MTU discovery could not correct it. The
+# segments ran at 9000 against a ~1400 path for months of builds and no test
+# noticed.
+#
+# One ping, DF set, sized to exactly the client interface's MTU. It must
+# arrive. A failure here is that black hole returning, and it is invisible to
+# every other check in this repo.
+# ---------------------------------------------------------------------------
+# The probe runs on the client, so it is built once as a literal and the
+# target substituted in. No $( ) inside a double-quoted bash string, and no
+# single quotes inside the script itself - it is wrapped in them for sh -c,
+# and the first attempt at this broke on exactly that.
+read -r -d '' MTU_PROBE <<'EOS' || true
+d=$(ip route get __TARGET__ | sed -n "s/.* dev \\([^ ]*\\).*/\\1/p" | head -1)
+m=$(cat /sys/class/net/$d/mtu)
+if ping -c1 -W2 -M do -s $((m-28)) __TARGET__ >/dev/null 2>&1
+then echo "$d mtu=$m ok"
+else echo "$d mtu=$m BLACKHOLE"
+fi
+EOS
+
+mtu_bad=0
+echo
+echo "Path MTU (one DF packet at the interface MTU - must arrive)"
+for c in "${clients[@]}"; do
+    target=""
+    for t in ${SERVES[$c]}; do
+        [[ -n "${WEBADDR[$t]:-}" ]] && { target="${WEBADDR[$t]}"; break; }
+    done
+    [[ -n "$target" ]] || continue
+    probe="${MTU_PROBE//__TARGET__/$target}"
+    out=$(on_client "${CLIENTIP[$c]}" "${PREFIX[$c]}sh -c '$probe'" | tr -d '\r' | tail -1)
+    printf '  %-18s -> %-15s %s\n' "$c" "$target" "$out"
+    [[ "$out" == *BLACKHOLE* ]] && mtu_bad=$((mtu_bad+1))
+done
+if (( mtu_bad )); then
+    echo
+    echo "  $mtu_bad client(s) cannot deliver a full-MTU packet to a pod. The web"
+    echo "  pages above still passed, because MSS clamping hid it. Compare the"
+    echo "  client segment against the pod:"
+    echo "      oc -n udn-<tenant> rsh <web pod> ip link show ovn-udn1"
+    echo "  and set vars.yaml:clab_client_mtu to match, then re-run --tags"
+    echo "  clabnsclient (and clabclients, if the tenant VMs are built)."
+fi
+
+# ---------------------------------------------------------------------------
 echo
 echo "What answered"
 printf '%-18s' 'client'
@@ -429,4 +483,4 @@ if (( bad == 0 )); then
         fi
     done
 fi
-exit $(( (bad > 0 || proxy_rc > 0) ? 1 : 0 ))
+exit $(( (bad > 0 || proxy_rc > 0 || mtu_bad > 0) ? 1 : 0 ))

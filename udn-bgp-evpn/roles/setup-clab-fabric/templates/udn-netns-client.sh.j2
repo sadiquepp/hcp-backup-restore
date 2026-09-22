@@ -19,6 +19,10 @@ trap 'echo "udn-netns-client.sh: failed at line $LINENO with status $?" >&2' ERR
 
 MAC="{{ (clab_fabric_mac_prefix ~ ':' ~ ip_list[udn_nsclient_vm_name]) | lower }}"
 MTU={{ clab_fabric_mtu }}
+# The VLAN children are the last hop to a POD, whose interface is capped by
+# the cluster MTU. The parent keeps the fabric MTU; a child may be smaller
+# than its parent and here it has to be. See vars.yaml:clab_client_mtu.
+CLIENT_MTU={{ clab_client_mtu | default(1400) }}
 
 # No `exit` in the awk program - it closes the pipe while `ip` is still
 # writing, `ip` takes SIGPIPE, and with pipefail plus -e that is fatal.
@@ -74,7 +78,7 @@ fi
 # namespaces flushes its addresses and routes. Configuring before the move
 # silently loses everything.
 ip netns exec "$NS" ip link set lo up
-ip netns exec "$NS" ip link set "$DEV" mtu "$MTU" up
+ip netns exec "$NS" ip link set "$DEV" mtu "$CLIENT_MTU" up
 
 # Flush before configuring, every run. This device and its namespace both
 # survive a re-run by design, and neither `ip addr replace` nor `ip route

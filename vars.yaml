@@ -1365,6 +1365,38 @@ clab_fabric_network: fabric
 clab_fabric_bridge: virbr1
 clab_fabric_mtu: 9000
 
+## MTU for the CLIENT segments - the tenant VLANs the namespace client and the
+## per-tenant client VMs put their addresses on. Separate from the fabric MTU
+## above, and deliberately much smaller.
+##
+## The fabric wants 9000 because it carries encapsulated pod traffic. A client
+## segment carries none: it is the last hop to a POD, and the pod's own
+## interface is capped by the cluster network MTU - 1400 on this lab, which is
+## 1500 minus Geneve overhead. Read it off a running pod rather than assuming:
+##
+##   oc get network.operator cluster \
+##     -o jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig.mtu}{"\n"}'
+##   oc -n udn-blue rsh <web pod> ip link show ovn-udn1
+##
+## This was 9000 for every segment until it was measured. The clients then
+## advertised mss 8960 into a path that drops anything over ~1414 at the OVN
+## gateway's check_pkt_len, and the ICMP too-big did not make it back, so
+## path-MTU discovery could not correct it:
+##
+##   ping -M do -s 1372 <pod>   0% loss
+##   ping -M do -s 8972 <pod>   100% loss, and NO 'Frag needed' message
+##
+## TCP never noticed, because MSS clamping pins each direction to the other's
+## advertised MSS - so every web page in every test passed. Nothing else
+## survived: a UDP datagram or any DF-set packet above the path MTU vanished
+## silently. Matching the segment to the pod makes the failure local and
+## explicit instead - 'message too long, mtu=1400' from the client's own
+## kernel, before the packet is sent.
+##
+## Raise it only after raising the cluster MTU, which is the OpenShift MTU
+## migration and reboots every node twice, on both clusters.
+clab_client_mtu: 1400
+
 ## Fabric addressing. The last octet of every fabric address is the SAME
 ## octet the node already has in ip_list on virbr0 - worker1 is .34 on both -
 ## so there is one number per node to remember and no new collision surface.
