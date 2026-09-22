@@ -264,6 +264,17 @@
   loop_control:
     label: "{{ item.item.ip_key }}"
 
+# Sessions up and routes on the leaf say the CONTROL plane is right. They say
+# nothing about whether the pods can answer: an advertised subnet that is
+# still masqueraded reaches its pods and cannot reply, with every object
+# green and ping succeeding. Checked here, after the sessions, because
+# OVN-Kubernetes programs the exclusion from the advertisement.
+- name: Confirm the advertised pod networks are exempt from SNAT
+  ansible.builtin.include_tasks: snat-exclusion.yml
+  when:
+    - udn_phase in ['shared', 'vrflite', 'evpn']
+    - udn_bgp_tenants | length > 0
+
 - name: Show each tenant VRF's routing table on the border leaf
   ansible.builtin.command:
     cmd: >-

@@ -1,0 +1,169 @@
+# Confirm the advertised pod networks are exempt from SNAT.
+#
+# When a RouteAdvertisements CR advertises a UDN's pod network, the fabric
+# routes that subnet, so OVN-Kubernetes must NOT masquerade pod traffic
+# leaving the gateway router toward the fabric. It expresses that as a MATCH
+# on the gateway router's SNAT rule:
+#
+#   snat  ip4.dst == $a10426...  169.254.0.11  32768-60999  10.200.0.0/16
+#
+# The match names the destinations that still get masqueraded; everything
+# advertised falls outside it. A rule for the same subnet with an EMPTY
+# match is the broken form - every packet the pod sends out the gateway
+# router is rewritten to a 169.254.x.x masquerade address that the fabric
+# has no route back to.
+#
+# How that failure presents, and why nothing else catches it: the CUDN is
+# realised, the RouteAdvertisements reports Accepted, the BGP sessions are
+# Established, the leaf holds the tenant's routes, and inbound connections
+# to the pod complete their TCP handshake - because the reply to the SYN is
+# the ct.new packet and escapes before the SNAT applies. Every packet after
+# it is masqueraded and lost. ICMP is unaffected, because the rule carries a
+# TCP/UDP port range, so PING TO THE POD SUCCEEDS THROUGHOUT. A build looks
+# entirely healthy and no tenant serves a page.
+#
+# Seen on the SNO with violet: the fabric NIC flapped, zebra lost its
+# connected route, the default-VRF session died, and OVN-Kubernetes
+# programmed the SNAT without the exclusion while the fabric was
+# unreachable. Nothing re-triggered the reconcile afterwards - the sessions
+# came back and the SNAT stayed wrong until ovnkube-node was restarted.
+#
+# One pod is enough: ovn-nbctl reads the NB database, which is cluster-wide.
+
+- name: Find an ovnkube-node pod to read the OVN databases through
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_ovnkube_namespace }} get pods -l app=ovnkube-node -o name
+  register: udn_bgp_ovnkube_pods
+  changed_when: false
+
+- name: Fail if there is no ovnkube-node pod to ask
+  ansible.builtin.assert:
+    that: udn_bgp_ovnkube_pods.stdout_lines | default([]) | length > 0
+    fail_msg: >-
+      No ovnkube-node pod in {{ udn_bgp_ovnkube_namespace }}. Without one
+      this check cannot read the gateway routers' NAT rules, and a silent
+      skip here is how the fault it looks for went unnoticed in the first
+      place.
+
+- name: Keep the first one
+  ansible.builtin.set_fact:
+    udn_bgp_ovnkube_pod: "{{ udn_bgp_ovnkube_pods.stdout_lines | first }}"
+
+- name: Read every source-NAT rule OVN has programmed
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_ovnkube_namespace }} exec {{ udn_bgp_ovnkube_pod }}
+      -c ovnkube-controller -- ovn-nbctl --format=csv --no-headings
+      --columns=logical_ip,match find NAT type=snat
+  register: udn_bgp_nat_raw
+  changed_when: false
+  failed_when: false
+
+# A row whose match column is empty masquerades unconditionally. Matching on
+# the whole line rather than splitting: ovn-nbctl quotes a value only when it
+# has to, so 'starts with the subnet and ends at the comma' is the one form
+# that does not depend on how the match itself is spelled.
+- name: Note which subnets are masqueraded unconditionally
+  ansible.builtin.set_fact:
+    udn_bgp_snat_open: >-
+      {{ udn_bgp_nat_raw.stdout_lines | default([])
+         | select('search', '^[0-9./]+,\s*$')
+         | map('regex_replace', ',.*$', '') | list }}
+
+- name: Note which of this cluster's advertised tenants are affected
+  ansible.builtin.set_fact:
+    udn_bgp_snat_broken: >-
+      {{ udn_bgp_tenants | selectattr('udn_subnet', 'in', udn_bgp_snat_open)
+         | map(attribute='name') | list }}
+
+- name: Report the SNAT state of the advertised networks
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Advertised but masqueraded unconditionally: ' ~ (udn_bgp_snat_broken | join(', ')) ~
+         '. Their pods can be reached but cannot answer - restarting ovnkube-node
+         to force OVN-Kubernetes to reconcile the RouteAdvertisements.'
+         if udn_bgp_snat_broken | length > 0 else
+         'Every advertised pod network is exempt from SNAT.' }}
+
+- name: Force OVN-Kubernetes to reprogram the gateway routers
+  ansible.builtin.command:
+    cmd: "oc -n {{ udn_bgp_ovnkube_namespace }} rollout restart daemonset/ovnkube-node"
+  when: udn_bgp_snat_broken | length > 0
+
+- name: Wait for ovnkube-node to come back
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_ovnkube_namespace }} rollout status daemonset/ovnkube-node
+      --timeout=600s
+  when: udn_bgp_snat_broken | length > 0
+  changed_when: false
+
+# The pod names change on a restart, so re-resolve before asking again.
+- name: Find an ovnkube-node pod again
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_ovnkube_namespace }} get pods -l app=ovnkube-node
+      -o name
+  register: udn_bgp_ovnkube_pods_after
+  when: udn_bgp_snat_broken | length > 0
+  changed_when: false
+
+- name: Read the source-NAT rules again
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_ovnkube_namespace }} exec
+      {{ udn_bgp_ovnkube_pods_after.stdout_lines | first }}
+      -c ovnkube-controller -- ovn-nbctl --format=csv --no-headings
+      --columns=logical_ip,match find NAT type=snat
+  register: udn_bgp_nat_raw_after
+  when: udn_bgp_snat_broken | length > 0
+  changed_when: false
+  failed_when: false
+  # The gateway routers are rebuilt as the pod starts; give the exclusion a
+  # moment to appear rather than reading once and failing on a race.
+  retries: 12
+  delay: 10
+  until: >-
+    udn_bgp_nat_raw_after.stdout_lines | default([])
+    | select('search', '^[0-9./]+,\s*$') | map('regex_replace', ',.*$', '')
+    | select('in', udn_bgp_tenants | map(attribute='udn_subnet') | list)
+    | list | length == 0
+
+- name: Note which tenants are still masqueraded after the restart
+  ansible.builtin.set_fact:
+    udn_bgp_snat_broken_after: >-
+      {{ udn_bgp_tenants
+         | selectattr('udn_subnet', 'in',
+             udn_bgp_nat_raw_after.stdout_lines | default([])
+             | select('search', '^[0-9./]+,\s*$')
+             | map('regex_replace', ',.*$', '') | list)
+         | map(attribute='name') | list }}
+  when: udn_bgp_snat_broken | length > 0
+
+- name: Fail with the tenant whose pod network is advertised but still masqueraded
+  ansible.builtin.assert:
+    that: udn_bgp_snat_broken_after | default([]) | length == 0
+    fail_msg: >-
+      {{ udn_bgp_snat_broken_after | default([]) | join(', ') }}:
+      the gateway router masquerades this tenant's pod subnet unconditionally
+      even after ovnkube-node was restarted, so its pods can be reached but
+      cannot answer. Everything else will look healthy - the CUDN is
+      realised, RouteAdvertisements reports Accepted, the sessions are
+      Established, and PING TO THE POD SUCCEEDS, because the rule carries a
+      TCP/UDP port range and ICMP is not matched by it. Confirm with
+      `oc -n {{ udn_bgp_ovnkube_namespace }} exec <ovnkube-node pod>
+      -c ovnkube-controller -- ovn-nbctl lr-nat-list
+      GR_cluster_udn_<tenant>_<node>`: the row for the tenant's pod subnet
+      must carry a MATCH of the form 'ip4.dst == $a<id>'. An empty MATCH is
+      the fault. Then check that RouteAdvertisements '{{ udn_phase }}'
+      selects this tenant - its CUDN needs the label
+      {{ udn_bgp_cudn_label_key }}=enabled, and the FRRConfiguration it
+      names in frrConfigurationSelector has to exist - and that the tenant's
+      BGP session was up when the CR was last reconciled. This has been
+      caused by the session being down at apply time, which leaves the
+      exclusion unprogrammed with no later event to correct it.
+    success_msg: >-
+      Every advertised pod network is exempt from SNAT
+      ({{ udn_bgp_tenants | map(attribute='name') | join(', ') }}).
+  when: udn_bgp_snat_broken | length > 0
