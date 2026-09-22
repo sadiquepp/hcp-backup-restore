@@ -511,11 +511,14 @@ a clean cluster restarts nothing.
 The assert's failure message says outright that ping will succeed and every
 object will be green, because that is what cost the most time.
 
-> **Untested against EVPN.** The check asserts the same invariant for the
-> `shared`, `vrflite` and `evpn` phases, on the reasoning that
-> `advertisements: PodNetwork` means the same thing in each. If an EVPN run
-> trips it, that is either a real find or OVN-Kubernetes modelling EVPN SNAT
-> differently — record which, here, and narrow the scope if needed.
+> **Confirmed against EVPN**, 2026-09-22. The check asserts the same invariant
+> for the `shared`, `vrflite` and `evpn` phases, on the reasoning that
+> `advertisements: PodNetwork` means the same thing in each. That was an
+> assumption when it was written; a full `./build-lab.sh` under EVPN has since
+> run it clean, so OVN-Kubernetes programs the advertised-destination
+> exclusion the same way there and the scope does not need narrowing. One
+> passing build is evidence for this lab's EVPN configuration, not a proof
+> about every one.
 
 ---
 
