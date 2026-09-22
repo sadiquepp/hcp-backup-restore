@@ -2,13 +2,26 @@
 #
 # Build the whole UDN-over-EVPN lab, two clusters, in one command.
 #
-#   ./build-lab.sh                       # everything, from scratch
+#   ./build-lab.sh                       # everything, from scratch (EVPN)
+#   ./build-lab.sh --vrflite             # the VRF-Lite lab instead
 #   ./build-lab.sh --from fabric         # resume at a step
-#   ./build-lab.sh --only evpn           # one step
+#   ./build-lab.sh --only tenants        # one step
 #   ./build-lab.sh --list                # what the steps are
 #   ./build-lab.sh --dry-run             # print the commands, run nothing
 #   ./build-lab.sh --rebuild-clusters    # cleanup.yaml first, then all of it
 #   ./build-lab.sh --rebuild-clusters -y # ... without the 10s abort window
+#
+# TWO LABS, ONE SCRIPT. --evpn (the default) builds the stretched-Layer2
+# EVPN lab; --vrflite builds the VRF-Lite one. They share every step but
+# three: the containerlab topology (evpn vs bgp), the tag the cluster phase
+# runs (evpn vs vrflite), and the cross-cluster test, which exists only
+# under EVPN - VRF-Lite has no stretched Layer2 for a pod in one cluster to
+# reach a pod in the other over, so that step is not in its step list at
+# all rather than being a step that always passes.
+#
+# The mode also decides the step list, so --list and the N/N counters follow
+# it. The step formerly called 'evpn' is now 'tenants'; --from evpn and
+# --only vrflite still work and name the same step.
 #
 # RUN IT UNDER tmux (or screen). A full build installs two OpenShift
 # clusters and takes hours; if the ssh session drops, the shell gets
@@ -18,7 +31,7 @@
 #   tmux new -s lab      then  ./build-lab.sh
 #   ctrl-b d             detach;  tmux attach -t lab  to come back
 #
-# A bare ./build-lab.sh runs all ten steps and therefore BUILDS THE
+# A bare ./build-lab.sh runs every step of the mode and therefore BUILDS THE
 # CLUSTERS. That is only right on a bare lab host: the cluster playbooks
 # are not idempotent, so it refuses if a hub kubeconfig or the libvirt
 # domains are already there. With clusters already up, start at --from
@@ -56,19 +69,27 @@ cd "$(dirname "$(readlink -f "$0")")"   # always run from udn-bgp-evpn/
 
 VAULT_FILE="${ANSIBLE_VAULT_PASSWORD_FILE:-$HOME/.vault_pass}"
 INVENTORY="../inventory/hosts"
-TOPOLOGY="evpn"
+MODE="evpn"                             # --evpn | --vrflite
+TOPOLOGY="evpn"                         # derived from MODE, see below
 KUBECONFIG_HUB="${KUBECONFIG_HUB:-/var/lib/libvirt/images/hub_install/auth/kubeconfig}"
 KUBECONFIG_SNO="${KUBECONFIG_SNO:-/var/lib/libvirt/images/sno_install/auth/kubeconfig}"
 LOGDIR="${LOGDIR:-./build-logs}"
-PARALLEL_EVPN=0
+PARALLEL_TENANTS=0
 REBUILD_CLUSTERS=0
 ASSUME_YES=0
 CLEANED=0
 DRY_RUN=0
+WANT_LIST=0
 FROM=""
 ONLY=""
 
-STEPS=(bmhost clusters fabric preflight evpn web nsclient nsproxy verify xcluster)
+# Filled in from MODE once the arguments are parsed - xcluster is EVPN-only.
+STEPS=()
+
+# --from/--only still accept the phase names. 'evpn' named this step before
+# there was a second mode, and 'vrflite' is what the equivalent run is called
+# by hand, so both resolve to it rather than erroring as unknown steps.
+declare -A STEP_ALIAS=([evpn]=tenants [vrflite]=tenants)
 
 usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
@@ -78,14 +99,16 @@ list_steps() {
   clusters   hub (--skip-tags acm) and the SNO, IN PARALLEL
   fabric     containerlab leaf1/spine/leaf2, virbr1, the node NICs
   preflight  report what the clusters can do; changes nothing
-  evpn       the cluster half, hub then sno (--parallel-evpn to overlap)
+  tenants    the cluster half, hub then sno (--parallel-tenants to overlap).
+             --tags evpn under --evpn, --tags vrflite under --vrflite
   web        one web pod per tenant, hub then sno
   nsclient   the namespace client VM - one netns per tenant
   nsproxy    the tenant ingress, on that VM. Needs nsclient and web
   verify     scripts/udn-web-demo.sh --proxy - the ingress, from outside
   xcluster   scripts/udn-xcluster-curl.sh - pod to pod ACROSS the two
-             clusters. Needs both kubeconfigs and web on both
+             clusters. Needs both kubeconfigs and web on both. EVPN ONLY
 EOF
+    printf '\n  this run (--%s): %s\n' "$MODE" "${STEPS[*]}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -93,15 +116,37 @@ while [[ $# -gt 0 ]]; do
         --vault-password-file) VAULT_FILE="$2"; shift 2 ;;
         --from)                FROM="$2"; shift 2 ;;
         --only)                ONLY="$2"; shift 2 ;;
-        --parallel-evpn)       PARALLEL_EVPN=1; shift ;;
+        --evpn)                MODE="evpn"; shift ;;
+        --vrflite)             MODE="vrflite"; shift ;;
+        --parallel-tenants|--parallel-evpn)
+                               PARALLEL_TENANTS=1; shift ;;
         --rebuild-clusters)    REBUILD_CLUSTERS=1; shift ;;
         -y|--yes)              ASSUME_YES=1; shift ;;
         --dry-run)             DRY_RUN=1; shift ;;
-        --list)                list_steps; exit 0 ;;
+        --list)                WANT_LIST=1; shift ;;
         -h|--help)             usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+# The mode decides the fabric topology and the step list. Only clab_topology
+# 'bgp' puts the per-tenant <vrf_prefix>.1 addresses on leaf1 that VRF-Lite
+# peers with; the 'evpn' topology keeps tenant VRFs on leaf2 and would leave
+# the vrflite phase with nothing to peer to.
+case "$MODE" in
+    evpn)    TOPOLOGY="evpn"
+             STEPS=(bmhost clusters fabric preflight tenants web nsclient nsproxy verify xcluster) ;;
+    vrflite) TOPOLOGY="bgp"
+             STEPS=(bmhost clusters fabric preflight tenants web nsclient nsproxy verify) ;;
+esac
+TOTAL=${#STEPS[@]}
+
+(( WANT_LIST )) && { list_steps; exit 0; }
+
+# Resolve the phase-name aliases before validating, so --from evpn and
+# --only vrflite name the step they obviously mean.
+if [[ -n "$FROM" ]]; then FROM="${STEP_ALIAS[$FROM]:-$FROM}"; fi
+if [[ -n "$ONLY" ]]; then ONLY="${STEP_ALIAS[$ONLY]:-$ONLY}"; fi
 
 # Arguments first, environment second. A typo in --from is the user's mistake
 # and should say so; reporting a missing ansible-playbook for it sends them
@@ -180,6 +225,17 @@ wait_all() {
     return $rc
 }
 
+# pos <step> - "3/9", from the step's place in the mode's list. Hand-written
+# counters went wrong the last time a step was added: every message still read
+# N/9 after the tenth step appeared. Deriving them removes the class.
+pos() {
+    local s="$1" i
+    for i in "${!STEPS[@]}"; do
+        [[ "${STEPS[$i]}" == "$s" ]] && { printf '%d/%d' "$((i + 1))" "$TOTAL"; return 0; }
+    done
+    printf '?/%d' "$TOTAL"
+}
+
 # should_run <step> - honours --from and --only
 started=0
 should_run() {
@@ -234,7 +290,7 @@ Continuing in 10s - ctrl-c to stop.  (-y skips this wait)
 EOF
         sleep 10
     fi
-    say "0/10  cleanup.yaml - destroying the existing lab"
+    say "0/$TOTAL  cleanup.yaml - destroying the existing lab"
     play ../cleanup.yaml
 }
 
@@ -274,48 +330,53 @@ run_step() {
     case "$step" in
     bmhost)
         guard_clusters
-        say "1/10  helper VM (DNS, LB, inventory)"
+        say "$(pos bmhost)  helper VM (DNS, LB, inventory)"
         play ../setup_bm_host.yaml ;;
     clusters)
         guard_clusters
-        say "2/10  hub and SNO, in parallel"
+        say "$(pos clusters)  hub and SNO, in parallel"
         play_bg hub ../setup_hub_cluster.yaml --skip-tags acm
         play_bg sno ../setup_sno.yaml
         wait_all ;;
     fabric)
-        say "3/10  containerlab fabric (leaf1 / spine / leaf2)"
+        say "$(pos fabric)  containerlab fabric (leaf1 / spine / leaf2), topology $TOPOLOGY"
         play setup_udn_bgp_lab.yaml --tags fabric -e "clab_topology=$TOPOLOGY" ;;
     preflight)
-        say "4/10  pre-flight - changes nothing"
+        say "$(pos preflight)  pre-flight - changes nothing"
         play setup_udn_bgp_lab.yaml --tags preflight ;;
-    evpn)
-        if (( PARALLEL_EVPN )); then
-            say "5/10  EVPN on both clusters, in parallel"
-            play_bg evpn-hub setup_udn_bgp_lab.yaml --tags evpn -e udn_bgp_cluster=hub
-            play_bg evpn-sno setup_udn_bgp_lab.yaml --tags evpn -e udn_bgp_cluster=sno
+    # The one step the mode actually changes: --tags evpn or --tags vrflite.
+    # Everything downstream is identical, which is why this is one script.
+    tenants)
+        if (( PARALLEL_TENANTS )); then
+            say "$(pos tenants)  $MODE on both clusters, in parallel"
+            play_bg "$MODE-hub" setup_udn_bgp_lab.yaml --tags "$MODE" -e udn_bgp_cluster=hub
+            play_bg "$MODE-sno" setup_udn_bgp_lab.yaml --tags "$MODE" -e udn_bgp_cluster=sno
             wait_all
         else
             # Sequential by default. Both runs patch cluster-scoped state, and
             # the SNO's session depends on leaf1 already holding the hub's, so
-            # serialising removes a variable. --parallel-evpn to overlap them.
-            say "5/10  EVPN on the hub"
-            play setup_udn_bgp_lab.yaml --tags evpn -e udn_bgp_cluster=hub
-            say "5/10  EVPN on the SNO"
-            play setup_udn_bgp_lab.yaml --tags evpn -e udn_bgp_cluster=sno
+            # serialising removes a variable. --parallel-tenants to overlap.
+            say "$(pos tenants)  $MODE on the hub"
+            play setup_udn_bgp_lab.yaml --tags "$MODE" -e udn_bgp_cluster=hub
+            say "$(pos tenants)  $MODE on the SNO"
+            play setup_udn_bgp_lab.yaml --tags "$MODE" -e udn_bgp_cluster=sno
         fi ;;
+    # Each cluster deploys the tenants it actually has in this phase - the SNO
+    # under --vrflite has violet and not green or purple - and webload.yml
+    # deploys what exists rather than failing on the first absent namespace.
     web)
-        say "6/10  web pods, hub"
+        say "$(pos web)  web pods, hub"
         play setup_udn_bgp_lab.yaml --tags web -e udn_bgp_cluster=hub
-        say "6/10  web pods, SNO"
+        say "$(pos web)  web pods, SNO"
         play setup_udn_bgp_lab.yaml --tags web -e udn_bgp_cluster=sno ;;
     nsclient)
-        say "7/10  namespace client VM"
+        say "$(pos nsclient)  namespace client VM"
         play setup_udn_bgp_lab.yaml --tags clabnsclient -e "clab_topology=$TOPOLOGY" ;;
     nsproxy)
-        say "8/10  tenant ingress"
+        say "$(pos nsproxy)  tenant ingress"
         play setup_udn_bgp_lab.yaml --tags clabnsproxy -e "clab_topology=$TOPOLOGY" ;;
     verify)
-        say "9/10  the tenant ingress, from outside"
+        say "$(pos verify)  the tenant ingress, from outside"
         if (( DRY_RUN )); then
             printf '    KUBECONFIG=%s scripts/udn-web-demo.sh --proxy\n' "$KUBECONFIG_HUB"
         else
@@ -334,7 +395,7 @@ run_step() {
     # built with the SNO skipped should say so and move on, not fail nine
     # steps of good work on a missing file.
     xcluster)
-        say "10/10  pod to pod, across both clusters"
+        say "$(pos xcluster)  pod to pod, across both clusters"
         if [[ ! -r "$KUBECONFIG_SNO" ]]; then
             echo "    no SNO kubeconfig at $KUBECONFIG_SNO - skipping." >&2
             echo "    This test needs two clusters. Set KUBECONFIG_SNO if it" >&2
