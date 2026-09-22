@@ -2357,13 +2357,39 @@ udn_proxy_selinux_permissive_fallback: true
 ## back, which presents as a fabric fault rather than a configuration choice -
 ## the same trap as leaving out the client segment's `network` statement.
 ##
-## WHAT THIS CANNOT DO, established on the running lab: a pod still cannot
-## reach another tenant's POD. OVN-Kubernetes installs an ACL named
-## advertised-network-subnets that drops traffic whose source AND destination
-## are both advertised UDN subnets - so BGP advertisement cannot be used to
-## defeat UDN isolation. The leak is real for everything else: a pod reaches
-## the other tenant's external network, and is reachable from its clients,
-## because those addresses are not advertised UDN subnets. See doc section 3i.
+## WHAT THIS CANNOT DO WITHIN ONE CLUSTER, established on the running lab: a
+## pod cannot reach another tenant's POD on the SAME cluster. OVN-Kubernetes
+## installs an ACL named advertised-network-subnets that drops traffic whose
+## source AND destination are both advertised UDN subnets - so BGP
+## advertisement cannot be used to defeat UDN isolation between two tenants of
+## one cluster. The leak is real for everything else: a pod reaches the other
+## tenant's external network, and is reachable from its clients, because those
+## addresses are not advertised UDN subnets. See doc section 3i.
+##
+## ACROSS CLUSTERS IT IS A DIFFERENT ANSWER, and the wording above used to
+## miss it. A violet pod on the SNO curls a green pod on the hub and gets
+## green's page:
+##
+##   sh-5.1# curl http://10.204.0.7:8080
+##   I am green on hub
+##
+## That is 10.206.0.5 -> 10.204.0.7, two DIFFERENT advertised subnets, so it
+## is not the same-subnet case README.md and udn-bgp-evpn-steps.md already
+## describe for EVPN. Each cluster's ACL is built from THAT CLUSTER'S
+## advertised subnets: the SNO's holds 10.206.0.0/16 and knows nothing of
+## 10.204.0.0/16, the hub's is the mirror image, so neither end sees a pair
+## where both sides are locally advertised and neither drops it. Confirm by
+## listing the address set the ACL matches on each cluster:
+##
+##   OVN=$(oc -n openshift-ovn-kubernetes get pod -l app=ovnkube-node -o name | head -1)
+##   oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN \
+##     ovn-nbctl --bare --columns=match find ACL \
+##       'external_ids{>=}{"k8s.ovn.org/name"=advertised-network-subnets}'
+##
+## So the isolation this list opens is per-VRF AND per-cluster. Within a
+## cluster the ACL is the backstop whatever the leaks say; across clusters the
+## leaks are the only thing deciding, which is why the pairs below are chosen
+## rather than convenient.
 ##
 ## Set to [] to have the tenants fully isolated again.
 udn_vrf_leaks:

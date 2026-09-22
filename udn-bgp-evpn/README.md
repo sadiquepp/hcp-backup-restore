@@ -296,6 +296,15 @@ hub pod sending to `10.204.128.5` is indistinguishable from one sending to
 `10.204.0.5`, and the latter obviously has to work. Same-UDN traffic is
 allowed whichever cluster it lands in.
 
+Traffic between **different** tenants in different clusters is allowed too,
+for a different reason, and it applies under VRF-Lite as much as EVPN: each
+cluster's ACL is built from that cluster's own advertised subnets. The SNO's
+holds `10.206.0.0/16` and knows nothing of the hub's `10.204.0.0/16`, so
+neither end sees a pair where both sides are locally advertised. A violet pod
+on the SNO curling `10.204.0.7` on the hub gets green's page; the same curl
+between two hub tenants is dropped. Within a cluster the ACL is the backstop
+whatever `udn_vrf_leaks` opens; across clusters the leaks decide alone.
+
 **The infrastructure addresses collide, and cannot be split.** Both clusters
 put their Layer2 gateway on `10.204.0.1` and their per-node management port on
 `10.204.0.2`. ovn-kubernetes derives a MAC from the IP, so those are literally

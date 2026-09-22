@@ -83,6 +83,16 @@ In descending order of interest. None of these is a lab misconfiguration.
    source and destination against the advertised-subnet set on addresses
    alone, so cross-cluster is indistinguishable from intra-cluster.
 
+6. **The same ACL does not block cross-cluster traffic between DIFFERENT
+   tenants either**, which is a separate mechanism and applies under VRF-Lite.
+   Each cluster's ACL is built from that cluster's advertised subnets, so
+   neither end of an SNO-to-hub pair sees both sides as locally advertised.
+   Observed: a violet pod on the SNO curls `10.204.0.7` on the hub and gets
+   green's page, while the same curl between two hub tenants is dropped.
+   `vars.yaml`'s `udn_vrf_leaks` comment claimed a pod could never reach
+   another tenant's pod; that is true within a cluster only, and has been
+   corrected.
+
 ## Open
 
 - `scripts/udn-web-demo.sh --netns` is still single-cluster (discovers from one

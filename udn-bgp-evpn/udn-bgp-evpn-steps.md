@@ -972,6 +972,15 @@ Measured, and worth stating because the lab looks like it works:
   and could not. It matches source and destination against the advertised-subnet
   set on **addresses alone**, so a hub pod sending to `10.204.128.5` is
   indistinguishable from one sending to `10.204.0.5`.
+- **Nor does it block cross-cluster traffic between DIFFERENT tenants**, which
+  is a separate case from the one above and holds under VRF-Lite too. Each
+  cluster's ACL is built from that cluster's own advertised subnets, so the
+  SNO's knows `10.206.0.0/16` and not `10.204.0.0/16` and the hub's is the
+  mirror image. Neither end sees a pair where both sides are locally
+  advertised. A violet pod on the SNO curling `10.204.0.7` on the hub gets
+  green's page, where the same curl between two hub tenants is dropped. Within
+  a cluster the ACL is the backstop whatever `udn_vrf_leaks` says; across
+  clusters the leaks are the only thing deciding.
 
 ---
 
