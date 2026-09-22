@@ -522,21 +522,49 @@ object will be green, because that is what cost the most time.
 
 ---
 
-## Open — client segment MTU is 9000 against a path that carries ~1400
+## Closed — client segments ran at MTU 9000 against a path carrying ~1400
 
-Found during Case 2, not the cause of it, not yet fixed.
+Found during Case 2, not its cause. Fixed in `a8d6325`.
 
 ```
 ip netns exec violet ping -c2 -M do -s 1372 10.206.0.5   →  0% loss
 ip netns exec violet ping -c2 -M do -s 8972 10.206.0.5   →  100% loss
 ```
 
-`eth1.260` is MTU 9000 and advertises `mss 8960`; the pod's `ovn-udn1` is
-1400; the datapath carries `check_pkt_len(size=1414)`. All six client
-segments come from `clab_fabric_mtu: 9000` via
-`roles/setup-clab-fabric/templates/udn-tenant-client-routes.sh.j2`, so every
-tenant has this. They survive only because MSS clamping pins them to the
-pod's 1360 — nothing in the lab would catch a large-segment black hole.
+Note what the second one did **not** print: `Frag needed and DF set (mtu = …)`.
+`ping -M do` prints that line whenever an ICMP too-big comes back. None did, so
+path-MTU discovery was not working on that path and this was a black hole
+rather than a clamp.
+
+`eth1.260` was 9000, advertising `mss 8960`; the pod's `ovn-udn1` is 1400; the
+datapath carries `check_pkt_len(size=1414)` at the OVN gateway. All six client
+segments came from `clab_fabric_mtu: 9000` via
+`roles/setup-clab-fabric/templates/udn-tenant-client-routes.sh.j2` and
+`udn-netns-client.sh.j2`, so every tenant had it.
+
+**Why no test caught it for months of builds.** TCP is protected by MSS
+clamping - each end sends no more than the other advertised, so the pod's
+`mss 1360` pinned every flow to a safe size and every web page passed. Only
+UDP, and DF-set packets, were affected, and nothing in the lab sent either.
+
+The fix is a separate `clab_client_mtu: 1400` for the VLAN **children** only.
+The parent NIC keeps `clab_fabric_mtu`: the fabric carries encapsulated pod
+traffic and wants 9000, while a client segment is the last hop to a pod and
+must not exceed what the pod can answer with. A child may be smaller than its
+parent.
+
+Matched to the pod, the failure becomes local and explicit instead of silent:
+
+```
+# ip netns exec blue ping -c2 -M do -s 1373 10.200.3.5
+ping: local error: message too long, mtu=1400
+```
+
+`scripts/udn-web-demo.sh` now probes it - one DF ping per client, sized to
+that client's own interface MTU, which must arrive. It sits after the page
+matrix on purpose: the pages pass either way, so the check cannot be folded
+into them. Raising it again means raising the cluster MTU first, which is the
+OpenShift MTU migration and reboots every node twice, on both clusters.
 
 ---
 
