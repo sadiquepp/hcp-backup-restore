@@ -676,6 +676,35 @@ the pairs from `vars.yaml:udn_vrf_leaks` and asserts four things.
 | other cluster, leaked pair | answers | leaf1 imports the route, and neither cluster's ACL sees both sides as locally advertised |
 | other cluster, not leaked | silent | no route in that tenant's VRF |
 
+Measured on this lab:
+
+```
+  from \ to       10.200.4.4            10.204.0.7            10.202.1.4            10.200.5.3            10.206.0.5
+  (holders)       hub/blue              hub/green,hub/purple  hub/orange            hub/red               sno/violet
+  hub/blue        I am blue on hub      (no answer)           (no answer)           (no answer)           I am violet on sno
+  hub/green       (no answer)           I am green on hub     (no answer)           (no answer)           I am violet on sno
+  hub/orange      (no answer)           (no answer)           I am orange on hub    (no answer)           I am violet on sno
+  hub/purple      (no answer)           I am purple on hub    (no answer)           (no answer)           (no answer)
+  hub/red         (no answer)           (no answer)           (no answer)           I am red on hub       (no answer)
+  sno/violet      I am blue on hub      I am green on hub     I am orange on hub    (no answer)           I am violet on sno
+```
+
+Two cells are worth more than the rest.
+
+**`sno/violet -> 10.200.5.3` is silent**, and that is the one that proves the
+opening is per-VRF. Red's pod sits inside `10.200.0.0/16`, which violet *does*
+have a route to - it imports it from blue. Silence there means leaf1 imported
+blue's per-node advertised `/24`s and not the tenant's `/16`, so `[violet,
+blue]` opens blue and nothing else that happens to share blue's supernet. A
+`/16`-granular import would have answered, and no other test in this lab would
+have noticed.
+
+**`10.204.0.7` answers three different ways** depending on who asks: green to
+green, purple to purple, green to violet, and silence to blue, orange and red.
+One address, four outcomes, each correct - the case
+`scripts/udn-vrf-isolation.sh` has to mark `AMBIG` because ICMP cannot tell two
+identical addresses apart.
+
 **This is the only test in the lab with a pod at both ends.** Section 6.1 and
 the ingress ask from the fabric netns clients, whose addresses are *not*
 advertised UDN subnets and therefore never meet that ACL at all. So it is the
