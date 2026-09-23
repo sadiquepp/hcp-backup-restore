@@ -1588,16 +1588,23 @@ customized_lab_image_url: ""
 ## one hardcoded root password, and because the image build and the base-image
 ## preparation have to agree on which key.
 ##
-## lab_root_password is a CREDENTIAL and belongs in vault.yaml, not here -
-## this file is committed to a public repository. Set it with
-## `ansible-vault edit vault.yaml`:
+## lab_root_password is OPTIONAL and, being a credential, belongs in
+## vault.yaml rather than here - this file is committed to a public
+## repository. There is no toggle: defining it is the toggle.
 ##
-##   lab_root_password: <the root password baked into the lab images>
+##   ansible-vault edit vault.yaml     # lab_root_password: <password>
 ##
-## The image build asserts it is present. setup_bm_host.yaml's preparation of
-## the BASE image reads the same variable and keeps its historical 'redhat'
-## when it is unset, so nothing that does not use the customized image
-## changes behaviour.
+## Unset, the customized image is key-only. The lab never needs a password -
+## Ansible reaches every guest with the injected key. What a password buys is
+## console access (virsh console, VNC) into a guest whose networking is
+## broken, which in a lab about VLANs, VRFs and routing is a state you will
+## reach.
+##
+## NOTE the two images can differ. setup_bm_host.yaml's preparation of the
+## BASE image reads the same variable but keeps its historical 'redhat' when
+## unset, so flows that never use the customized image are unaffected. With
+## nothing in vault.yaml, guests from the customized image are key-only while
+## guests from the base image still have root:redhat. Set it and both agree.
 lab_ssh_pubkey_path: /root/.ssh/lab_rsa.pub
 
 ## Rebuild the image even if it is already there. Off by default because the
