@@ -1,0 +1,10 @@
+---
+# Defaults for lab-image.
+#
+# The real values live in vars.yaml, beside the per-guest package lists they
+# are derived from. These exist so the role is usable from a play that does
+# not load vars.yaml, and so a missing variable is a sensible default rather
+# than an undefined-variable traceback three tasks deep.
+
+customized_lab_image_ready: false
+customized_lab_image_for_helper: false

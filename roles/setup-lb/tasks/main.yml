@@ -57,9 +57,13 @@
   shell: nmcli connection up "{{ primary_conn.stdout }}"
 
 - name: Install HAProxy
-  dnf:
-    name: haproxy
-    state: installed
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
+  vars:
+    lab_pkg_list: "{{ lb_packages }}"
+    lab_pkg_what: helper load balancer
+    lab_pkg_use_image: "{{ customized_lab_helper_ready | default(false) }}"
 
 - name: Allow Ports via SELinux
   shell:

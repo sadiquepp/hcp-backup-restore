@@ -15,8 +15,9 @@
 # Answers "prebuilt image or not" before anything reads it. tags: [always]
 # because every guest-building subset of this role depends on the answer.
 - name: Detect the prebuilt lab image
-  ansible.builtin.include_tasks:
-    file: lab-image.yml
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: detect
     apply:
       tags: [always]
   tags: [always]
@@ -370,7 +371,7 @@
       subscription-manager, same as the helper.
   when:
     - clab_deploy_mode == 'vm'
-    - not (udn_lab_image_ready | default(false) | bool)
+    - not (customized_lab_image_ready | default(false) | bool)
   tags: [fabric, clabvm, rhsm, clabinstall]
 
 # setup-rhsm lives at the REPOSITORY ROOT, not in udn-bgp-evpn/roles/. It is
@@ -388,7 +389,7 @@
       tags: [fabric, rhsm, clabinstall]
   when:
     - clab_deploy_mode == 'vm'
-    - not (udn_lab_image_ready | default(false) | bool)
+    - not (customized_lab_image_ready | default(false) | bool)
   tags: [fabric, rhsm, clabinstall]
 
 # 'apply' propagates delegate_to onto every task in the included file, which
@@ -483,7 +484,7 @@
       Add org_id / activation_key to vault.yaml (ansible-vault edit
       vault.yaml) - needed to register the client VM with
       subscription-manager, same as the containerlab VM and the helper.
-  when: not (udn_lab_image_ready | default(false) | bool)
+  when: not (customized_lab_image_ready | default(false) | bool)
   tags: [clabclient]
 
 - name: Register the client VM with subscription-manager
@@ -492,7 +493,7 @@
     apply:
       delegate_to: "{{ udn_client_vm_name }}"
       tags: [clabclient]
-  when: not (udn_lab_image_ready | default(false) | bool)
+  when: not (customized_lab_image_ready | default(false) | bool)
   tags: [clabclient]
 
 - name: Configure the client VM
@@ -538,7 +539,7 @@
       Add org_id / activation_key to vault.yaml (ansible-vault edit
       vault.yaml) - needed to register the per-tenant client VMs with
       subscription-manager, same as every other guest in this lab.
-  when: not (udn_lab_image_ready | default(false) | bool)
+  when: not (customized_lab_image_ready | default(false) | bool)
   tags: [clabtenantclients]
 
 - name: Register each per-tenant client with subscription-manager
@@ -547,7 +548,7 @@
     apply:
       delegate_to: "{{ client.name }}"
       tags: [clabtenantclients]
-  when: not (udn_lab_image_ready | default(false) | bool)
+  when: not (customized_lab_image_ready | default(false) | bool)
   loop: "{{ udn_tenant_clients }}"
   loop_control:
     loop_var: client
@@ -596,7 +597,7 @@
     fail_msg: >-
       Add org_id / activation_key to vault.yaml - needed to register the
       namespace client with subscription-manager, same as every other guest.
-  when: not (udn_lab_image_ready | default(false) | bool)
+  when: not (customized_lab_image_ready | default(false) | bool)
   tags: [clabnsclient]
 
 - name: Register the namespace client with subscription-manager
@@ -605,7 +606,7 @@
     apply:
       delegate_to: "{{ udn_nsclient_vm_name }}"
       tags: [clabnsclient]
-  when: not (udn_lab_image_ready | default(false) | bool)
+  when: not (customized_lab_image_ready | default(false) | bool)
   tags: [clabnsclient]
 
 - name: Configure the namespace client

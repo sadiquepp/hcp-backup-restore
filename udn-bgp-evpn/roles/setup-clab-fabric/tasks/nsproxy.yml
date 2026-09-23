@@ -187,11 +187,12 @@
 # On the VM
 # ---------------------------------------------------------------------------
 - name: Install haproxy and the SELinux tooling the fallback may need
-  ansible.builtin.include_tasks:
-    file: packages.yml
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
   vars:
-    udn_pkg_list: "{{ udn_pkgs_nsproxy }}"
-    udn_pkg_what: tenant ingress
+    lab_pkg_list: "{{ lab_pkgs_nsproxy }}"
+    lab_pkg_what: tenant ingress
 
 # The namespace keyword is a compile-time option. Without it haproxy rejects
 # the config outright, so check the binary before rendering one it cannot read.

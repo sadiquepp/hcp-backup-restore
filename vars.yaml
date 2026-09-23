@@ -472,6 +472,18 @@ dns_packages:
   - vim
   - net-tools
 
+## The other two helper roles used to hardcode their package lists inside the
+## task. They are variables now for the same reason dns_packages already was,
+## and for one more: the customized lab image installs the union of every
+## guest's list, so a hardcoded list is one the image cannot know about.
+lb_packages:
+  - haproxy
+tftp_packages:
+  - httpd
+  - tftp-server
+  - syslinux-tftpboot
+  - syslinux
+
 ## Where the helper's named sends everything it is NOT authoritative for.
 ##
 ## SET THIS IN vault.yaml, not here - resolver addresses are internal
@@ -1473,19 +1485,40 @@ clab_alpine_image: "alpine:3.20"
 ## dnf. Add a package to a list here and the image build picks it up; forget
 ## to rebuild the image and the verification says exactly which package is
 ## missing rather than failing later inside whatever needed it.
-udn_pkgs_clab:
+lab_pkgs_clab:
   - iproute      # ip, bridge - creates and inspects the fabric bridge
   - tcpdump      # proving what is actually on the wire
   - iptables-nft # the FORWARD rules containerlab and this role insert
   - git
   - tar
-udn_pkgs_client: [iproute, tcpdump]
-udn_pkgs_nsclient: [iproute, tcpdump, curl]
-udn_pkgs_nsproxy: [haproxy, policycoreutils-python-utils]
+lab_pkgs_client: [iproute, tcpdump]
+lab_pkgs_nsclient: [iproute, tcpdump, curl]
+lab_pkgs_nsproxy: [haproxy, policycoreutils-python-utils]
 
-udn_lab_image_packages: >-
-  {{ (udn_pkgs_clab + udn_pkgs_client + udn_pkgs_nsclient + udn_pkgs_nsproxy)
+## The helper's three roles are in here unconditionally, even though the
+## helper only USES the image when customized_lab_image_for_helper is true.
+## One image that serves every guest is the point - especially for a workshop
+## built once and copied to many hosts - and it means turning the helper flag
+## on later needs no rebuild. The cost is bind/httpd/tftp-server sitting
+## installed and unstarted on the client VMs, which is disk and nothing else.
+customized_lab_image_packages: >-
+  {{ (lab_pkgs_clab + lab_pkgs_client + lab_pkgs_nsclient + lab_pkgs_nsproxy
+      + dns_packages + lb_packages + tftp_packages)
      | unique | sort }}
+
+## Does the HELPER VM use the image too, and skip its subscription-manager
+## registration? Default false, deliberately.
+##
+## setup_bm_host.yaml is shared by every flow in this repository - hub,
+## hosted clusters, OADP, Ceph, the mirror registry - while the udn-bgp-evpn
+## lab is otherwise entirely additive to all of them. The helper is also the
+## one VM whose failure takes the rest down with it: it is DNS and the load
+## balancer for both clusters. Opting it in is a decision to make once you
+## trust the image, not one to inherit from a file appearing in a directory.
+##
+## Turning this on does NOT need an image rebuild - the helper's packages are
+## already in the union above.
+customized_lab_image_for_helper: false
 
 ## Docker CE comes from download.docker.com, not from a Red Hat repository -
 ## but containerd.io pulls container-selinux out of AppStream, so installing
@@ -1493,24 +1526,24 @@ udn_lab_image_packages: >-
 ## the same reason as everything above. Only the clab VM uses it; the client
 ## VMs carry it and never start it, which costs disk and nothing else.
 ## Set false to leave Docker to the normal clab-install.yml path.
-udn_lab_image_with_docker: true
-udn_lab_image_docker_packages: [docker-ce, docker-ce-cli, containerd.io]
-udn_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-ce.repo
+customized_lab_image_with_docker: true
+customized_lab_image_docker_packages: [docker-ce, docker-ce-cli, containerd.io]
+customized_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-ce.repo
 
 ## The customized image, beside the base one in base_image_dir. Its PRESENCE
 ## is what switches the lab over - there is no enable flag to forget.
-udn_lab_image: "{{ rhel9_kvm_image | regex_replace('\\.qcow2$', '') }}-udnlab.qcow2"
+customized_lab_image: "{{ rhel9_kvm_image | regex_replace('\\.qcow2$', '') }}-customized.qcow2"
 
 ## Rebuild the image even if it is already there. Off by default because the
 ## build takes several minutes and re-registers with Red Hat each time.
-udn_lab_image_force: false
+customized_lab_image_force: false
 
 ## Safe defaults for a lab with no prebuilt image. setup-clab-fabric stats
 ## the file and set_facts both of these at the top of every run - set_fact
 ## outranks vars_files, so the stat always wins and these two only matter to
 ## a play that never reaches that role.
-udn_lab_image_ready: false
-udn_lab_base_image: "{{ rhel9_kvm_image }}"
+customized_lab_image_ready: false
+customized_lab_base_image: "{{ rhel9_kvm_image }}"
 
 
 ## ---------------------------------------------------------------------------
@@ -2194,10 +2227,10 @@ udn_client_os_variant: rhel9.5
 ## and tcpdump and has no use for a grown root filesystem. Point it at whatever
 ## base image you have; rhel8 works as well as rhel9, adjust os_variant to match.
 ##
-## Defaults to udn_lab_base_image, which is the prebuilt udn_lab_image when one
+## Defaults to customized_lab_base_image, which is the prebuilt customized_lab_image when one
 ## exists and plain rhel9_kvm_image when it does not. Naming an image here
 ## overrides both.
-udn_client_base_image: "{{ udn_lab_base_image }}"
+udn_client_base_image: "{{ customized_lab_base_image }}"
 
 
 ## ---------------------------------------------------------------------------
@@ -2274,7 +2307,7 @@ udn_tenant_clients:
 udn_tenant_client_memory: 2048
 udn_tenant_client_vcpus: 2
 udn_tenant_client_os_variant: rhel9.5
-udn_tenant_client_base_image: "{{ udn_lab_base_image }}"
+udn_tenant_client_base_image: "{{ customized_lab_base_image }}"
 
 
 ## ---------------------------------------------------------------------------
@@ -2305,7 +2338,7 @@ udn_nsclient_vm_name: udnnsclient
 udn_nsclient_memory: 2048
 udn_nsclient_vcpus: 2
 udn_nsclient_os_variant: rhel9.5
-udn_nsclient_base_image: "{{ udn_lab_base_image }}"
+udn_nsclient_base_image: "{{ customized_lab_base_image }}"
 
 ## MUST differ from udn_client_segment_host_octet. The per-tenant client VMs
 ## hold .20 on these same VLANs on this same bridge, so reusing it would put

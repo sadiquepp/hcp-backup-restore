@@ -6,7 +6,7 @@
 # its own and so `ansible-playbook --list-tasks` does not fail on an
 # undefined variable.
 
-udn_lab_image_force: false
-udn_lab_image_with_docker: true
-udn_lab_image_docker_packages: [docker-ce, docker-ce-cli, containerd.io]
-udn_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-ce.repo
+customized_lab_image_force: false
+customized_lab_image_with_docker: true
+customized_lab_image_docker_packages: [docker-ce, docker-ce-cli, containerd.io]
+customized_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-ce.repo

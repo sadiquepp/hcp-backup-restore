@@ -23,10 +23,16 @@
     success_msg: >-
       Forwarding to {{ dns_forwarders | join(', ') }}.
 
+# Installed, or - when the helper was built from the customized lab image -
+# verified present with rpm -q. See roles/lab-image/tasks/packages.yml.
 - name: Install DNS Packages
-  dnf:
-    name: "{{ dns_packages }}"
-    state: installed
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
+  vars:
+    lab_pkg_list: "{{ dns_packages }}"
+    lab_pkg_what: helper DNS
+    lab_pkg_use_image: "{{ customized_lab_helper_ready | default(false) }}"
 
 - name: Deploy named.conf
   template:

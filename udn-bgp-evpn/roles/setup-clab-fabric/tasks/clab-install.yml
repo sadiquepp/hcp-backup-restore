@@ -25,53 +25,54 @@
 # both from iproute. Listing it only made dnf fail with "No match for
 # argument: bridge-utils" before any of the real work started.
 - name: Install container and networking tooling
-  ansible.builtin.include_tasks:
-    file: packages.yml
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
   vars:
-    udn_pkg_list: "{{ udn_pkgs_clab }}"
-    udn_pkg_what: containerlab VM
+    lab_pkg_list: "{{ lab_pkgs_clab }}"
+    lab_pkg_what: containerlab VM
 
 # Docker CE comes from download.docker.com rather than a Red Hat repository,
 # but containerd.io pulls container-selinux out of AppStream, so it still
 # needs an entitled guest - which is why the prebuilt image carries it too
-# (udn_lab_image_with_docker). When the image already has it, the repo file
+# (customized_lab_image_with_docker). When the image already has it, the repo file
 # and the dnf are skipped and only the service start is left to do.
 - name: Install Docker CE from the upstream repository
   block:
     - name: Add the Docker CE repository
       ansible.builtin.get_url:
-        url: "{{ udn_lab_image_docker_repo }}"
+        url: "{{ customized_lab_image_docker_repo }}"
         dest: /etc/yum.repos.d/docker-ce.repo
         mode: '0644'
-      when: not (udn_lab_image_docker_ready | bool)
+      when: not (customized_lab_image_docker_ready | bool)
 
     - name: Install Docker CE
       ansible.builtin.dnf:
-        name: "{{ udn_lab_image_docker_packages }}"
+        name: "{{ customized_lab_image_docker_packages }}"
         state: present
-      when: not (udn_lab_image_docker_ready | bool)
+      when: not (customized_lab_image_docker_ready | bool)
 
     - name: Check the prebuilt image carries Docker CE
       ansible.builtin.command:
-        cmd: "rpm -q --whatprovides {{ udn_lab_image_docker_packages | join(' ') }}"
-      register: udn_clab_docker_check
+        cmd: "rpm -q --whatprovides {{ customized_lab_image_docker_packages | join(' ') }}"
+      register: lab_clab_docker_check
       changed_when: false
       failed_when: false
-      when: udn_lab_image_docker_ready | bool
+      when: customized_lab_image_docker_ready | bool
 
     - name: Fail if the prebuilt image is missing Docker CE
       ansible.builtin.assert:
-        that: udn_clab_docker_check.rc == 0
+        that: lab_clab_docker_check.rc == 0
         fail_msg: >-
-          The containerlab VM was built from {{ udn_lab_image }}, which was
-          built with udn_lab_image_with_docker true but does not have Docker:
+          The containerlab VM was built from {{ customized_lab_image }}, which was
+          built with customized_lab_image_with_docker true but does not have Docker:
 
-          {{ udn_clab_docker_check.stdout | default('') }}
+          {{ lab_clab_docker_check.stdout | default('') }}
 
-          Rebuild the image (-e udn_lab_image_force=true), or set
-          udn_lab_image_with_docker false and rebuild it so this step
+          Rebuild the image (-e customized_lab_image_force=true), or set
+          customized_lab_image_with_docker false and rebuild it so this step
           installs Docker itself.
-      when: udn_lab_image_docker_ready | bool
+      when: customized_lab_image_docker_ready | bool
 
     # Always. Installed-but-not-running is the state a rebuilt guest is in,
     # and it is the one containerlab actually cares about.
@@ -81,9 +82,9 @@
         state: started
         enabled: true
   vars:
-    udn_lab_image_docker_ready: >-
-      {{ (udn_lab_image_ready | default(false) | bool)
-         and (udn_lab_image_with_docker | default(false) | bool) }}
+    customized_lab_image_docker_ready: >-
+      {{ (customized_lab_image_ready | default(false) | bool)
+         and (customized_lab_image_with_docker | default(false) | bool) }}
   rescue:
     - name: Report that Docker could not be installed
       ansible.builtin.fail:

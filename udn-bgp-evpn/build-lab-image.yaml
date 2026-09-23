@@ -11,7 +11,7 @@
 #
 # WHAT IT DOES. Copies rhel9_kvm_image, registers the COPY with
 # subscription-manager, installs every package the lab's guests need,
-# unregisters, cleans, and publishes the result as udn_lab_image beside the
+# unregisters, cleans, and publishes the result as customized_lab_image beside the
 # base image.
 #
 # WHAT CHANGES AFTERWARDS. The clab VM, the phase-2 client, the per-tenant
@@ -28,9 +28,9 @@
 # REBUILDING. It refuses to overwrite an existing image unless you ask:
 #
 #   ansible-playbook -i ../inventory/hosts build-lab-image.yaml \
-#       --vault-password-file ~/.vault_pass -e udn_lab_image_force=true
+#       --vault-password-file ~/.vault_pass -e customized_lab_image_force=true
 #
-# Add a package to udn_pkgs_* in vars.yaml and you need this - the lists are
+# Add a package to lab_pkgs_* in vars.yaml and you need this - the lists are
 # the source for both the image build and the per-guest verification, so they
 # cannot drift silently, but the image does not rebuild itself.
 - name: Build the prebuilt lab image

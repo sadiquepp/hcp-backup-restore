@@ -35,13 +35,13 @@
 - name: Check that virt-customize is available
   ansible.builtin.command:
     cmd: which virt-customize
-  register: udn_lab_image_virtcustomize
+  register: customized_lab_image_virtcustomize
   changed_when: false
   failed_when: false
 
 - name: Fail if virt-customize is missing
   ansible.builtin.assert:
-    that: udn_lab_image_virtcustomize.rc == 0
+    that: customized_lab_image_virtcustomize.rc == 0
     fail_msg: >-
       virt-customize not found. dnf install guestfs-tools - it is the same
       package that provides virt-resize, which this lab already uses.
@@ -49,11 +49,11 @@
 - name: Check that the base image is there
   ansible.builtin.stat:
     path: "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
-  register: udn_lab_image_base
+  register: customized_lab_image_base
 
 - name: Fail if the base image is missing
   ansible.builtin.assert:
-    that: udn_lab_image_base.stat.exists
+    that: customized_lab_image_base.stat.exists
     fail_msg: >-
       No base image at {{ base_image_dir }}/{{ rhel9_kvm_image }}. Put the
       RHEL9 KVM qcow2 there first - this role copies it, it does not
@@ -71,16 +71,16 @@
 - name: Check the base image has been prepared by the bmhost step
   ansible.builtin.command:
     cmd: "virt-cat -a {{ base_image_dir }}/{{ rhel9_kvm_image }} /root/.ssh/authorized_keys"
-  register: udn_lab_image_prepared
+  register: customized_lab_image_prepared
   changed_when: false
   failed_when: false
-  when: not (udn_lab_image_skip_prepare_check | default(false) | bool)
+  when: not (customized_lab_image_skip_prepare_check | default(false) | bool)
 
 - name: Fail if the base image has not been through bmhost yet
   ansible.builtin.assert:
     that:
-      - udn_lab_image_prepared.rc == 0
-      - udn_lab_image_prepared.stdout | trim | length > 0
+      - customized_lab_image_prepared.rc == 0
+      - customized_lab_image_prepared.stdout | trim | length > 0
     fail_msg: >-
       {{ base_image_dir }}/{{ rhel9_kvm_image }} has no /root/.ssh/authorized_keys,
       so setup_bm_host.yaml has not prepared it yet. That step injects the
@@ -91,14 +91,14 @@
         ./build-lab.sh --only bmhost
 
       then build this image. If your base image is prepared some other way,
-      pass -e udn_lab_image_skip_prepare_check=true.
+      pass -e customized_lab_image_skip_prepare_check=true.
     success_msg: >-
       Base image carries the lab ssh key - bmhost has prepared it.
-  when: not (udn_lab_image_skip_prepare_check | default(false) | bool)
+  when: not (customized_lab_image_skip_prepare_check | default(false) | bool)
 
-# The one way this role could ever destroy the base image. udn_lab_image is
+# The one way this role could ever destroy the base image. customized_lab_image is
 # derived from rhel9_kvm_image by a regex, and both an override (-e
-# udn_lab_image=...) and a base image whose name the regex does not match
+# customized_lab_image=...) and a base image whose name the regex does not match
 # can collapse the two onto one path. The build then removes "a previous
 # customized image" - which IS the base image - and the copy that follows
 # has no source. Asserted rather than defended against, because there is no
@@ -106,15 +106,15 @@
 - name: Refuse to build if the customized name collides with the base image
   ansible.builtin.assert:
     that:
-      - udn_lab_image | length > 0
-      - udn_lab_image != rhel9_kvm_image
+      - customized_lab_image | length > 0
+      - customized_lab_image != rhel9_kvm_image
     fail_msg: >-
-      udn_lab_image ({{ udn_lab_image }}) must be a DIFFERENT filename from
+      customized_lab_image ({{ customized_lab_image }}) must be a DIFFERENT filename from
       rhel9_kvm_image ({{ rhel9_kvm_image }}) - they share base_image_dir,
       and building onto the base image's own name would delete it. Leave
-      udn_lab_image at its default, or give it a name of its own.
+      customized_lab_image at its default, or give it a name of its own.
     success_msg: >-
-      Building {{ udn_lab_image }} from {{ rhel9_kvm_image }} - separate
+      Building {{ customized_lab_image }} from {{ rhel9_kvm_image }} - separate
       files in {{ base_image_dir }}.
 
 # Recorded so the run can PROVE it left the base image alone, rather than
@@ -123,27 +123,27 @@
 # here could modify the file without changing one of the two.
 - name: Note the base image's size and mtime before the build
   ansible.builtin.set_fact:
-    udn_lab_image_base_before: >-
-      {{ udn_lab_image_base.stat.size }}:{{ udn_lab_image_base.stat.mtime }}
+    customized_lab_image_base_before: >-
+      {{ customized_lab_image_base.stat.size }}:{{ customized_lab_image_base.stat.mtime }}
 
 - name: Check whether the customized image already exists
   ansible.builtin.stat:
-    path: "{{ base_image_dir }}/{{ udn_lab_image }}"
-  register: udn_lab_image_existing
+    path: "{{ base_image_dir }}/{{ customized_lab_image }}"
+  register: customized_lab_image_existing
 
 - name: Report that the image is already built
   ansible.builtin.debug:
     msg: >-
-      {{ base_image_dir }}/{{ udn_lab_image }} already exists - nothing to
-      do. Pass -e udn_lab_image_force=true to rebuild it, which deletes and
+      {{ base_image_dir }}/{{ customized_lab_image }} already exists - nothing to
+      do. Pass -e customized_lab_image_force=true to rebuild it, which deletes and
       recreates it.
   when:
-    - udn_lab_image_existing.stat.exists
-    - not (udn_lab_image_force | bool)
+    - customized_lab_image_existing.stat.exists
+    - not (customized_lab_image_force | bool)
 
 # Everything below is the build, and it only runs when there is one to do.
 - name: Build the image
-  when: (not udn_lab_image_existing.stat.exists) or (udn_lab_image_force | bool)
+  when: (not customized_lab_image_existing.stat.exists) or (customized_lab_image_force | bool)
   block:
     # Deleted rather than overwritten. virt-customize edits in place, so a
     # rebuild onto a half-built image from a failed earlier run would layer
@@ -151,9 +151,9 @@
     # registration that was never cleaned.
     - name: Remove a previous customized image
       ansible.builtin.file:
-        path: "{{ base_image_dir }}/{{ udn_lab_image }}"
+        path: "{{ base_image_dir }}/{{ customized_lab_image }}"
         state: absent
-      when: udn_lab_image_existing.stat.exists
+      when: customized_lab_image_existing.stat.exists
 
     # Built under a .partial name so an interrupted run cannot leave
     # something at the real path that the lab would then detect and trust.
@@ -163,15 +163,15 @@
         cmd: >-
           cp --sparse=always
           {{ base_image_dir }}/{{ rhel9_kvm_image }}
-          {{ base_image_dir }}/{{ udn_lab_image }}.partial
+          {{ base_image_dir }}/{{ customized_lab_image }}.partial
 
     - name: Show what is about to be installed
       ansible.builtin.debug:
         msg: >-
-          Customizing {{ udn_lab_image }}.partial with
-          {{ udn_lab_image_packages | join(' ') }}{{
-          ' plus ' + (udn_lab_image_docker_packages | join(' '))
-          if udn_lab_image_with_docker | bool else '' }}. This takes a few
+          Customizing {{ customized_lab_image }}.partial with
+          {{ customized_lab_image_packages | join(' ') }}{{
+          ' plus ' + (customized_lab_image_docker_packages | join(' '))
+          if customized_lab_image_with_docker | bool else '' }}. This takes a few
           minutes.
 
     # ORDER MATTERS: virt-customize applies its options in the order they
@@ -184,25 +184,25 @@
     # reason this is not something to run on a shared machine.
     - name: Register, install and unregister inside the image (virt-customize)
       ansible.builtin.command:
-        argv: "{{ udn_lab_image_argv }}"
+        argv: "{{ customized_lab_image_argv }}"
       vars:
-        udn_lab_image_argv: >-
+        customized_lab_image_argv: >-
           {{
             ['virt-customize', '-a',
-             base_image_dir + '/' + udn_lab_image + '.partial',
+             base_image_dir + '/' + customized_lab_image + '.partial',
              '--network',
              '--run-command',
              'subscription-manager register --org=' + (org_id | string) +
              ' --activationkey=' + (activation_key | string) + ' --force']
             + (['--run-command',
-                'curl -sSL ' + udn_lab_image_docker_repo +
+                'curl -sSL ' + customized_lab_image_docker_repo +
                 ' -o /etc/yum.repos.d/docker-ce.repo']
-               if udn_lab_image_with_docker | bool else [])
-            + ['--install', udn_lab_image_packages | join(',')]
-            + (['--install', udn_lab_image_docker_packages | join(',')]
-               if udn_lab_image_with_docker | bool else [])
+               if customized_lab_image_with_docker | bool else [])
+            + ['--install', customized_lab_image_packages | join(',')]
+            + (['--install', customized_lab_image_docker_packages | join(',')]
+               if customized_lab_image_with_docker | bool else [])
             + (['--run-command', 'systemctl enable docker']
-               if udn_lab_image_with_docker | bool else [])
+               if customized_lab_image_with_docker | bool else [])
             + ['--run-command', 'dnf clean all',
                '--run-command', 'subscription-manager unregister || true',
                '--run-command', 'subscription-manager clean || true',
@@ -211,7 +211,7 @@
                '--selinux-relabel']
           }}
       no_log: true
-      register: udn_lab_image_customize
+      register: customized_lab_image_customize
 
     # Proof, not assumption. virt-customize exits non-zero on a failed
     # --install, but a package that resolved to something unexpected, or a
@@ -227,25 +227,25 @@
         argv:
           - virt-customize
           - -a
-          - "{{ base_image_dir }}/{{ udn_lab_image }}.partial"
+          - "{{ base_image_dir }}/{{ customized_lab_image }}.partial"
           - --run-command
           - >-
-            rpm -q --whatprovides {{ udn_lab_image_packages | join(' ') }}
-            {{ udn_lab_image_docker_packages | join(' ')
-               if udn_lab_image_with_docker | bool else '' }}
-      register: udn_lab_image_verify
+            rpm -q --whatprovides {{ customized_lab_image_packages | join(' ') }}
+            {{ customized_lab_image_docker_packages | join(' ')
+               if customized_lab_image_with_docker | bool else '' }}
+      register: customized_lab_image_verify
       changed_when: false
       failed_when: false
 
     - name: Fail if a package is missing from the finished image
       ansible.builtin.assert:
-        that: udn_lab_image_verify.rc == 0
+        that: customized_lab_image_verify.rc == 0
         fail_msg: >-
           The image was customized but rpm -q could not find every package:
-          {{ udn_lab_image_verify.stdout | default('') }}
-          {{ udn_lab_image_verify.stderr | default('') }}
+          {{ customized_lab_image_verify.stdout | default('') }}
+          {{ customized_lab_image_verify.stderr | default('') }}
           The partial image is left at
-          {{ base_image_dir }}/{{ udn_lab_image }}.partial for inspection
+          {{ base_image_dir }}/{{ customized_lab_image }}.partial for inspection
           and is NOT published, so the lab will keep using the normal
           register-and-dnf path.
 
@@ -253,8 +253,8 @@
     - name: Publish the finished image
       ansible.builtin.command:
         cmd: >-
-          mv {{ base_image_dir }}/{{ udn_lab_image }}.partial
-          {{ base_image_dir }}/{{ udn_lab_image }}
+          mv {{ base_image_dir }}/{{ customized_lab_image }}.partial
+          {{ base_image_dir }}/{{ customized_lab_image }}
 
     # The base image is only ever a `cp` source and a `stat` target in this
     # role, and virt-customize - which DOES edit in place - is pointed at
@@ -263,34 +263,34 @@
     - name: Re-read the base image
       ansible.builtin.stat:
         path: "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
-      register: udn_lab_image_base_after
+      register: customized_lab_image_base_after
 
     - name: Confirm the base image was not touched
       ansible.builtin.assert:
         that:
-          - udn_lab_image_base_after.stat.exists
-          - (udn_lab_image_base_after.stat.size | string) + ':' +
-            (udn_lab_image_base_after.stat.mtime | string)
-            == udn_lab_image_base_before
+          - customized_lab_image_base_after.stat.exists
+          - (customized_lab_image_base_after.stat.size | string) + ':' +
+            (customized_lab_image_base_after.stat.mtime | string)
+            == customized_lab_image_base_before
         fail_msg: >-
           {{ base_image_dir }}/{{ rhel9_kvm_image }} changed during this
-          build - it was {{ udn_lab_image_base_before }} (size:mtime) and is
+          build - it was {{ customized_lab_image_base_before }} (size:mtime) and is
           now
-          {{ udn_lab_image_base_after.stat.size | default('gone') }}:{{
-             udn_lab_image_base_after.stat.mtime | default('gone') }}.
+          {{ customized_lab_image_base_after.stat.size | default('gone') }}:{{
+             customized_lab_image_base_after.stat.mtime | default('gone') }}.
           Nothing in this role writes to it, so something else on this host
           did. Do not trust the image just built.
         success_msg: >-
           Base image {{ rhel9_kvm_image }} unchanged
-          ({{ udn_lab_image_base_before }}).
+          ({{ customized_lab_image_base_before }}).
 
     - name: Report what was built
       ansible.builtin.debug:
         msg:
-          - "Built {{ base_image_dir }}/{{ udn_lab_image }}"
-          - "Packages: {{ udn_lab_image_packages | join(' ') }}"
-          - "Docker: {{ 'yes - ' + (udn_lab_image_docker_packages | join(' '))
-                        if udn_lab_image_with_docker | bool else 'no' }}"
+          - "Built {{ base_image_dir }}/{{ customized_lab_image }}"
+          - "Packages: {{ customized_lab_image_packages | join(' ') }}"
+          - "Docker: {{ 'yes - ' + (customized_lab_image_docker_packages | join(' '))
+                        if customized_lab_image_with_docker | bool else 'no' }}"
           - "The lab will now use this image and skip subscription-manager
              and dnf on every guest. Delete it to go back to the normal
              path."

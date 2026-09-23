@@ -74,18 +74,18 @@ against the base image **in place** — it injects the lab's ssh key, sets the
 root password, removes cloud-init and permits root login. Copy the image
 before that and every guest cloned from the result is unreachable, with
 nothing about the copy looking wrong. The build checks for the injected key
-and refuses if it is absent (`-e udn_lab_image_skip_prepare_check=true` if
+and refuses if it is absent (`-e customized_lab_image_skip_prepare_check=true` if
 your base image is prepared some other way).
 
 That copies the base image, registers **the copy**, installs everything,
 then unregisters and cleans, and publishes the result as
-`rhel-9.8-x86_64-kvm-udnlab.qcow2` beside the original.
+`rhel-9.8-x86_64-kvm-customized.qcow2` beside the original.
 
 **It does not touch the original.** `rhel9_kvm_image` is only ever a `cp`
 source; `virt-customize` — which does edit in place — is pointed at a
 `.partial` copy, and the rename to the real name happens last, so an
 interrupted run leaves nothing the lab would detect and trust. The build
-refuses outright if `udn_lab_image` resolves to the same filename as the
+refuses outright if `customized_lab_image` resolves to the same filename as the
 base image (they share `base_image_dir`, and building onto the base name
 would delete it), and it re-reads the base image afterwards and asserts the
 size and mtime are unchanged. So no backup of the base image is needed — but
@@ -102,10 +102,59 @@ is also the whole rollback procedure.
 
 | | |
 | --- | --- |
-| **What is in it** | `curl git haproxy iproute iptables-nft policycoreutils-python-utils tar tcpdump`, plus `docker-ce docker-ce-cli containerd.io` unless `udn_lab_image_with_docker: false` |
-| **Where the list comes from** | `udn_pkgs_clab`, `udn_pkgs_client`, `udn_pkgs_nsclient`, `udn_pkgs_nsproxy` in `vars.yaml`. The image installs their union and each guest verifies its own list — one source, so the two halves cannot drift |
-| **Rebuild** | `-e udn_lab_image_force=true`. It will not overwrite silently |
+| **What is in it** | `bind bind-utils curl git haproxy httpd iproute iptables-nft net-tools policycoreutils-python-utils syslinux syslinux-tftpboot tar tcpdump tftp-server vim`, plus `docker-ce docker-ce-cli containerd.io` unless `customized_lab_image_with_docker: false` |
+| **Where the list comes from** | `lab_pkgs_clab`, `lab_pkgs_client`, `lab_pkgs_nsclient`, `lab_pkgs_nsproxy`, `dns_packages`, `lb_packages`, `tftp_packages` in `vars.yaml`. The image installs their union and each guest verifies its own list — one source, so the two halves cannot drift |
+| **Rebuild** | `-e customized_lab_image_force=true`. It will not overwrite silently |
 | **Needs** | `guestfs-tools` (for `virt-customize` — the same package as the `virt-resize` the lab already uses), and `org_id`/`activation_key` in `vault.yaml` |
+
+### The helper VM
+
+The helper's own packages (`bind bind-utils vim net-tools` for DNS,
+`haproxy` for the load balancer, `httpd tftp-server syslinux syslinux-tftpboot`
+for PXE) are in the image, but the helper does **not** use it unless you say
+so:
+
+```yaml
+customized_lab_image_for_helper: true      # vars.yaml
+```
+
+Off by default on purpose. `setup_bm_host.yaml` is shared by every flow in
+this repository — hub, hosted clusters, OADP, Ceph, the mirror registry —
+while the udn-bgp-evpn lab is otherwise entirely additive to all of them, and
+the helper is the one VM whose failure takes the rest down with it: it is DNS
+and the load balancer for both clusters. Opt it in once you trust the image.
+
+Turning it on needs **no image rebuild** — the helper's packages are already
+in the union above. With it on, the helper is built from the customized image
+and skips its `subscription-manager` registration, and the `org_id` /
+`activation_key` assert in `setup_bm_host.yaml` is skipped with it.
+
+### Building a workshop image
+
+One image, built once on one host, copied to the rest:
+
+```bash
+# on the build host, after ./build-lab.sh --only image
+scp /var/lib/libvirt/images/rhel-9.8-x86_64-kvm{,-customized}.qcow2 \
+    host2:/var/lib/libvirt/images/
+```
+
+Copy **both**. The customized image is derived from the prepared base, and a
+host whose base image has not been through the `bmhost` preparation will be
+refused by the image build and will build its helper from an unprepared base.
+
+What this does and does not remove from a per-host build:
+
+| | |
+| --- | --- |
+| **Gone** | Every guest registration — four per lab build, plus the helper with `customized_lab_image_for_helper`. No `org_id`/`activation_key` needed on those hosts for the guests |
+| **Gone** | Every guest `dnf`, and with it the per-host download of the same packages N times |
+| **Still needed** | `basic_packages` on the **bare-metal host itself** (libvirt, qemu-kvm, guestfs-tools…). `setup-bm-host` installs those with `yum` on `localhost`, not on a guest, so each host still needs its own entitlement or a local repo for that |
+| **Still needed** | `pull_secret` in `vault.yaml`, for the OpenShift installs |
+
+So it gets you most of the way to "no activation key per host", not all of
+it. The remaining item is the host's own package set, which is a different
+problem — a local mirror, a kickstart, or a golden host image.
 
 **Docker is in the image on purpose.** It comes from `download.docker.com`
 rather than a Red Hat repository, but `containerd.io` pulls
@@ -119,7 +168,7 @@ The guests do **not** blindly skip their package step — each runs
 `rpm -q --whatprovides` for its own list instead, and fails by name:
 
 ```
-This guest was built from rhel-9.8-x86_64-kvm-udnlab.qcow2, which is
+This guest was built from rhel-9.8-x86_64-kvm-customized.qcow2, which is
 missing a package it needs:
 
   package tshark is not installed

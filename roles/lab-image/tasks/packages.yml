@@ -1,0 +1,71 @@
+---
+# Install a guest's packages, or - when it was built from the prebuilt
+# customized image - verify they are already there.
+#
+# Included with:
+#   lab_pkg_list        the packages
+#   lab_pkg_what        what to call this guest in messages
+#   lab_pkg_use_image   optional. Defaults to customized_lab_image_ready,
+#                       which is right for every guest of the udn-bgp-evpn
+#                       lab. The HELPER passes customized_lab_helper_ready
+#                       instead, because it needs the opt-in flag as well.
+#
+# WHY VERIFY RATHER THAN SKIP. A bare `when: not ..._ready` on the dnf task
+# would be shorter and would be the wrong shape: it asserts nothing, so an
+# image built before a package was added to vars.yaml produces a guest that
+# is silently missing it, and the failure surfaces later inside whatever
+# needed the package - haproxy failing to start, named refusing to load, a
+# tcpdump that is not there. rpm -q costs one command and names the missing
+# package at the point the assumption is made.
+#
+# The same lists feed build-lab-image.yaml, so the two halves cannot drift by
+# editing one; they can only drift by not rebuilding the image, which is
+# precisely what this reports.
+
+- name: Resolve whether this guest uses the prebuilt image
+  ansible.builtin.set_fact:
+    lab_pkg_from_image: >-
+      {{ lab_pkg_use_image
+         | default(customized_lab_image_ready | default(false))
+         | bool }}
+
+- name: Install {{ lab_pkg_what }} packages ({{ lab_pkg_list | join(', ') }})
+  ansible.builtin.dnf:
+    name: "{{ lab_pkg_list }}"
+    state: present
+  when: not (lab_pkg_from_image | bool)
+
+# --whatprovides, not a bare rpm -q. On RHEL 9 the base image carries
+# curl-minimal, which PROVIDES curl without being named curl: `dnf install
+# curl` is therefore a satisfied no-op while `rpm -q curl` says "package curl
+# is not installed". A bare rpm -q would fail this assert on a perfectly good
+# image - the check reporting on the wrong thing again.
+- name: Check the prebuilt image carries the {{ lab_pkg_what }} packages
+  ansible.builtin.command:
+    cmd: "rpm -q --whatprovides {{ lab_pkg_list | join(' ') }}"
+  register: lab_pkg_check
+  changed_when: false
+  failed_when: false
+  when: lab_pkg_from_image | bool
+
+- name: Fail if the prebuilt image is missing a {{ lab_pkg_what }} package
+  ansible.builtin.assert:
+    that: lab_pkg_check.rc == 0
+    fail_msg: >-
+      This guest was built from {{ customized_lab_image }}, which is missing
+      a package it needs:
+
+      {{ lab_pkg_check.stdout | default('') }}
+
+      The image has no entitlement, so dnf cannot fix it here. Rebuild it:
+
+        cd udn-bgp-evpn && ansible-playbook -i ../inventory/hosts
+        build-lab-image.yaml --vault-password-file ~/.vault_pass
+        -e customized_lab_image_force=true
+
+      then rebuild this guest. Or delete
+      {{ base_image_dir }}/{{ customized_lab_image }} to go back to
+      registering each guest with subscription-manager.
+    success_msg: >-
+      {{ lab_pkg_what }} packages present in {{ customized_lab_image }}.
+  when: lab_pkg_from_image | bool

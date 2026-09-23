@@ -20,6 +20,17 @@
     - name: Re-read the inventory that was just rendered
       ansible.builtin.meta: refresh_inventory
 
+    # Before setup-bm-host, because that role builds the helper disk and has
+    # to know which image to expand into it.
+    - name: Detect the prebuilt customized lab image
+      ansible.builtin.import_role:
+        name: lab-image
+        tasks_from: detect
+
+    # Only when the helper still has to register. With the customized image
+    # opted in (customized_lab_image_for_helper) the helper installs nothing
+    # and needs no entitlement, and demanding credentials it will not use is
+    # how a lab that could run without them ends up needing them anyway.
     - name: Fail fast if org_id/activation_key are missing from vault.yaml
       ansible.builtin.assert:
         that:
@@ -28,6 +39,9 @@
         fail_msg: >-
           Add org_id / activation_key to vault.yaml (ansible-vault edit
           vault.yaml) - needed to register helper with subscription-manager.
+          Alternatively build the customized lab image and set
+          customized_lab_image_for_helper true, and the helper needs neither.
+      when: not (customized_lab_helper_ready | default(false) | bool)
 
     - ansible.builtin.import_role:
         name: setup-bm-host
@@ -37,6 +51,7 @@
       tags:
         - rhsm
       delegate_to: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"
+      when: not (customized_lab_helper_ready | default(false) | bool)
 
     - ansible.builtin.import_role:
         name: setup-dns

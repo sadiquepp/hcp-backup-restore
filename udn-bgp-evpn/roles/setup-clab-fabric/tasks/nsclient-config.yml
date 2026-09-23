@@ -2,11 +2,12 @@
 # In-guest configuration for the namespace client. Delegated to it.
 
 - name: Install test tooling on the namespace client
-  ansible.builtin.include_tasks:
-    file: packages.yml
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
   vars:
-    udn_pkg_list: "{{ udn_pkgs_nsclient }}"
-    udn_pkg_what: namespace client
+    lab_pkg_list: "{{ lab_pkgs_nsclient }}"
+    lab_pkg_what: namespace client
 
 # Phase 2 reaches the pods a different way, and this VM has to be able to do
 # both. VRF-Lite and EVPN put each tenant behind its own VLAN into leaf1's

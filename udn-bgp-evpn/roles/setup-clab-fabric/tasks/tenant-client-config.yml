@@ -3,11 +3,12 @@
 # `client` is the loop variable from tenant-client-vms.yml.
 
 - name: Install test tooling on {{ client.name }}
-  ansible.builtin.include_tasks:
-    file: packages.yml
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
   vars:
-    udn_pkg_list: "{{ udn_pkgs_client }}"
-    udn_pkg_what: "tenant client {{ client.name }}"
+    lab_pkg_list: "{{ lab_pkgs_client }}"
+    lab_pkg_what: "tenant client {{ client.name }}"
 
 - name: Install the tenant client routing script on {{ client.name }}
   ansible.builtin.template:

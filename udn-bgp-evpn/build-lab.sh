@@ -389,7 +389,16 @@ run_step() {
         play_bg sno ../setup_sno.yaml
         wait_all ;;
     image)
-        say "prebuilt lab image - register once, install, unregister"
+        # Two plays, in this order, because setup-bm-host prepares the base
+        # image IN PLACE - ssh key, root password, cloud-init removed - and
+        # build-lab-image.yaml copies the result. Copy first and every guest
+        # cloned from the image is unreachable, with nothing about the copy
+        # looking wrong. Running the prepare step here means the ordering
+        # cannot be got wrong; it is idempotent, so on a built lab it is a
+        # no-op.
+        say "prebuilt lab image (1/2)  prepare the base image"
+        play ../setup_bm_host.yaml --tags baseimage
+        say "prebuilt lab image (2/2)  register once, install, unregister"
         play build-lab-image.yaml ;;
     fabric)
         say "$(pos fabric)  containerlab fabric (leaf1 / spine / leaf2), topology $TOPOLOGY"

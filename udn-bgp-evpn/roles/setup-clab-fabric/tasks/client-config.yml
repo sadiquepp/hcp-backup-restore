@@ -6,11 +6,12 @@
 # a name, and it was the one package the base image did not already have, so it
 # was also the only reason this task ever failed.
 - name: Install test tooling on the client VM
-  ansible.builtin.include_tasks:
-    file: packages.yml
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
   vars:
-    udn_pkg_list: "{{ udn_pkgs_client }}"
-    udn_pkg_what: client VM
+    lab_pkg_list: "{{ lab_pkgs_client }}"
+    lab_pkg_what: client VM
 
 - name: Install the client routing script
   ansible.builtin.template:

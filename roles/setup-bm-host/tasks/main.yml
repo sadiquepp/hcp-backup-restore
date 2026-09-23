@@ -1,10 +1,15 @@
 ---
 # Start with Installing the required packages on the Host
 
+# tags: [baseimage] because guestfs-tools - which provides the virt-customize
+# that prepares the base image below - is in basic_packages. Without this a
+# standalone --tags baseimage run fails on a host that has never been set up.
 - name: Install Basic Required Packages.
   yum:
     name: "{{ basic_packages }}"
     state: installed
+  tags:
+    - baseimage
 
 # Once Packages are installed, lets start the Libvirt Service
 - name: Start Libvirtd Service
@@ -21,6 +26,7 @@
   register: ssh_key_status
   tags:
     - ssh
+    - baseimage
 
 # Create Key if not existing
 - name: Create SSH Key if not existing
@@ -29,9 +35,10 @@
     type: rsa
     size: 2048
     mode: '0600'
-  when: ssh_key_status.stat.exists == false 
+  when: ssh_key_status.stat.exists == false
   tags:
     - ssh
+    - baseimage
 
 # Enable Nested KVM
 - name: Enable Nested KVM
@@ -40,11 +47,57 @@
     content: |
       options kvm-intel nested=1
 
-# Prepare the KVM Image 
-- name: Remove Cloud-Init & Add Password  
-  shell: | 
-    export LIBGUESTFS_BACKEND=direct && virt-customize -a "{{ base_image_dir }}/{{ rhel9_kvm_image }}" --root-password password:redhat --ssh-inject "root:file:/root/.ssh/lab_rsa.pub" --selinux-relabel --run-command 'yum remove cloud-init* -y' --run-command 'echo "PermitRootLogin yes" >>/etc/ssh/sshd_config'
-    
+# Prepare the KVM Image
+#
+# This edits base_image_dir/rhel9_kvm_image IN PLACE - it is the one place in
+# this repository that does. Every guest of every flow is a copy or a
+# virt-resize of the result, so it has to happen before any of them, and
+# before udn-bgp-evpn/build-lab-image.yaml copies it to build the customized
+# lab image.
+#
+# tags: [baseimage] so that build can run this step on its own first:
+#
+#   ansible-playbook setup_bm_host.yaml --tags baseimage
+#
+# which is what udn-bgp-evpn/build-lab.sh --only image does for you.
+- name: Check whether the base image has already been prepared
+  ansible.builtin.command:
+    cmd: "virt-cat -a {{ base_image_dir }}/{{ rhel9_kvm_image }} /root/.ssh/authorized_keys"
+  register: base_image_authkeys
+  changed_when: false
+  failed_when: false
+  tags:
+    - baseimage
+
+- name: Read the lab public key
+  ansible.builtin.slurp:
+    src: "~/.ssh/lab_rsa.pub"
+  register: lab_pubkey
+  tags:
+    - baseimage
+
+# Re-run only when the image does not already carry THIS key. Two reasons to
+# compare the content rather than just test for the file: the step is no
+# longer run exactly once (the image build runs it too), and rotating
+# lab_rsa has to still take effect.
+- name: Remove Cloud-Init & Add Password
+  ansible.builtin.shell:
+    cmd: >-
+      export LIBGUESTFS_BACKEND=direct &&
+      virt-customize -a "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
+      --root-password password:redhat
+      --ssh-inject "root:file:/root/.ssh/lab_rsa.pub"
+      --selinux-relabel
+      --run-command 'yum remove cloud-init* -y'
+      --run-command 'grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config ||
+                     echo "PermitRootLogin yes" >>/etc/ssh/sshd_config'
+  when: >-
+    base_image_authkeys.rc != 0 or
+    (lab_pubkey.content | b64decode | trim) not in
+    (base_image_authkeys.stdout | default(''))
+  tags:
+    - baseimage
+
 
 # Once Check if Key Exists
 - name: Check the Helper Disk Existence
@@ -79,7 +132,7 @@
   ansible.builtin.command:
     cmd: >
       virt-resize --expand {{ helper_resize_partition }}
-      {{ base_image_dir }}/{{ rhel9_kvm_image }}
+      {{ base_image_dir }}/{{ customized_lab_helper_image | default(rhel9_kvm_image) }}
       /var/lib/libvirt/images/{{ helper_disk }}
   when: helper_disk_status.stat.exists == false
   tags:
