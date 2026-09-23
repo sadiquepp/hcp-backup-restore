@@ -72,6 +72,20 @@ That copies the base image, registers **the copy**, installs everything,
 then unregisters and cleans, and publishes the result as
 `rhel-9.8-x86_64-kvm-udnlab.qcow2` beside the original.
 
+**It does not touch the original.** `rhel9_kvm_image` is only ever a `cp`
+source; `virt-customize` — which does edit in place — is pointed at a
+`.partial` copy, and the rename to the real name happens last, so an
+interrupted run leaves nothing the lab would detect and trust. The build
+refuses outright if `udn_lab_image` resolves to the same filename as the
+base image (they share `base_image_dir`, and building onto the base name
+would delete it), and it re-reads the base image afterwards and asserts the
+size and mtime are unchanged. So no backup of the base image is needed — but
+if you want one anyway it is one command:
+
+```bash
+cp --sparse=always /var/lib/libvirt/images/rhel-9.8-x86_64-kvm.qcow2{,.orig}
+```
+
 **The image's presence is the switch.** There is no enable flag to set or
 forget. Build it and every guest is created from it with no registration and
 no `dnf`; delete it and the lab goes straight back to the normal path. That
