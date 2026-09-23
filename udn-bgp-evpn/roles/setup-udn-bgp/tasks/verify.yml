@@ -95,7 +95,9 @@
         nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ && !f {gsub(":","",$2); print $2; f=1}');
         echo "${nic:-NONE} $(cat /proc/sys/net/ipv4/conf/${nic:-lo}/forwarding 2>/dev/null || echo unknown)
         all=$(cat /proc/sys/net/ipv4/conf/all/forwarding)
-        default=$(cat /proc/sys/net/ipv4/conf/default/forwarding)"
+        default=$(cat /proc/sys/net/ipv4/conf/default/forwarding)
+        rp=$(cat /proc/sys/net/ipv4/conf/${nic:-lo}/rp_filter 2>/dev/null || echo unknown)
+        rp_all=$(cat /proc/sys/net/ipv4/conf/all/rp_filter)"
   loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:
     label: "{{ item.ip_key }}"
@@ -171,15 +173,30 @@
 # checking 'all' alone would have reported everything fine.
 - name: Fail if a fabric NIC still has strict reverse-path filtering
   vars:
-    rp_iface: "{{ (item.stdout | regex_search('rp=(\\d)', '\\1') | default(['1'], true)) | first }}"
-    rp_all: "{{ (item.stdout | regex_search('rp_all=(\\d)', '\\1') | default(['1'], true)) | first }}"
+    # '-1' as the sentinel for ABSENT, never a plausible rp_filter value. The
+    # first version of this defaulted a missing field to '1' and reported
+    # "iface=1, all=1, effective=1" on every node - the assert's own defaults,
+    # printed as if they were measurements, failing unconditionally. The read
+    # task did not emit these fields at all, which is a fault in the CHECK and
+    # has to be said as one rather than blamed on the node.
+    rp_iface: "{{ (item.stdout | regex_search('rp=(\\d)', '\\1') | default(['-1'], true)) | first }}"
+    rp_all: "{{ (item.stdout | regex_search('rp_all=(\\d)', '\\1') | default(['-1'], true)) | first }}"
     rp_effective: "{{ [rp_iface | int, rp_all | int] | max }}"
   ansible.builtin.assert:
-    that: rp_effective | int != 1
+    that:
+      - rp_iface | int >= 0
+      - rp_all | int >= 0
+      - rp_effective | int != 1
     fail_msg: >-
-      On {{ udn_bgp_node_names[item.item.ip_key] }} the fabric NIC has strict
+      {% if rp_iface | int < 0 or rp_all | int < 0 %}THIS CHECK IS BROKEN, not
+      the node: the read task above did not report rp= and rp_all=, so there
+      is no measurement to judge. Its line was
+      '{{ item.stdout | default('(none)') | trim }}'. Fix the echo in the
+      "Read the fabric NIC's forwarding state" task before reading anything
+      below as a finding.{% else %}On
+      {{ udn_bgp_node_names[item.item.ip_key] }} the fabric NIC has strict
       reverse-path filtering (iface={{ rp_iface }}, all={{ rp_all }},
-      effective={{ rp_effective }}). The repair's own line was
+      effective={{ rp_effective }}).{% endif %} The repair's own line was
       '{{ item.stdout | default('(none)') | trim }}' - read write_rc there
       before anything else, because a FAILED write and a write that was
       REVERTED look identical from the value alone, and that distinction is
