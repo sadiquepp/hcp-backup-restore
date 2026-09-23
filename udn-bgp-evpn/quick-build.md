@@ -59,23 +59,32 @@ registered with subscription-manager before its first `dnf`. That is four
 registrations per build, each a network round trip to Red Hat that can fail
 on its own.
 
-Do it once instead — **after the `bmhost` step, not before it**:
+Do it once instead, in any order relative to the rest of the build:
 
 ```bash
-./build-lab.sh --only bmhost     # if the helper does not exist yet
 ./build-lab.sh --only image
-# or, the image build directly:
+# or the image build directly, if the host already has virt-customize
+# and the lab keypair:
 ansible-playbook -i ../inventory/hosts build-lab-image.yaml \
     --vault-password-file ~/.vault_pass
 ```
 
-The ordering is not a preference. `setup_bm_host.yaml` runs `virt-customize`
-against the base image **in place** — it injects the lab's ssh key, sets the
-root password, removes cloud-init and permits root login. Copy the image
-before that and every guest cloned from the result is unreachable, with
-nothing about the copy looking wrong. The build checks for the injected key
-and refuses if it is absent (`-e customized_lab_image_skip_prepare_check=true` if
-your base image is prepared some other way).
+**It prepares its own copy.** `setup_bm_host.yaml` runs `virt-customize`
+against the base image *in place* — root password, lab ssh key, cloud-init
+removed, root login permitted — for every guest built directly from it. The
+image build applies the same preparation to **its copy**, so it does not
+depend on that having happened and works from a pristine base image. The two
+are independent; run them in either order.
+
+The one thing it needs from the host is `virt-customize` and the lab keypair
+(it injects the key, so a missing one would leave every guest unreachable).
+`./build-lab.sh --only image` runs `setup_bm_host.yaml --tags labprereq`
+first, which is exactly that and nothing else — `basic_packages` and the key,
+*not* the in-place edit. On a host that is already set up it is a no-op, and
+the build refuses with instructions if the key is absent.
+
+`lab_root_password` and `lab_ssh_pubkey_path` in `vars.yaml` control what
+gets injected; the defaults match what `setup_bm_host.yaml` has always used.
 
 That copies the base image, registers **the copy**, installs everything,
 then unregisters and cleans, and publishes the result as
@@ -135,13 +144,25 @@ One image, built once on one host, copied to the rest:
 
 ```bash
 # on the build host, after ./build-lab.sh --only image
-scp /var/lib/libvirt/images/rhel-9.8-x86_64-kvm{,-customized}.qcow2 \
+scp /var/lib/libvirt/images/rhel-9.8-x86_64-kvm-customized.qcow2 \
     host2:/var/lib/libvirt/images/
 ```
 
-Copy **both**. The customized image is derived from the prepared base, and a
-host whose base image has not been through the `bmhost` preparation will be
-refused by the image build and will build its helper from an unprepared base.
+The customized image is **self-contained** — it already carries the root
+password, the lab ssh key and the cloud-init removal, because the build
+applies those to its own copy. So the receiving hosts need only this one
+file for every guest the lab builds.
+
+They still need the plain base image for everything *else*: the helper (with
+`customized_lab_image_for_helper` off) and every VM of the hub,
+hosted-cluster, Ceph, MinIO and mirror-registry flows are built from it, and
+`setup_bm_host.yaml` prepares it in place on each host exactly as before.
+
+One thing to decide deliberately: the key you inject is the **build host's**
+`lab_rsa.pub`. Every host receiving the image is then reachable with that one
+key, which for a workshop may be what you want or may be exactly what you do
+not. To give each host its own, build the image per host rather than copying
+it, or set `lab_ssh_pubkey_path` to a key you manage centrally.
 
 What this does and does not remove from a per-host build:
 

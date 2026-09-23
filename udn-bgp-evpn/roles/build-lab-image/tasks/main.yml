@@ -59,42 +59,34 @@
       RHEL9 KVM qcow2 there first - this role copies it, it does not
       download it.
 
-# ORDERING. setup_bm_host.yaml (build-lab.sh's 'bmhost' step) runs
-# virt-customize against the base image IN PLACE - it injects the lab's ssh
-# key, sets a root password, removes cloud-init and permits root login. Copy
-# the image before that has happened and every guest cloned from the result
-# is unreachable: no key, no password, and cloud-init still trying to manage
-# the account on first boot. Nothing about the copy would look wrong.
+# The image prepares its own copy (root password, ssh key, cloud-init
+# removed, root login permitted) exactly as setup_bm_host.yaml prepares the
+# base image for every other guest. That is why this build has NO ordering
+# dependency on that play: it works from a pristine base image and can run
+# before, after or instead of it.
 #
-# The injected authorized_keys is the cheapest thing to look for, and
-# virt-cat is read-only so this cannot disturb the image it is checking.
-- name: Check the base image has been prepared by the bmhost step
-  ansible.builtin.command:
-    cmd: "virt-cat -a {{ base_image_dir }}/{{ rhel9_kvm_image }} /root/.ssh/authorized_keys"
-  register: customized_lab_image_prepared
-  changed_when: false
-  failed_when: false
-  when: not (customized_lab_image_skip_prepare_check | default(false) | bool)
+# The one thing it does need from the host is the lab keypair, because that
+# is what it injects. setup_bm_host.yaml creates it (--tags labprereq is the
+# smallest slice that does, and build-lab.sh --only image runs it first).
+- name: Check the lab ssh public key exists
+  ansible.builtin.stat:
+    path: "{{ lab_ssh_pubkey_path }}"
+  register: customized_lab_image_pubkey
 
-- name: Fail if the base image has not been through bmhost yet
+- name: Fail if the lab ssh public key is missing
   ansible.builtin.assert:
-    that:
-      - customized_lab_image_prepared.rc == 0
-      - customized_lab_image_prepared.stdout | trim | length > 0
+    that: customized_lab_image_pubkey.stat.exists
     fail_msg: >-
-      {{ base_image_dir }}/{{ rhel9_kvm_image }} has no /root/.ssh/authorized_keys,
-      so setup_bm_host.yaml has not prepared it yet. That step injects the
-      lab's ssh key, sets the root password and removes cloud-init, IN PLACE
-      on this image. Building from it now would produce guests nothing can
-      log in to. Run the bmhost step first:
+      No ssh public key at {{ lab_ssh_pubkey_path }}. It is injected into the
+      image, and without it every guest built from the image would be
+      unreachable. Create it with:
 
-        ./build-lab.sh --only bmhost
+        ./build-lab.sh --only image
 
-      then build this image. If your base image is prepared some other way,
-      pass -e customized_lab_image_skip_prepare_check=true.
-    success_msg: >-
-      Base image carries the lab ssh key - bmhost has prepared it.
-  when: not (customized_lab_image_skip_prepare_check | default(false) | bool)
+      which runs setup_bm_host.yaml --tags labprereq first, or directly:
+
+        ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags labprereq
+    success_msg: "Injecting {{ lab_ssh_pubkey_path }} into the image."
 
 # The one way this role could ever destroy the base image. customized_lab_image is
 # derived from rhel9_kvm_image by a regex, and both an override (-e
@@ -174,15 +166,26 @@
           if customized_lab_image_with_docker | bool else '' }}. This takes a few
           minutes.
 
-    # ORDER MATTERS: virt-customize applies its options in the order they
-    # appear on the command line, so the register has to come before the
-    # installs and the unregister after them.
+    # The virt-customize run, in command-line order, which is the order the
+    # options take effect in:
     #
-    # no_log because org_id and activation_key are on this command line.
-    # They are still visible in the host's process table for the length of
-    # the run - on a single-user lab host that is accepted, but it is the
-    # reason this is not something to run on a shared machine.
-    - name: Register, install and unregister inside the image (virt-customize)
+    #   1. the same preparation setup_bm_host.yaml applies to the base image
+    #      - root password, lab ssh key, cloud-init removed, root login
+    #      permitted - applied here to the COPY. It runs unconditionally and
+    #      is written to be safe on an already-prepared base: the password is
+    #      a set, a repeated key append is harmless, the removal is || true
+    #      when there is no cloud-init left, and the sshd line is grep-guarded.
+    #   2. register, so there are repositories to install from
+    #   3. the packages
+    #   4. clean and unregister, so the published image carries no consumer
+    #      identity - otherwise every guest cloned from it would share one
+    #      registration in Red Hat's inventory
+    #
+    # no_log because org_id and activation_key are on this command line. They
+    # are still visible in the host's process table for the length of the run
+    # - accepted on a single-user lab host, and the reason this is not
+    # something to run on a shared machine.
+    - name: Prepare, register, install and unregister inside the image (virt-customize)
       ansible.builtin.command:
         argv: "{{ customized_lab_image_argv }}"
       vars:
@@ -191,6 +194,12 @@
             ['virt-customize', '-a',
              base_image_dir + '/' + customized_lab_image + '.partial',
              '--network',
+             '--root-password', 'password:' + (lab_root_password | string),
+             '--ssh-inject', 'root:file:' + lab_ssh_pubkey_path,
+             '--run-command', 'yum remove cloud-init* -y || true',
+             '--run-command',
+             'grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config ||'
+             ' echo "PermitRootLogin yes" >>/etc/ssh/sshd_config',
              '--run-command',
              'subscription-manager register --org=' + (org_id | string) +
              ' --activationkey=' + (activation_key | string) + ' --force']
@@ -210,6 +219,11 @@
                '--run-command', 'rm -rf /var/log/rhsm/*',
                '--selinux-relabel']
           }}
+      # setup_bm_host.yaml exports this for the same binary, and on a host
+      # where the libvirt backend cannot start the appliance virt-customize
+      # fails without it. Matched here rather than discovered the hard way.
+      environment:
+        LIBGUESTFS_BACKEND: direct
       no_log: true
       register: customized_lab_image_customize
 
@@ -233,6 +247,8 @@
             rpm -q --whatprovides {{ customized_lab_image_packages | join(' ') }}
             {{ customized_lab_image_docker_packages | join(' ')
                if customized_lab_image_with_docker | bool else '' }}
+      environment:
+        LIBGUESTFS_BACKEND: direct
       register: customized_lab_image_verify
       changed_when: false
       failed_when: false

@@ -4,12 +4,18 @@
 # tags: [baseimage] because guestfs-tools - which provides the virt-customize
 # that prepares the base image below - is in basic_packages. Without this a
 # standalone --tags baseimage run fails on a host that has never been set up.
+#
+# tags: [labprereq] is the SMALLER subset that udn-bgp-evpn's image build
+# needs: virt-customize and the lab ssh key, WITHOUT the in-place
+# preparation below. That build prepares its own copy, so it must not depend
+# on this image having been touched.
 - name: Install Basic Required Packages.
   yum:
     name: "{{ basic_packages }}"
     state: installed
   tags:
     - baseimage
+    - labprereq
 
 # Once Packages are installed, lets start the Libvirt Service
 - name: Start Libvirtd Service
@@ -27,6 +33,7 @@
   tags:
     - ssh
     - baseimage
+    - labprereq
 
 # Create Key if not existing
 - name: Create SSH Key if not existing
@@ -39,6 +46,7 @@
   tags:
     - ssh
     - baseimage
+    - labprereq
 
 # Enable Nested KVM
 - name: Enable Nested KVM
@@ -55,11 +63,11 @@
 # before udn-bgp-evpn/build-lab-image.yaml copies it to build the customized
 # lab image.
 #
-# tags: [baseimage] so that build can run this step on its own first:
-#
-#   ansible-playbook setup_bm_host.yaml --tags baseimage
-#
-# which is what udn-bgp-evpn/build-lab.sh --only image does for you.
+# This is for the guests built DIRECTLY from this image - the helper, and
+# every VM of the hub, hosted-cluster, Ceph, MinIO and mirror-registry flows.
+# udn-bgp-evpn's customized lab image does NOT depend on it: that build
+# applies the same preparation to its own copy, so it can run on a pristine
+# base image and in any order relative to this play.
 - name: Check whether the base image has already been prepared
   ansible.builtin.command:
     cmd: "virt-cat -a {{ base_image_dir }}/{{ rhel9_kvm_image }} /root/.ssh/authorized_keys"

@@ -143,11 +143,13 @@ list_steps() {
 
   Not in any mode's sequence, run it on its own with --only:
 
-  image      build-lab-image.yaml - copy the base image, register the COPY
-             with subscription-manager, install every package the lab's
-             guests need, unregister and clean. Build it once and every
-             guest is created from it with no registration and no dnf;
-             skip it and nothing changes. Its PRESENCE is the switch
+  image      build-lab-image.yaml - copy the base image, prepare the COPY
+             (root password, lab ssh key, cloud-init removed), register it,
+             install every package the lab's guests need, then unregister
+             and clean. Build it once and every guest is created from it
+             with no registration and no dnf; skip it and nothing changes.
+             Its PRESENCE is the switch. No ordering dependency on bmhost -
+             it prepares its own copy and works from a pristine base
 EOF
     printf '\n  this run (--%s): %s\n' "$MODE" "${STEPS[*]}"
 }
@@ -389,16 +391,16 @@ run_step() {
         play_bg sno ../setup_sno.yaml
         wait_all ;;
     image)
-        # Two plays, in this order, because setup-bm-host prepares the base
-        # image IN PLACE - ssh key, root password, cloud-init removed - and
-        # build-lab-image.yaml copies the result. Copy first and every guest
-        # cloned from the image is unreachable, with nothing about the copy
-        # looking wrong. Running the prepare step here means the ordering
-        # cannot be got wrong; it is idempotent, so on a built lab it is a
-        # no-op.
-        say "prebuilt lab image (1/2)  prepare the base image"
-        play ../setup_bm_host.yaml --tags baseimage
-        say "prebuilt lab image (2/2)  register once, install, unregister"
+        # The image build prepares its own copy - root password, ssh key,
+        # cloud-init removed - so it has no ordering dependency on
+        # setup-bm-host's in-place preparation of the base image and works
+        # from a pristine one. What it does need from the host is
+        # virt-customize and the lab keypair, which is all --tags labprereq
+        # is: basic_packages and the key, and NOT the in-place edit. On a
+        # host that has already been set up it is a no-op.
+        say "prebuilt lab image (1/2)  host prerequisites (virt-customize, lab ssh key)"
+        play ../setup_bm_host.yaml --tags labprereq
+        say "prebuilt lab image (2/2)  copy, prepare, register once, install, unregister"
         play build-lab-image.yaml ;;
     fabric)
         say "$(pos fabric)  containerlab fabric (leaf1 / spine / leaf2), topology $TOPOLOGY"

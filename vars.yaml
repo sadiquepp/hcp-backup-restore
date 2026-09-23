@@ -1534,6 +1534,14 @@ customized_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-
 ## is what switches the lab over - there is no enable flag to forget.
 customized_lab_image: "{{ rhel9_kvm_image | regex_replace('\\.qcow2$', '') }}-customized.qcow2"
 
+## What the image build injects while preparing its copy - the same two
+## things setup_bm_host.yaml puts into the base image. Variables rather than
+## literals because a workshop handing out 20 hosts should not be stuck with
+## one hardcoded root password, and because the image build and the base-image
+## preparation have to agree on which key.
+lab_ssh_pubkey_path: /root/.ssh/lab_rsa.pub
+lab_root_password: redhat
+
 ## Rebuild the image even if it is already there. Off by default because the
 ## build takes several minutes and re-registers with Red Hat each time.
 customized_lab_image_force: false
