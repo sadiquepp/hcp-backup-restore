@@ -440,13 +440,22 @@
       tags: [clabclient]
   tags: [clabclient]
 
+# Also under clabnsclient, and that is not a convenience.
+#
+# The phase-2 client path has two halves: routes on the CLIENT (a route per
+# udn_subnet_shared via the clab VM) and routing on the CLAB VM (its fabric
+# address, forwarding, and a route to each tenant prefix via leaf1). Tagging
+# this clabclient-only meant the second half existed only when the separate
+# udnclient VM was built. Running --tags clabnsclient then produced a client
+# with correct routes pointing at a VM that would not forward, and every curl
+# timed out with nothing to show which half was missing.
 - name: Make the clab VM route the client onto the fabric
   ansible.builtin.include_tasks:
     file: client-router.yml
     apply:
       delegate_to: "{{ clab_exec_host }}"
-      tags: [clabclient]
-  tags: [clabclient]
+      tags: [clabclient, clabnsclient]
+  tags: [clabclient, clabnsclient]
 
 # Same ordering rule as the containerlab VM above, and for the same reason: the
 # client is a bare copy of rhel9_kvm_image with no entitlement, so the first

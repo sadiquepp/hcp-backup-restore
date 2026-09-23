@@ -406,10 +406,18 @@ run_step() {
         else
             say "$(pos verify)  the tenant ingress, from outside"
         fi
+        # --host is meant to reach EVERY tenant, and under --shared the SNO
+        # holds one of its own. The demo is single-cluster by default, so it
+        # has to be told about the second or the run is green having never
+        # asked about violet.
+        demo_extra=""
+        [[ "$DEMO_FLAG" == "--host" && -r "$KUBECONFIG_SNO" ]] && demo_extra="$KUBECONFIG_SNO"
         if (( DRY_RUN )); then
-            printf '    KUBECONFIG=%s scripts/udn-web-demo.sh %s\n' "$KUBECONFIG_HUB" "$DEMO_FLAG"
+            printf '    KUBECONFIG=%s %sscripts/udn-web-demo.sh %s\n' "$KUBECONFIG_HUB" \
+                   "${demo_extra:+UDN_EXTRA_KUBECONFIGS=$demo_extra }" "$DEMO_FLAG"
         else
-            KUBECONFIG="$KUBECONFIG_HUB" scripts/udn-web-demo.sh "$DEMO_FLAG"
+            KUBECONFIG="$KUBECONFIG_HUB" UDN_EXTRA_KUBECONFIGS="$demo_extra" \
+                scripts/udn-web-demo.sh "$DEMO_FLAG"
         fi ;;
     # The only test in the build with a POD at both ends, which is what makes
     # it worth its runtime in either mode. Step 9 asks from the fabric client,

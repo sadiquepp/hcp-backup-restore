@@ -127,15 +127,36 @@ on_client() {  # client-ip, command
 # ---------------------------------------------------------------------------
 # Where the pages are. Read off the interface, not the annotation.
 # ---------------------------------------------------------------------------
-for ns in $(oc get ns -l udn-tenant -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
-    tenant=$(oc get ns "$ns" -o jsonpath='{.metadata.labels.udn-tenant}')
-    pod=$(oc -n "$ns" get pods -l app=udn-web -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+# This script is otherwise single-cluster: it reads whatever KUBECONFIG points
+# at. Under the shared phase the SNO carries a tenant of its own (violet), and
+# a client that is supposed to reach EVERY tenant has to be asked about that
+# one too - otherwise the run is green having never tested the tenant the
+# phase was extended for. UDN_EXTRA_KUBECONFIGS adds clusters to discovery.
+#
+# Keyed by tenant name, which is safe only where tenant names do not repeat
+# across clusters - true under shared and VRF-Lite, false under EVPN, where a
+# stretched tenant exists in both. The duplicate is kept and noted rather than
+# silently overwriting an address with another cluster's.
+KC_ARGS=("")
+for _kc in ${UDN_EXTRA_KUBECONFIGS:-}; do
+    if [[ -r "$_kc" ]]; then KC_ARGS+=("--kubeconfig=$_kc")
+    else echo "skipping unreadable kubeconfig: $_kc" >&2; fi
+done
+
+for _kc in "${KC_ARGS[@]}"; do
+for ns in $(oc ${_kc:+$_kc} get ns -l udn-tenant -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+    tenant=$(oc ${_kc:+$_kc} get ns "$ns" -o jsonpath='{.metadata.labels.udn-tenant}')
+    if [[ -n "${WEBADDR[$tenant]:-}" ]]; then
+        echo "  note: tenant '$tenant' is in more than one cluster; keeping ${WEBADDR[$tenant]}" >&2
+        continue
+    fi
+    pod=$(oc ${_kc:+$_kc} -n "$ns" get pods -l app=udn-web -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
     [[ -n "$pod" ]] || continue
     # From the page, not from `ip`: the httpd image is ubi9/httpd-24 and has no
     # iproute in it. The init container already read ovn-udn1 and wrote the
     # address into the page, which is also the more honest source - it is what
     # the pod that will answer says about itself.
-    page=$(oc -n "$ns" exec "$pod" -c httpd -- cat /var/www/html/index.html 2>/dev/null)
+    page=$(oc ${_kc:+$_kc} -n "$ns" exec "$pod" -c httpd -- cat /var/www/html/index.html 2>/dev/null)
     addr=$(printf '%s\n' "$page" | awk '/^udn:/ {print $2}')
     # Which cluster this pod is in, straight off the page. Only routes in THIS
     # cluster can be judged stale below - the others are served by a kubeconfig
@@ -165,6 +186,7 @@ for ns in $(oc get ns -l udn-tenant -o jsonpath='{range .items[*]}{.metadata.nam
         esac
     fi
 done
+done   # per kubeconfig
 
 (( ${#tenants[@]} )) || { echo "No udn-web pods found. Run --tags web first." >&2; exit 1; }
 
@@ -412,11 +434,22 @@ mtu_bad=0
 echo
 echo "Path MTU (one DF packet at the interface MTU - must arrive)"
 for c in "${clients[@]}"; do
+    # Only against a pod this client ACTUALLY reached. A DF ping to somewhere
+    # unreachable fails for the same reason everything else did, and reporting
+    # that as an MTU black hole blames the wrong thing - this printed
+    # "BLACKHOLE ... the web pages above still passed, because MSS clamping hid
+    # it" on a run where not one page had passed.
     target=""
     for t in ${SERVES[$c]}; do
-        [[ -n "${WEBADDR[$t]:-}" ]] && { target="${WEBADDR[$t]}"; break; }
+        a="${WEBADDR[$t]:-}"
+        [[ -n "$a" ]] || continue
+        [[ "${RESULT[$c,$a]:-}" == I\ am\ * ]] || continue
+        target="$a"; break
     done
-    [[ -n "$target" ]] || continue
+    if [[ -z "$target" ]]; then
+        printf '  %-18s -> %s\n' "$c" "no pod answered it - MTU not testable"
+        continue
+    fi
     probe="${MTU_PROBE//__TARGET__/$target}"
     out=$(on_client "${CLIENTIP[$c]}" "${PREFIX[$c]}sh -c '$probe'" | tr -d '\r' | tail -1)
     printf '  %-18s -> %-15s %s\n' "$c" "$target" "$out"
@@ -424,9 +457,10 @@ for c in "${clients[@]}"; do
 done
 if (( mtu_bad )); then
     echo
-    echo "  $mtu_bad client(s) cannot deliver a full-MTU packet to a pod. The web"
-    echo "  pages above still passed, because MSS clamping hid it. Compare the"
-    echo "  client segment against the pod:"
+    echo "  $mtu_bad client(s) reached a pod but cannot deliver a full-MTU packet"
+    echo "  to it. The pages above passed anyway, because MSS clamping pins TCP"
+    echo "  to the smaller end - UDP and anything DF-set does not survive it."
+    echo "  Compare the client segment against the pod:"
     echo "      oc -n udn-<tenant> rsh <web pod> ip link show ovn-udn1"
     echo "  and set vars.yaml:clab_client_mtu to match, then re-run --tags"
     echo "  clabnsclient (and clabclients, if the tenant VMs are built)."
