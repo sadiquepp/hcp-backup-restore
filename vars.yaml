@@ -1397,6 +1397,27 @@ clab_fabric_mtu: 9000
 ## migration and reboots every node twice, on both clusters.
 clab_client_mtu: 1400
 
+## Loose reverse-path filtering on the cluster nodes, applied through the
+## Tuned profile in roles/setup-udn-bgp/templates/tuned-forwarding.yaml.j2.
+##
+## The role defaults this to false, which is right for a cluster that is not
+## on a fabric. This lab always is, and phase 2 cannot work without it: its
+## client is off-segment by design, so the request reaches the pod over the
+## fabric and the pod's reply leaves by the node's default gateway. The paths
+## differ at every hop, and strict rp_filter rejects the request at INPUT -
+## before the kernel picks an output device, so forwarding, the ip rules, the
+## route in the UDN's table and the BGP advertisement are all correct and all
+## irrelevant.
+##
+## net.ipv4.conf.all.rp_filter=2 alone is enough: the effective value is
+## max(all, <iface>) and there is nothing above 2. Through Tuned rather than
+## sysctl -w because it covers every worker and survives a reboot.
+##
+## Left false, the symptom is per-node and looks like nothing: pods on nodes
+## that happen to have it answer, pods on nodes that do not are silent, and
+## every control-plane signal is identical either way.
+udn_bgp_loose_rp_filter: true
+
 ## Fabric addressing. The last octet of every fabric address is the SAME
 ## octet the node already has in ip_list on virbr0 - worker1 is .34 on both -
 ## so there is one number per node to remember and no new collision surface.

@@ -179,7 +179,15 @@
     fail_msg: >-
       On {{ udn_bgp_node_names[item.item.ip_key] }} the fabric NIC has strict
       reverse-path filtering (iface={{ rp_iface }}, all={{ rp_all }},
-      effective={{ rp_effective }}). The request from an off-segment client
+      effective={{ rp_effective }}). The repair's own line was
+      '{{ item.stdout | default('(none)') | trim }}' - read write_rc there
+      before anything else, because a FAILED write and a write that was
+      REVERTED look identical from the value alone, and that distinction is
+      what the forwarding check above had to learn the hard way.
+      The durable fix is `udn_bgp_loose_rp_filter: true` in vars.yaml, which
+      puts net.ipv4.conf.all.rp_filter=2 into the Tuned profile for every
+      worker and survives a reboot; a hand-run `sysctl -w` on one node does
+      not. The request from an off-segment client
       reaches this NIC and is dropped before the kernel picks an output
       device, so nothing downstream can be at fault and nothing downstream
       will look it. Confirm with a capture - the echo request appears on the

@@ -50,6 +50,14 @@
 #   - forwarding, the ip rules, the route in the VRF table and the BGP
 #     advertisement are all correct and all irrelevant
 #
+# The DURABLE fix is vars.yaml:udn_bgp_loose_rp_filter, which puts
+# net.ipv4.conf.all.rp_filter=2 in the Tuned profile - every worker, surviving
+# a reboot. It has been there all along and defaults to false; this lab now
+# sets it true. The write here is the immediate repair for the same value, so
+# a run does not depend on when NTO next applies the profile, and it writes
+# 'all' for the same reason the documented fix does: effective is
+# max(all, <iface>), so all=2 wins whatever the interface inherited.
+#
 # 2 (loose) rather than 0: loose still rejects a source with no route at all,
 # which keeps a genuine fabric misconfiguration visible, and it is what the
 # client and tenant-client scripts already use.
@@ -77,7 +85,7 @@
         nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ && !f {gsub(":","",$2); print $2; f=1}');
         [ -n "$nic" ] || { echo "NONE"; exit 0; };
         err=$(sysctl -w net.ipv4.conf.$nic.forwarding=1 net.ipv4.conf.default.forwarding=1
-        net.ipv4.conf.$nic.rp_filter=2 net.ipv4.conf.default.rp_filter=2 2>&1 >/dev/null); rc=$?;
+        net.ipv4.conf.all.rp_filter=2 net.ipv4.conf.$nic.rp_filter=2 net.ipv4.conf.default.rp_filter=2 2>&1 >/dev/null); rc=$?;
         echo "$nic $(cat /proc/sys/net/ipv4/conf/$nic/forwarding)
         all=$(cat /proc/sys/net/ipv4/conf/all/forwarding)
         default=$(cat /proc/sys/net/ipv4/conf/default/forwarding)

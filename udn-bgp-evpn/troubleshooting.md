@@ -634,12 +634,36 @@ net.ipv4.conf.default.rp_filter = 1
 
 The asymmetry is deliberate. Phase 2's client is off-segment: the request goes
 over the fabric, the reply leaves by the node's default gateway.
-`udn-client-routes.sh` has set `rp_filter=2` on the **client** for that reason
-since it was written, with a comment saying the paths differ. Nothing set it on
-the **node**, the other end of the same asymmetry.
 
-Exactly the same shape as the forwarding bug this lab already carries a repair
-for: `conf.default.<knob>` inherited by a NIC created after boot.
+### The part I got wrong, which is the real lesson
+
+The first write-up of this case said "nothing set it on the node". That was
+false, and it is worth recording because the mistake cost more than the bug.
+The lab had all of this already:
+
+| | |
+| --- | --- |
+| `roles/setup-udn-bgp/defaults/main.yml:79` | `udn_bgp_loose_rp_filter: false` |
+| `templates/tuned-forwarding.yaml.j2` | `net.ipv4.conf.all.rp_filter=2` when true |
+| `README.md` (two rows of the symptom table) | this exact symptom and this exact fix |
+| `roles/setup-clab-fabric/tasks/client-vm.yml` | a warning when the flag is false |
+
+A supported switch, applied durably through Tuned to every worker, surviving a
+reboot — and documented twice. It defaulted to false, and this lab never set
+it.
+
+Two things hid it. The flag defaults off, so nothing in a normal run mentions
+it. And the warning that *would* have said "the nodes are running strict
+reverse-path filtering" lives in `client-vm.yml`, which runs only under
+`--tags clabclient` — the step the shared build was deliberately routed
+*around* when it was changed to reuse the namespace client. Removing the VM
+removed the warning about the VM's own precondition.
+
+So the sequence was: a documented precondition, defaulted off, with its only
+runtime reminder attached to a component that had just been designed out.
+
+`vars.yaml` now sets `udn_bgp_loose_rp_filter: true`, and the assert names it
+as the durable fix rather than pointing only at `sysctl -w`.
 
 ### Fix
 
@@ -651,10 +675,17 @@ Ping answered on the next packet.
 
 ### What the lab does now
 
-`fabric-forwarding.yml` writes `conf.<nic>.rp_filter=2` and
-`conf.default.rp_filter=2` beside the forwarding pair — same script, same
-inheritance problem, same trigger — and reports `rp=` and `rp_all=`.
-`verify.yml` asserts the **effective** value, `max(all, iface)`, is not 1.
+`vars.yaml` sets `udn_bgp_loose_rp_filter: true` — the durable fix, through
+Tuned, on every worker.
+
+`fabric-forwarding.yml` additionally writes `conf.all.rp_filter=2` (plus the
+interface and default) beside the forwarding pair, so a run does not depend on
+when NTO next applies the profile, and reports `rp=` and `rp_all=`.
+`verify.yml` asserts the **effective** value, `max(all, iface)`, is not 1 —
+and prints the repair's own output line, `write_rc` included, because a failed
+write and a reverted one look identical from the value alone. The first
+version of that message omitted `write_rc`, which is exactly the instrument
+the forwarding check had already learned to carry.
 
 2 rather than 0 on purpose: loose still rejects a source with no route at all,
 so a genuine fabric misconfiguration stays visible, and it matches what the
