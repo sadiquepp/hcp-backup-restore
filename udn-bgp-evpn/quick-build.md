@@ -59,14 +59,23 @@ registered with subscription-manager before its first `dnf`. That is four
 registrations per build, each a network round trip to Red Hat that can fail
 on its own.
 
-Do it once instead:
+Do it once instead — **after the `bmhost` step, not before it**:
 
 ```bash
+./build-lab.sh --only bmhost     # if the helper does not exist yet
 ./build-lab.sh --only image
-# or, the same thing directly:
+# or, the image build directly:
 ansible-playbook -i ../inventory/hosts build-lab-image.yaml \
     --vault-password-file ~/.vault_pass
 ```
+
+The ordering is not a preference. `setup_bm_host.yaml` runs `virt-customize`
+against the base image **in place** — it injects the lab's ssh key, sets the
+root password, removes cloud-init and permits root login. Copy the image
+before that and every guest cloned from the result is unreachable, with
+nothing about the copy looking wrong. The build checks for the injected key
+and refuses if it is absent (`-e udn_lab_image_skip_prepare_check=true` if
+your base image is prepared some other way).
 
 That copies the base image, registers **the copy**, installs everything,
 then unregisters and cleans, and publishes the result as

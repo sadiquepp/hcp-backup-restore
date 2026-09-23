@@ -59,6 +59,43 @@
       RHEL9 KVM qcow2 there first - this role copies it, it does not
       download it.
 
+# ORDERING. setup_bm_host.yaml (build-lab.sh's 'bmhost' step) runs
+# virt-customize against the base image IN PLACE - it injects the lab's ssh
+# key, sets a root password, removes cloud-init and permits root login. Copy
+# the image before that has happened and every guest cloned from the result
+# is unreachable: no key, no password, and cloud-init still trying to manage
+# the account on first boot. Nothing about the copy would look wrong.
+#
+# The injected authorized_keys is the cheapest thing to look for, and
+# virt-cat is read-only so this cannot disturb the image it is checking.
+- name: Check the base image has been prepared by the bmhost step
+  ansible.builtin.command:
+    cmd: "virt-cat -a {{ base_image_dir }}/{{ rhel9_kvm_image }} /root/.ssh/authorized_keys"
+  register: udn_lab_image_prepared
+  changed_when: false
+  failed_when: false
+  when: not (udn_lab_image_skip_prepare_check | default(false) | bool)
+
+- name: Fail if the base image has not been through bmhost yet
+  ansible.builtin.assert:
+    that:
+      - udn_lab_image_prepared.rc == 0
+      - udn_lab_image_prepared.stdout | trim | length > 0
+    fail_msg: >-
+      {{ base_image_dir }}/{{ rhel9_kvm_image }} has no /root/.ssh/authorized_keys,
+      so setup_bm_host.yaml has not prepared it yet. That step injects the
+      lab's ssh key, sets the root password and removes cloud-init, IN PLACE
+      on this image. Building from it now would produce guests nothing can
+      log in to. Run the bmhost step first:
+
+        ./build-lab.sh --only bmhost
+
+      then build this image. If your base image is prepared some other way,
+      pass -e udn_lab_image_skip_prepare_check=true.
+    success_msg: >-
+      Base image carries the lab ssh key - bmhost has prepared it.
+  when: not (udn_lab_image_skip_prepare_check | default(false) | bool)
+
 # The one way this role could ever destroy the base image. udn_lab_image is
 # derived from rhel9_kvm_image by a regex, and both an override (-e
 # udn_lab_image=...) and a base image whose name the regex does not match
