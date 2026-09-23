@@ -79,7 +79,7 @@
 
 - name: Read the lab public key
   ansible.builtin.slurp:
-    src: "~/.ssh/lab_rsa.pub"
+    src: "{{ lab_ssh_pubkey_path | default('/root/.ssh/lab_rsa.pub') }}"
   register: lab_pubkey
   tags:
     - baseimage
@@ -88,17 +88,40 @@
 # compare the content rather than just test for the file: the step is no
 # longer run exactly once (the image build runs it too), and rotating
 # lab_rsa has to still take effect.
-- name: Remove Cloud-Init & Add Password
+# The root password is OPTIONAL, and unset is now the default - it used to be
+# the literal 'redhat' here. Nothing in this repository logs into a guest
+# with a password: every play reaches them with the key injected below. What
+# a password buys is console access (virsh console, VNC) to a guest whose
+# networking is broken. Set lab_root_password in vault.yaml to keep it.
+#
+# passwd -u -f unlocks root unconditionally. A stock RHEL cloud image ships
+# root locked, and --root-password used to unlock it as a side effect of
+# setting one; without that side effect the lock would remain, and whether
+# key-based root login still works past it is an image-and-PAM detail rather
+# than something to leave to chance on twenty hosts. -f because passwd
+# refuses to unlock an account that has no password at all.
+#
+# no_log: the command line carries lab_root_password when one is set.
+#
+# DO NOT wrap the lines below. This is a YAML folded scalar (>-), which joins
+# lines with spaces EXCEPT where a continuation is indented further - those
+# keep their newline. A newline lands in the middle of the shell command and
+# splits it in two, so `virt-customize -a IMAGE` runs with no options at all
+# and the rest becomes a second command that does not exist. Caught exactly
+# that way when the optional-password conditional was first written across
+# two lines.
+- name: Remove Cloud-Init, inject the lab key, optionally set a root password
   ansible.builtin.shell:
     cmd: >-
       export LIBGUESTFS_BACKEND=direct &&
       virt-customize -a "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
-      --root-password password:{{ lab_root_password | default('redhat') }}
-      --ssh-inject "root:file:/root/.ssh/lab_rsa.pub"
+      {{ '--root-password "password:' + lab_root_password + '"' if lab_root_password is defined else '' }}
+      --ssh-inject "root:file:{{ lab_ssh_pubkey_path | default('/root/.ssh/lab_rsa.pub') }}"
       --selinux-relabel
       --run-command 'yum remove cloud-init* -y'
-      --run-command 'grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config ||
-                     echo "PermitRootLogin yes" >>/etc/ssh/sshd_config'
+      --run-command 'passwd -u -f root || true'
+      --run-command 'grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config || echo "PermitRootLogin yes" >>/etc/ssh/sshd_config'
+  no_log: "{{ lab_root_password is defined }}"
   when: >-
     base_image_authkeys.rc != 0 or
     (lab_pubkey.content | b64decode | trim) not in

@@ -1600,11 +1600,14 @@ customized_lab_image_url: ""
 ## broken, which in a lab about VLANs, VRFs and routing is a state you will
 ## reach.
 ##
-## NOTE the two images can differ. setup_bm_host.yaml's preparation of the
-## BASE image reads the same variable but keeps its historical 'redhat' when
-## unset, so flows that never use the customized image are unaffected. With
-## nothing in vault.yaml, guests from the customized image are key-only while
-## guests from the base image still have root:redhat. Set it and both agree.
+## Both images behave the same way: setup_bm_host.yaml's preparation of the
+## BASE image reads the same variable and also omits the password when it is
+## unset. It used to hardcode 'redhat'; that literal is gone.
+##
+## Root is UNLOCKED either way (passwd -u -f). A stock RHEL cloud image ships
+## it locked, and setting a password used to unlock it as a side effect - so
+## dropping the password without unlocking would have risked key-based root
+## login failing on an image-and-PAM detail.
 lab_ssh_pubkey_path: /root/.ssh/lab_rsa.pub
 
 ## Rebuild the image even if it is already there. Off by default because the
