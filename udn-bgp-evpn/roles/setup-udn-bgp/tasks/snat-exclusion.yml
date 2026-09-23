@@ -30,6 +30,17 @@
 #
 # One pod is enough: ovn-nbctl reads the NB database, which is cluster-wide.
 
+# WHICH subnet is advertised depends on the phase, and reading the wrong one
+# makes this check vacuous rather than wrong-looking. The shared phase
+# advertises udn_subnet_shared (10.220-10.225 here); vrflite and evpn
+# advertise udn_subnet (10.200-10.206). Hard-coding udn_subnet meant a shared
+# run compared the gateway routers' SNAT rules against prefixes that phase
+# never advertises, found no match, and passed - a green check that had looked
+# at nothing.
+- name: Decide which subnet this phase advertises
+  ansible.builtin.set_fact:
+    udn_bgp_snat_attr: "{{ 'udn_subnet_shared' if udn_phase == 'shared' else 'udn_subnet' }}"
+
 - name: Find an ovnkube-node pod to read the OVN databases through
   ansible.builtin.command:
     cmd: >-
@@ -74,7 +85,7 @@
 - name: Note which of this cluster's advertised tenants are affected
   ansible.builtin.set_fact:
     udn_bgp_snat_broken: >-
-      {{ udn_bgp_tenants | selectattr('udn_subnet', 'in', udn_bgp_snat_open)
+      {{ udn_bgp_tenants | selectattr(udn_bgp_snat_attr, 'in', udn_bgp_snat_open)
          | map(attribute='name') | list }}
 
 - name: Report the SNAT state of the advertised networks
@@ -127,14 +138,14 @@
   until: >-
     udn_bgp_nat_raw_after.stdout_lines | default([])
     | select('search', '^[0-9./]+,\s*$') | map('regex_replace', ',.*$', '')
-    | select('in', udn_bgp_tenants | map(attribute='udn_subnet') | list)
+    | select('in', udn_bgp_tenants | map(attribute=udn_bgp_snat_attr) | list)
     | list | length == 0
 
 - name: Note which tenants are still masqueraded after the restart
   ansible.builtin.set_fact:
     udn_bgp_snat_broken_after: >-
       {{ udn_bgp_tenants
-         | selectattr('udn_subnet', 'in',
+         | selectattr(udn_bgp_snat_attr, 'in',
              udn_bgp_nat_raw_after.stdout_lines | default([])
              | select('search', '^[0-9./]+,\s*$')
              | map('regex_replace', ',.*$', '') | list)
