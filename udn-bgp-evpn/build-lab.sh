@@ -118,7 +118,7 @@ declare -A STEP_ALIAS=([evpn]=tenants [vrflite]=tenants [shared]=tenants)
 # other labs on this host may share and needs credentials the rest of a
 # --from fabric run does not, so it is opt-in and explicit - see
 # build-lab-image.yaml.
-EXTRA_STEPS=(image)
+EXTRA_STEPS=(image image-publish image-fetch)
 
 usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
@@ -141,7 +141,7 @@ list_steps() {
              same tenant over the stretched L2; under VRF-Lite, the
              udn_vrf_leaks matrix with the shut pairs asserted shut
 
-  Not in any mode's sequence, run it on its own with --only:
+  Not in any mode's sequence, run each on its own with --only:
 
   image      build-lab-image.yaml - copy the base image, prepare the COPY
              (root password, lab ssh key, cloud-init removed), register it,
@@ -150,6 +150,15 @@ list_steps() {
              with no registration and no dnf; skip it and nothing changes.
              Its PRESENCE is the switch. No ordering dependency on bmhost -
              it prepares its own copy and works from a pristine base
+
+  image-publish
+             upload that image plus a .sha256 to S3, from the ONE host that
+             built it
+  image-fetch
+             pull it down on a lab host instead of building one here. The
+             workshop path: build once, publish, fetch on each of N hosts.
+             Verified against the published checksum before it is moved
+             into place, so a truncated download never becomes the image
 EOF
     printf '\n  this run (--%s): %s\n' "$MODE" "${STEPS[*]}"
 }
@@ -390,6 +399,12 @@ run_step() {
         play_bg hub ../setup_hub_cluster.yaml --skip-tags acm
         play_bg sno ../setup_sno.yaml
         wait_all ;;
+    image-publish)
+        say "publish the lab image to S3, for other hosts to pull"
+        play publish-lab-image.yaml ;;
+    image-fetch)
+        say "pull the published lab image onto this host"
+        play fetch-lab-image.yaml ;;
     image)
         # The image build prepares its own copy - root password, ssh key,
         # cloud-init removed - so it has no ordering dependency on

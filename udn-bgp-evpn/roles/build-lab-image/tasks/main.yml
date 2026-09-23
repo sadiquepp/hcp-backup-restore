@@ -202,6 +202,10 @@
              '--ssh-inject', 'root:file:' + lab_ssh_pubkey_path,
              '--run-command', 'yum remove cloud-init* -y || true',
              '--run-command',
+             'printf "%s\\n" "image=' + customized_lab_image +
+             '" "built=' + (ansible_date_time.iso8601 | default('unknown')) +
+             '" > /etc/lab-image-release',
+             '--run-command',
              'grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config ||'
              ' echo "PermitRootLogin yes" >>/etc/ssh/sshd_config',
             ]

@@ -1,0 +1,37 @@
+---
+# Pull the published customized lab image onto this host.
+#
+#   ./build-lab.sh --only image-fetch
+# or
+#   ansible-playbook -i ../inventory/hosts fetch-lab-image.yaml \
+#       --vault-password-file ~/.vault_pass
+#
+# This is the workshop path: build the image once somewhere, publish it, and
+# every lab host pulls the finished article instead of building its own. No
+# subscription credentials, no virt-customize, no several-minute build - and
+# every host gets a byte-identical image, which is worth as much as the time
+# saved when twenty of them have to behave the same way.
+#
+# Two sources, and the URL one is deliberately the undemanding one:
+#
+#   -e customized_lab_image_url=https://...      presigned S3, a public
+#                                                object, or any web server.
+#                                                Needs no AWS tooling and no
+#                                                credentials.
+#   customized_lab_image_s3_bucket in vars.yaml  needs the aws CLI, and uses
+#                                                its own credential chain.
+#
+# Either way the download lands under .partial, is verified against the
+# published .sha256, and is only then moved into place. A truncated image
+# never reaches the name the lab looks for.
+- name: Fetch the customized lab image
+  hosts: localhost
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../vars.yaml
+    - ../vault.yaml
+  tasks:
+    - ansible.builtin.include_role:
+        name: lab-image
+        tasks_from: fetch

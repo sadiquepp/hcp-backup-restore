@@ -29,6 +29,39 @@
          | default(customized_lab_image_ready | default(false))
          | bool }}
 
+# WHICH IMAGE THIS GUEST ACTUALLY CAME FROM, not which image exists on the
+# hypervisor. Those are different questions, and the difference is a trap:
+# customized_lab_image_ready is a stat of a FILE, so a guest whose disk was
+# built before that file existed - or before the helper was opted in - would
+# be sent down the verify path having never seen the image. The packages
+# would be missing and the failure would name a package rather than the real
+# cause.
+#
+# The image build stamps /etc/lab-image-release into the image. Its presence
+# in the GUEST is the only honest evidence, so it is what decides.
+- name: Check whether this guest was actually built from the image
+  ansible.builtin.stat:
+    path: /etc/lab-image-release
+  register: lab_pkg_marker
+  when: lab_pkg_from_image | bool
+
+- name: Fail if this guest predates the image it is assumed to come from
+  ansible.builtin.assert:
+    that: lab_pkg_marker.stat.exists
+    fail_msg: >-
+      {{ lab_pkg_what }} is assumed to be built from {{ customized_lab_image }},
+      but it has no /etc/lab-image-release - so its disk was created before
+      that image existed, or from the plain base image.
+
+      Its packages were never installed and verifying them here would fail on
+      a package name rather than on this. Rebuild the guest from the image
+      (delete its disk and re-run the step that creates it), or unset the
+      switch that sent it down this path - for the helper that is
+      customized_lab_image_for_helper.
+    success_msg: >-
+      {{ lab_pkg_what }} was built from the customized image.
+  when: lab_pkg_from_image | bool
+
 - name: Install {{ lab_pkg_what }} packages ({{ lab_pkg_list | join(', ') }})
   ansible.builtin.dnf:
     name: "{{ lab_pkg_list }}"

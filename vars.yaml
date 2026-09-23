@@ -1549,6 +1549,39 @@ customized_lab_image: "{{ rhel9_kvm_image | regex_replace('\\.qcow2$', '') }}-cu
 ## so unless your base image is built for it, leave this true.
 customized_lab_image_register: true
 
+## ---------------------------------------------------------------------------
+## Distributing the image: build once, publish, pull on each lab host
+## ---------------------------------------------------------------------------
+##
+## The workshop shape. Building the image on every host means every host
+## needs subscription credentials and several minutes of virt-customize;
+## pulling a finished one needs neither.
+##
+##   on the build host:   ./build-lab.sh --only image
+##                        ./build-lab.sh --only image-publish
+##   on each lab host:    ./build-lab.sh --only image-fetch
+##
+## Either a bucket or a URL. The URL form takes a presigned S3 link, a public
+## object, or any ordinary web server, and needs nothing installed but the
+## ability to fetch it - which is the right property for the side that runs
+## on twenty hosts. The bucket form needs the aws CLI and uses its normal
+## credential chain, so on an AWS metal instance with an instance profile
+## there is nothing to configure at all.
+customized_lab_image_s3_bucket: ""
+customized_lab_image_s3_prefix: lab-images
+customized_lab_image_s3_region: "{{ oadp_aws_region }}"
+
+## Overrides the bucket for the FETCH side only. Presigned URLs expire, so
+## this is usually passed with -e rather than committed.
+customized_lab_image_url: ""
+
+## Credentials for the aws CLI, if it should not use its own chain. Leave
+## unset on an instance with a profile, or where ~/.aws/credentials is set
+## up. Put the values in vault.yaml, never here.
+##
+##   customized_lab_image_aws_access_key_id: ...
+##   customized_lab_image_aws_secret_access_key: ...
+
 ## What the image build injects while preparing its copy - the same two
 ## things setup_bm_host.yaml puts into the base image. Variables rather than
 ## literals because a workshop handing out 20 hosts should not be stuck with

@@ -1,0 +1,133 @@
+---
+# Pull a published image onto this lab host, instead of building one.
+#
+# This is the side that runs on twenty machines, so it is written to need as
+# little as possible: with customized_lab_image_url it needs no AWS tooling
+# and no credentials at all - a presigned S3 link, a public object or any web
+# server will do.
+#
+# THE CHECKSUM IS THE POINT. A download that stops half way leaves a qcow2
+# that is the right name, in the right place, and wrong. Everything
+# downstream would then detect it, trust it, and build guests from it, and
+# the first symptom would be something unrelated failing inside a VM. So the
+# file is fetched to .partial, verified against the published .sha256, and
+# only then moved into place - and a MISSING sidecar is a failure, not a
+# reason to skip the check.
+
+- name: Check whether the image is already here
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ customized_lab_image }}"
+  register: lab_image_fetch_existing
+
+- name: Report that the image is already present
+  ansible.builtin.debug:
+    msg: >-
+      {{ base_image_dir }}/{{ customized_lab_image }} already exists -
+      nothing to fetch. Remove it to pull a newer one.
+  when: lab_image_fetch_existing.stat.exists
+
+- name: Fetch the image
+  when: not lab_image_fetch_existing.stat.exists
+  block:
+    - name: Decide where it is coming from
+      ansible.builtin.set_fact:
+        lab_image_fetch_mode: >-
+          {{ 'url' if (customized_lab_image_url | length > 0)
+             else ('s3' if (customized_lab_image_s3_bucket | length > 0)
+                   else 'none') }}
+
+    - name: Fail if no source is configured
+      ansible.builtin.assert:
+        that: lab_image_fetch_mode != 'none'
+        fail_msg: >-
+          Nothing to fetch from. Set customized_lab_image_url (a presigned S3
+          link, a public object, or any web server - needs no AWS tooling) or
+          customized_lab_image_s3_bucket (needs the aws CLI). Or build the
+          image here instead with ./build-lab.sh --only image.
+
+    # ---------------------------------------------------------------- URL
+    - name: Download the image and its checksum over HTTP
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ item.dest }}"
+        mode: '0644'
+        timeout: 60
+      loop:
+        - url: "{{ customized_lab_image_url }}"
+          dest: "{{ base_image_dir }}/{{ customized_lab_image }}.partial"
+        # The sidecar sits beside the object. With a presigned image URL the
+        # signature covers one key only, so the sidecar needs its own link -
+        # customized_lab_image_sha256_url - and without it there is nothing
+        # to verify against, which this refuses to do silently.
+        - url: "{{ customized_lab_image_sha256_url | default(customized_lab_image_url ~ '.sha256') }}"
+          dest: "{{ base_image_dir }}/{{ customized_lab_image }}.sha256"
+      loop_control:
+        label: "{{ item.dest | basename }}"
+      when: lab_image_fetch_mode == 'url'
+
+    # ----------------------------------------------------------------- S3
+    - name: Download the image and its checksum from S3
+      ansible.builtin.command:
+        argv:
+          - aws
+          - s3
+          - cp
+          - "s3://{{ customized_lab_image_s3_bucket }}/{{ customized_lab_image_s3_prefix }}/{{ item.key }}"
+          - "{{ item.dest }}"
+          - --region
+          - "{{ customized_lab_image_s3_region }}"
+      loop:
+        - key: "{{ customized_lab_image }}"
+          dest: "{{ base_image_dir }}/{{ customized_lab_image }}.partial"
+        - key: "{{ customized_lab_image }}.sha256"
+          dest: "{{ base_image_dir }}/{{ customized_lab_image }}.sha256"
+      loop_control:
+        label: "{{ item.key }}"
+      environment: "{{ lab_image_aws_env }}"
+      no_log: "{{ customized_lab_image_aws_access_key_id is defined }}"
+      when: lab_image_fetch_mode == 's3'
+
+    # ------------------------------------------------------------- verify
+    - name: Read the published checksum
+      ansible.builtin.slurp:
+        src: "{{ base_image_dir }}/{{ customized_lab_image }}.sha256"
+      register: lab_image_fetch_sidecar
+
+    - name: Checksum what actually arrived
+      ansible.builtin.stat:
+        path: "{{ base_image_dir }}/{{ customized_lab_image }}.partial"
+        checksum_algorithm: sha256
+        get_checksum: true
+      register: lab_image_fetch_got
+
+    - name: Compare them
+      ansible.builtin.assert:
+        that:
+          - lab_image_fetch_got.stat.exists
+          - lab_image_fetch_got.stat.checksum
+            == (lab_image_fetch_sidecar.content | b64decode | trim | split(' ') | first)
+        fail_msg: >-
+          Checksum mismatch - the download is incomplete or corrupt, and is
+          NOT being moved into place.
+          published {{ lab_image_fetch_sidecar.content | b64decode | trim
+                       | split(' ') | first }},
+          got {{ lab_image_fetch_got.stat.checksum | default('nothing') }}.
+          The partial file is left at
+          {{ base_image_dir }}/{{ customized_lab_image }}.partial - delete it
+          and re-run to try again.
+        success_msg: >-
+          sha256 matches the published image
+          ({{ lab_image_fetch_got.stat.checksum }}).
+
+    - name: Publish it under the real name
+      ansible.builtin.command:
+        cmd: >-
+          mv {{ base_image_dir }}/{{ customized_lab_image }}.partial
+          {{ base_image_dir }}/{{ customized_lab_image }}
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          {{ base_image_dir }}/{{ customized_lab_image }} is in place. The lab
+          will build its guests from it, with no subscription-manager and no
+          dnf on any of them.

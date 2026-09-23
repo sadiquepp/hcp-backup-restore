@@ -1,0 +1,81 @@
+---
+# Publish the built image to S3, so lab hosts can pull it instead of
+# building their own.
+#
+# Uploads TWO objects: the image, and a .sha256 sidecar. The sidecar is not
+# optional decoration - it is the only thing that lets the fetching side tell
+# a complete image from a truncated one, and a truncated qcow2 sitting at the
+# right filename is exactly the failure this lab keeps meeting: everything
+# downstream inspects it, everything agrees, and the guests are broken.
+#
+# The aws CLI rather than a collection, so this works with nothing installed
+# but the CLI itself, and uses the CLI's own credential chain - on an AWS
+# metal instance with an instance profile there is nothing to configure.
+
+- name: Fail if no bucket is configured
+  ansible.builtin.assert:
+    that: customized_lab_image_s3_bucket | length > 0
+    fail_msg: >-
+      Set customized_lab_image_s3_bucket in vars.yaml (and optionally
+      customized_lab_image_s3_prefix) before publishing.
+
+- name: Check the image exists
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ customized_lab_image }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  register: lab_image_publish_src
+
+- name: Fail if the image has not been built
+  ansible.builtin.assert:
+    that: lab_image_publish_src.stat.exists
+    fail_msg: >-
+      No image at {{ base_image_dir }}/{{ customized_lab_image }}. Build it
+      first with ./build-lab.sh --only image.
+
+- name: Check the aws CLI is available
+  ansible.builtin.command:
+    cmd: which aws
+  register: lab_image_aws_cli
+  changed_when: false
+  failed_when: false
+
+- name: Fail if the aws CLI is missing
+  ansible.builtin.assert:
+    that: lab_image_aws_cli.rc == 0
+    fail_msg: >-
+      aws CLI not found. dnf install awscli2, or pip install awscli. Only the
+      publishing side needs it - lab hosts can pull with
+      customized_lab_image_url and no AWS tooling at all.
+
+- name: Write the checksum sidecar
+  ansible.builtin.copy:
+    content: "{{ lab_image_publish_src.stat.checksum }}  {{ customized_lab_image }}\n"
+    dest: "{{ base_image_dir }}/{{ customized_lab_image }}.sha256"
+    mode: '0644'
+
+- name: Upload the image and its checksum
+  ansible.builtin.command:
+    argv:
+      - aws
+      - s3
+      - cp
+      - "{{ base_image_dir }}/{{ item }}"
+      - "s3://{{ customized_lab_image_s3_bucket }}/{{ customized_lab_image_s3_prefix }}/{{ item }}"
+      - --region
+      - "{{ customized_lab_image_s3_region }}"
+  loop:
+    # Image first, sidecar second. A fetch that sees the sidecar can then
+    # rely on the image being there; the other order leaves a window where
+    # the checksum exists and the image does not.
+    - "{{ customized_lab_image }}"
+    - "{{ customized_lab_image }}.sha256"
+  environment: "{{ lab_image_aws_env }}"
+  no_log: "{{ customized_lab_image_aws_access_key_id is defined }}"
+
+- name: Report where it went
+  ansible.builtin.debug:
+    msg:
+      - "Published s3://{{ customized_lab_image_s3_bucket }}/{{ customized_lab_image_s3_prefix }}/{{ customized_lab_image }}"
+      - "sha256 {{ lab_image_publish_src.stat.checksum }}"
+      - "Pull it on a lab host with: ./build-lab.sh --only image-fetch"

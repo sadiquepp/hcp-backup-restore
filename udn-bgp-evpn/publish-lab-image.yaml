@@ -1,0 +1,28 @@
+---
+# Publish the built customized lab image to S3.
+#
+#   ./build-lab.sh --only image-publish
+# or
+#   ansible-playbook -i ../inventory/hosts publish-lab-image.yaml \
+#       --vault-password-file ~/.vault_pass
+#
+# Run this on the ONE host that built the image. It uploads the qcow2 and a
+# .sha256 sidecar to
+# s3://<customized_lab_image_s3_bucket>/<customized_lab_image_s3_prefix>/,
+# which is what fetch-lab-image.yaml pulls on each lab host.
+#
+# Credentials: the aws CLI's own chain by default - an instance profile on
+# AWS metal, or ~/.aws/credentials - so nothing needs to go in vault.yaml.
+# Set customized_lab_image_aws_access_key_id / _secret_access_key there if
+# you do need to name them.
+- name: Publish the customized lab image
+  hosts: localhost
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../vars.yaml
+    - ../vault.yaml
+  tasks:
+    - ansible.builtin.include_role:
+        name: lab-image
+        tasks_from: publish

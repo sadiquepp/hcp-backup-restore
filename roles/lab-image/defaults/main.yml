@@ -8,3 +8,23 @@
 
 customized_lab_image_ready: false
 customized_lab_image_for_helper: false
+
+customized_lab_image_s3_bucket: ""
+customized_lab_image_s3_prefix: lab-images
+customized_lab_image_s3_region: us-east-1
+customized_lab_image_url: ""
+
+# Credentials for the aws CLI, passed only when they are defined. Undefined
+# is the useful default: the CLI then uses its own chain - an instance
+# profile on AWS metal, or ~/.aws/credentials - and nothing has to be put in
+# vault.yaml at all.
+lab_image_aws_env: >-
+  {{
+    {
+      'AWS_ACCESS_KEY_ID': customized_lab_image_aws_access_key_id,
+      'AWS_SECRET_ACCESS_KEY': customized_lab_image_aws_secret_access_key,
+    }
+    if (customized_lab_image_aws_access_key_id is defined
+        and customized_lab_image_aws_secret_access_key is defined)
+    else {}
+  }}
