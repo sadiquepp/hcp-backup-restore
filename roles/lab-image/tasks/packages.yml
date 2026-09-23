@@ -50,14 +50,23 @@
     that: lab_pkg_marker.stat.exists
     fail_msg: >-
       {{ lab_pkg_what }} is assumed to be built from {{ customized_lab_image }},
-      but it has no /etc/lab-image-release - so its disk was created before
-      that image existed, or from the plain base image.
+      but it has no /etc/lab-image-release. Three ways to get here:
 
-      Its packages were never installed and verifying them here would fail on
-      a package name rather than on this. Rebuild the guest from the image
-      (delete its disk and re-run the step that creates it), or unset the
-      switch that sent it down this path - for the helper that is
-      customized_lab_image_for_helper.
+        1. the guest's disk was created before the image existed, or from the
+           plain base image. Delete its disk and re-run the step that creates
+           it.
+        2. the IMAGE predates this check and carries no marker, even though
+           the guest did come from it. Rebuild the image - it is quick, and
+           nothing else has to change:
+             ./build-lab.sh --only image   (add
+             -e customized_lab_image_force=true to overwrite the existing one)
+           then rebuild the guests from it.
+        3. this guest is not meant to use the image at all. Unset the switch
+           that sent it down this path - for the helper that is
+           customized_lab_image_for_helper.
+
+      Its packages were never verified as present, and going on would fail on
+      a package name rather than on any of the above.
     success_msg: >-
       {{ lab_pkg_what }} was built from the customized image.
   when: lab_pkg_from_image | bool
