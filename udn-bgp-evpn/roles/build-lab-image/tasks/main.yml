@@ -26,7 +26,11 @@
     fail_msg: >-
       Add org_id / activation_key to vault.yaml (ansible-vault edit
       vault.yaml). The image is registered with subscription-manager while
-      the packages are installed, then unregistered again.
+      the packages are installed, then unregistered again. If your base
+      image can already reach repositories on its own - a local mirror, a
+      Satellite, a cloud image with RHUI - set customized_lab_image_register
+      false and no credentials are needed.
+  when: customized_lab_image_register | bool
 
 # virt-customize ships in guestfs-tools, the same package that provides the
 # virt-resize this lab already uses to build the clab VM disk. Checked
@@ -200,9 +204,11 @@
              '--run-command',
              'grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config ||'
              ' echo "PermitRootLogin yes" >>/etc/ssh/sshd_config',
-             '--run-command',
-             'subscription-manager register --org=' + (org_id | string) +
-             ' --activationkey=' + (activation_key | string) + ' --force']
+            ]
+            + (['--run-command',
+                'subscription-manager register --org=' + (org_id | string) +
+                ' --activationkey=' + (activation_key | string) + ' --force']
+               if customized_lab_image_register | bool else [])
             + (['--run-command',
                 'curl -sSL ' + customized_lab_image_docker_repo +
                 ' -o /etc/yum.repos.d/docker-ce.repo']
@@ -212,12 +218,13 @@
                if customized_lab_image_with_docker | bool else [])
             + (['--run-command', 'systemctl enable docker']
                if customized_lab_image_with_docker | bool else [])
-            + ['--run-command', 'dnf clean all',
-               '--run-command', 'subscription-manager unregister || true',
-               '--run-command', 'subscription-manager clean || true',
-               '--run-command', 'rm -f /etc/yum.repos.d/redhat.repo',
-               '--run-command', 'rm -rf /var/log/rhsm/*',
-               '--selinux-relabel']
+            + ['--run-command', 'dnf clean all']
+            + (['--run-command', 'subscription-manager unregister || true',
+                '--run-command', 'subscription-manager clean || true',
+                '--run-command', 'rm -f /etc/yum.repos.d/redhat.repo',
+                '--run-command', 'rm -rf /var/log/rhsm/*']
+               if customized_lab_image_register | bool else [])
+            + ['--selinux-relabel']
           }}
       # setup_bm_host.yaml exports this for the same binary, and on a host
       # where the libvirt backend cannot start the appliance virt-customize

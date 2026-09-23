@@ -114,7 +114,7 @@ is also the whole rollback procedure.
 | **What is in it** | `bind bind-utils curl git haproxy httpd iproute iptables-nft net-tools policycoreutils-python-utils syslinux syslinux-tftpboot tar tcpdump tftp-server vim`, plus `docker-ce docker-ce-cli containerd.io` unless `customized_lab_image_with_docker: false` |
 | **Where the list comes from** | `lab_pkgs_clab`, `lab_pkgs_client`, `lab_pkgs_nsclient`, `lab_pkgs_nsproxy`, `dns_packages`, `lb_packages`, `tftp_packages` in `vars.yaml`. The image installs their union and each guest verifies its own list — one source, so the two halves cannot drift |
 | **Rebuild** | `-e customized_lab_image_force=true`. It will not overwrite silently |
-| **Needs** | `guestfs-tools` (for `virt-customize` — the same package as the `virt-resize` the lab already uses), and `org_id`/`activation_key` in `vault.yaml` |
+| **Needs** | `guestfs-tools` (for `virt-customize` — the same package as the `virt-resize` the lab already uses), and `org_id`/`activation_key` in `vault.yaml` unless `customized_lab_image_register: false` |
 
 ### The helper VM
 
@@ -168,14 +168,39 @@ What this does and does not remove from a per-host build:
 
 | | |
 | --- | --- |
-| **Gone** | Every guest registration — four per lab build, plus the helper with `customized_lab_image_for_helper`. No `org_id`/`activation_key` needed on those hosts for the guests |
+| **Gone** | Every guest registration — four per lab build, plus the helper with `customized_lab_image_for_helper`. No `org_id`/`activation_key` on those hosts for the guests |
 | **Gone** | Every guest `dnf`, and with it the per-host download of the same packages N times |
-| **Still needed** | `basic_packages` on the **bare-metal host itself** (libvirt, qemu-kvm, guestfs-tools…). `setup-bm-host` installs those with `yum` on `localhost`, not on a guest, so each host still needs its own entitlement or a local repo for that |
+| **Depends** | `basic_packages` on the **bare-metal host itself** (libvirt, qemu-kvm, guestfs-tools…). `setup-bm-host` installs those with `yum` on `localhost`, not on a guest. On a **cloud RHEL host with RHUI — an AWS metal instance, for one — that works unregistered** and there is nothing to do. On a host from a plain RHEL install it needs its own entitlement or a local repo |
 | **Still needed** | `pull_secret` in `vault.yaml`, for the OpenShift installs |
 
-So it gets you most of the way to "no activation key per host", not all of
-it. The remaining item is the host's own package set, which is a different
-problem — a local mirror, a kickstart, or a golden host image.
+### Running with no subscription credentials at all
+
+On AWS metal (or anywhere the host reaches RHUI, a Satellite or a local
+mirror) the whole path can run without `org_id` / `activation_key`:
+
+1. The **host** installs `basic_packages` from RHUI — no registration.
+2. The **guests** come from the customized image — no registration, because
+   the image carries the packages and each guest verifies with `rpm -q`
+   rather than installing.
+3. The **image build** is the one step that registers, and only to reach
+   Red Hat's repositories. Two ways around it:
+   - build the image once on a machine that does have credentials, and copy
+     the result to the workshop hosts; or
+   - set `customized_lab_image_register: false`, which skips the
+     register/unregister pair and the credential assert entirely, and
+     install from whatever repositories the base image can already reach.
+
+Set `customized_lab_image_for_helper: true` as well, and `setup_bm_host.yaml`
+stops asking for credentials too — its `org_id`/`activation_key` assert is
+skipped along with the helper's registration.
+
+One trap in option two: the KVM **guests are not on RHUI**. A cloud RHEL
+host has RHUI client certificates and region-routable access; a stock RHEL
+qcow2 booted as a guest inside it has neither. So
+`customized_lab_image_register: false` only works if your *base image* is one
+that can already reach repositories — a Satellite client, a local mirror, or
+an image built from the cloud RHEL build. It is not a way to install packages
+into an unentitled stock qcow2.
 
 **Docker is in the image on purpose.** It comes from `download.docker.com`
 rather than a Red Hat repository, but `containerd.io` pulls

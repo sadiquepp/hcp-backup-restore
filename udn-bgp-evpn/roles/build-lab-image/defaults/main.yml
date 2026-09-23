@@ -9,6 +9,7 @@
 customized_lab_image_force: false
 lab_ssh_pubkey_path: /root/.ssh/lab_rsa.pub
 lab_root_password: redhat
+customized_lab_image_register: true
 customized_lab_image_with_docker: true
 customized_lab_image_docker_packages: [docker-ce, docker-ce-cli, containerd.io]
 customized_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-ce.repo

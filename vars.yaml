@@ -1534,6 +1534,21 @@ customized_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-
 ## is what switches the lab over - there is no enable flag to forget.
 customized_lab_image: "{{ rhel9_kvm_image | regex_replace('\\.qcow2$', '') }}-customized.qcow2"
 
+## Does the image build register the copy with subscription-manager before
+## installing? Normally yes - a stock RHEL qcow2 has no repositories.
+##
+## Set false when the base image can already reach repositories on its own:
+## a local mirror, a Satellite, or an image derived from a cloud RHEL build
+## that carries RHUI. The register/unregister pair is then skipped entirely
+## and so is the org_id/activation_key assert, which is what makes a
+## credential-free build possible.
+##
+## Note this is about the IMAGE, not the host. On AWS metal the host itself
+## installs basic_packages from RHUI with no registration, but the KVM guests
+## inside it are ordinary RHEL qcow2s with no RHUI entitlement of their own -
+## so unless your base image is built for it, leave this true.
+customized_lab_image_register: true
+
 ## What the image build injects while preparing its copy - the same two
 ## things setup_bm_host.yaml puts into the base image. Variables rather than
 ## literals because a workshop handing out 20 hosts should not be stuck with
