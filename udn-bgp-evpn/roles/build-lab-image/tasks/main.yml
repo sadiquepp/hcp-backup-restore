@@ -36,17 +36,23 @@
 # virt-resize this lab already uses to build the clab VM disk. Checked
 # explicitly because the failure otherwise arrives as a bare "command not
 # found" several minutes into a task that has already copied 10G.
-- name: Fail fast if lab_root_password is missing from vault.yaml
-  ansible.builtin.assert:
-    that: lab_root_password is defined
-    fail_msg: >-
-      Add lab_root_password to vault.yaml (ansible-vault edit vault.yaml).
-      It is the root password baked into every guest built from this image,
-      so it is a credential and is deliberately not defaulted in the
-      repository - this one is public.
-
-        lab_root_password: <your password>
-    success_msg: "Root password will be taken from vault.yaml."
+# A root password is NOT needed for the lab to work - Ansible reaches every
+# guest with the injected key and never uses a password. It buys one thing:
+# console access (virsh console, VNC) when a guest's networking is broken,
+# which in a lab about VLANs, VRFs and routing is a real rather than a
+# theoretical state to be in. An ssh key is no help there.
+#
+# So it is optional. Set lab_root_password in vault.yaml and it is applied;
+# leave it unset and the image is key-only.
+- name: Say whether a root password is being set
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Root password from vault.yaml will be set on the image.'
+         if lab_root_password is defined else
+         'No lab_root_password set - the image will be key-only. Ansible does
+          not need one. What you give up is console access: virsh console or
+          VNC into a guest whose networking you have just broken will have no
+          way in. Set lab_root_password in vault.yaml if you want that.' }}
 
 - name: Check that virt-customize is available
   ansible.builtin.command:
@@ -210,7 +216,10 @@
             ['virt-customize', '-a',
              base_image_dir + '/' + customized_lab_image + '.partial',
              '--network',
-             '--root-password', 'password:' + (lab_root_password | string),
+            ]
+            + (['--root-password', 'password:' + (lab_root_password | string)]
+               if lab_root_password is defined else [])
+            + [
              '--ssh-inject', 'root:file:' + lab_ssh_pubkey_path,
              '--run-command', 'yum remove cloud-init* -y || true',
              '--run-command',

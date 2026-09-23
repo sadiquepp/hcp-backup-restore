@@ -87,19 +87,23 @@ That copies the base image, registers **the copy**, installs everything,
 then unregisters and cleans, and publishes the result as
 `rhel-9.8-x86_64-kvm-customized.qcow2` beside the original.
 
-`lab_ssh_pubkey_path` in `vars.yaml` and **`lab_root_password` in
-`vault.yaml`** control what gets injected. The password is a credential, so
-it is not defaulted anywhere in this repository — the build refuses without
-it:
+`lab_ssh_pubkey_path` in `vars.yaml` controls which key is injected. That
+key is all the lab needs — Ansible reaches every guest with it and never
+uses a password.
+
+**`lab_root_password` is optional**, and lives in `vault.yaml` because it is
+a credential. Leave it unset and the image is key-only. Set it and you also
+get console access — `virsh console <vm>` or VNC — into a guest whose
+networking you have just broken, which in a lab about VLANs, VRFs and
+routing is a state you will reach. That is the only thing it buys.
 
 ```bash
 ansible-vault edit vault.yaml     # lab_root_password: <your password>
 ```
 
 `setup_bm_host.yaml` reads the same variable when preparing the *base* image
-and keeps its historical `redhat` if it is unset, so flows that never touch
-the customized image are unaffected. Set it in `vault.yaml` and both images
-get the same password.
+and keeps its historical `redhat` if unset, so flows that never touch the
+customized image are unaffected.
 
 **It does not touch the original.** `rhel9_kvm_image` is only ever a `cp`
 source; `virt-customize` — which does edit in place — is pointed at a
