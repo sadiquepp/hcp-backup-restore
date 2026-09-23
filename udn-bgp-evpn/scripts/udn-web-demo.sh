@@ -13,13 +13,13 @@
 # namespaces INSTEAD OF the VMs. Ask for several explicitly to get several.
 #
 # --host is for the SHARED phase, and it is the only one that fits there. That
-phase leaks every UDN into the one default VRF, so there are no per-tenant
-VRFs for a VLAN to enter and no isolation for a per-tenant client to prove -
-one off-segment client reaches every tenant through one table. It curls every
-web pod from the namespace client's ROOT namespace and asserts each address
-returned its own tenant's page. No namespaces, no ingress.
+# phase leaks every UDN into the one default VRF, so there are no per-tenant
+# VRFs for a VLAN to enter and no isolation for a per-tenant client to prove -
+# one off-segment client reaches every tenant through one table. It curls every
+# web pod from the namespace client's ROOT namespace and asserts each address
+# returned its own tenant's page. No namespaces, no ingress.
 
---proxy is a different axis from the other two. They ask "can a machine on
+# --proxy is a different axis from the other two. They ask "can a machine on
 # tenant X reach anything but X"; it asks how an end user reaches EITHER of two
 # tenants that share an address, which is the question the first answer
 # provokes. Needs --tags clabnsproxy.
@@ -95,7 +95,9 @@ if (( WITH_VMS )) && [[ ! -r "$CLIENTS_ENV" ]]; then
     echo "Build them with --tags clabtenantclients, or set UDN_CLIENTS_ENV." >&2
     WITH_VMS=0
 fi
-if (( WITH_NETNS )) && [[ ! -r "$NETNS_ENV" ]]; then
+# --host reads the same manifest: it is the same VM, asked in its root
+# namespace instead of per-namespace.
+if (( WITH_NETNS || WITH_HOST )) && [[ ! -r "$NETNS_ENV" ]]; then
     echo "No namespace-client manifest at $NETNS_ENV." >&2
     echo "Build it with --tags clabnsclient, or set UDN_NETNS_ENV." >&2
     exit 1
@@ -105,7 +107,10 @@ if (( WITH_PROXY )) && [[ ! -r "$PROXY_ENV" ]]; then
     echo "Build it with --tags clabnsproxy, or set UDN_PROXY_ENV." >&2
     exit 1
 fi
-if (( ! WITH_VMS && ! WITH_NETNS && ! WITH_PROXY )); then
+# Every mode has to be listed here. --host was added and this was not updated,
+# so `--host` alone exited with "Nothing to test" having built nothing - the
+# guard for an empty run firing on a run that was fully specified.
+if (( ! WITH_VMS && ! WITH_NETNS && ! WITH_PROXY && ! WITH_HOST )); then
     echo "Nothing to test. Build --tags clabtenantclients, --tags clabnsclient" >&2
     echo "or --tags clabnsproxy." >&2
     exit 1
