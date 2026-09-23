@@ -32,6 +32,7 @@ next hunt more than any individual command does.
 | **A check scoped to the wrong objects** | A VRF-Lite assert read *every* frr-k8s pod, masters included. Masters have no fabric NIC and sit at `never/Active` by design. | The assert fails on nodes that were never in scope, and the real state is hidden in the noise. |
 | **A status field that is a receipt, not a statement** | `Profile.status.conditions[Applied]=True` from the Node Tuning Operator. NTO runs tuned in `no_daemon` mode - it applies once and exits. | `Applied=True` means "this was written at some point", not "this is the value now". Last writer wins permanently. |
 | **`ping` succeeding while the thing you care about is broken** | See both cases below. It happened twice in one day for two unrelated reasons. | ICMP takes a different path through NAT, ACLs and MTU than the TCP flow you are actually testing. |
+| **A check that reads the global knob when the per-interface one decides** | `conf.all.rp_filter=0` looks fine; `conf.enp8s0.rp_filter=1` is what drops the packet, because the effective value is `max(all, iface)`. | The reassuring value is the one that is easy to read, and it is not the one in force. |
 | **A component that is internally consistent but stale** | leaf1's config was self-consistent and correct - built from a `vars.yaml` two commits old, so a whole VLAN was simply absent. | Everything you inspect agrees with everything else you inspect. |
 | **State that is wrong with no event left to correct it** | Both cases below. A reconcile ran while a dependency was down, produced the wrong answer, and nothing re-triggered it when the dependency came back. | Retrying the *symptom* never helps. Only forcing the reconcile does. |
 
@@ -519,6 +520,154 @@ object will be green, because that is what cost the most time.
 > exclusion the same way there and the scope does not need narrowing. One
 > passing build is evidence for this lab's EVPN configuration, not a proof
 > about every one.
+
+---
+
+## Case 3 — the shared phase, unreachable with every layer verified correct
+
+**Date:** 2026-09-23 · **Phase:** `--tags shared` · **Cluster:** hub (and sno)
+**Fix:** commit `4140664`, `roles/setup-udn-bgp/tasks/fabric-forwarding.yml`
+
+### Symptom
+
+`udn-web-demo.sh --host` — one client, every pod — six tenants, six timeouts.
+
+```
+=== from host/udnnsclient (192.168.122.88), serves blue green orange purple red violet ===
+  curl http://10.220.2.4:8080/       -> (no answer)
+  ... all six ...
+```
+
+ICMP failed too, so not TCP-specific.
+
+### Everything that was verified correct first
+
+This list is the case. Each was checked, each was right:
+
+| Layer | Evidence |
+| --- | --- |
+| RouteAdvertisements | `udn-shared-vrf` → `Accepted` |
+| OVN programmed it | six `ovnk-generated-*`, label `k8s.ovn.org/route-advertisements=udn-shared-vrf` |
+| BGP sessions | all four Established, `PfxRcd 5` per hub worker, 1 for the SNO |
+| leaf1's FIB | `B>* 10.220.1.0/24 via 192.168.140.34`, `.2.0/24 via .35`, `.3.0/24 via .36` |
+| leaf1 filtering | `FROM-CLUSTER` denies only the management prefix |
+| clab VM | router active, `10.220.0.0/16 via 192.168.140.1 dev br-fabric`, `ip_forward=1` |
+| client route | `10.220.2.4 via 192.168.122.40 dev eth0` |
+| node forwarding | `ip_forward=1`, `conf.all.forwarding=1`, `conf.enp8s0.forwarding=1` |
+| policy routing | `2000: from all to 10.220.0.0/16 lookup 1023` |
+| the route itself | `10.220.2.0/24 dev ovn-k8s-mp1 ... src 10.220.2.2` in table 1023 |
+| SNAT exclusion | `snat  ip4.dst == $a10426  169.254.0.11  10.220.0.0/16` — MATCH present |
+
+### The wrong turns
+
+Worth recording, because four of the six rounds were spent here.
+
+1. **A stale checkout.** Two consecutive runs produced byte-identical output,
+   including a sentence that had been deleted in the committed file. The lab
+   host had not pulled. Comparing the observed output against the committed
+   source is what caught it — not re-reading the code.
+2. **An exact-prefix query read as an absence.**
+   `show ip route 10.220.0.0/16` answered `% Network not in table`, which was
+   taken as "nothing was advertised". It is an **exact** lookup, and OVN
+   advertises per-node `/24`s. `show ip route 10.220.0.0/16 longer-prefixes`
+   showed all three. The diagnostic command asked a different question from
+   the one being asked.
+3. **The SNAT hypothesis**, from Case 2. Killed by two facts: ping failed too
+   (Case 2's signature is ping *working*, because the rule carries a TCP/UDP
+   port range), and the `MATCH` column was populated.
+4. **Stale VRF-Lite NNCPs.** `ovn-k8s-mp1` really is `master blue`,
+   `vrf_slave table 1023` — but `oc get nncp` showed only `fabric-untagged-*`.
+   Those VRFs are OVN-Kubernetes' own, created per UDN in every phase. Normal,
+   not leftover.
+
+### What actually found it
+
+A capture on the node while pinging:
+
+```bash
+oc debug node/worker2 --quiet -- chroot /host timeout 25 tcpdump -nei any \
+  'host 192.168.122.88 or host 10.220.2.4'
+```
+
+```
+enp8s0 In  192.168.122.88 > 10.220.2.4: ICMP echo request, seq 1
+enp8s0 In  ... seq 2, 3, 4, 5
+```
+
+Arrives on the fabric NIC. Appears on **no other interface**. No `ovn-k8s-mp*`,
+no veth, no reply. The packet is rejected before the kernel assigns it an
+output device, which rules out everything downstream in one observation.
+
+Then the simulated forwarded packet:
+
+```bash
+ip route get 10.220.2.4 from 192.168.122.88 iif enp8s0
+RTNETLINK answers: Invalid argument
+```
+
+while the plain query succeeded:
+
+```bash
+ip route get 10.220.2.4
+10.220.2.4 dev ovn-k8s-mp1 table 1023 src 10.220.2.2
+```
+
+**Those two are different lookups.** Without `from`/`iif` the kernel does an
+output lookup from a locally-chosen source; the forwarded packet does an input
+lookup. Only the second one fails, and only the second one is what the packet
+does.
+
+### Root cause
+
+```
+net.ipv4.conf.all.rp_filter     = 0
+net.ipv4.conf.enp8s0.rp_filter  = 1
+net.ipv4.conf.default.rp_filter = 1
+```
+
+> The fabric NIC is hot-plugged, so it is created after boot and inherits
+> `conf.default.rp_filter`, which is 1 on RHCOS. The effective value is
+> **`max(all, iface)`**, so `all=0` does not save it — the interface's own 1 is
+> in force, and strict reverse-path filtering rejects the packet at input
+> because `192.168.122.88` is reachable from this node via `br-ex`, not via the
+> interface the packet arrived on.
+
+The asymmetry is deliberate. Phase 2's client is off-segment: the request goes
+over the fabric, the reply leaves by the node's default gateway.
+`udn-client-routes.sh` has set `rp_filter=2` on the **client** for that reason
+since it was written, with a comment saying the paths differ. Nothing set it on
+the **node**, the other end of the same asymmetry.
+
+Exactly the same shape as the forwarding bug this lab already carries a repair
+for: `conf.default.<knob>` inherited by a NIC created after boot.
+
+### Fix
+
+```bash
+sysctl -w net.ipv4.conf.enp8s0.rp_filter=2
+```
+
+Ping answered on the next packet.
+
+### What the lab does now
+
+`fabric-forwarding.yml` writes `conf.<nic>.rp_filter=2` and
+`conf.default.rp_filter=2` beside the forwarding pair — same script, same
+inheritance problem, same trigger — and reports `rp=` and `rp_all=`.
+`verify.yml` asserts the **effective** value, `max(all, iface)`, is not 1.
+
+2 rather than 0 on purpose: loose still rejects a source with no route at all,
+so a genuine fabric misconfiguration stays visible, and it matches what the
+client scripts already use.
+
+### Also found, not the cause
+
+`snat-exclusion.yml` read `udn_subnet` (10.200–10.206) while this phase
+advertises `udn_subnet_shared` (10.220–10.225). A shared run compared the
+gateway routers against prefixes the phase never advertises, matched nothing,
+and reported "Every advertised pod network is exempt from SNAT." Green, having
+looked at nothing. Fixed in `b0b4179`; it only surfaced because an unrelated
+failure sent someone reading the check.
 
 ---
 
