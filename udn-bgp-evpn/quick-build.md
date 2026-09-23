@@ -83,6 +83,10 @@ first, which is exactly that and nothing else — `basic_packages` and the key,
 *not* the in-place edit. On a host that is already set up it is a no-op, and
 the build refuses with instructions if the key is absent.
 
+That copies the base image, registers **the copy**, installs everything,
+then unregisters and cleans, and publishes the result as
+`rhel-9.8-x86_64-kvm-customized.qcow2` beside the original.
+
 `lab_ssh_pubkey_path` in `vars.yaml` and **`lab_root_password` in
 `vault.yaml`** control what gets injected. The password is a credential, so
 it is not defaulted anywhere in this repository — the build refuses without
@@ -96,10 +100,6 @@ ansible-vault edit vault.yaml     # lab_root_password: <your password>
 and keeps its historical `redhat` if it is unset, so flows that never touch
 the customized image are unaffected. Set it in `vault.yaml` and both images
 get the same password.
-
-That copies the base image, registers **the copy**, installs everything,
-then unregisters and cleans, and publishes the result as
-`rhel-9.8-x86_64-kvm-customized.qcow2` beside the original.
 
 **It does not touch the original.** `rhel9_kvm_image` is only ever a `cp`
 source; `virt-customize` — which does edit in place — is pointed at a
