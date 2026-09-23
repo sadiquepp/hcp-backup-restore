@@ -11,6 +11,10 @@ Built by `setup_udn_bgp_lab.yaml` (roles `setup-clab-fabric` and
 or Ceph flows reads any of it, and none of those flows change whether or not
 you ever run it.
 
+**[quick-build.md](quick-build.md)** is the short version: the three
+`build-lab.sh` phases side by side - what each one builds, what it proves,
+what it cannot do, and the prerequisites for each.
+
 **[clab-fabric.md](clab-fabric.md)** is the fabric side: what `virbr1`, the
 containerlab VM and the FRR containers actually are, what each phase uses, and
 how to build the whole fabric by hand.
