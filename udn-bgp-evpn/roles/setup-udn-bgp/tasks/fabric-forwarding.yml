@@ -30,6 +30,30 @@
 # consistent with every symptom seen: only the fabric NIC, only on nodes the
 # EVPN phase reconfigured, and repaired by any pass that writes it again.
 #
+# rp_filter is the same inheritance problem with a different sysctl, and it
+# cost a full day of the shared phase looking broken. The fabric NIC is
+# hot-plugged, so it is created AFTER boot and takes conf.default.rp_filter,
+# which is 1 on RHCOS. The effective value is max(all, <iface>), so with
+# all=0 the interface's own 1 wins and the filter is strict.
+#
+# Phase 2's client is deliberately OFF-SEGMENT: the request reaches the pod
+# over the fabric and the pod's reply leaves by the node's default gateway on
+# the management network. The paths differ by design - udn-client-routes.sh
+# sets rp_filter=2 on the CLIENT for exactly this reason and says so - but
+# nothing set it on the NODE, which is the other end of the same asymmetry.
+# Strict rp_filter then drops the request at INPUT, before it is assigned an
+# output device, so:
+#
+#   - the echo request appears on enp8s0 In and on no other interface
+#   - `ip route get <pod> from <client> iif enp8s0` returns
+#     "RTNETLINK answers: Invalid argument"
+#   - forwarding, the ip rules, the route in the VRF table and the BGP
+#     advertisement are all correct and all irrelevant
+#
+# 2 (loose) rather than 0: loose still rejects a source with no route at all,
+# which keeps a genuine fabric misconfiguration visible, and it is what the
+# client and tenant-client scripts already use.
+#
 # Which is why the echo below reports all= and default= alongside the
 # interface's own value. If the interface reads 0 while all reads 0 too, that
 # is the global-knob path. If the interface reads 0 while all reads 1, the
@@ -52,10 +76,13 @@
       - >-
         nic=$(ip -o link show | awk '/{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}/ && !f {gsub(":","",$2); print $2; f=1}');
         [ -n "$nic" ] || { echo "NONE"; exit 0; };
-        err=$(sysctl -w net.ipv4.conf.$nic.forwarding=1 net.ipv4.conf.default.forwarding=1 2>&1 >/dev/null); rc=$?;
+        err=$(sysctl -w net.ipv4.conf.$nic.forwarding=1 net.ipv4.conf.default.forwarding=1
+        net.ipv4.conf.$nic.rp_filter=2 net.ipv4.conf.default.rp_filter=2 2>&1 >/dev/null); rc=$?;
         echo "$nic $(cat /proc/sys/net/ipv4/conf/$nic/forwarding)
         all=$(cat /proc/sys/net/ipv4/conf/all/forwarding)
         default=$(cat /proc/sys/net/ipv4/conf/default/forwarding)
+        rp=$(cat /proc/sys/net/ipv4/conf/$nic/rp_filter)
+        rp_all=$(cat /proc/sys/net/ipv4/conf/all/rp_filter)
         write_rc=$rc${err:+ write_err=$err}"
   loop: "{{ udn_bgp_cluster_nodes }}"
   loop_control:

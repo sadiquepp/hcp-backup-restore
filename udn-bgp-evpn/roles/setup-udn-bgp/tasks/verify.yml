@@ -159,6 +159,45 @@
   loop_control:
     label: "{{ item.item.ip_key }}"
 
+# Strict reverse-path filtering on the fabric NIC drops the request at INPUT,
+# before it is given an output device - so forwarding, the ip rules, the route
+# in the UDN's table and the BGP advertisement can all be correct and the pod
+# is still unreachable. The only direct evidence is that the request appears
+# on the NIC and on nothing else.
+#
+# The effective value is max(all, <iface>), which is why this reads both: the
+# NIC inherits conf.default.rp_filter (1 on RHCOS) at hot-plug time while
+# conf.all is 0, so the interface's own value is the one that bites, and
+# checking 'all' alone would have reported everything fine.
+- name: Fail if a fabric NIC still has strict reverse-path filtering
+  vars:
+    rp_iface: "{{ (item.stdout | regex_search('rp=(\\d)', '\\1') | default(['1'], true)) | first }}"
+    rp_all: "{{ (item.stdout | regex_search('rp_all=(\\d)', '\\1') | default(['1'], true)) | first }}"
+    rp_effective: "{{ [rp_iface | int, rp_all | int] | max }}"
+  ansible.builtin.assert:
+    that: rp_effective | int != 1
+    fail_msg: >-
+      On {{ udn_bgp_node_names[item.item.ip_key] }} the fabric NIC has strict
+      reverse-path filtering (iface={{ rp_iface }}, all={{ rp_all }},
+      effective={{ rp_effective }}). The request from an off-segment client
+      reaches this NIC and is dropped before the kernel picks an output
+      device, so nothing downstream can be at fault and nothing downstream
+      will look it. Confirm with a capture - the echo request appears on the
+      NIC 'In' and on no other interface - and with
+      `ip route get <pod ip> from <client ip> iif <nic>`, which answers
+      'RTNETLINK answers: Invalid argument'. The repair is
+      `sysctl -w net.ipv4.conf.<nic>.rp_filter=2`, which
+      tasks/fabric-forwarding.yml writes alongside forwarding; reaching this
+      message means the write is being reverted, not never made. The
+      asymmetry is by design: the request arrives over the fabric and the
+      pod's reply leaves by the node's default gateway.
+    success_msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] }}: rp_filter effective
+      {{ rp_effective }} (loose enough for the fabric's asymmetric path)
+  loop: "{{ udn_bgp_fwd.results }}"
+  loop_control:
+    label: "{{ item.item.ip_key }}"
+
 - name: Show BGP sessions from the border leaf's point of view
   ansible.builtin.command:
     cmd: >-
