@@ -157,9 +157,11 @@ echo
 if [[ "$MODE" == "evpn" ]]; then
     echo "Mode: EVPN - tenants present in both clusters: $(tr '\n' ' ' <<<"${dupes:-}")"
 elif [[ "$MODE" == "shared" ]]; then
-    echo "Mode: shared VRF - every UDN is leaked into the one default VRF, so"
-    echo "      the question is whether the ONLY separation left, the"
-    echo "      same-cluster ACL, still holds."
+    echo "Mode: shared VRF - every UDN is leaked into the one default VRF."
+    echo "      Two questions: does the same-cluster ACL, the only tenant"
+    echo "      separation left, still hold; and does anything unexpectedly"
+    echo "      carry pod egress onto the fabric, which this phase does not"
+    echo "      configure and phase 3 is what adds."
 else
     echo "Mode: VRF-Lite - no tenant is in more than one cluster, so the"
     echo "      question is which of the udn_vrf_leaks openings are real."
@@ -261,62 +263,100 @@ if [[ "$MODE" == "evpn" ]]; then
 
 elif [[ "$MODE" == "shared" ]]; then
     # ---------------------------------------------------------------------
-    # Shared VRF. Every UDN is leaked into the one default VRF, so routing
-    # separates nothing: any pod can route to any other pod's prefix. The
-    # only separation left is the advertised-network-subnets ACL, and that
-    # is built from ONE CLUSTER'S advertised subnets - so it drops a pair
-    # where both sides are local, and cannot see a pair that spans the two
-    # clusters.
+    # Shared VRF (phase 2). TWO different mechanisms produce silence here,
+    # and keeping them apart is the whole point of this verdict:
     #
     #   same cluster, same tenant        answers
-    #   same cluster, different tenant   silent   the ACL, the only thing left
-    #   other cluster, any tenant        answers  one table, and the ACL does
-    #                                             not span clusters
+    #   same cluster, different tenant   silent - the advertised-network-
+    #                                    subnets ACL. Its address set holds
+    #                                    this cluster's own advertised
+    #                                    prefixes and the rule drops a packet
+    #                                    whose src AND dst are both in it.
+    #   other cluster, any tenant        silent - and NOT because of the ACL.
+    #                                    Phase 2 gives a tenant no path to the
+    #                                    fabric at all. The pod's gateway
+    #                                    router holds only its own /16 and a
+    #                                    default pointing at the MANAGEMENT
+    #                                    gateway, so egress toward another
+    #                                    cluster's UDN leaves by the
+    #                                    management NIC and is dropped there.
+    #                                    The node does learn the other
+    #                                    cluster's prefixes over BGP, but into
+    #                                    the MAIN table, which pod egress
+    #                                    never reads. README.md's phase-2 row
+    #                                    states this as expected behaviour.
+    #                                    Giving the tenant its own path to the
+    #                                    fabric is what phase 3 does, and
+    #                                    there cross-cluster pod-to-pod works.
     #
-    # The last row is the honest result of this phase rather than a defect:
-    # a shared VRF gives no tenant separation across a cluster boundary, and
-    # this is the test that says so out loud.
+    # An earlier version of this verdict expected the cross-cluster cells to
+    # ANSWER, reasoning that one default VRF plus a per-cluster ACL leaves
+    # nothing to stop them. The ACL half of that is correct and was measured:
+    # the hub's set holds 10.220-10.224 only, so it never matches a pair that
+    # spans clusters. It is simply moot - the packet dies at the gateway
+    # router long before any ACL is consulted. The reasoning was extrapolated
+    # from one VRF-Lite observation (violet -> green) without checking that
+    # phase 2 has the path phase 3 adds.
+    #
+    # udn-web-demo.sh --host passing in this phase contradicts none of it:
+    # that client sits ON the management segment, so pod-to-client is a
+    # direct ARP off br-ex and client-to-pod arrives inbound over BGP.
+    # Neither direction exercises pod egress toward the fabric.
     # ---------------------------------------------------------------------
+    # One address with two holders is a phase-2 configuration error on its
+    # own terms - udn_subnet_shared must be unique across ALL tenants in ALL
+    # clusters - and is reported whatever the curls did, because with every
+    # cross-cluster cell silent no curl can reveal it.
+    for a in "${addrs[@]}"; do
+        n=0; for holder in ${TARGETS[$a]}; do n=$((n+1)); done
+        if (( n > 1 )); then
+            echo "  DUPLICATE  $a is held by (${TARGETS[$a]})."
+            echo "             Phase 2 requires udn_subnet_shared unique across ALL"
+            echo "             tenants; two holders of one address means it is not."
+            bad=$((bad+1))
+        fi
+    done
     for src in "${keys[@]}"; do
         src_cluster="${src%%/*}"; src_tenant="${src#*/}"
         [[ -n "${SRCPOD[$src]}" ]] || continue
         for a in "${addrs[@]}"; do
             got="${RESULT[$src,$a]:-}"
-            expect=""; why=""; ambig=""; same_cluster_holder=""
+            expect=""
+            # Why silence is expected for this cell, if it is. A holder in
+            # the source's own cluster means the ACL is the mechanism;
+            # otherwise it is the missing fabric path.
+            silent_why="phase 2 gives the tenant no path to the fabric"
             for holder in ${TARGETS[$a]}; do
-                [[ "${holder%%/*}" == "$src_cluster" ]] && same_cluster_holder=yes
-                [[ "${holder%%/*}" == "$src_cluster" && "${holder#*/}" == "$src_tenant" ]] \
-                    && { expect="$holder"; why="its own UDN"; }
+                if [[ "${holder%%/*}" == "$src_cluster" ]]; then
+                    silent_why="the advertised-network-subnets ACL"
+                    [[ "${holder#*/}" == "$src_tenant" ]] && expect="$holder"
+                fi
             done
-            if [[ -z "$expect" ]]; then
-                for holder in ${TARGETS[$a]}; do
-                    [[ "${holder%%/*}" == "$src_cluster" ]] && continue
-                    [[ -n "$expect" ]] && ambig="$expect ${holder}"
-                    expect="$holder"; why="one default VRF, ACL does not span clusters"
-                done
-            fi
 
-            if [[ -n "$ambig" ]]; then
-                echo "  AMBIG   $src -> $a  held by ($ambig) in the other cluster."
-                echo "          Phase 2 requires udn_subnet_shared unique across ALL"
-                echo "          tenants; two holders of one address means it is not."
-                bad=$((bad+1))
-            elif [[ -n "$expect" ]]; then
+            if [[ -n "$expect" ]]; then
                 want_tenant="${expect#*/}"; want_cluster="${expect%%/*}"
                 if [[ ! "$got" =~ ^"I am $want_tenant"( on .+)?$ ]]; then
-                    echo "  BROKEN  $src -> $a  expected ${want_tenant} (${why}), got: $got"
+                    echo "  BROKEN  $src -> $a  expected ${want_tenant} (its own UDN), got: $got"
                     bad=$((bad+1))
                 elif [[ "$got" != *" on ${want_cluster}" ]]; then
                     echo "  WRONGCLUSTER  $src -> $a  expected ${want_cluster}, got: $got"
                     bad=$((bad+1))
-                elif [[ "$want_cluster" != "$src_cluster" ]]; then
-                    crossed=$((crossed+1))
                 fi
             elif [[ "$got" != "(no answer)" ]]; then
-                echo "  ACL BREACH  $src -> $a  a different tenant in the SAME cluster"
-                echo "              answered: $got"
-                echo "              In this phase the ACL is the only separation there"
-                echo "              is. If it is not holding, nothing is."
+                if [[ "$silent_why" == "the advertised-network-subnets ACL" ]]; then
+                    echo "  ACL BREACH  $src -> $a  a different tenant in the SAME cluster"
+                    echo "              answered: $got"
+                    echo "              In this phase the ACL is the only separation there"
+                    echo "              is. If it is not holding, nothing is."
+                else
+                    echo "  UNEXPECTED  $src -> $a  answered across a cluster boundary: $got"
+                    echo "              Phase 2 has no pod path to the fabric, so this"
+                    echo "              cell should be silent. Something is routing pod"
+                    echo "              egress onto the fabric that this phase does not"
+                    echo "              configure - check gatewayConfig.routingViaHost"
+                    echo "              and for leftover phase-3 VRF/VLAN plumbing."
+                fi
+                crossed=$((crossed+1))
                 bad=$((bad+1))
             fi
         done
@@ -410,19 +450,25 @@ if [[ "$MODE" == "evpn" ]]; then
         fi
     done
 elif [[ "$MODE" == "shared" ]]; then
-    echo "  clean: every tenant reached its own pods, every same-cluster pair of"
-    echo "         DIFFERENT tenants stayed silent, and every cross-cluster pair"
-    echo "         answered."
+    echo "  clean: every tenant reached its own pods, and every other cell stayed"
+    echo "         silent - for two different reasons, both expected here."
     echo
-    echo "  ${crossed} answers crossed a cluster boundary, and under this phase that"
-    echo "  is the expected result, not a leak. One default VRF holds every"
-    echo "  tenant's prefixes from both clusters, so routing separates nothing;"
-    echo "  the advertised-network-subnets ACL is the only thing left, and it is"
-    echo "  built from one cluster's own advertised subnets, so it cannot see a"
-    echo "  pair that spans the two."
+    echo "  Same cluster, different tenant: the advertised-network-subnets ACL."
+    echo "  Its address set holds this cluster's own advertised prefixes and the"
+    echo "  rule drops a packet whose src AND dst are both in it. In this phase"
+    echo "  that ACL is the only tenant separation there is."
     echo
-    echo "  If you want tenant separation that survives a cluster boundary, that"
-    echo "  is VRF-Lite with udn_vrf_leaks, or EVPN. This phase does not offer it."
+    echo "  Across the cluster boundary: no path, rather than a policy. A pod's"
+    echo "  gateway router in phase 2 holds its own /16 and a default pointing at"
+    echo "  the MANAGEMENT gateway - nothing steers pod egress at the fabric. The"
+    echo "  node learns the other cluster's prefixes over BGP into its main"
+    echo "  table, which pod egress never reads. The ACL never even gets asked."
+    echo
+    echo "  So this phase carries pod subnets over BGP and serves them to fabric"
+    echo "  clients, which the client tests prove, but it does not give pods a"
+    echo "  route off the node to another cluster. That is phase 3: VRF-Lite"
+    echo "  gives the tenant VRF its own fabric path, and cross-cluster pod-to-"
+    echo "  pod works there, gated by udn_vrf_leaks. Or EVPN."
 else
     echo "  clean: every tenant reached its own pods, every pair in udn_vrf_leaks"
     echo "         reached each other POD TO POD across the cluster boundary, and"

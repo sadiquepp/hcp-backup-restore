@@ -305,7 +305,29 @@ holds `10.206.0.0/16` and knows nothing of the hub's `10.204.0.0/16`, so
 neither end sees a pair where both sides are locally advertised. A violet pod
 on the SNO curling `10.204.0.7` on the hub gets green's page; the same curl
 between two hub tenants is dropped. Within a cluster the ACL is the backstop
-whatever `udn_vrf_leaks` opens; across clusters the leaks decide alone.
+whatever `udn_vrf_leaks` opens; across clusters the leaks decide alone. You
+can read the set directly and confirm it holds only local prefixes:
+
+```bash
+OVN=$(oc -n openshift-ovn-kubernetes get pod -l app=ovnkube-node -o name | head -1)
+
+# which set the drop rule matches on
+oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN \
+  bash -c 'ovn-nbctl list ACL | grep -B4 -A6 advertised-network-subnets'
+
+# then what is in it. Use --columns: plain `list` prints fields
+# ALPHABETICALLY, so `addresses` comes out above `name` and a grep -A
+# anchored on the name shows the NEXT record's addresses.
+oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN \
+  ovn-nbctl --format=csv --data=bare --no-headings --columns=name,addresses \
+    list Address_Set | grep '^a<the id from the match above>'
+```
+
+**None of this extends to phase 2.** The reasoning above is about what the
+ACL permits, and under the shared VRF the question never reaches the ACL:
+phase 2 gives a tenant no path to the fabric at all, so cross-cluster
+pod-to-pod is silent regardless. See the phase-2 row in the table below, and
+Case 4 in `troubleshooting.md`.
 
 **The infrastructure addresses collide, and cannot be split.** Both clusters
 put their Layer2 gateway on `10.204.0.1` and their per-node management port on
@@ -615,7 +637,7 @@ required for `Layer3`.
 | `sudo: a password is required` from the first task of a `--tags fabric` or `--tags clabclient` run | The playbook is `hosts: localhost` with `become: true`, and those tags drive libvirt - so they must run **on the lab host**, not from a workstation. The cluster-side tags (preflight, default, shared, vrflite, evpn) are only `oc` calls and run anywhere with a kubeconfig. With `--tags` only the selected tasks execute, so this surfaces at whatever runs first rather than at the task that actually needs libvirt |
 | An external client's packets reach a UDN pod, the pod replies, and the reply vanishes on the way back | Reverse-path filtering somewhere on the return path. Phase 2's reply leaves by the node's default gateway rather than the fabric, so forward and reverse paths differ at every hop and each host's rp_filter rejects it. Check each in turn - **the effective value is `max(all, <iface>)`**, so `net.ipv4.conf.all.rp_filter = 0` with `conf.virbr0.rp_filter = 1` is strict. Set both to 2. `udn_bgp_loose_rp_filter: true` covers the cluster nodes; the lab host and any client VM are outside the playbook |
 | A ping from the clab VM to a pod succeeds but proves nothing | The clab VM shares a broadcast domain with all three workers, so leaf1 answers with `Redirect Host` and the traffic goes direct, testing no routing at all. Source the ping from the management address (`ping -I 192.168.122.40`) and check the reply's TTL - 61 rather than 63 means it was really routed via leaf1 and the node |
-| Phase 2: a UDN pod cannot ping the fabric, nothing on the fabric bridge at all | Expected in this lab, not a fault. In local gateway mode pod egress lands in the tenant's VRF table, whose only external route is the node's ordinary default gateway. `192.168.140.0/24` is a connected route on the fabric NIC, which lives in the default VRF, so `main` has it and the tenant table does not - the packet leaves by the management NIC instead (`tcpdump -ni virbr0` shows it, un-SNATed). Giving the tenant VRF its own path to the fabric is what phase 3 does |
+| Phase 2: a UDN pod cannot ping the fabric, nothing on the fabric bridge at all | Expected in this lab, not a fault. In local gateway mode pod egress lands in the tenant's VRF table, whose only external route is the node's ordinary default gateway. `192.168.140.0/24` is a connected route on the fabric NIC, which lives in the default VRF, so `main` has it and the tenant table does not - the packet leaves by the management NIC instead (`tcpdump -ni virbr0` shows it, un-SNATed). Giving the tenant VRF its own path to the fabric is what phase 3 does. In **shared** gateway mode the same thing happens one layer up: the tenant's OVN gateway router holds its own `/16` and a default via the management gateway, and never consults the host table where the BGP routes live. Either way the consequence is the same and it is the phase-2 answer to a common question - **cross-cluster pod-to-pod does not work under phase 2**, and `udn-xcluster-curl.sh --shared` expects every such cell to be silent. Clients on the fabric still reach pods: that direction is inbound over BGP and works. See Case 4 in `troubleshooting.md` |
 | Phase 2 reply takes a different path from the request | By design, and not how production works. Inbound is decided by **leaf1** from BGP; outbound is decided by the **node** from the tenant VRF's table, which holds only the tenant's subnets and the node's default gateway. A route advertisement is one-way information - it tells the fabric how to reach the pods, not the node how to reach the fabric. In production the fabric is what `br-ex` faces, so the VRF's default gateway *is* the fabric and both directions match. This lab puts the fabric on a second NIC with no default route, deliberately, so the change is safe on a live cluster. There is no supported way to force symmetry in phase 2 - see bgp-evpn.md, "Can the return path be forced to match?" |
 | Want to prove phase 2 worked at all | Three things are real: the RA is Accepted, leaf1 holds every node's slice of every tenant, and every node has the others' slices in `main` via `proto bgp`. Plus the un-SNAT: `tcpdump -nni ovn-k8s-mpN` on the tenant's management port shows the pod's own address as the source |
 | RouteAdvertisements stuck at `configuration pending: no networks selected` | Rarely the label selector, which is what the message suggests. OVN-Kubernetes resolves the selected CUDNs against networks it has actually instantiated, so a correctly-labelled CUDN with no NetworkAttachmentDefinition selects as nothing. Check `oc get clusteruserdefinednetwork <tenant> -o jsonpath='{.status.conditions}'` - the CUDN carries the real reason (there is no `cudn` short name; `oc get cudn` fails with "the server doesn't have a resource type") |

@@ -34,6 +34,7 @@ next hunt more than any individual command does.
 | **`ping` succeeding while the thing you care about is broken** | See both cases below. It happened twice in one day for two unrelated reasons. | ICMP takes a different path through NAT, ACLs and MTU than the TCP flow you are actually testing. |
 | **A check that reads the global knob when the per-interface one decides** | `conf.all.rp_filter=0` looks fine; `conf.enp8s0.rp_filter=1` is what drops the packet, because the effective value is `max(all, iface)`. | The reassuring value is the one that is easy to read, and it is not the one in force. |
 | **A component that is internally consistent but stale** | leaf1's config was self-consistent and correct - built from a `vars.yaml` two commits old, so a whole VLAN was simply absent. | Everything you inspect agrees with everything else you inspect. |
+| **A test that asserts a conclusion instead of measuring it** | The `--shared` cross-cluster verdict was reasoned out from one VRF-Lite observation and never run against a shared lab. It contradicted a row in this repo's own README. | The test fails loudly and correctly, and ten cells of real output get read as a lab fault. Hours go into repairing something that was behaving as designed and documented. |
 | **State that is wrong with no event left to correct it** | Both cases below. A reconcile ran while a dependency was down, produced the wrong answer, and nothing re-triggered it when the dependency came back. | Retrying the *symptom* never helps. Only forcing the reconcile does. |
 
 ### Two rules that came out of this iteration
@@ -431,8 +432,21 @@ UDN on that node - see the loop in the appendix under *What is OVN's logical
 topology?*.
 
 **The `MATCH` column.** Blue's SNAT is *conditional* — it applies only when
-the destination is in that address set, which is how OVN-Kubernetes excludes
-BGP-advertised destinations from masquerading. Violet's is **unconditional**:
+the destination is in that address set. Dumping the set later (during the
+shared-VRF work, Case 4) showed what is actually in it, and it is worth
+stating precisely because "excludes advertised destinations" is the wrong
+mental model:
+
+```
+# ovn-nbctl --format=csv --data=bare --no-headings --columns=name,addresses \
+#     list Address_Set
+a1042611113178530741,192.168.122.31 192.168.122.32 ... 192.168.140.34 ...
+```
+
+Those are **node addresses**, not subnets. So the rule reads *masquerade pod
+traffic only when it is headed to a node IP* — which is what an advertised
+network wants, because everything else must keep its real pod source for the
+fabric to route the reply back. Violet's is **unconditional**:
 everything leaving `10.206.0.0/16` through the gateway router is rewritten to
 `169.254.0.13`, a link-local masquerade address the fabric has no route back
 to.
@@ -699,6 +713,181 @@ gateway routers against prefixes the phase never advertises, matched nothing,
 and reported "Every advertised pod network is exempt from SNAT." Green, having
 looked at nothing. Fixed in `b0b4179`; it only surfaced because an unrelated
 failure sent someone reading the check.
+
+---
+
+## Case 4 — "cross-cluster curl is broken" when it was the test that was wrong
+
+**Phase:** shared VRF (phase 2), `./build-lab.sh --shared`, step 9/9.
+**Verdict:** the lab was correct. The check was not. Fixed in the check.
+
+### The symptom
+
+`scripts/udn-xcluster-curl.sh --shared` came back a perfect diagonal — every
+tenant reached its own pod and nothing else:
+
+```
+  from \ to       10.220.4.5   10.223.0.10  ...  10.225.0.5
+  (holders)       hub/blue     hub/green         sno/violet
+  hub/blue        I am blue on hub  (no answer)  (no answer)
+  ...
+  sno/violet      (no answer)       (no answer)  I am violet on sno
+
+  BROKEN  hub/blue -> 10.225.0.5  expected violet (one default VRF, ACL does
+                                  not span clusters), got: (no answer)
+  ... 10 cells ...
+  FAIL - 10 cell(s) wrong.
+```
+
+The same-cluster cross-tenant cells were expected to be silent and were. All
+ten **cross-cluster** cells were expected to answer and did not.
+
+### Two wrong hypotheses, and the two commands that killed them
+
+Both came from Case 2, which had just been solved twice by the same
+mechanism. That is the trap: the most recent explanation is the one that
+comes to mind, not the one the evidence supports.
+
+**Hypothesis 1 — the `advertised-network-subnets` ACL is dropping it.**
+Dump what the ACL actually matches on, then what is in the set. Note the
+column order: `ovn-nbctl list` prints fields alphabetically, so `addresses`
+appears *above* `name`, and a `grep -A` anchored on the name shows the *next*
+record's addresses. Use `--columns` and the ambiguity disappears:
+
+```bash
+OVN=$(oc -n openshift-ovn-kubernetes get pod -l app=ovnkube-node -o name | head -1)
+
+oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN \
+  bash -c 'ovn-nbctl list ACL | grep -B4 -A6 advertised-network-subnets'
+# match : "(ip4.src == $a10109792604843350142 && ip4.dst == $a10109792604843350142)"
+# action: drop
+
+oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN \
+  ovn-nbctl --format=csv --data=bare --no-headings --columns=name,addresses \
+    list Address_Set | grep '^a10109792604843350142'
+# a10109792604843350142,10.220.0.0/16 10.221.0.0/16 10.222.0.0/16 \
+#                       10.223.0.0/16 10.224.0.0/16
+```
+
+The hub's set holds the **hub's own five prefixes only**. Violet's
+`10.225.0.0/16`, which the hub learns over BGP, is not in it — so `ip4.dst ==
+$set` is false and the rule cannot fire on a cross-cluster pair. The ACL
+reasoning in `scripts/udn-xcluster-curl.sh` was *correct*. It was also moot.
+
+**Hypothesis 2 — the Case 2 SNAT masquerade again.** One command:
+
+```bash
+NS=$(oc get ns -l udn-tenant=blue -o jsonpath='{.items[0].metadata.name}')
+P=$(oc -n $NS get pods -l app=udn-test -o jsonpath='{.items[0].metadata.name}')
+oc -n $NS exec $P -- ping -c2 -W2 10.225.0.5
+# 2 packets transmitted, 0 received, 100% packet loss
+```
+
+Ping failed too. The SNAT exclusion carries a TCP/UDP **port range**, so it
+cannot touch ICMP — the Case 2 signature is *ping works, TCP does not*. Both
+failing means a layer-3 blackhole, not NAT. (This is the one time in this
+document that `ping` earned its keep, and only as a **negative** control.)
+
+### The measurement that settled it
+
+```bash
+NODE=$(oc -n udn-blue get pod $P -o jsonpath='{.spec.nodeName}')
+OVN=$(oc -n openshift-ovn-kubernetes get pod -l app=ovnkube-node \
+        --field-selector spec.nodeName=$NODE -o name | head -1)
+oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN bash -c '
+  for lr in $(ovn-nbctl --format=csv --data=bare --no-headings --columns=name \
+                list Logical_Router | grep -i blue); do
+    echo "== $lr"; ovn-nbctl lr-route-list $lr; done'
+```
+
+```
+== GR_cluster_udn_blue_worker1
+IPv4 Routes
+Route Table <main>:
+       169.254.0.0/17     169.254.0.4     dst-ip rtoe-GR_cluster_udn_blue_worker1
+        10.220.0.0/16     100.65.0.1      dst-ip
+            0.0.0.0/0     192.168.122.1   dst-ip rtoe-GR_cluster_udn_blue_worker1
+```
+
+That is the whole table. A pod sending to `10.225.0.5` matches **only the
+default**, whose nexthop is `192.168.122.1` — the *management* gateway. The
+packet leaves by the management NIC and dies there. Nothing steers pod egress
+at the fabric.
+
+And the node-side routes, which look reassuring and are irrelevant:
+
+```bash
+oc debug -q node/$NODE -- chroot /host bash -c \
+  'echo "== table 1023"; ip route show table 1023 | grep -E "10\.22[0-9]" ;
+   echo "== main";      ip route show           | grep -E "10\.22[0-9]"'
+```
+
+```
+== table 1023
+== main
+10.225.0.0/24 nhid 125 via 192.168.140.20 dev enp8s0 proto bgp metric 20
+...
+```
+
+The route to violet **exists** — in `main`, learned over BGP, on the fabric
+NIC. The tenant's own table `1023` is empty of it, and the gateway router has
+its own table and never consults the host's at all. A `main`-table route is
+for host-originated traffic; pod egress never reads it.
+
+### Why this is by design, and where it was already written down
+
+`README.md`, phase 2 row:
+
+> **Phase 2: a UDN pod cannot ping the fabric, nothing on the fabric bridge
+> at all** — *Expected in this lab, not a fault.* […] the packet leaves by
+> the management NIC instead […] Giving the tenant VRF its own path to the
+> fabric is what phase 3 does.
+
+Phase 2 advertises pod subnets *outward* so fabric clients can reach pods.
+It does not give pods a path *out* to the fabric. Phase 3 (VRF-Lite) does,
+which is exactly why the violet→green curl worked there — and that single
+observation is what the broken expectation had been extrapolated from.
+
+### Why the passing tests did not catch it
+
+`udn-web-demo.sh --host` passes in this phase, and that is not a
+contradiction. The client sits at `192.168.122.88`, **on the management
+segment**: pod→client is a direct ARP off `br-ex`, and client→pod arrives
+inbound over BGP. Neither direction exercises pod egress toward the fabric,
+which is the only thing that is missing.
+
+A test can pass, be correct, and still say nothing about the property you
+are about to assume it covered.
+
+### The fix
+
+In `scripts/udn-xcluster-curl.sh`, the `shared` verdict now expects silence
+across the cluster boundary and names the *mechanism* per cell, because the
+two kinds of silence are not the same fact:
+
+| Cell | Expected | Mechanism |
+| --- | --- | --- |
+| same cluster, same tenant | answers | — |
+| same cluster, different tenant | silent | the `advertised-network-subnets` ACL |
+| other cluster, any tenant | silent | phase 2 gives the tenant no path to the fabric |
+
+A cross-cluster answer is now reported as `UNEXPECTED` with the two things
+worth checking (`gatewayConfig.routingViaHost`, leftover phase-3 VRF/VLAN
+plumbing) rather than being celebrated as the expected result. Duplicate
+`udn_subnet_shared` addresses are now reported directly from the discovered
+holders, since with every cross-cluster cell silent no curl can reveal them.
+
+### The rule
+
+**A test's expectation is a claim about the system and needs the same
+evidence as any other claim.** This one was derived by analogy from a
+different phase, fixture-tested only, and shipped asserting the opposite of
+a row in this repo's own README. It was flagged as unproven before the run
+and still read as a lab fault for the first several minutes of the hunt.
+
+When a check fails on a path it has never passed on, rank "the check is
+wrong" *first*, not last — and grep the repo's own docs for the behaviour
+before touching the lab.
 
 ---
 

@@ -24,12 +24,22 @@
 # asking an ingress by hostname. The namespace client VM is still built: its
 # ROOT namespace carries the phase-2 routes, so one VM serves all three labs.
 #
-# The cross-cluster test runs in both, asking a different question in each.
-# Under EVPN: does a tenant reach ITSELF in the other cluster over one
+# The cross-cluster test runs in all three, asking a different question in
+# each. Under EVPN: does a tenant reach ITSELF in the other cluster over one
 # stretched Layer2 domain. Under VRF-Lite there is no stretched Layer2 and no
 # tenant is in both clusters, so it asks whether the openings in
 # udn_vrf_leaks are real pod to pod and - the part worth having - whether the
-# pairs left out are shut. The script detects which lab it is looking at.
+# pairs left out are shut. The script detects which of those two it is
+# looking at; --shared has to be passed.
+#
+# Under --shared the answer is that NO cell crosses the boundary, and that is
+# the phase behaving correctly rather than a defect. Phase 2 advertises pod
+# subnets outward so fabric clients can reach pods; it does not give pods a
+# path out to the fabric - the tenant's gateway router holds its own /16 and
+# a default pointing at the MANAGEMENT gateway. Giving the tenant VRF its own
+# fabric path is what VRF-Lite adds, which is why the same test lights up
+# under --vrflite. So here the test is checking the same-cluster ACL still
+# holds AND that nothing has unexpectedly opened a pod path to the fabric.
 #
 # The mode still decides the topology, so --list and the N/N counters stay
 # derived from it. The step formerly called 'evpn' is now 'tenants'; --from
@@ -433,6 +443,13 @@ run_step() {
     # pairs left out must stay silent, and two tenants of the SAME cluster
     # must stay silent whatever the leaks say, because the ACL is the backstop
     # there. The script reads the pairs from vars.yaml and detects the mode.
+    #
+    # Under --shared every cross-cluster cell is expected SILENT: phase 2
+    # gives a tenant no path to the fabric, so pod egress toward the other
+    # cluster leaves by the management NIC and dies. The step is still worth
+    # running - it is what would catch the same-cluster ACL failing open, and
+    # it would catch a pod path to the fabric appearing where this phase does
+    # not configure one.
     #
     # It needs BOTH kubeconfigs, so it is guarded rather than assumed: a lab
     # built with the SNO skipped should say so and move on, not fail nine
