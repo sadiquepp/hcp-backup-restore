@@ -421,24 +421,36 @@ done
 # target substituted in. No $( ) inside a double-quoted bash string, and no
 # single quotes inside the script itself - it is wrapped in them for sh -c,
 # and the first attempt at this broke on exactly that.
+# It measures the PATH, not just the interface. The first version pinged once
+# at the interface MTU and called a failure BLACKHOLE, which on the --host
+# client meant measuring eth0 - the management NIC at 1500 - against a pod
+# path capped at 1400, then advising clab_client_mtu, a variable that governs
+# netns VLAN subinterfaces and has nothing to do with eth0. Right that
+# something was wrong, wrong about what and wrong about the fix.
+#
+# So: try the interface MTU, and if that fails bisect down to the largest DF
+# packet that does get through. Then the report names both numbers.
 read -r -d '' MTU_PROBE <<'EOS' || true
-d=$(ip route get __TARGET__ | sed -n "s/.* dev \\([^ ]*\\).*/\\1/p" | head -1)
+d=$(ip route get __TARGET__ | sed -n "s/.* dev \([^ ]*\).*/\1/p" | head -1)
 m=$(cat /sys/class/net/$d/mtu)
 if ping -c1 -W2 -M do -s $((m-28)) __TARGET__ >/dev/null 2>&1
-then echo "$d mtu=$m ok"
-else echo "$d mtu=$m BLACKHOLE"
+then echo "$d mtu=$m path=$m ok"; exit 0
 fi
+lo=0; hi=$((m-28))
+while [ $((hi-lo)) -gt 8 ]; do
+  mid=$(( (lo+hi)/2 ))
+  if ping -c1 -W1 -M do -s $mid __TARGET__ >/dev/null 2>&1; then lo=$mid; else hi=$mid; fi
+done
+echo "$d mtu=$m path=$((lo+28)) SMALLER"
 EOS
 
 mtu_bad=0
 echo
-echo "Path MTU (one DF packet at the interface MTU - must arrive)"
+echo "Path MTU (largest DF packet that reaches the pod)"
 for c in "${clients[@]}"; do
     # Only against a pod this client ACTUALLY reached. A DF ping to somewhere
     # unreachable fails for the same reason everything else did, and reporting
-    # that as an MTU black hole blames the wrong thing - this printed
-    # "BLACKHOLE ... the web pages above still passed, because MSS clamping hid
-    # it" on a run where not one page had passed.
+    # that as an MTU black hole blames the wrong thing.
     target=""
     for t in ${SERVES[$c]}; do
         a="${WEBADDR[$t]:-}"
@@ -453,18 +465,27 @@ for c in "${clients[@]}"; do
     probe="${MTU_PROBE//__TARGET__/$target}"
     out=$(on_client "${CLIENTIP[$c]}" "${PREFIX[$c]}sh -c '$probe'" | tr -d '\r' | tail -1)
     printf '  %-18s -> %-15s %s\n' "$c" "$target" "$out"
-    [[ "$out" == *BLACKHOLE* ]] && mtu_bad=$((mtu_bad+1))
+    [[ "$out" == *SMALLER* ]] || continue
+
+    dev=${out%% *}
+    # A client interface this lab configures is a VLAN subinterface - ethN.VID
+    # - and its size comes from clab_client_mtu, so an over-large one is ours
+    # to fix and fails the run. A plain NIC (the --host client's eth0, the
+    # management network) is not ours to shrink: there the gap is a real
+    # path-MTU black hole to report, not a setting to correct.
+    if [[ "$dev" == *.* ]]; then
+        echo "        FAIL: this interface is configured by the lab. Set"
+        echo "        vars.yaml:clab_client_mtu to the path size above and re-run"
+        echo "        --tags clabnsclient (and clabtenantclients, if built)."
+        mtu_bad=$((mtu_bad+1))
+    else
+        echo "        WARN: $dev is not a lab-configured VLAN - lowering it is not"
+        echo "        the fix. The gap itself is the finding: TCP survives by MSS"
+        echo "        clamping, and anything DF-set above the path size is dropped"
+        echo "        with no ICMP too-big coming back, so path-MTU discovery"
+        echo "        cannot correct it."
+    fi
 done
-if (( mtu_bad )); then
-    echo
-    echo "  $mtu_bad client(s) reached a pod but cannot deliver a full-MTU packet"
-    echo "  to it. The pages above passed anyway, because MSS clamping pins TCP"
-    echo "  to the smaller end - UDP and anything DF-set does not survive it."
-    echo "  Compare the client segment against the pod:"
-    echo "      oc -n udn-<tenant> rsh <web pod> ip link show ovn-udn1"
-    echo "  and set vars.yaml:clab_client_mtu to match, then re-run --tags"
-    echo "  clabnsclient (and clabclients, if the tenant VMs are built)."
-fi
 
 # ---------------------------------------------------------------------------
 echo
@@ -542,16 +563,30 @@ if (( bad == 0 )); then
         done
         if (( ${#ANSWERED_BY[@]} > 1 )); then
             echo
-            echo "  More than one cluster answered. These clients are on the fabric,"
-            echo "  not in any cluster, and they reached pods in both - over one"
-            echo "  L2VNI, with every address inside one subnet. That is the"
-            echo "  stretched broadcast domain doing what it is for."
+            if (( WITH_HOST )); then
+                echo "  More than one cluster answered, from ONE client with one"
+                echo "  address and one routing table. That is the shared phase: every"
+                echo "  UDN leaked into the default VRF and reached off-segment through"
+                echo "  the clab VM and leaf1. No VLANs, no per-tenant VRFs, and no"
+                echo "  isolation between tenants at the node boundary - which is the"
+                echo "  cost this phase pays for being simple."
+            else
+                echo "  More than one cluster answered. These clients are on the fabric,"
+                echo "  not in any cluster, and they reached pods in both - over one"
+                echo "  L2VNI, with every address inside one subnet. That is the"
+                echo "  stretched broadcast domain doing what it is for."
+            fi
         fi
     fi
-    echo
-    echo "  Note every address curled above is inside one subnet. The only"
-    echo "  difference between these machines is the VLAN tag on their fabric"
-    echo "  interface, and that is what decided which document came back."
+    # Only true of the per-tenant clients, whose sole difference IS the VLAN
+    # tag. The --host client has no VLAN and the shared phase gives each tenant
+    # a distinct subnet, so printing this there was simply false.
+    if (( ! WITH_HOST )); then
+        echo
+        echo "  Note every address curled above is inside one subnet. The only"
+        echo "  difference between these machines is the VLAN tag on their fabric"
+        echo "  interface, and that is what decided which document came back."
+    fi
     for a in "${addrs[@]}"; do
         if [[ "${ADDR_TENANTS[$a]}" == *" "* ]]; then
             echo
