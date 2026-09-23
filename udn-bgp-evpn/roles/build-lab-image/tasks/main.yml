@@ -1,0 +1,201 @@
+---
+# Build the prebuilt lab image.
+#
+# One copy of rhel9_kvm_image with every package the lab's guests need
+# already in it, so the build does not register four VMs with
+# subscription-manager and run four rounds of dnf against Red Hat's CDN.
+#
+# WHY A SEPARATE PLAYBOOK AND NOT A STEP INSIDE build-lab.sh. This changes a
+# file in base_image_dir that every other lab on this host may also be using,
+# it takes several minutes, and it needs credentials the rest of a --from
+# fabric run does not. Making it opt-in and explicit means a normal build
+# never surprises anyone by rewriting a shared base image.
+#
+# THE IMAGE CARRIES NO ENTITLEMENT. Registration happens inside the copy,
+# only for as long as the installs take, and is undone before the image is
+# finished. Guests cloned from it therefore cannot dnf anything - which is
+# the point, and is why the lab verifies packages with rpm -q rather than
+# assuming. If you need a package later, add it to the list in vars.yaml and
+# rebuild, or delete the image and let the lab fall back to registering.
+
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml (ansible-vault edit
+      vault.yaml). The image is registered with subscription-manager while
+      the packages are installed, then unregistered again.
+
+# virt-customize ships in guestfs-tools, the same package that provides the
+# virt-resize this lab already uses to build the clab VM disk. Checked
+# explicitly because the failure otherwise arrives as a bare "command not
+# found" several minutes into a task that has already copied 10G.
+- name: Check that virt-customize is available
+  ansible.builtin.command:
+    cmd: which virt-customize
+  register: udn_lab_image_virtcustomize
+  changed_when: false
+  failed_when: false
+
+- name: Fail if virt-customize is missing
+  ansible.builtin.assert:
+    that: udn_lab_image_virtcustomize.rc == 0
+    fail_msg: >-
+      virt-customize not found. dnf install guestfs-tools - it is the same
+      package that provides virt-resize, which this lab already uses.
+
+- name: Check that the base image is there
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
+  register: udn_lab_image_base
+
+- name: Fail if the base image is missing
+  ansible.builtin.assert:
+    that: udn_lab_image_base.stat.exists
+    fail_msg: >-
+      No base image at {{ base_image_dir }}/{{ rhel9_kvm_image }}. Put the
+      RHEL9 KVM qcow2 there first - this role copies it, it does not
+      download it.
+
+- name: Check whether the customized image already exists
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ udn_lab_image }}"
+  register: udn_lab_image_existing
+
+- name: Report that the image is already built
+  ansible.builtin.debug:
+    msg: >-
+      {{ base_image_dir }}/{{ udn_lab_image }} already exists - nothing to
+      do. Pass -e udn_lab_image_force=true to rebuild it, which deletes and
+      recreates it.
+  when:
+    - udn_lab_image_existing.stat.exists
+    - not (udn_lab_image_force | bool)
+
+# Everything below is the build, and it only runs when there is one to do.
+- name: Build the image
+  when: (not udn_lab_image_existing.stat.exists) or (udn_lab_image_force | bool)
+  block:
+    # Deleted rather than overwritten. virt-customize edits in place, so a
+    # rebuild onto a half-built image from a failed earlier run would layer
+    # onto whatever that left behind - including, in the worst case, a
+    # registration that was never cleaned.
+    - name: Remove a previous customized image
+      ansible.builtin.file:
+        path: "{{ base_image_dir }}/{{ udn_lab_image }}"
+        state: absent
+      when: udn_lab_image_existing.stat.exists
+
+    # Built under a .partial name so an interrupted run cannot leave
+    # something at the real path that the lab would then detect and trust.
+    # The rename at the end is what publishes it.
+    - name: Copy the base image (sparse)
+      ansible.builtin.command:
+        cmd: >-
+          cp --sparse=always
+          {{ base_image_dir }}/{{ rhel9_kvm_image }}
+          {{ base_image_dir }}/{{ udn_lab_image }}.partial
+
+    - name: Show what is about to be installed
+      ansible.builtin.debug:
+        msg: >-
+          Customizing {{ udn_lab_image }}.partial with
+          {{ udn_lab_image_packages | join(' ') }}{{
+          ' plus ' + (udn_lab_image_docker_packages | join(' '))
+          if udn_lab_image_with_docker | bool else '' }}. This takes a few
+          minutes.
+
+    # ORDER MATTERS: virt-customize applies its options in the order they
+    # appear on the command line, so the register has to come before the
+    # installs and the unregister after them.
+    #
+    # no_log because org_id and activation_key are on this command line.
+    # They are still visible in the host's process table for the length of
+    # the run - on a single-user lab host that is accepted, but it is the
+    # reason this is not something to run on a shared machine.
+    - name: Register, install and unregister inside the image (virt-customize)
+      ansible.builtin.command:
+        argv: "{{ udn_lab_image_argv }}"
+      vars:
+        udn_lab_image_argv: >-
+          {{
+            ['virt-customize', '-a',
+             base_image_dir + '/' + udn_lab_image + '.partial',
+             '--network',
+             '--run-command',
+             'subscription-manager register --org=' + (org_id | string) +
+             ' --activationkey=' + (activation_key | string) + ' --force']
+            + (['--run-command',
+                'curl -sSL ' + udn_lab_image_docker_repo +
+                ' -o /etc/yum.repos.d/docker-ce.repo']
+               if udn_lab_image_with_docker | bool else [])
+            + ['--install', udn_lab_image_packages | join(',')]
+            + (['--install', udn_lab_image_docker_packages | join(',')]
+               if udn_lab_image_with_docker | bool else [])
+            + (['--run-command', 'systemctl enable docker']
+               if udn_lab_image_with_docker | bool else [])
+            + ['--run-command', 'dnf clean all',
+               '--run-command', 'subscription-manager unregister || true',
+               '--run-command', 'subscription-manager clean || true',
+               '--run-command', 'rm -f /etc/yum.repos.d/redhat.repo',
+               '--run-command', 'rm -rf /var/log/rhsm/*',
+               '--selinux-relabel']
+          }}
+      no_log: true
+      register: udn_lab_image_customize
+
+    # Proof, not assumption. virt-customize exits non-zero on a failed
+    # --install, but a package that resolved to something unexpected, or a
+    # dnf that installed nothing because the registration silently produced
+    # no repositories, would still exit 0. rpm -q inside the finished image
+    # is the only thing that actually answers "is it in there".
+    #
+    # --whatprovides because RHEL 9 satisfies `dnf install curl` with the
+    # already-installed curl-minimal, which provides curl under another
+    # name. A bare rpm -q would fail here on a correct image.
+    - name: Verify every package really landed in the image
+      ansible.builtin.command:
+        argv:
+          - virt-customize
+          - -a
+          - "{{ base_image_dir }}/{{ udn_lab_image }}.partial"
+          - --run-command
+          - >-
+            rpm -q --whatprovides {{ udn_lab_image_packages | join(' ') }}
+            {{ udn_lab_image_docker_packages | join(' ')
+               if udn_lab_image_with_docker | bool else '' }}
+      register: udn_lab_image_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if a package is missing from the finished image
+      ansible.builtin.assert:
+        that: udn_lab_image_verify.rc == 0
+        fail_msg: >-
+          The image was customized but rpm -q could not find every package:
+          {{ udn_lab_image_verify.stdout | default('') }}
+          {{ udn_lab_image_verify.stderr | default('') }}
+          The partial image is left at
+          {{ base_image_dir }}/{{ udn_lab_image }}.partial for inspection
+          and is NOT published, so the lab will keep using the normal
+          register-and-dnf path.
+
+    # Only now does it get the name the lab looks for.
+    - name: Publish the finished image
+      ansible.builtin.command:
+        cmd: >-
+          mv {{ base_image_dir }}/{{ udn_lab_image }}.partial
+          {{ base_image_dir }}/{{ udn_lab_image }}
+
+    - name: Report what was built
+      ansible.builtin.debug:
+        msg:
+          - "Built {{ base_image_dir }}/{{ udn_lab_image }}"
+          - "Packages: {{ udn_lab_image_packages | join(' ') }}"
+          - "Docker: {{ 'yes - ' + (udn_lab_image_docker_packages | join(' '))
+                        if udn_lab_image_with_docker | bool else 'no' }}"
+          - "The lab will now use this image and skip subscription-manager
+             and dnf on every guest. Delete it to go back to the normal
+             path."

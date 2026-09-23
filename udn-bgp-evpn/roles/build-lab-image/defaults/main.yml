@@ -1,0 +1,12 @@
+---
+# Defaults for build-lab-image.
+#
+# Everything meaningful lives in vars.yaml, next to the per-guest package
+# lists it is derived from - these are only here so the role is runnable on
+# its own and so `ansible-playbook --list-tasks` does not fail on an
+# undefined variable.
+
+udn_lab_image_force: false
+udn_lab_image_with_docker: true
+udn_lab_image_docker_packages: [docker-ce, docker-ce-cli, containerd.io]
+udn_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-ce.repo

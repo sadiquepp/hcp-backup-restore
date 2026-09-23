@@ -113,6 +113,13 @@ STEPS=()
 # by hand, so both resolve to it rather than erroring as unknown steps.
 declare -A STEP_ALIAS=([evpn]=tenants [vrflite]=tenants [shared]=tenants)
 
+# Steps that are valid for --only but are in no mode's sequence, so a full
+# run never performs them. 'image' rewrites a file in base_image_dir that
+# other labs on this host may share and needs credentials the rest of a
+# --from fabric run does not, so it is opt-in and explicit - see
+# build-lab-image.yaml.
+EXTRA_STEPS=(image)
+
 usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
 list_steps() {
@@ -133,6 +140,14 @@ list_steps() {
              clusters. Needs both kubeconfigs and web on both. Under EVPN,
              same tenant over the stretched L2; under VRF-Lite, the
              udn_vrf_leaks matrix with the shut pairs asserted shut
+
+  Not in any mode's sequence, run it on its own with --only:
+
+  image      build-lab-image.yaml - copy the base image, register the COPY
+             with subscription-manager, install every package the lab's
+             guests need, unregister and clean. Build it once and every
+             guest is created from it with no registration and no dnf;
+             skip it and nothing changes. Its PRESENCE is the switch
 EOF
     printf '\n  this run (--%s): %s\n' "$MODE" "${STEPS[*]}"
 }
@@ -188,7 +203,7 @@ if [[ -n "$ONLY" ]]; then ONLY="${STEP_ALIAS[$ONLY]:-$ONLY}"; fi
 # after the wrong thing.
 for want in "$FROM" "$ONLY"; do
     [[ -z "$want" ]] && continue
-    [[ " ${STEPS[*]} " == *" $want "* ]] || {
+    [[ " ${STEPS[*]} ${EXTRA_STEPS[*]} " == *" $want "* ]] || {
         echo "no such step: $want" >&2; echo >&2; list_steps >&2; exit 1; }
 done
 [[ -n "$FROM" && -n "$ONLY" ]] && { echo "--from and --only are mutually exclusive" >&2; exit 1; }
@@ -373,6 +388,9 @@ run_step() {
         play_bg hub ../setup_hub_cluster.yaml --skip-tags acm
         play_bg sno ../setup_sno.yaml
         wait_all ;;
+    image)
+        say "prebuilt lab image - register once, install, unregister"
+        play build-lab-image.yaml ;;
     fabric)
         say "$(pos fabric)  containerlab fabric (leaf1 / spine / leaf2), topology $TOPOLOGY"
         play setup_udn_bgp_lab.yaml --tags fabric -e "clab_topology=$TOPOLOGY" ;;
@@ -493,6 +511,10 @@ Continuing in 10s - ctrl-c to stop.
 EOF
     sleep 10
 fi
+
+# An out-of-band step replaces the sequence rather than being filtered from
+# it - it is in no mode's STEPS, so the loop below would never reach it.
+if [[ " ${EXTRA_STEPS[*]} " == *" $ONLY "* ]]; then STEPS=("$ONLY"); fi
 
 for step in "${STEPS[@]}"; do
     CURRENT="$step"

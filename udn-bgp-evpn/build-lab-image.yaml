@@ -1,0 +1,44 @@
+---
+# Build the prebuilt lab image, once, before build-lab.sh.
+#
+#   cd udn-bgp-evpn
+#   ansible-playbook -i ../inventory/hosts build-lab-image.yaml \
+#       --vault-password-file ~/.vault_pass
+#
+# or, equivalently, through the build script:
+#
+#   ./build-lab.sh --only image
+#
+# WHAT IT DOES. Copies rhel9_kvm_image, registers the COPY with
+# subscription-manager, installs every package the lab's guests need,
+# unregisters, cleans, and publishes the result as udn_lab_image beside the
+# base image.
+#
+# WHAT CHANGES AFTERWARDS. The clab VM, the phase-2 client, the per-tenant
+# clients and the namespace client are all built from that image instead, and
+# each one skips its subscription-manager registration and its dnf. Instead
+# of installing, each verifies with rpm -q that its own packages are there -
+# so a stale image reports exactly which package is missing rather than
+# failing later inside whatever needed it.
+#
+# WHAT HAPPENS IF YOU DO NOT RUN IT. Nothing. The presence of the image is
+# the only switch; without it every guest registers and dnfs exactly as
+# before. Deleting the image reverts the lab in the same way.
+#
+# REBUILDING. It refuses to overwrite an existing image unless you ask:
+#
+#   ansible-playbook -i ../inventory/hosts build-lab-image.yaml \
+#       --vault-password-file ~/.vault_pass -e udn_lab_image_force=true
+#
+# Add a package to udn_pkgs_* in vars.yaml and you need this - the lists are
+# the source for both the image build and the per-guest verification, so they
+# cannot drift silently, but the image does not rebuild itself.
+- name: Build the prebuilt lab image
+  hosts: localhost
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../vars.yaml
+    - ../vault.yaml
+  roles:
+    - build-lab-image

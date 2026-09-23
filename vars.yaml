@@ -1453,6 +1453,67 @@ clab_frr_image: "quay.io/frrouting/frr:10.2.1"
 clab_alpine_image: "alpine:3.20"
 
 ## ---------------------------------------------------------------------------
+## Prebuilt lab image (optional) - udn-bgp-evpn/build-lab-image.yaml
+## ---------------------------------------------------------------------------
+##
+## Every guest this lab builds is a bare copy of rhel9_kvm_image with no
+## entitlement, so each one has to be registered with subscription-manager
+## before its first dnf. That is four registrations per build (the clab VM,
+## the phase-2 client, the per-tenant clients, the namespace client), each
+## one a network round trip to Red Hat that can and does fail independently.
+##
+## build-lab-image.yaml does it once instead: copy the base image, register
+## INSIDE the copy, install everything below, then unregister and clean so
+## the image carries no consumer identity. Build it and the lab uses it and
+## skips both the registration and the dnf; do not build it and nothing
+## changes. See udn-bgp-evpn/quick-build.md.
+##
+## The per-guest lists are the SOURCE for both halves - the image installs
+## their union, and each guest verifies its own list with rpm -q instead of
+## dnf. Add a package to a list here and the image build picks it up; forget
+## to rebuild the image and the verification says exactly which package is
+## missing rather than failing later inside whatever needed it.
+udn_pkgs_clab:
+  - iproute      # ip, bridge - creates and inspects the fabric bridge
+  - tcpdump      # proving what is actually on the wire
+  - iptables-nft # the FORWARD rules containerlab and this role insert
+  - git
+  - tar
+udn_pkgs_client: [iproute, tcpdump]
+udn_pkgs_nsclient: [iproute, tcpdump, curl]
+udn_pkgs_nsproxy: [haproxy, policycoreutils-python-utils]
+
+udn_lab_image_packages: >-
+  {{ (udn_pkgs_clab + udn_pkgs_client + udn_pkgs_nsclient + udn_pkgs_nsproxy)
+     | unique | sort }}
+
+## Docker CE comes from download.docker.com, not from a Red Hat repository -
+## but containerd.io pulls container-selinux out of AppStream, so installing
+## it still needs an entitled guest. It therefore belongs in the image for
+## the same reason as everything above. Only the clab VM uses it; the client
+## VMs carry it and never start it, which costs disk and nothing else.
+## Set false to leave Docker to the normal clab-install.yml path.
+udn_lab_image_with_docker: true
+udn_lab_image_docker_packages: [docker-ce, docker-ce-cli, containerd.io]
+udn_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-ce.repo
+
+## The customized image, beside the base one in base_image_dir. Its PRESENCE
+## is what switches the lab over - there is no enable flag to forget.
+udn_lab_image: "{{ rhel9_kvm_image | regex_replace('\\.qcow2$', '') }}-udnlab.qcow2"
+
+## Rebuild the image even if it is already there. Off by default because the
+## build takes several minutes and re-registers with Red Hat each time.
+udn_lab_image_force: false
+
+## Safe defaults for a lab with no prebuilt image. setup-clab-fabric stats
+## the file and set_facts both of these at the top of every run - set_fact
+## outranks vars_files, so the stat always wins and these two only matter to
+## a play that never reaches that role.
+udn_lab_image_ready: false
+udn_lab_base_image: "{{ rhel9_kvm_image }}"
+
+
+## ---------------------------------------------------------------------------
 ## The clusters attached to this fabric.
 ##
 ## There used to be one flat clab_fabric_nodes list here, and it was serving
@@ -2132,7 +2193,11 @@ udn_client_os_variant: rhel9.5
 ## A plain copy of this image, not a virt-resize expansion - the VM runs ping
 ## and tcpdump and has no use for a grown root filesystem. Point it at whatever
 ## base image you have; rhel8 works as well as rhel9, adjust os_variant to match.
-udn_client_base_image: "{{ rhel9_kvm_image }}"
+##
+## Defaults to udn_lab_base_image, which is the prebuilt udn_lab_image when one
+## exists and plain rhel9_kvm_image when it does not. Naming an image here
+## overrides both.
+udn_client_base_image: "{{ udn_lab_base_image }}"
 
 
 ## ---------------------------------------------------------------------------
@@ -2209,7 +2274,7 @@ udn_tenant_clients:
 udn_tenant_client_memory: 2048
 udn_tenant_client_vcpus: 2
 udn_tenant_client_os_variant: rhel9.5
-udn_tenant_client_base_image: "{{ rhel9_kvm_image }}"
+udn_tenant_client_base_image: "{{ udn_lab_base_image }}"
 
 
 ## ---------------------------------------------------------------------------
@@ -2240,7 +2305,7 @@ udn_nsclient_vm_name: udnnsclient
 udn_nsclient_memory: 2048
 udn_nsclient_vcpus: 2
 udn_nsclient_os_variant: rhel9.5
-udn_nsclient_base_image: "{{ rhel9_kvm_image }}"
+udn_nsclient_base_image: "{{ udn_lab_base_image }}"
 
 ## MUST differ from udn_client_segment_host_octet. The per-tenant client VMs
 ## hold .20 on these same VLANs on this same bridge, so reusing it would put

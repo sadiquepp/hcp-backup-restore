@@ -37,12 +37,92 @@ tmux new -s lab      # then ./build-lab.sh ...
 | **Local gateway mode** | `--vrflite` and `--evpn` require `routingViaHost: true`. `udn_bgp_set_local_gateway: true` in `vars.yaml` makes the `tenants` step do it. Flipping it is a second full `ovnkube-node` rollout. |
 | **`clusters` step is destructive-by-omission** | The cluster playbooks are not idempotent. A bare run refuses if a hub kubeconfig or the libvirt domains already exist. With clusters already up, start at `--from fabric`. |
 
+Optional but worth it if you build this lab more than once: **[the prebuilt
+image](#optional-once-the-prebuilt-lab-image)**, which removes four
+subscription-manager registrations and four rounds of `dnf` from every build.
+
 Useful before committing to a run:
 
 ```bash
 ./build-lab.sh --shared --list      # the steps this mode will run
 ./build-lab.sh --shared --dry-run   # print every command, run nothing
 ```
+
+---
+
+## Optional, once: the prebuilt lab image
+
+Every guest this lab builds — the containerlab VM, the phase-2 client, the
+per-tenant clients, the namespace client — is a bare copy of
+`rhel9_kvm_image` with **no entitlement**. Each therefore has to be
+registered with subscription-manager before its first `dnf`. That is four
+registrations per build, each a network round trip to Red Hat that can fail
+on its own.
+
+Do it once instead:
+
+```bash
+./build-lab.sh --only image
+# or, the same thing directly:
+ansible-playbook -i ../inventory/hosts build-lab-image.yaml \
+    --vault-password-file ~/.vault_pass
+```
+
+That copies the base image, registers **the copy**, installs everything,
+then unregisters and cleans, and publishes the result as
+`rhel-9.8-x86_64-kvm-udnlab.qcow2` beside the original.
+
+**The image's presence is the switch.** There is no enable flag to set or
+forget. Build it and every guest is created from it with no registration and
+no `dnf`; delete it and the lab goes straight back to the normal path. That
+is also the whole rollback procedure.
+
+| | |
+| --- | --- |
+| **What is in it** | `curl git haproxy iproute iptables-nft policycoreutils-python-utils tar tcpdump`, plus `docker-ce docker-ce-cli containerd.io` unless `udn_lab_image_with_docker: false` |
+| **Where the list comes from** | `udn_pkgs_clab`, `udn_pkgs_client`, `udn_pkgs_nsclient`, `udn_pkgs_nsproxy` in `vars.yaml`. The image installs their union and each guest verifies its own list — one source, so the two halves cannot drift |
+| **Rebuild** | `-e udn_lab_image_force=true`. It will not overwrite silently |
+| **Needs** | `guestfs-tools` (for `virt-customize` — the same package as the `virt-resize` the lab already uses), and `org_id`/`activation_key` in `vault.yaml` |
+
+**Docker is in the image on purpose.** It comes from `download.docker.com`
+rather than a Red Hat repository, but `containerd.io` pulls
+`container-selinux` out of AppStream, so installing it still needs an
+entitled guest. Only the clab VM uses it; the client VMs carry it and never
+start it, which costs disk and nothing else.
+
+### What a stale image looks like
+
+The guests do **not** blindly skip their package step — each runs
+`rpm -q --whatprovides` for its own list instead, and fails by name:
+
+```
+This guest was built from rhel-9.8-x86_64-kvm-udnlab.qcow2, which is
+missing a package it needs:
+
+  package tshark is not installed
+
+The image has no entitlement, so dnf cannot fix it here. Rebuild it: ...
+```
+
+So adding a package to `vars.yaml` without rebuilding the image is caught at
+the point the assumption is made, not later inside whatever needed the
+package. (`--whatprovides` rather than a bare `rpm -q` because RHEL 9
+satisfies `dnf install curl` with the already-installed `curl-minimal`,
+which provides `curl` under another name — a bare `rpm -q curl` would fail
+on a perfectly good image.)
+
+### What it costs you
+
+The image carries **no entitlement**, deliberately — otherwise every guest
+cloned from it would share one consumer identity in Red Hat's inventory. A
+guest built from it therefore cannot `dnf install` anything at all. If you
+want to add a package by hand on a running guest, register it first, or
+delete the image and rebuild that guest the normal way.
+
+During the build, `org_id` and `activation_key` appear in the lab host's
+process table for the length of the `virt-customize` run (the Ansible task
+is `no_log`). On a single-user lab host that is fine; it is the reason this
+is not something to run on a shared machine.
 
 ---
 

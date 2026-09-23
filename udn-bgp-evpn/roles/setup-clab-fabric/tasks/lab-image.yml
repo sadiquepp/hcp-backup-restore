@@ -1,0 +1,42 @@
+---
+# Is there a prebuilt lab image, and should the guests use it?
+#
+# Runs with tags: [always] from main.yml, because EVERY subset of this role
+# that builds or configures a guest needs the answer - --tags clabnsproxy
+# does not go near clab-deploy.yml but still has to know whether to dnf
+# haproxy or to check for it.
+#
+# The image's PRESENCE is the switch. There is no enable flag, on purpose:
+# an enable flag can be true while the image is missing, and then every VM
+# is built from an image that is not there. Statting the file cannot lie.
+#
+# Built by udn-bgp-evpn/build-lab-image.yaml. Delete the file and the lab
+# goes back to registering each guest with subscription-manager and running
+# dnf, with nothing else to change.
+
+- name: Look for the prebuilt lab image
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ udn_lab_image }}"
+  register: udn_lab_image_stat
+
+- name: Decide whether the guests are built from it
+  ansible.builtin.set_fact:
+    udn_lab_image_ready: "{{ udn_lab_image_stat.stat.exists }}"
+    udn_lab_base_image: >-
+      {{ udn_lab_image if udn_lab_image_stat.stat.exists else rhel9_kvm_image }}
+
+# Said out loud every run. Which image the guests came from decides whether
+# a missing package is a dnf away or an image rebuild away, and finding that
+# out from a failure three tasks later is exactly the kind of "everything I
+# inspected agreed with everything else" hunt this lab has had enough of.
+- name: Say which image the guests will be built from
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Prebuilt image ' + udn_lab_image + ' found - guests are built from
+      it, and subscription-manager and dnf are skipped. Packages are verified
+      with rpm -q instead.'
+      if udn_lab_image_ready | bool else
+      'No prebuilt image at ' + base_image_dir + '/' + udn_lab_image + ' -
+      each guest registers with subscription-manager and installs its own
+      packages. Build it with udn-bgp-evpn/build-lab-image.yaml to skip
+      that.' }}

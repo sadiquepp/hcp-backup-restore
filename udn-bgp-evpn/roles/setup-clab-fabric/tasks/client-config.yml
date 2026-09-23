@@ -6,11 +6,11 @@
 # a name, and it was the one package the base image did not already have, so it
 # was also the only reason this task ever failed.
 - name: Install test tooling on the client VM
-  ansible.builtin.dnf:
-    name:
-      - iproute
-      - tcpdump
-    state: present
+  ansible.builtin.include_tasks:
+    file: packages.yml
+  vars:
+    udn_pkg_list: "{{ udn_pkgs_client }}"
+    udn_pkg_what: client VM
 
 - name: Install the client routing script
   ansible.builtin.template:

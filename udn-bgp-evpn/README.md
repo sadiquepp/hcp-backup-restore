@@ -13,7 +13,10 @@ you ever run it.
 
 **[quick-build.md](quick-build.md)** is the short version: the three
 `build-lab.sh` phases side by side - what each one builds, what it proves,
-what it cannot do, and the prerequisites for each.
+what it cannot do, and the prerequisites for each. It also covers the
+optional prebuilt lab image (`build-lab-image.yaml`), which pre-installs
+every package the lab's guests need so a build does not register four VMs
+with subscription-manager and run four rounds of dnf.
 
 **[clab-fabric.md](clab-fabric.md)** is the fabric side: what `virbr1`, the
 containerlab VM and the FRR containers actually are, what each phase uses, and

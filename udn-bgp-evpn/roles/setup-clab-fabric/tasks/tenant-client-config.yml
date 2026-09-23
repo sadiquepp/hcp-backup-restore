@@ -3,11 +3,11 @@
 # `client` is the loop variable from tenant-client-vms.yml.
 
 - name: Install test tooling on {{ client.name }}
-  ansible.builtin.dnf:
-    name:
-      - iproute
-      - tcpdump
-    state: present
+  ansible.builtin.include_tasks:
+    file: packages.yml
+  vars:
+    udn_pkg_list: "{{ udn_pkgs_client }}"
+    udn_pkg_what: "tenant client {{ client.name }}"
 
 - name: Install the tenant client routing script on {{ client.name }}
   ansible.builtin.template:

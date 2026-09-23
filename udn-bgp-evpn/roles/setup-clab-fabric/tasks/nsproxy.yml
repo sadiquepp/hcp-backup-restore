@@ -187,11 +187,11 @@
 # On the VM
 # ---------------------------------------------------------------------------
 - name: Install haproxy and the SELinux tooling the fallback may need
-  ansible.builtin.dnf:
-    name:
-      - haproxy
-      - policycoreutils-python-utils
-    state: present
+  ansible.builtin.include_tasks:
+    file: packages.yml
+  vars:
+    udn_pkg_list: "{{ udn_pkgs_nsproxy }}"
+    udn_pkg_what: tenant ingress
 
 # The namespace keyword is a compile-time option. Without it haproxy rejects
 # the config outright, so check the binary before rendering one it cannot read.
