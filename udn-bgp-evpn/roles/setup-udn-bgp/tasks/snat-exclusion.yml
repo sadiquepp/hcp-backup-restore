@@ -71,15 +71,41 @@
   changed_when: false
   failed_when: false
 
-# A row whose match column is empty masquerades unconditionally. Matching on
-# the whole line rather than splitting: ovn-nbctl quotes a value only when it
-# has to, so 'starts with the subnet and ends at the comma' is the one form
-# that does not depend on how the match itself is spelled.
+# STRIP THE QUOTES FIRST. ovn-nbctl --format=csv quotes each field AND the
+# ovsdb string inside it, so a real line looks like
+#
+#   """10.225.0.0/16""",""""""                      (empty match)
+#   """10.225.0.0/24""","""eth.dst == 0a:58:..."""   (match present)
+#
+# The first version of this anchored on a digit - '^[0-9./]+,\s*$' - which
+# matches neither. It selected nothing on every run, in every phase, and so
+# reported "Every advertised pod network is exempt from SNAT" while looking
+# straight at an unconditional rule. Removing every quote normalises both
+# shapes to 'subnet,' and 'subnet,match', which is also robust if ovn-nbctl
+# ever stops quoting.
+- name: Normalise the NAT rows
+  ansible.builtin.set_fact:
+    udn_bgp_snat_rows: >-
+      {{ udn_bgp_nat_raw.stdout_lines | default([])
+         | map('regex_replace', '"', '') | list }}
+
+# Zero parsed rows is NOT "nothing is broken" - a cluster always has SNAT
+# rules for its node addresses. It means the check cannot see, and that has to
+# fail rather than pass quietly, which is the whole reason this file exists.
+- name: Fail if the NAT rows could not be parsed at all
+  ansible.builtin.assert:
+    that: udn_bgp_snat_rows | select('search', '^[0-9]') | list | length > 0
+    fail_msg: >-
+      Read {{ udn_bgp_nat_raw.stdout_lines | default([]) | length }} line(s)
+      from ovn-nbctl and parsed 0 of them as 'logical_ip,match'. The output
+      format has changed and this check is blind, not clean. First line was
+      '{{ udn_bgp_nat_raw.stdout_lines | default(['(none)'], true) | first }}'.
+
 - name: Note which subnets are masqueraded unconditionally
   ansible.builtin.set_fact:
     udn_bgp_snat_open: >-
-      {{ udn_bgp_nat_raw.stdout_lines | default([])
-         | select('search', '^[0-9./]+,\s*$')
+      {{ udn_bgp_snat_rows
+         | select('search', '^[0-9][0-9./]*,\s*$')
          | map('regex_replace', ',.*$', '') | list }}
 
 - name: Note which of this cluster's advertised tenants are affected
@@ -137,7 +163,8 @@
   delay: 10
   until: >-
     udn_bgp_nat_raw_after.stdout_lines | default([])
-    | select('search', '^[0-9./]+,\s*$') | map('regex_replace', ',.*$', '')
+    | map('regex_replace', '"', '')
+    | select('search', '^[0-9][0-9./]*,\s*$') | map('regex_replace', ',.*$', '')
     | select('in', udn_bgp_tenants | map(attribute=udn_bgp_snat_attr) | list)
     | list | length == 0
 
@@ -147,7 +174,8 @@
       {{ udn_bgp_tenants
          | selectattr(udn_bgp_snat_attr, 'in',
              udn_bgp_nat_raw_after.stdout_lines | default([])
-             | select('search', '^[0-9./]+,\s*$')
+             | map('regex_replace', '"', '')
+             | select('search', '^[0-9][0-9./]*,\s*$')
              | map('regex_replace', ',.*$', '') | list)
          | map(attribute='name') | list }}
   when: udn_bgp_snat_broken | length > 0
