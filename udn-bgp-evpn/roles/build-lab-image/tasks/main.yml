@@ -36,6 +36,18 @@
 # virt-resize this lab already uses to build the clab VM disk. Checked
 # explicitly because the failure otherwise arrives as a bare "command not
 # found" several minutes into a task that has already copied 10G.
+- name: Fail fast if lab_root_password is missing from vault.yaml
+  ansible.builtin.assert:
+    that: lab_root_password is defined
+    fail_msg: >-
+      Add lab_root_password to vault.yaml (ansible-vault edit vault.yaml).
+      It is the root password baked into every guest built from this image,
+      so it is a credential and is deliberately not defaulted in the
+      repository - this one is public.
+
+        lab_root_password: <your password>
+    success_msg: "Root password will be taken from vault.yaml."
+
 - name: Check that virt-customize is available
   ansible.builtin.command:
     cmd: which virt-customize

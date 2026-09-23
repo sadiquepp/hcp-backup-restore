@@ -83,8 +83,19 @@ first, which is exactly that and nothing else — `basic_packages` and the key,
 *not* the in-place edit. On a host that is already set up it is a no-op, and
 the build refuses with instructions if the key is absent.
 
-`lab_root_password` and `lab_ssh_pubkey_path` in `vars.yaml` control what
-gets injected; the defaults match what `setup_bm_host.yaml` has always used.
+`lab_ssh_pubkey_path` in `vars.yaml` and **`lab_root_password` in
+`vault.yaml`** control what gets injected. The password is a credential, so
+it is not defaulted anywhere in this repository — the build refuses without
+it:
+
+```bash
+ansible-vault edit vault.yaml     # lab_root_password: <your password>
+```
+
+`setup_bm_host.yaml` reads the same variable when preparing the *base* image
+and keeps its historical `redhat` if it is unset, so flows that never touch
+the customized image are unaffected. Set it in `vault.yaml` and both images
+get the same password.
 
 That copies the base image, registers **the copy**, installs everything,
 then unregisters and cleans, and publishes the result as
@@ -114,7 +125,7 @@ is also the whole rollback procedure.
 | **What is in it** | `bind bind-utils curl git haproxy httpd iproute iptables-nft net-tools policycoreutils-python-utils syslinux syslinux-tftpboot tar tcpdump tftp-server vim`, plus `docker-ce docker-ce-cli containerd.io` unless `customized_lab_image_with_docker: false` |
 | **Where the list comes from** | `lab_pkgs_clab`, `lab_pkgs_client`, `lab_pkgs_nsclient`, `lab_pkgs_nsproxy`, `dns_packages`, `lb_packages`, `tftp_packages` in `vars.yaml`. The image installs their union and each guest verifies its own list — one source, so the two halves cannot drift |
 | **Rebuild** | `-e customized_lab_image_force=true`. It will not overwrite silently |
-| **Needs** | `guestfs-tools` (for `virt-customize` — the same package as the `virt-resize` the lab already uses), and `org_id`/`activation_key` in `vault.yaml` unless `customized_lab_image_register: false` |
+| **Needs** | `guestfs-tools` (for `virt-customize` — the same package as the `virt-resize` the lab already uses), `lab_root_password` in `vault.yaml`, and `org_id`/`activation_key` there too unless `customized_lab_image_register: false` |
 
 ### The helper VM
 

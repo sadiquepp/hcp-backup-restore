@@ -93,7 +93,7 @@
     cmd: >-
       export LIBGUESTFS_BACKEND=direct &&
       virt-customize -a "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
-      --root-password password:redhat
+      --root-password password:{{ lab_root_password | default('redhat') }}
       --ssh-inject "root:file:/root/.ssh/lab_rsa.pub"
       --selinux-relabel
       --run-command 'yum remove cloud-init* -y'

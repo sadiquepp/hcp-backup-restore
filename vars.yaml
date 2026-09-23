@@ -1587,8 +1587,18 @@ customized_lab_image_url: ""
 ## literals because a workshop handing out 20 hosts should not be stuck with
 ## one hardcoded root password, and because the image build and the base-image
 ## preparation have to agree on which key.
+##
+## lab_root_password is a CREDENTIAL and belongs in vault.yaml, not here -
+## this file is committed to a public repository. Set it with
+## `ansible-vault edit vault.yaml`:
+##
+##   lab_root_password: <the root password baked into the lab images>
+##
+## The image build asserts it is present. setup_bm_host.yaml's preparation of
+## the BASE image reads the same variable and keeps its historical 'redhat'
+## when it is unset, so nothing that does not use the customized image
+## changes behaviour.
 lab_ssh_pubkey_path: /root/.ssh/lab_rsa.pub
-lab_root_password: redhat
 
 ## Rebuild the image even if it is already there. Off by default because the
 ## build takes several minutes and re-registers with Red Hat each time.
