@@ -87,6 +87,27 @@
     - baseimage
     - labprereq
 
+# Deliberately early and dependency-free: it is pure vars -> file, so it is in
+# place before the helper is built, before any cluster exists, and it keeps
+# answering if the helper is later down. That is the whole reason for using
+# files rather than a resolver.
+#
+# blockinfile with a named marker, re-rendered on every run, so the block
+# cannot drift from ip_list - the one real hazard of /etc/hosts is an entry
+# that is stale and silently outranks correct DNS. Anything a user puts
+# outside the markers is left alone.
+- name: Publish the lab's cluster names in /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} hcp-lab cluster names (managed by setup-bm-host)"
+    block: "{{ lookup('template', 'etc-hosts-lab.j2') }}"
+    create: false
+    mode: '0644'
+  when: lab_etc_hosts_manage | bool
+  tags:
+    - etchosts
+    - dns
+
 # Optional, off by default, and tagged so it can be run on its own:
 #   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags vnc
 - name: Set up a VNC desktop on this host

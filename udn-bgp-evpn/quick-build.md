@@ -37,6 +37,23 @@ tmux new -s lab      # then ./build-lab.sh ...
 | **Local gateway mode** | `--vrflite` and `--evpn` require `routingViaHost: true`. `udn_bgp_set_local_gateway: true` in `vars.yaml` makes the `tenants` step do it. Flipping it is a second full `ovnkube-node` rollout. |
 | **`clusters` step is destructive-by-omission** | The cluster playbooks are not idempotent. A bare run refuses if a hub kubeconfig or the libvirt domains already exist. With clusters already up, start at `--from fabric`. |
 
+**Once, after the `bmhost` step: point this host at the helper for DNS.** The
+build does not need it — `setup_bm_host.yaml` writes every name the automation
+uses into `/etc/hosts`, which is why the run is deterministic without a
+resolver. You need it for names that block does not know: a route **you**
+create later will `NXDOMAIN` from the hypervisor while working fine inside the
+cluster, because `/etc/hosts` has no wildcards and the helper's zones do.
+
+```bash
+CON=$(nmcli -g GENERAL.CONNECTION device show "$(ip route show default | awk '{print $5; exit}')")
+nmcli con mod "$CON" ipv4.dns 192.168.122.21 ipv4.dns-options timeout:1
+nmcli con up "$CON"
+```
+
+The DHCP resolver stays behind it, so external names still work if the helper
+is down. Full explanation, and how to undo it, in the [root
+README](../README.md#resolving-the-labs-names-from-the-hypervisor).
+
 Optional but worth it if you build this lab more than once: **[the prebuilt
 image](#optional-once-the-prebuilt-lab-image)**, which removes four
 subscription-manager registrations and four rounds of `dnf` from every build.

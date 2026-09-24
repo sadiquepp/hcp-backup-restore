@@ -12,3 +12,62 @@ helper_disk_size: 100G
 # Partition inside rhel9_kvm_image to expand into the new space. Image
 # specific - check with `virt-filesystems --long --parts --blkdevs -h -a`.
 helper_resize_partition: /dev/sda4
+
+
+## --- /etc/hosts for the lab's cluster names ---------------------------------
+##
+## WHY THIS EXISTS. The hypervisor's own resolver is whatever DHCP gave it -
+## on a cloud metal instance, the VPC resolver - and it knows nothing about
+## mylab.com. The clusters install fine either way (the nodes resolve through
+## libvirt's dnsmasq on the lab network, which forwards the lab zones to the
+## helper), but every `oc` call the automation makes FROM THE HYPERVISOR goes
+## to api.<cluster>.<base_domain> out of the kubeconfig, and those are the
+## checks that fail: wait-for-cluster-operators, wait-for-workers-ready, ACM,
+## OADP, and the whole UDN lab.
+##
+## nsswitch consults files before dns, so these answer with no packet, no
+## timeout and no dependency on the helper being up - which is the point.
+## They are correct before the helper exists and while it is rebooting.
+##
+## SCOPE IS DELIBERATELY NARROW: only addresses that cannot move. Every name
+## here is a fixed ip_list octet on the helper's haproxy. Hosted-cluster
+## api/api-int are NOT here and must not be added - those follow MetalLB VIPs
+## that move between hubs at DR cutover, which is why the libvirt network caps
+## dnsmasq at max-cache-ttl=60. An /etc/hosts entry has no TTL and silently
+## outranks correct DNS, so pinning a movable address here would reproduce
+## exactly the stale-resolution failure that cap exists to bound.
+##
+## This does NOT give you wildcards. A route you create yourself will not
+## resolve from the hypervisor - see the split-DNS note in the root README for
+## the one-time nmcli step that fixes that.
+lab_etc_hosts_manage: true
+
+## Cluster zone -> the ip_list key holding its haproxy VIP. A cluster whose
+## key is absent from ip_list is skipped, so trimming vars.yaml down to one
+## hub does not break the render.
+## A list of pairs, not a dict keyed on the zone: Ansible does template dict
+## keys, but it is fragile enough to be worth not relying on.
+lab_etc_hosts_clusters:
+  - zone: "{{ hub_domain }}"
+    lb: hublb
+  - zone: "{{ hub2_domain }}"
+    lb: hub2lb
+  - zone: "{{ hub_disconnected_domain }}"
+    lb: hubdlb
+  - zone: "{{ hub2_disconnected_domain }}"
+    lb: hub2dlb
+  - zone: "{{ sno_name }}.{{ base_domain }}"
+    lb: "{{ sno_name }}"
+
+## Route names published under *.apps.<cluster>, so the web console is usable
+## from a browser on this host - over VNC, or through `ssh -D` with SOCKS5
+## remote DNS. All of them resolve to the same VIP as api; the router picks
+## the route from the Host header.
+##
+## oauth-openshift is not optional: the console redirects to it to log in, so
+## without it you reach a console you cannot sign into.
+## downloads-openshift-console backs the console's "Command line tools" page.
+lab_apps_routes:
+  - console-openshift-console
+  - oauth-openshift
+  - downloads-openshift-console

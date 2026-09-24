@@ -302,6 +302,71 @@ Creates and configures the `helper` VM that provides DNS and HAProxy for the lab
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
 ```
 
+### Resolving the lab's names from the hypervisor
+
+`setup_bm_host.yaml` writes a marked block into `/etc/hosts` with every fixed
+name the automation needs — `api` and `api-int` for each cluster, the console,
+OAuth and downloads routes, and the helper. That is what makes an end-to-end
+run deterministic: `nsswitch` reads `files` before `dns`, so those names answer
+with no packet, no timeout and no dependency on the helper being up.
+
+It is rendered from `ip_list` on every run and lives between markers, so it
+cannot drift and anything you add outside the markers is left alone. Turn it
+off with `lab_etc_hosts_manage: false`; extend the route list with
+`lab_apps_routes`.
+
+**Hosted-cluster `api`/`api-int` are deliberately absent.** Those follow
+MetalLB VIPs that move between hubs at DR cutover — the reason the libvirt
+network caps dnsmasq at `max-cache-ttl=60`. An `/etc/hosts` entry has no TTL
+and silently outranks correct DNS, so pinning one there would reproduce the
+stale-resolution failure that cap exists to bound. Only addresses that cannot
+move belong in the block.
+
+#### Do this once: point the host at the helper, so your own routes resolve
+
+The block covers the names the *automation* uses. It cannot cover a route
+**you** create — `/etc/hosts` has no wildcards, and your new route will simply
+`NXDOMAIN` from the hypervisor while working perfectly from inside the
+cluster.
+
+The helper's zones do carry `*.apps` wildcards, so one step fixes it for
+everything, now and later. **Run it after `setup_bm_host.yaml`** — the helper
+has to exist first:
+
+```bash
+CON=$(nmcli -g GENERAL.CONNECTION device show "$(ip route show default | awk '{print $5; exit}')")
+nmcli con mod "$CON" ipv4.dns 192.168.122.21 ipv4.dns-options timeout:1
+nmcli con up "$CON"
+```
+
+Use `nmcli`, not an edit to `/etc/resolv.conf`: NetworkManager owns that file
+and will overwrite a hand-edit on the next DHCP renew, reboot or `nmcli con
+up`. Manually configured servers are written **before** the DHCP-learned ones,
+so the helper is consulted first and your original resolver stays in the file
+behind it.
+
+That ordering is the safety net. If the helper is down, lookups cost the
+`timeout:1` and then fall through to the DHCP resolver; if its `named` answers
+SERVFAIL, glibc moves to the next server immediately. External names keep
+working either way — the failure is slow, not broken. And because
+`/etc/hosts` is still consulted first, the automation's own names never depend
+on this at all.
+
+Check it, and undo it if you want the host back the way it was:
+
+```bash
+cat /etc/resolv.conf                                     # helper first, then DHCP
+getent hosts console-openshift-console.apps.hub.mylab.com
+getent hosts whatever-route-you-made.apps.hub.mylab.com  # the wildcard at work
+
+nmcli con mod "$CON" -ipv4.dns 192.168.122.21 && nmcli con up "$CON"
+```
+
+Over VNC on a cloud metal instance this is what makes the web console usable.
+Browsing from your laptop instead, `ssh -D 1080` with SOCKS5 remote DNS gives
+the browser the host's resolution, so every route name works with nothing
+configured locally.
+
 ### Setup Mirror Registry (disconnected only)
 
 **Skip this section entirely when `disconnected_install: false`.**
