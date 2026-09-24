@@ -117,32 +117,30 @@ ansible-galaxy collection install community.crypto
 
 ```bash
 git clone https://github.com/sadiquepp/hcp-backup-restore.git
-cp rhel-9.8-x86_64-kvm.qcow2 /var/lib/libvirt/images/   # base_image_dir in vars.yaml
+mkdir -p /opt/lab-images
+cp rhel-9.8-x86_64-kvm.qcow2 /opt/lab-images/   # base_image_dir in vars.yaml
 ```
 
 If using a different RHEL 9 KVM image, update `rhel9_kvm_image` in `vars.yaml`.
 
-**On a host where libvirt has never been installed**, `/var/lib/libvirt/images`
-does not exist yet — the libvirt RPM creates it, and the automation installs
-libvirt. So there is nowhere to stage the image before the first run, and
-pre-creating a path an RPM owns is not something you should have to do by
-hand. This is the normal case on a fresh cloud metal instance.
+**Why `/opt/lab-images` and not `/var/lib/libvirt/images`.** On a host where
+libvirt has never been installed the latter does not exist yet — the libvirt
+RPM creates it, and this lab is what installs libvirt. So there is nowhere to
+stage the image before the first run, and the only way forward is to
+hand-create a path an RPM owns. On a fresh cloud metal instance that is not an
+edge case, it is the first thing that happens. `/opt/lab-images` is owned by
+nobody, so making it yourself is unremarkable.
 
-`base_image_dir` is only ever *read* from, so point it at a directory you
-control:
+`base_image_dir` is only ever *read* from, so it can be any directory you
+control — including a mount point on a separate, larger volume, which is
+where it belongs when the root disk is small.
 
-```yaml
-# vars.yaml
-base_image_dir: /opt/lab-images
-```
+> **Upgrading a lab built before this default changed?** The image is where
+> you left it; only the variable moved. Either move the image to
+> `/opt/lab-images`, or put `base_image_dir: "{{ download_dir }}"` back in
+> `vars.yaml`. Both work.
 
-```bash
-mkdir -p /opt/lab-images
-cp rhel-9.8-x86_64-kvm.qcow2 /opt/lab-images/
-```
-
-That is also where you want it when the root disk is small and the images
-belong on a separate, larger volume. `download_dir` is a different matter —
+`download_dir` is a different matter —
 those are live VM disks, so moving *it* means giving the new path libvirt's
 SELinux context:
 

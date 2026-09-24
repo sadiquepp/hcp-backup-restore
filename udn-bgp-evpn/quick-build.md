@@ -116,7 +116,7 @@ size and mtime are unchanged. So no backup of the base image is needed — but
 if you want one anyway it is one command:
 
 ```bash
-cp --sparse=always /var/lib/libvirt/images/rhel-9.8-x86_64-kvm.qcow2{,.orig}
+cp --sparse=always /opt/lab-images/rhel-9.8-x86_64-kvm.qcow2{,.orig}
 ```
 
 **The image's presence is the switch.** There is no enable flag to set or
@@ -159,8 +159,8 @@ One image, built once on one host, copied to the rest:
 
 ```bash
 # on the build host, after ./build-lab.sh --only image
-scp /var/lib/libvirt/images/rhel-9.8-x86_64-kvm-customized.qcow2 \
-    host2:/var/lib/libvirt/images/
+scp /opt/lab-images/rhel-9.8-x86_64-kvm-customized.qcow2 \
+    host2:/opt/lab-images/          # base_image_dir on both ends
 ```
 
 The customized image is **self-contained** — it already carries the root

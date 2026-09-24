@@ -25,16 +25,20 @@
     enabled: yes
 
 
-# Neither of these existed before this role ran, and nothing in the repository
-# created them. download_dir is /var/lib/libvirt/images by default, which the
-# libvirt RPM creates - so it appears above, in the package task, and this is
-# a no-op. It stops being a no-op the moment either path is moved onto a
-# separate volume, which on a cloud metal instance with a small root disk is
-# the normal case.
+# download_dir is /var/lib/libvirt/images by default, which the libvirt RPM
+# creates - so by the time this runs, after the package task above, it is a
+# no-op. It stops being one the moment that path is moved onto a separate
+# volume, which on a cloud metal instance with a small root disk is normal.
 #
-# base_image_dir is only ever read from, so it needs no libvirt context. It
-# is created here for the same reason: so that relocating it is one variable
-# and not a variable plus a mkdir.
+# base_image_dir (/opt/lab-images) is a different case: nothing creates it,
+# and it is only ever read from, so it needs no libvirt context. Creating it
+# here means relocating it is one variable rather than a variable plus a
+# mkdir - but note the ordering. THE IMAGE HAS TO BE STAGED BEFORE THIS ROLE
+# RUNS, and this task is what creates the directory, so on a genuinely fresh
+# host you mkdir it yourself to put the qcow2 there. That is the whole point
+# of the default no longer being /var/lib/libvirt/images: making a directory
+# nobody owns is fine, pre-creating one an RPM owns is not.
+#
 # NO mode: on purpose. /var/lib/libvirt/images ships 0711 and is owned by the
 # libvirt RPM; naming a mode here would quietly relax it to 0755 on every run.
 # Without one, an existing directory keeps whatever it has and only a
@@ -68,11 +72,16 @@
       the RHEL KVM guest image and put it there - the automation cannot
       fetch it, it needs your Red Hat login.
 
-      On a fresh host {{ base_image_dir }} may not exist yet if it is left at
-      the default (/var/lib/libvirt/images, created by the libvirt RPM). Set
-      base_image_dir in vars.yaml to a directory you control instead - it is
-      only ever read from, so it can live anywhere, and on a cloud metal
-      instance it probably should be on a larger volume than the root disk.
+      The directory itself has just been created by this role, so an empty
+      {{ base_image_dir }} means the copy step, not the path.
+
+      IF THIS LAB RAN BEFORE base_image_dir DEFAULTED TO /opt/lab-images, the
+      image is probably still in /var/lib/libvirt/images. Move it
+      (mv /var/lib/libvirt/images/{{ rhel9_kvm_image }} {{ base_image_dir }}/)
+      or set base_image_dir back to "{{ '{{ download_dir }}' }}" in vars.yaml.
+      Either is fine: it is only ever read from, so it can live anywhere - and
+      on a cloud metal instance it probably should be on a larger volume than
+      the root disk.
     success_msg: "Base image found at {{ base_image_dir }}/{{ rhel9_kvm_image }}."
   tags:
     - baseimage

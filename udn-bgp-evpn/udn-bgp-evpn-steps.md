@@ -257,14 +257,15 @@ udn_bgp_password: "a-shared-key"
 
 ```bash
 # the RHEL9 image the helper, the clab VM and the client VMs are copied from.
-# base_image_dir in vars.yaml, which defaults to download_dir.
-cp rhel-9.8-x86_64-kvm.qcow2 /var/lib/libvirt/images/
+# base_image_dir in vars.yaml.
+mkdir -p /opt/lab-images
+cp rhel-9.8-x86_64-kvm.qcow2 /opt/lab-images/
 ```
 
-> On a host where libvirt has never been installed, that directory does not
-> exist yet - the libvirt RPM creates it. Set `base_image_dir` to a directory
-> you control instead (`/opt/lab-images`, say); it is only ever read from, so
-> it can live anywhere. See the root README's prerequisites.
+> Not `/var/lib/libvirt/images`: on a host where libvirt has never been
+> installed that does not exist yet - the libvirt RPM creates it, and this lab
+> is what installs libvirt. `base_image_dir` is only ever read from, so it can
+> live anywhere you control. See the root README's prerequisites.
 
 > **Every command in this document runs from `udn-bgp-evpn/`.**
 >
@@ -319,7 +320,7 @@ oc get nodes                              # all Ready
 # and the SNO, if 1.2 was run
 oc --kubeconfig=/var/lib/libvirt/images/sno_install/auth/kubeconfig get nodes
 
-ls /var/lib/libvirt/images/rhel-9.8-x86_64-kvm.qcow2
+ls /opt/lab-images/rhel-9.8-x86_64-kvm.qcow2   # base_image_dir
 ```
 
 OpenShift **4.22+** for path C (nodes as VTEPs). Paths A and B work on 4.21.

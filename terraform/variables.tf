@@ -147,7 +147,7 @@ variable "repo_branch" {
 }
 
 variable "base_image_dir" {
-  description = "Where the RHEL KVM qcow2 is staged. Deliberately NOT /var/lib/libvirt/images, which does not exist until the libvirt RPM creates it."
+  description = "Where the RHEL KVM qcow2 is staged. Matches base_image_dir in the repo's vars.yaml; NOT /var/lib/libvirt/images, which does not exist until the libvirt RPM creates it."
   type        = string
   default     = "/opt/lab-images"
 }
