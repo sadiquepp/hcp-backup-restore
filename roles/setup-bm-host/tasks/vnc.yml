@@ -1,0 +1,164 @@
+---
+# A VNC desktop on the bare-metal host, for virt-manager and guest consoles.
+#
+#   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags vnc
+#
+# OFF BY DEFAULT (vnc_enabled). This starts a listening remote-access service
+# on a machine that, on a cloud metal instance, may sit on a public subnet -
+# not something to switch on for everyone who runs this repository.
+#
+# TWO THINGS ABOUT VNC SECURITY, because they decide how this is configured:
+#
+#   1. THE PASSWORD IS TRUNCATED TO 8 CHARACTERS. VNC authentication is a DES
+#      challenge-response with a 56-bit key, so vncpasswd silently keeps only
+#      the first 8 characters of whatever you give it. "Set a strong
+#      password" is not achievable here in the usual sense - a 32-character
+#      generated secret would be a 8-character secret wearing a disguise, and
+#      a credentials file claiming otherwise would be lying. So this
+#      generates exactly 8 characters from a wide alphabet and says so.
+#
+#   2. THE SESSION IS NOT ENCRYPTED under the default security type. Anyone
+#      on the path sees the screen and the keystrokes.
+#
+# Hence vnc_localhost_only, which defaults to true: the server binds to
+# loopback and you reach it over an ssh tunnel, which gives it the encryption
+# and the authentication the protocol does not have.
+#
+#   ssh -L 5900{{ vnc_display }}:localhost:5900{{ vnc_display }} root@<host>
+#   vncviewer localhost:{{ vnc_display }}
+#
+# Setting it false exposes the port directly. On a public subnet that is a
+# bad trade whatever the password is, and the assert below makes you say so
+# explicitly rather than arriving there by leaving a default alone.
+
+- name: Refuse to expose VNC directly without an explicit acknowledgement
+  ansible.builtin.assert:
+    that: vnc_localhost_only | bool or (vnc_expose_acknowledged | default(false) | bool)
+    fail_msg: >-
+      vnc_localhost_only is false, which binds VNC to every interface with an
+      8-character password and no encryption. If this host is on a public
+      subnet, do not. Use the default (loopback) and an ssh tunnel:
+
+        ssh -L 590{{ vnc_display }}:localhost:590{{ vnc_display }} root@<host>
+
+      If you genuinely want it exposed and have restricted it another way -
+      a security group limited to your address, a VPN - set
+      vnc_expose_acknowledged: true as well.
+
+# A desktop session. tigervnc starts an X server; without a session manager
+# there is nothing in it. This is the heavyweight part of the install, so it
+# is a variable: set vnc_desktop_group to "" on a host that already has one.
+- name: Install a desktop environment for the VNC session
+  ansible.builtin.dnf:
+    name: "@{{ vnc_desktop_group }}"
+    state: present
+  when: vnc_desktop_group | length > 0
+
+- name: Create the VNC user
+  ansible.builtin.user:
+    name: "{{ vnc_user }}"
+    create_home: true
+    shell: /bin/bash
+  register: vnc_user_created
+
+- name: Create the VNC user's config directory
+  ansible.builtin.file:
+    path: "{{ vnc_user_created.home }}/.vnc"
+    state: directory
+    owner: "{{ vnc_user }}"
+    group: "{{ vnc_user }}"
+    mode: '0700'
+
+# Generated once and reused. The password lookup writes the plaintext to
+# vnc_password_file and returns it; on every later run it reads that file
+# back, so re-running this play does not invalidate the password someone is
+# already using.
+#
+# EXACTLY 8 characters, for the reason in the header. Wide alphabet, minus
+# the shell-hostile quoting characters, so it can be pasted anywhere.
+- name: Generate (once) the VNC password
+  ansible.builtin.set_fact:
+    vnc_password_resolved: >-
+      {{ vnc_password | default(lookup('password', vnc_password_file
+         ~ ' length=8 chars=ascii_letters,digits,!#%*+-=?@^_'), true) }}
+  no_log: true
+
+- name: Lock down the credentials file
+  ansible.builtin.file:
+    path: "{{ vnc_password_file }}"
+    owner: root
+    group: root
+    mode: '0600'
+  when: vnc_password is not defined
+
+# vncpasswd -f reads the password on stdin and writes the obfuscated form to
+# stdout, which is the only non-interactive way to set it.
+- name: Check whether the VNC password file already matches
+  ansible.builtin.stat:
+    path: "{{ vnc_user_created.home }}/.vnc/passwd"
+  register: vnc_passwd_file
+
+- name: Write the VNC password
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      printf '%s' {{ vnc_password_resolved | quote }} |
+      vncpasswd -f > {{ vnc_user_created.home }}/.vnc/passwd
+  args:
+    executable: /bin/bash
+  no_log: true
+  when: not vnc_passwd_file.stat.exists
+
+- name: Secure the VNC password file
+  ansible.builtin.file:
+    path: "{{ vnc_user_created.home }}/.vnc/passwd"
+    owner: "{{ vnc_user }}"
+    group: "{{ vnc_user }}"
+    mode: '0600'
+
+- name: Configure the VNC session
+  ansible.builtin.copy:
+    dest: "{{ vnc_user_created.home }}/.vnc/config"
+    owner: "{{ vnc_user }}"
+    group: "{{ vnc_user }}"
+    mode: '0600'
+    content: |
+      session={{ vnc_session }}
+      geometry={{ vnc_geometry }}
+      alwaysshared
+      {% if vnc_localhost_only | bool %}
+      localhost
+      {% endif %}
+  notify: restart vncserver
+
+# lineinfile, not the `echo >>` this replaces: that appends a duplicate on
+# every run, and tigervnc refuses to start when a display is listed twice.
+- name: Map the display to the VNC user
+  ansible.builtin.lineinfile:
+    path: /etc/tigervnc/vncserver.users
+    regexp: "^:{{ vnc_display }}="
+    line: ":{{ vnc_display }}={{ vnc_user }}"
+    create: true
+    mode: '0644'
+  notify: restart vncserver
+
+- name: Enable and start the VNC server
+  ansible.builtin.systemd:
+    name: "vncserver@:{{ vnc_display }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Say how to reach it
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'VNC is on loopback only. Tunnel to it:
+         ssh -L 590' ~ vnc_display ~ ':localhost:590' ~ vnc_display ~ ' root@<this host>
+         then point a viewer at localhost:' ~ vnc_display
+      if vnc_localhost_only | bool else
+      'VNC is listening on ALL interfaces, port 590' ~ vnc_display ~ ' - restrict it
+       at the security group.' }}
+      Password: {{ 'from vault (vnc_password)' if vnc_password is defined
+                   else 'generated, in ' ~ vnc_password_file ~ ' (root, 0600)' }}.
+      VNC keeps only the first 8 characters of any password - that is the
+      protocol, not this automation.

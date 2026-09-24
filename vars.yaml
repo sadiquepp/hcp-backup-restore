@@ -210,6 +210,50 @@ hosted_clusters_disconnected:
 ## (-e target_hub=hub2); fuller note further down.
 target_hub: hub
 
+## --- VNC desktop on the bare-metal host --------------------------------------
+##
+##   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags vnc
+##
+## For virt-manager and guest consoles. OFF by default: it starts a listening
+## remote-access service, which is not something to enable for everyone who
+## runs this repository - especially on a cloud metal instance that may be on
+## a public subnet.
+vnc_enabled: false
+vnc_user: vncuser
+vnc_display: 99
+vnc_geometry: 1920x1080
+vnc_session: gnome
+
+## The desktop environment the session runs. tigervnc starts an X server;
+## without a session manager there is nothing in it. Set to "" on a host that
+## already has a desktop - this group is a large install.
+vnc_desktop_group: Server with GUI
+
+## VNC AUTHENTICATION KEEPS ONLY THE FIRST 8 CHARACTERS. It is a DES
+## challenge-response with a 56-bit key, so vncpasswd truncates silently. A
+## longer generated secret would be an 8-character secret with extra
+## characters that authenticate nothing, so the automation generates exactly
+## 8 from a wide alphabet rather than pretending otherwise.
+##
+## Generated on first run and reused after - re-running the play does not
+## invalidate a password someone is already using. root-owned, 0600.
+vnc_password_file: /root/.vnc-credentials
+
+## To choose the password yourself instead, put vnc_password in vault.yaml
+## (never here). Still 8 characters, for the reason above.
+
+## Bind to loopback only, and reach it over an ssh tunnel:
+##
+##   ssh -L 5999:localhost:5999 root@<host>   # for vnc_display 99
+##
+## That gives the session the encryption and the authentication VNC does not
+## have - the protocol sends the screen and the keystrokes in clear under the
+## default security type. Setting this false also requires
+## vnc_expose_acknowledged: true, so exposing it is a decision rather than a
+## default left alone.
+vnc_localhost_only: true
+
+
 ## --- Backup target (OADP) --------------------------------------------------
 
 ## AWS access key id/secret go in vault.yaml as oadp_aws_access_key_id /

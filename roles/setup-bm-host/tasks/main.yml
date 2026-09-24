@@ -78,6 +78,16 @@
     - baseimage
     - labprereq
 
+# Optional, off by default, and tagged so it can be run on its own:
+#   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags vnc
+- name: Set up a VNC desktop on this host
+  ansible.builtin.include_tasks:
+    file: vnc.yml
+    apply:
+      tags: [vnc]
+  when: vnc_enabled | default(false) | bool
+  tags: [vnc]
+
 # Once Check if Key Exists
 - name: Check the SSH KeyPair Existence
   stat:

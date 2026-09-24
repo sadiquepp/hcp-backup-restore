@@ -1,2 +1,7 @@
 ---
-# handlers file for roles/setup-bm-host
+- name: restart vncserver
+  ansible.builtin.systemd:
+    name: "vncserver@:{{ vnc_display }}"
+    state: restarted
+    daemon_reload: true
+  when: vnc_enabled | default(false) | bool
