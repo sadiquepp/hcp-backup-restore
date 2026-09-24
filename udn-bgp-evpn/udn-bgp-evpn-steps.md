@@ -261,6 +261,11 @@ udn_bgp_password: "a-shared-key"
 cp rhel-9.8-x86_64-kvm.qcow2 /var/lib/libvirt/images/
 ```
 
+> On a host where libvirt has never been installed, that directory does not
+> exist yet - the libvirt RPM creates it. Set `base_image_dir` to a directory
+> you control instead (`/opt/lab-images`, say); it is only ever read from, so
+> it can live anywhere. See the root README's prerequisites.
+
 > **Every command in this document runs from `udn-bgp-evpn/`.**
 >
 > ```bash

@@ -113,7 +113,7 @@ ansible-galaxy collection install community.libvirt
 ansible-galaxy collection install community.crypto
 ```
 
-- Download `rhel-9.8-x86_64-kvm.qcow2` (or latest RHEL 9 KVM image) from [access.redhat.com/downloads](https://access.redhat.com/downloads) and place it in the role files directory:
+- Download `rhel-9.8-x86_64-kvm.qcow2` (or latest RHEL 9 KVM image) from [access.redhat.com/downloads](https://access.redhat.com/downloads) and put it in `base_image_dir`:
 
 ```bash
 git clone https://github.com/sadiquepp/hcp-backup-restore.git
@@ -121,6 +121,37 @@ cp rhel-9.8-x86_64-kvm.qcow2 /var/lib/libvirt/images/   # base_image_dir in vars
 ```
 
 If using a different RHEL 9 KVM image, update `rhel9_kvm_image` in `vars.yaml`.
+
+**On a host where libvirt has never been installed**, `/var/lib/libvirt/images`
+does not exist yet — the libvirt RPM creates it, and the automation installs
+libvirt. So there is nowhere to stage the image before the first run, and
+pre-creating a path an RPM owns is not something you should have to do by
+hand. This is the normal case on a fresh cloud metal instance.
+
+`base_image_dir` is only ever *read* from, so point it at a directory you
+control:
+
+```yaml
+# vars.yaml
+base_image_dir: /opt/lab-images
+```
+
+```bash
+mkdir -p /opt/lab-images
+cp rhel-9.8-x86_64-kvm.qcow2 /opt/lab-images/
+```
+
+That is also where you want it when the root disk is small and the images
+belong on a separate, larger volume. `download_dir` is a different matter —
+those are live VM disks, so moving *it* means giving the new path libvirt's
+SELinux context:
+
+```bash
+semanage fcontext -a -t virt_image_t "/new/path(/.*)?" && restorecon -R /new/path
+```
+
+`setup_bm_host.yaml` creates both directories if they are missing, and fails
+early — naming the path — if the base image has not been staged.
 
 - Set up OADP s3 Bucket. An example with AWS is shown here. Refer the respective documentation for other cloud providers.
 
