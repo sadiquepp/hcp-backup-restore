@@ -20,6 +20,19 @@
     lab_repo_dir: /root/hcp-backup-restore
     lab_image_name: rhel-9.8-x86_64-kvm.qcow2
 
+    # ~/.tmux.conf. The build runs for hours inside tmux, so these are about
+    # watching it rather than taste - set lab_tmux_conf: [] to skip entirely.
+    #
+    # mouse on: scroll the pane with the wheel instead of ctrl-b [ first.
+    #   The trade is that a plain drag now selects into tmux's buffer, not the
+    #   terminal's - hold SHIFT while dragging for the native selection your
+    #   system clipboard sees.
+    # history-limit: the default 2000 lines does not survive one cluster
+    #   install, so the error you want to scroll back to is already gone.
+    lab_tmux_conf:
+      - "set -g mouse on"
+      - "set -g history-limit 50000"
+
   tasks:
     - name: Install the tools the lab is driven with
       ansible.builtin.dnf:
@@ -108,6 +121,37 @@
           vnc_localhost_only: true
           vnc_tunnel_user: ec2-user
       register: lab_overrides
+
+    # Both accounts: the playbook connects as ansible_user and becomes root,
+    # and the docs tell you to build from a root shell, so a config written to
+    # only one of them is missing exactly when you want it.
+    #
+    # Home directories come from passwd rather than being assumed - /home/ec2-user
+    # is right on this AMI and is not a fact worth hardcoding on a host that
+    # someone may rebuild from a different one.
+    - name: Read the passwd database
+      ansible.builtin.getent:
+        database: passwd
+      when: lab_tmux_conf | length > 0
+
+    # blockinfile, not copy: a marked block leaves anything else in the file
+    # alone, so re-running the bootstrap never discards settings you added.
+    - name: Configure tmux for watching a long build
+      ansible.builtin.blockinfile:
+        path: "{{ ansible_facts.getent_passwd[item][4] }}/.tmux.conf"
+        marker: "# {mark} hcp-lab"
+        block: "{{ lab_tmux_conf | join('\n') }}"
+        create: true
+        owner: "{{ item }}"
+        # The gid from passwd, not the user's name: they match on RHEL but
+        # that is a convention, not a guarantee, and a file group-owned by
+        # root in someone's home is a small surprise waiting to happen.
+        group: "{{ ansible_facts.getent_passwd[item][2] }}"
+        mode: '0644'
+      loop:
+        - root
+        - "{{ ansible_user }}"
+      when: lab_tmux_conf | length > 0
 
     - name: Look for the staged base image
       ansible.builtin.stat:

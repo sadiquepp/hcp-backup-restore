@@ -128,6 +128,12 @@ match on first boot.
   creates it
 - writes `vars-metal.yaml` with `worker_memory`, `worker_cpu`,
   `base_image_dir` and the VNC settings
+- writes `~/.tmux.conf` for **root and `ec2-user`** — `mouse on` so the wheel
+  scrolls a pane, and `history-limit 50000` because the default 2000 lines
+  does not survive one cluster install. A marked block, so anything else in
+  the file is left alone; `lab_tmux_conf: []` skips it. Note that with the
+  mouse on, a plain drag selects into tmux's buffer rather than the
+  terminal's — hold **shift** for the selection your clipboard sees
 - reports what is still missing
 
 It is an ordinary playbook and can be re-run on its own:
