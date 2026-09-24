@@ -28,15 +28,54 @@
     dest: "{{ sno_install_folder }}"
     remote_src: true
 
+# `agent create image` SHELLS OUT TO oc. It extracts the base RHCOS ISO from
+# the release payload with it, and when that is not on PATH the build dies
+# eight seconds in with `exec: "oc": executable file not found in $PATH`,
+# after a misleading "Failed to extract base ISO from release payload - check
+# registry configuration" that points at the registry rather than at a missing
+# binary.
+#
+# THIS ROLE USED TO INHERIT oc FROM setup-hub-cluster, which unpacks it into
+# /usr/bin. build-lab.sh runs the hub and the SNO IN PARALLEL (play_bg), so
+# that was a race: the ISO build won or lost depending on which play reached
+# its step first. It only ever looked stable because a host that had built
+# this lab before already had /usr/bin/oc from the previous run - on a fresh
+# machine there is nothing to inherit. Worse than losing the race would be
+# half-winning it, exec'ing an oc that the hub's unarchive is still writing.
+#
+# So fetch our own, beside the installer, and put THAT on PATH for the build
+# below. No shared path, nothing to order against, and the client matches the
+# cluster version for the same reason the installer does.
+- name: Get the OpenShift client for {{ ocp_major_version }}.{{ ocp_minor_version }}
+  ansible.builtin.get_url:
+    url: >-
+      https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-client-linux.tar.gz
+    dest: "{{ sno_install_folder }}/openshift-client-linux.tar.gz"
+    mode: '0644'
+
+- name: Extract oc
+  ansible.builtin.unarchive:
+    src: "{{ sno_install_folder }}/openshift-client-linux.tar.gz"
+    dest: "{{ sno_install_folder }}"
+    remote_src: true
+
+# Proves the binary runs, here, rather than letting openshift-install discover
+# it is truncated or the wrong architecture in the middle of the ISO build.
+- name: Report the client version
+  ansible.builtin.command:
+    cmd: "{{ sno_install_folder }}/oc version --client"
+  register: sno_oc_version
+  changed_when: false
+
 - name: Report the installer version
   ansible.builtin.command:
     cmd: "{{ sno_install_folder }}/openshift-install version"
   register: sno_installer_version
   changed_when: false
 
-- name: Show the installer version
+- name: Show the installer and client versions
   ansible.builtin.debug:
-    msg: "{{ sno_installer_version.stdout_lines }}"
+    msg: "{{ sno_installer_version.stdout_lines + sno_oc_version.stdout_lines }}"
 
 # Kept where they can be read after the fact. `agent create image` CONSUMES
 # both manifests - they are deleted from the install directory once the ISO is
@@ -67,11 +106,16 @@
     - install-config.yaml
     - agent-config.yaml
 
+# PATH, not a copy into /usr/bin: openshift-install finds oc with exec.LookPath,
+# so prepending the install folder is enough, and it leaves /usr/bin/oc alone
+# for the hub play that owns it and for whatever the user has installed.
 - name: Build the agent ISO
   ansible.builtin.command:
     cmd: "{{ sno_install_folder }}/openshift-install --dir {{ sno_install_folder }} agent create image"
   register: sno_iso_build
   changed_when: true
+  environment:
+    PATH: "{{ sno_install_folder }}:{{ ansible_env.PATH }}"
 
 - name: Report the ISO build
   ansible.builtin.debug:

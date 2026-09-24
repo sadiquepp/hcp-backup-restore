@@ -35,6 +35,7 @@ next hunt more than any individual command does.
 | **A check that reads the global knob when the per-interface one decides** | `conf.all.rp_filter=0` looks fine; `conf.enp8s0.rp_filter=1` is what drops the packet, because the effective value is `max(all, iface)`. | The reassuring value is the one that is easy to read, and it is not the one in force. |
 | **A component that is internally consistent but stale** | leaf1's config was self-consistent and correct - built from a `vars.yaml` two commits old, so a whole VLAN was simply absent. | Everything you inspect agrees with everything else you inspect. |
 | **A test that asserts a conclusion instead of measuring it** | The `--shared` cross-cluster verdict was reasoned out from one VRF-Lite observation and never run against a shared lab. It contradicted a row in this repo's own README. | The test fails loudly and correctly, and ten cells of real output get read as a lab fault. Hours go into repairing something that was behaving as designed and documented. |
+| **One play depending on another play's side effect, while both run in parallel** | `setup-sno` needed `oc`; nothing in it installed `oc`; `setup-hub-cluster` unpacks one into `/usr/bin`. `build-lab.sh` starts both with `play_bg`. | The dependency is invisible - it is not an import, a `when:` or a variable, just a file that usually happens to be there. It passes on every host that has built the lab before, and fails on the first clean one. |
 | **State that is wrong with no event left to correct it** | Both cases below. A reconcile ran while a dependency was down, produced the wrong answer, and nothing re-triggered it when the dependency came back. | Retrying the *symptom* never helps. Only forcing the reconcile does. |
 
 ### Two rules that came out of this iteration
@@ -888,6 +889,114 @@ and still read as a lab fault for the first several minutes of the hunt.
 When a check fails on a path it has never passed on, rank "the check is
 wrong" *first*, not last — and grep the repo's own docs for the behaviour
 before touching the lab.
+
+---
+
+## Case 5 — the SNO agent ISO failed on a fresh host and nowhere else
+
+**Phase:** clusters (step 4), `./build-lab.sh`, first build on a new c5.metal.
+**Verdict:** a race between two plays that run in parallel, exposed by the
+host being clean. Fixed in `setup-sno`.
+
+### The symptom
+
+```
+TASK [setup-sno : Build the agent ISO] ***
+fatal: [localhost]: FAILED! => {"cmd": [".../openshift-install", "--dir",
+  ".../sno_install", "agent", "create", "image"], "delta": "0:00:08", "rc": 1,
+ "stderr": "...
+   level=info msg=Extracting base ISO from release payload
+   level=warning msg=Failed to extract base ISO from release payload - check registry configuration
+   level=info msg=Downloading base ISO
+   level=error msg=failed to write asset (Agent Installer ISO) to disk: cannot generate ISO image due to configuration errors
+   level=fatal msg=... exec: \"oc\": executable file not found in $PATH"}
+```
+
+And then, from the same shell, seconds later:
+
+```
+# oc version
+Client Version: 4.22.15
+```
+
+`oc` was right there. That is the whole case: **the binary existed by the time
+anyone looked, and did not exist at the moment it was needed.**
+
+### The misleading line
+
+`Failed to extract base ISO from release payload - check registry
+configuration` is a `warning`, it names the registry, and it arrives four
+lines before the actual cause. It sends you to the pull secret, to quay.io
+reachability, to `ImageContentSourcePolicy` — none of which is involved.
+
+Read to the `fatal` line. `exec: "oc": executable file not found in $PATH` is
+the whole diagnosis, and it is unambiguous: `openshift-install` shells out to
+`oc` to pull the base RHCOS ISO out of the release payload.
+
+### Why it had never happened before
+
+Two facts, neither visible from the failing task:
+
+1. **`setup-sno` never installed `oc`.** It downloads `openshift-install`
+   into `sno_install_folder` and assumes a client is already on `PATH`.
+2. **`setup-hub-cluster` installs one**, into `/usr/bin`, from
+   `clients/ocp/latest/`.
+
+And `build-lab.sh` runs them at the same time:
+
+```bash
+play_bg hub ../setup_hub_cluster.yaml --skip-tags acm
+play_bg sno ../setup_sno.yaml
+wait_all
+```
+
+So whether the ISO built came down to which background play reached its own
+step first. On any host that had built this lab before, `/usr/bin/oc` was
+already there from the previous run and the race could not be lost — which is
+exactly why it survived every run on the old baremetal and failed on the
+first clean cloud instance.
+
+The version printout is the proof, not a guess. The SNO role pins
+`4.22.10`; the `oc` on the host reported **4.22.15**, which is what
+`clients/ocp/latest/` serves. The client on that box came from the hub play.
+It just arrived late.
+
+There is a worse version of this failure that nobody hit: losing the race by
+a smaller margin, and exec'ing an `oc` that the hub's `unarchive` is still
+in the middle of writing.
+
+### The fix
+
+Not ordering, and not a `when:`. **Remove the dependency**: `setup-sno`
+fetches its own version-matched client beside the installer, and the ISO
+build gets that directory prepended to `PATH`.
+
+```yaml
+- name: Build the agent ISO
+  ansible.builtin.command:
+    cmd: "{{ sno_install_folder }}/openshift-install --dir {{ sno_install_folder }} agent create image"
+  environment:
+    PATH: "{{ sno_install_folder }}:{{ ansible_env.PATH }}"
+```
+
+`openshift-install` resolves `oc` with `exec.LookPath`, so prepending is
+sufficient — and nothing writes to `/usr/bin`, so the hub play keeps sole
+ownership of the copy the user's own shell picks up.
+
+### What to take from it
+
+**"It works on the host I always use" is not evidence.** A machine that has
+run the automation before carries the residue of every previous run, and that
+residue silently satisfies dependencies nobody declared. The workshop plan —
+20+ clean hosts — turns every one of those into a first-build failure.
+
+**A parallel step needs its dependencies to be self-contained, or it is not
+parallel.** `play_bg` makes ordering unavailable as a fix, which is the right
+pressure: it forces the dependency to be removed rather than sequenced.
+
+**When a tool prints a warning and a fatal, the fatal is the diagnosis.** The
+warning here described a consequence — extraction failed — in the vocabulary
+of the wrong subsystem.
 
 ---
 
