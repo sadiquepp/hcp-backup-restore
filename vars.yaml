@@ -482,6 +482,14 @@ basic_packages:
   - tigervnc-server
   - tigervnc
   - python3-pip
+  ## nmstatectl, which `openshift-install agent create image` runs ON THIS
+  ## HOST to validate each host's networkConfig before it will build the ISO.
+  ## Without it the SNO install dies at image creation with
+  ##   failed to validate network yaml for host 0, install nmstate package,
+  ##   exec: "nmstatectl": executable file not found in $PATH
+  ## Easy to miss on a long-lived lab host that picked it up as a dependency
+  ## years ago; a fresh machine has nothing.
+  - nmstate
 
 ##  Variables required by DNS Role 
 dns_packages:
