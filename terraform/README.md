@@ -8,11 +8,42 @@ and `vault.yaml`.
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars   # edit it
-terraform init
-terraform apply
+./lab-up.sh
 ```
 
-`terraform apply` prints the addresses and exactly what to do next.
+That is init, apply and the Ansible bootstrap in one command, ending with the
+addresses and exactly what to do next.
+
+## `lab-up.sh`
+
+| | |
+| --- | --- |
+| `./lab-up.sh` | provision and bootstrap |
+| `./lab-up.sh bootstrap` | re-run the bootstrap playbook only |
+| `./lab-up.sh stage-image FILE` | copy the RHEL KVM qcow2 to every host |
+| `./lab-up.sh ssh [N]` | ssh to host *N* (default 1) |
+| `./lab-up.sh tunnel [N]` | ssh with the VNC port forwarded |
+| `./lab-up.sh status` | what is provisioned, and the next steps again |
+| `./lab-up.sh destroy` | tear it all down |
+
+`-y` skips the confirmation on apply and destroy; `--no-bootstrap` provisions
+only. Arguments it does not recognise are passed through to
+`ansible-playbook`, so `./lab-up.sh bootstrap --limit hcp-lab-2 -vv` works.
+
+It preflights before spending anything — `terraform` and `ansible-playbook`
+on `PATH`, AWS credentials that actually resolve, `terraform.tfvars` present,
+and the private key existing where `ssh_private_key_path` says it does. Each
+of those otherwise fails minutes in, after you have walked away, and one of
+them fails with the instances already billing.
+
+### Why the script runs Ansible instead of Terraform running it
+
+`terraform apply` on its own does run the bootstrap, through a `local-exec`
+provisioner. But a provisioner buffers its output until it finishes, and a
+playbook that fails taints the `null_resource` — so retrying means another
+`terraform apply` rather than just re-running the playbook. `lab-up.sh`
+therefore applies with `run_bootstrap=false` and runs the playbook itself, in
+the foreground. Using `terraform` directly still works exactly as before.
 
 ## What it creates
 
@@ -41,6 +72,7 @@ VNC, the cluster API, the consoles and the tenant ingress are all reached by
 forwarding a port over the same connection:
 
 ```bash
+./lab-up.sh tunnel                  # or, by hand:
 ssh -i ~/.ssh/id_ed25519 -L 5999:localhost:5999 ec2-user@<ip>
 ```
 
@@ -80,7 +112,14 @@ ansible-playbook -i inventory.ini ansible/bootstrap.yml
 ## The two things you still do by hand
 
 **1. The RHEL KVM image.** It needs your Red Hat login, so nothing here can
-fetch it.
+fetch it. Once it is on your own machine, `stage-image` copies it to every
+host and puts it in `base_image_dir`:
+
+```bash
+./lab-up.sh stage-image ~/Downloads/rhel-9.8-x86_64-kvm.qcow2
+```
+
+By hand, if you prefer:
 
 ```bash
 scp -i ~/.ssh/id_ed25519 rhel-9.8-x86_64-kvm.qcow2 ec2-user@<ip>:/tmp/
@@ -114,6 +153,6 @@ merge it into `vars.yaml`. `worker_memory: 24576` and `worker_cpu: 16` suit
 ## Cost
 
 `c5.metal` is a large on-demand instance and a 1000 GiB gp3 volume is not
-free. `terraform destroy` when you are done — and note that destroying the
+free. `./lab-up.sh destroy` when you are done — and note that destroying the
 instance destroys the lab on it, including any golden images you have not
 copied off.
