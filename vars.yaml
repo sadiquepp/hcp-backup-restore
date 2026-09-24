@@ -62,6 +62,24 @@ rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
 ##
 ## MIGRATING an existing lab - move the image rather than re-downloading it:
 ##   mv roles/setup-bm-host/files/*.qcow2 /var/lib/libvirt/images/
+##
+## ON A FRESH HOST, POINT THIS SOMEWHERE ELSE. The default follows
+## download_dir, which is /var/lib/libvirt/images - a directory the libvirt
+## RPM creates. On a machine where libvirt has never been installed (a new
+## AWS metal instance, for instance) it does not exist yet, so there is
+## nowhere to stage the qcow2 before the first run, and pre-creating a path
+## an RPM owns is not something to have to do by hand.
+##
+## base_image_dir is only ever READ from - nothing here needs libvirt to
+## resolve it - so it can be any directory you control:
+##
+##   base_image_dir: /opt/lab-images
+##
+## That is also where you want it if the image lives on a separate, larger
+## volume, which on a cloud metal instance with a small root disk it usually
+## should. download_dir is different: those are live VM disks, so moving it
+## means giving the new path libvirt's SELinux context
+## (semanage fcontext -a -t virt_image_t "<path>(/.*)?" && restorecon -R).
 base_image_dir: "{{ download_dir }}"
 
 ## --- OpenShift version -----------------------------------------------------

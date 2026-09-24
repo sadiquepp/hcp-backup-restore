@@ -25,6 +25,59 @@
     enabled: yes
 
 
+# Neither of these existed before this role ran, and nothing in the repository
+# created them. download_dir is /var/lib/libvirt/images by default, which the
+# libvirt RPM creates - so it appears above, in the package task, and this is
+# a no-op. It stops being a no-op the moment either path is moved onto a
+# separate volume, which on a cloud metal instance with a small root disk is
+# the normal case.
+#
+# base_image_dir is only ever read from, so it needs no libvirt context. It
+# is created here for the same reason: so that relocating it is one variable
+# and not a variable plus a mkdir.
+# NO mode: on purpose. /var/lib/libvirt/images ships 0711 and is owned by the
+# libvirt RPM; naming a mode here would quietly relax it to 0755 on every run.
+# Without one, an existing directory keeps whatever it has and only a
+# directory this task actually creates gets the default.
+- name: Ensure the image directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+  loop: "{{ [download_dir, base_image_dir] | unique }}"
+  tags:
+    - baseimage
+    - labprereq
+
+# Fails HERE, naming the path, rather than several tasks later inside
+# virt-customize with "could not open disk image". On a host that has never
+# run this lab the base image is the one thing the automation cannot produce
+# for itself, so it is worth one explicit check.
+- name: Check the base image has been staged
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
+  register: bm_base_image
+  tags:
+    - baseimage
+    - labprereq
+
+- name: Fail if the base image is missing
+  ansible.builtin.assert:
+    that: bm_base_image.stat.exists
+    fail_msg: >-
+      No base image at {{ base_image_dir }}/{{ rhel9_kvm_image }}. Download
+      the RHEL KVM guest image and put it there - the automation cannot
+      fetch it, it needs your Red Hat login.
+
+      On a fresh host {{ base_image_dir }} may not exist yet if it is left at
+      the default (/var/lib/libvirt/images, created by the libvirt RPM). Set
+      base_image_dir in vars.yaml to a directory you control instead - it is
+      only ever read from, so it can live anywhere, and on a cloud metal
+      instance it probably should be on a larger volume than the root disk.
+    success_msg: "Base image found at {{ base_image_dir }}/{{ rhel9_kvm_image }}."
+  tags:
+    - baseimage
+    - labprereq
+
 # Once Check if Key Exists
 - name: Check the SSH KeyPair Existence
   stat:
