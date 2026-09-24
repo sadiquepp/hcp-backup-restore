@@ -24,8 +24,13 @@
 # loopback and you reach it over an ssh tunnel, which gives it the encryption
 # and the authentication the protocol does not have.
 #
-#   ssh -L 5900{{ vnc_display }}:localhost:5900{{ vnc_display }} root@<host>
-#   vncviewer localhost:{{ vnc_display }}
+#   ssh -L $((5900+<display>)):localhost:$((5900+<display>)) <vnc_tunnel_user>@<host>
+#   vncviewer localhost:<display>
+#
+# NOT root@ on a cloud image. Red Hat's AWS AMIs disable root ssh through
+# cloud-init, so root@ answers 'Please login as the user "ec2-user"'. The
+# tunnel does not need root anyway - port forwarding is just a shell - hence
+# vnc_tunnel_user, which is only ever used to print a correct command.
 #
 # Setting it false exposes the port directly. On a public subnet that is a
 # bad trade whatever the password is, and the assert below makes you say so
@@ -39,7 +44,7 @@
       8-character password and no encryption. If this host is on a public
       subnet, do not. Use the default (loopback) and an ssh tunnel:
 
-        ssh -L 590{{ vnc_display }}:localhost:590{{ vnc_display }} root@<host>
+        ssh -L {{ 5900 + vnc_display | int }}:localhost:{{ 5900 + vnc_display | int }} {{ vnc_tunnel_user }}@<host>
 
       If you genuinely want it exposed and have restricted it another way -
       a security group limited to your address, a VPN - set
@@ -153,10 +158,11 @@
   ansible.builtin.debug:
     msg: >-
       {{ 'VNC is on loopback only. Tunnel to it:
-         ssh -L 590' ~ vnc_display ~ ':localhost:590' ~ vnc_display ~ ' root@<this host>
+         ssh -L ' ~ (5900 + vnc_display | int) ~ ':localhost:' ~ (5900 + vnc_display | int)
+         ~ ' ' ~ vnc_tunnel_user ~ '@<this host>
          then point a viewer at localhost:' ~ vnc_display
       if vnc_localhost_only | bool else
-      'VNC is listening on ALL interfaces, port 590' ~ vnc_display ~ ' - restrict it
+      'VNC is listening on ALL interfaces, port ' ~ (5900 + vnc_display | int) ~ ' - restrict it
        at the security group.' }}
       Password: {{ 'from vault (vnc_password)' if vnc_password is defined
                    else 'generated, in ' ~ vnc_password_file ~ ' (root, 0600)' }}.

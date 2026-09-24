@@ -244,7 +244,7 @@ vnc_password_file: /root/.vnc-credentials
 
 ## Bind to loopback only, and reach it over an ssh tunnel:
 ##
-##   ssh -L 5999:localhost:5999 root@<host>   # for vnc_display 99
+##   ssh -L 5999:localhost:5999 ec2-user@<host>   # 5900 + vnc_display
 ##
 ## That gives the session the encryption and the authentication VNC does not
 ## have - the protocol sends the screen and the keystrokes in clear under the
@@ -252,6 +252,13 @@ vnc_password_file: /root/.vnc-credentials
 ## vnc_expose_acknowledged: true, so exposing it is a decision rather than a
 ## default left alone.
 vnc_localhost_only: true
+
+## Only used to print a tunnel command you can paste. NOT root on a cloud
+## image: Red Hat's AWS AMIs disable root ssh through cloud-init, so root@
+## answers 'Please login as the user "ec2-user"'. The tunnel does not need
+## root regardless - port forwarding is just a shell - so this is whichever
+## user you actually log in as. Set it to root on a host where root ssh works.
+vnc_tunnel_user: ec2-user
 
 
 ## --- Backup target (OADP) --------------------------------------------------
