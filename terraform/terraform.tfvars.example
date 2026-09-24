@@ -1,0 +1,22 @@
+## Copy to terraform.tfvars and edit. terraform.tfvars is gitignored.
+
+## YOUR address, not 0.0.0.0/0. Find it with:
+##   curl -s https://checkip.amazonaws.com
+allowed_ssh_cidrs = ["203.0.113.4/32"]
+
+## The public key to install, and the private half this machine will use for
+## the Ansible bootstrap.
+ssh_public_key       = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... you@example.com"
+ssh_private_key_path = "~/.ssh/id_ed25519"
+
+region         = "us-east-2"
+instance_count = 1
+
+## Sized for 192 GiB of host RAM (c5.metal). See vars-metal.yaml on the host.
+worker_memory = 24576
+worker_cpu    = 16
+
+## THE DEFAULT RHEL AMI ROOT VOLUME IS 10 GiB. This is the whole of the lab's
+## storage - base image, customized image, helper, containerlab VM, clients,
+## three masters, three workers, an SNO.
+root_volume_size = 1000
