@@ -81,6 +81,33 @@ characters and does not encrypt the session, so exposing it would be a poor
 trade at any password length. It binds to loopback and the tunnel supplies
 the encryption and authentication VNC lacks.
 
+### If the AMI lookup returns nothing
+
+```
+Error: Your query returned no results. Please change your search criteria
+  with data.aws_ami.rhel9
+```
+
+The image is found by name, and Red Hat renames them. The suffix went from
+`-Hourly2-GP2` to `-Hourly2-GP3`; both are matched now, but if it moves
+again, pin an AMI and the lookup is skipped entirely:
+
+```bash
+aws ec2 describe-images --owners 309956199498 --region us-east-2 \
+  --filters 'Name=name,Values=RHEL-9.*_HVM-*-x86_64-*-Hourly2-GP3' \
+  --query 'reverse(sort_by(Images,&CreationDate))[:5].[ImageId,Name]' \
+  --output text
+```
+
+```hcl
+ami_id = "ami-0123456789abcdef0"    # region-specific
+```
+
+Pinning is worth doing for a workshop anyway: `most_recent = true` means the
+RHEL minor version changes under you between applies, so hosts built on
+different mornings are not the same host. The `ami` output records which
+image was used.
+
 ### The root volume is the thing to get right
 
 A RHEL AMI's root volume defaults to **10 GiB**. This lab stores the base

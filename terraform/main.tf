@@ -17,13 +17,30 @@ locals {
 
 # Red Hat's own account. Filtering on the owner rather than a name pattern
 # alone matters: anyone can publish an AMI called RHEL-9-something.
+#
+# THE SUFFIX IS THE FRAGILE PART. Red Hat renamed these from -Hourly2-GP2 to
+# -Hourly2-GP3, so a GP2-only pattern matches nothing for RHEL 9 and the
+# failure is the unhelpful "Your query returned no results". Both are listed
+# below - the values of a name filter are OR'd, and most_recent then picks
+# the newest across them. If the name changes again, skip the lookup
+# entirely with ami_id (see variables.tf); the count below is what makes
+# that possible, since a data source that errors would otherwise fail the
+# plan whether or not its result was used.
+#
+# Hourly2 is on-demand/PAYG. Access2 is BYOS and needs a subscription
+# attached at the account level, which is not what this lab assumes.
 data "aws_ami" "rhel9" {
+  count = var.ami_id == "" ? 1 : 0
+
   most_recent = true
   owners      = ["309956199498"]
 
   filter {
-    name   = "name"
-    values = ["RHEL-9.*_HVM-*-x86_64-*-Hourly2-GP2"]
+    name = "name"
+    values = [
+      "RHEL-9.*_HVM-*-x86_64-*-Hourly2-GP3",
+      "RHEL-9.*_HVM-*-x86_64-*-Hourly2-GP2",
+    ]
   }
   filter {
     name   = "architecture"
@@ -32,6 +49,10 @@ data "aws_ami" "rhel9" {
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
+  }
+  filter {
+    name   = "state"
+    values = ["available"]
   }
 }
 
@@ -117,7 +138,11 @@ resource "aws_key_pair" "lab" {
 resource "aws_instance" "metal" {
   count = var.instance_count
 
-  ami                    = data.aws_ami.rhel9.id
+  # one() rather than [0]: with ami_id set the data source has count 0, and
+  # one([]) is null where [0] would be an index error. The ternary never
+  # reaches it in that case, but this does not depend on the conditional
+  # short-circuiting, which is a thing Terraform does not promise.
+  ami                    = var.ami_id != "" ? var.ami_id : one(data.aws_ami.rhel9[*].id)
   instance_type          = var.instance_type
   availability_zone      = local.az
   subnet_id              = aws_subnet.public.id

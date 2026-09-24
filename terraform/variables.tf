@@ -33,6 +33,25 @@ variable "ssh_private_key_path" {
 ## Sizing and placement
 ## ---------------------------------------------------------------------------
 
+# The escape hatch for the AMI lookup in main.tf. Leave it empty and the
+# newest RHEL 9 PAYG image is found by name; set it and the lookup is skipped
+# altogether. Worth knowing about because the lookup's failure mode is the
+# opaque "Your query returned no results", and because pinning one AMI is how
+# you get 20 workshop hosts that are all identical rather than all "whatever
+# was newest that morning".
+#
+#   aws ec2 describe-images --owners 309956199498 --region us-east-2 \
+#     --filters 'Name=name,Values=RHEL-9.*_HVM-*-x86_64-*-Hourly2-GP3' \
+#     --query 'reverse(sort_by(Images,&CreationDate))[:5].[ImageId,Name]' \
+#     --output text
+#
+# An AMI ID is region-specific: change region and this must change with it.
+variable "ami_id" {
+  description = "Pin a specific AMI. Empty looks up the newest RHEL 9 PAYG image by name."
+  type        = string
+  default     = ""
+}
+
 variable "region" {
   description = "AWS region."
   type        = string

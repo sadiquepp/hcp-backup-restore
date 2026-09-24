@@ -67,3 +67,18 @@ output "next_steps" {
     consoles the same way, by forwarding ports over that connection.
   EOT
 }
+
+# Worth recording. For a workshop you want every host on the same image, and
+# the name says which RHEL 9 minor version the lab is actually running on -
+# `most_recent = true` means that changes under you between applies. Pin it
+# with ami_id once you have one that works.
+output "ami" {
+  description = "The AMI the instances were built from."
+  value = {
+    # distinct() first: one() errors on a list with more than one element,
+    # and instance_count is 20-odd for a workshop. Every instance takes the
+    # same AMI expression, so distinct collapses to exactly one.
+    id   = one(distinct(aws_instance.metal[*].ami))
+    name = var.ami_id != "" ? "(pinned via ami_id)" : one(data.aws_ami.rhel9[*].name)
+  }
+}

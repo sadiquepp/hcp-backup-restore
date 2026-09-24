@@ -20,3 +20,8 @@ worker_cpu    = 16
 ## storage - base image, customized image, helper, containerlab VM, clients,
 ## three masters, three workers, an SNO.
 root_volume_size = 1000
+
+## Pin the RHEL 9 AMI instead of looking up the newest by name. Region
+## specific. See "If the AMI lookup returns nothing" in README.md - and pin it
+## for a workshop, so every host is built from the same image.
+# ami_id = "ami-0123456789abcdef0"
