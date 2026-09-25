@@ -401,7 +401,27 @@ isolation: violet still cannot reach `blue`, or the lab's management network.
 design.
 
 **Measured:** a violet pod on the hub and one on the SNO each ping
-`www.google.com` with 0% loss.
+`www.google.com` with 0% loss. One echo from the SNO pod, captured inside
+leaf2 - encapsulated in, plain out, and the reverse for the reply:
+
+```
+eth10  In  100.64.0.20 > 10.0.0.2 VXLAN vni 601   10.206.128.4 > 142.251.151.119 echo request
+vni601 In                                          10.206.128.4 > 142.251.151.119 echo request
+br601  In                                          10.206.128.4 > 142.251.151.119 echo request
+eth0   Out                                         10.206.128.4 > 142.251.151.119 echo request
+eth0   In                                          142.251.151.119 > 10.206.128.4 echo reply
+violet Out                                         142.251.151.119 > 10.206.128.4 echo reply
+br601  Out                                         142.251.151.119 > 10.206.128.4 echo reply
+vni601 Out                                         142.251.151.119 > 10.206.128.4 echo reply
+eth10  Out 10.0.0.2 > 100.64.0.20 VXLAN vni 601   142.251.151.119 > 10.206.128.4 echo reply
+```
+
+`eth10` is leaf2's fabric link, `vni601` its VXLAN device, `br601` the L3VNI
+bridge enslaved to the `violet` VRF. The source is still `10.206.128.4` on
+`eth0`: the NAT happens one hop later, on the containerlab host. On the way
+back the reply matches `10.206.0.0/16 dev violet` in leaf2's main table, which
+hands it to the VRF, where the SNO's type-5 route sends it back to
+`100.64.0.20`.
 
 The EVPN phase checks it end to end from a violet pod on each cluster
 (`udn_bgp_internet_probe`, `http://1.1.1.1/` by default; `""` to skip), and on
@@ -411,6 +431,13 @@ failure names the hops to walk in order. By hand:
 oc -n udn-violet exec <udn-test pod> -- curl -sI http://1.1.1.1/
 oc debug node/<node> -- chroot /host ip route show vrf <violet vrf> default
 docker exec clab-udnbgp-leaf2 vtysh -c 'show bgp l2vpn evpn route type prefix'
+
+# the capture above, on the containerlab host, while the pod pings.
+# udp[39] = 1 keeps VXLAN whose inner packet is ICMP - drops the tenant
+# ingress health checks that otherwise fill VNI 601 every 2s
+PID=$(docker inspect -f '{{.State.Pid}}' clab-udnbgp-leaf2)
+nsenter -t $PID -n tcpdump -ni any \
+  '(udp port 4789 and (udp[12:4] >> 8) = 601 and udp[39] = 1) or icmp'
 ```
 
 ### What a stretched Layer2 UDN across two clusters actually does
