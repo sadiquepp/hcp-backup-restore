@@ -973,6 +973,24 @@ oc --kubeconfig=<sno> -n udn-green exec <pod> -- ping -c3 10.204.0.9
 # 0% loss, ttl=64 - no gateway, no route, no NAT anywhere in the path
 ```
 
+**Since that measurement, `violet` is on both clusters too** - the routed
+counterpart, one L3VNI (`601`) with the hub allocating from `10.206.0.0/17` and
+the SNO from `10.206.128.0/17`. Expected, not yet measured: two more rows and
+columns, with `hub/violet` and `sno/violet` answering each other and nothing
+else, the summary reporting 6 crossings, and violet listed as routed. The cell
+to read is `sno/violet` against `blue`'s address: silent, because a different
+route target on the same fabric is a different network. Cross-check that
+violet is routed rather than bridged, and node to node:
+
+```bash
+oc --kubeconfig=<sno> -n udn-violet exec <pod> -- ping -c3 <hub violet pod>
+# TTL below 64 - routed, where green's stays at 64
+oc debug node/<sno node> -- chroot /host ip route show table all | grep '^10\.206\.'
+# the hub's violet /24s, next hop a hub node's 100.64.0.x VTEP
+```
+
+See "What a routed Layer3 UDN across two clusters does" in `README.md`.
+
 ### 8.5 Test: the same question from outside
 
 8.4 asks from inside the clusters. The tenant ingress asks from outside, and on

@@ -5,8 +5,18 @@
 #   UDN_KUBECONFIGS="/a/kubeconfig /b/kubeconfig" scripts/udn-xcluster-curl.sh
 #   scripts/udn-xcluster-curl.sh --vrflite <kubeconfig> <kubeconfig>
 #
-# EVPN asks: does a tenant reach ITSELF in the other cluster, over one
-# stretched Layer2 domain, and does nothing else answer at all.
+# EVPN asks: does a tenant reach ITSELF in the other cluster, and does nothing
+# else answer at all. Two shapes of "itself", both built on this lab:
+#
+#   Layer2 (green, purple)  one stretched broadcast domain on an L2VNI -
+#                           bridged, MAC routes (type-2), one subnet shared
+#   Layer3 (violet)         one routed tenant on an L3VNI - each cluster owns
+#                           a slice of the subnet (evpn_udn_subnets) and routes
+#                           to the other's over prefix routes (type-5)
+#
+# The Layer3 row has a control built in: blue is on the hub beside violet with
+# a different route target, so violet on the SNO must reach violet on the hub
+# and NOT blue. Same fabric, same VTEPs - the route target is the boundary.
 #
 # VRF-Lite asks a different question, because there is no stretched Layer2 and
 # no tenant exists in both clusters. It asks whether the OPENINGS in
@@ -47,8 +57,9 @@
 # unresolvable by ping is the most informative one here.
 #
 # WHAT A PASS MEANS. Same tenant reaches same tenant in either cluster, and
-# nothing else answers at all. That is one broadcast domain spanning two
-# clusters, with tenant isolation intact across it.
+# nothing else answers at all. For a Layer2 tenant that is one broadcast domain
+# spanning two clusters; for a Layer3 tenant it is one routed network spanning
+# them; in both, tenant isolation intact across the boundary.
 set -uo pipefail
 
 PORT="${UDN_WEB_PORT:-8080}"
@@ -61,7 +72,9 @@ LEAKS="${UDN_VRF_LEAKS:-}"
 kubeconfigs=()
 while (( $# )); do
     case "$1" in
-        -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        # The whole leading comment block, however long it grows - a fixed
+        # line range silently truncated the help the first time it did.
+        -h|--help) awk 'NR == 1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"; exit 0 ;;
         --evpn)    MODE="evpn"; shift ;;
         --vrflite) MODE="vrflite"; shift ;;
         --shared)  MODE="shared"; shift ;;
@@ -89,6 +102,7 @@ command -v oc >/dev/null || { echo "oc not found in PATH" >&2; exit 1; }
 # single-cluster script single-cluster, and keying by address alone cannot
 # survive two pods sharing one.
 declare -A WEBADDR SRCPOD SRCNS SRCKUBE TARGETS RESULT
+declare -A CROSSED_T=()   # tenants that answered across the cluster boundary
 keys=(); addrs=()
 
 echo "Discovering web pods and test pods in each cluster"
@@ -253,6 +267,7 @@ if [[ "$MODE" == "evpn" ]]; then
                     bad=$((bad+1))
                 elif [[ "${src%%/*}" != "$want_cluster" ]]; then
                     crossed=$((crossed+1))
+                    CROSSED_T["$src_tenant"]=1
                 fi
             elif [[ "$got" != "(no answer)" ]]; then
                 echo "  LEAK    $src -> $a  serves none of [${TARGETS[$a]}] but got: $got"
@@ -435,10 +450,48 @@ if [[ "$MODE" == "evpn" ]]; then
     echo "  clean: every tenant reached its own pods in BOTH clusters,"
     echo "         and nothing reached a tenant it does not belong to."
     echo
-    echo "  ${crossed} of those answers crossed a cluster boundary. Those packets left"
-    echo "  one cluster's VTEP, crossed the fabric as VXLAN on the tenant's VNI, and"
-    echo "  were delivered inside the other cluster - with no gateway, no route and"
-    echo "  no address translation anywhere in the path."
+    echo "  ${crossed} of those answers crossed a cluster boundary, from:"
+    echo "  ${!CROSSED_T[*]}"
+    echo "  Each left one cluster's VTEP as VXLAN on the tenant's VNI and was delivered"
+    echo "  inside the other cluster, with no address translation anywhere in the path."
+    # Layer2 vs Layer3 is a property of the tenant, which the page does not
+    # carry - read it from vars.yaml, best effort, the same way the VRF-Lite
+    # verdict reads udn_vrf_leaks. Without it the two explanations print
+    # unlabelled rather than guessing.
+    vars_yaml="$(dirname "$(readlink -f "$0")")/../../vars.yaml"
+    topo=""
+    if command -v python3 >/dev/null && [[ -r "$vars_yaml" ]]; then
+        topo=$(python3 - "$vars_yaml" <<'PY2' 2>/dev/null
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1])) or {}
+print(' '.join('%s:%s' % (t['name'], t.get('topology', 'Layer3'))
+               for t in (d.get('udn_bgp_tenants') or [])))
+PY2
+        )
+    fi
+    l2=""; l3=""
+    for t in "${!CROSSED_T[@]}"; do
+        case " $topo " in
+            *" $t:Layer2 "*) l2+="$t " ;;
+            *" $t:Layer3 "*) l3+="$t " ;;
+        esac
+    done
+    if [[ -n "$l2" || -z "$topo" ]]; then
+        echo
+        echo "  Layer2${l2:+ (${l2% })}: BRIDGED. One broadcast domain on an L2VNI - the"
+        echo "  destination was learned as a MAC (type-2 route), and no router touched"
+        echo "  the packet between the two pods."
+    fi
+    if [[ -n "$l3" || -z "$topo" ]]; then
+        echo
+        echo "  Layer3${l3:+ (${l3% })}: ROUTED. Each cluster owns a slice of the subnet and"
+        echo "  advertises its node subnets as type-5 routes under the tenant's one"
+        echo "  route target. The source node routed the packet into the tenant's VRF,"
+        echo "  onto the L3VNI, straight to the destination node's VTEP - leaf1 only"
+        echo "  carries the outer packet. A different route target on the same fabric"
+        echo "  (blue beside violet on the hub) stayed silent above: the boundary is"
+        echo "  the route target, not the cluster."
+    fi
     for a in "${addrs[@]}"; do
         if [[ "${TARGETS[$a]}" == *" "* ]]; then
             echo

@@ -351,18 +351,25 @@ ingress asked by hostname.
 
 **What it builds.** The cluster nodes are VTEPs. VXLAN runs between them and
 type-5 routes carry a per-tenant VNI. `green` and `purple` exist in **both**
-clusters as one stretched Layer2 domain.
+clusters as one stretched Layer2 domain, and `violet` exists in both as one
+**routed** Layer3 tenant - each cluster allocating from its own half of
+`10.206.0.0/16` (`evpn_udn_subnets`).
 
 **What it proves.** That a tenant reaches **itself** in the other cluster
 over one stretched broadcast domain — a macVRF on one L2VNI is *meant* to
 exist in both clusters, which is the whole point. `udn-xcluster-curl.sh`
 auto-detects this mode from the duplicate tenants and asks that question.
+`violet` asks it for a routed tenant: the SNO's violet reaches the hub's over
+type-5 routes and a node-to-node tunnel on VNI 601, while `blue` beside it on
+the hub - a different route target on the same fabric - stays silent.
 
 **Needs 4.22** and local gateway mode. The border-leaf handoff variant works
 on 4.21 and is described in `README.md`.
 
 **Watch out:** addresses stay unambiguous only because `evpn_l2_excludes`
-gives each cluster its own half of the prefix to allocate from. Infrastructure
+gives each cluster its own half of the prefix to allocate from (and, for
+`violet`, `evpn_udn_subnets` its own half of the subnet - the run refuses a
+routed tenant on two clusters without one). Infrastructure
 addresses (`10.204.0.1` gateway, `10.204.0.2` management port) collide across
 clusters and **cannot** be split — OVN-Kubernetes derives the MAC from the IP,
 so one cluster's is shadowed at the VTEP.
@@ -410,7 +417,10 @@ than layering:
 
 `fabric` re-renders the containerlab topology (`clab_topology=bgp` for
 `--shared` and `--vrflite`, `evpn` for `--evpn`), and `tenants` recreates the
-CUDNs on the right subnets. Only the `bgp` topology puts the per-tenant
+CUDNs on the right subnets. It first removes **every** declared tenant's
+namespace and CUDN, not only the ones the new phase builds - a cluster's
+tenant list differs by phase (`violet` is on the hub under `--evpn` only), and
+a leftover from the previous phase would sit on its old transport. Only the `bgp` topology puts the per-tenant
 `<vrf_prefix>.1` addresses on leaf1 that VRF-Lite peers with.
 
 ---
@@ -421,7 +431,7 @@ CUDNs on the right subnets. Only the `bgp` topology puts the per-tenant
 | --- | --- | --- |
 | `--shared` | `--host`: every pod from one client, root namespace | every cross-cluster cell **silent**; same-cluster cross-tenant silent (the ACL) |
 | `--vrflite` | `--proxy`: the tenant ingress by hostname | the `udn_vrf_leaks` matrix — openings real, shut pairs shut |
-| `--evpn` | `--proxy` | same tenant, both clusters, over the stretched Layer2 |
+| `--evpn` | `--proxy` | same tenant, both clusters: bridged for `green`/`purple`, routed for `violet`; `violet` → `blue` silent |
 
 `xcluster` needs **both** kubeconfigs and `web` on both clusters. Built with
 the SNO skipped, it says so and moves on rather than failing the run.

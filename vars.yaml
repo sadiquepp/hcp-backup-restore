@@ -1756,15 +1756,44 @@ clab_clusters:
     install_folder: "{{ hub_install_folder }}"
     asn: 64512
     ## Explicit, and it has to be: a cluster with no tenants list builds
-    ## EVERY tenant in udn_bgp_tenants, which since violet was added would
-    ## put the SNO's tenant on the hub as well. violet exists precisely to be
-    ## the one network that is on one cluster only.
+    ## EVERY tenant in udn_bgp_tenants, which would put the SNO's tenant,
+    ## violet, on the hub in the phases where violet must be on one cluster
+    ## only - shared and VRF-Lite, which have no VNI or route target to keep
+    ## two clusters' copies of it apart.
     tenants:
       - blue
       - red
       - orange
       - green
       - purple
+
+    ## Phase 4 adds violet, the one ROUTED tenant that spans both clusters.
+    ## green and purple show a stretched broadcast domain (Layer2, type-2
+    ## routes); violet shows the Layer3 counterpart: one tenant, one L3VNI and
+    ## one route target, with each cluster holding its own slice of the
+    ## subnet (violet's evpn_udn_subnets) and routing to the other's over
+    ## type-5 routes. And blue beside it is the control - a different route
+    ## target on the same fabric, so violet on the SNO reaches violet on the
+    ## hub and not blue.
+    tenants_evpn:
+      - blue
+      - red
+      - orange
+      - green
+      - purple
+      - violet
+
+    ## The union, for the same reason as the SNO's tenants_web below: the web
+    ## phase runs after whichever transport phase was last applied and deploys
+    ## only the tenants whose namespace exists, so violet's web pod appears on
+    ## the hub after EVPN and is skipped with a note after the others.
+    tenants_web:
+      - blue
+      - red
+      - orange
+      - green
+      - purple
+      - violet
 
     nodes:
       - domain: hub_worker1
@@ -1804,8 +1833,8 @@ clab_clusters:
     install_folder: "{{ sno_install_folder }}"
     asn: 64515
     advertise_default: false
-    ## The Layer2 tenants only, and this is not a simplification - building
-    ## the others here would break the hub.
+    ## Not the hub's routed tenants, and that is not a simplification -
+    ## copying one here would break the hub.
     ##
     ## A tenant's identity in the fabric is its route target. blue is
     ## RT 65000:101 carrying 10.200.0.0/16, and that belongs to the tenant,
@@ -1814,6 +1843,8 @@ clab_clusters:
     ## so leaf2 imports two equally good paths to one prefix pointing at two
     ## different VTEPs - and traffic for a hub pod starts arriving at the SNO,
     ## where nothing answers. Nothing reports this; it looks like packet loss.
+    ## setup-udn-bgp refuses it: a Layer3 tenant built on two clusters under
+    ## EVPN must give each cluster its own slice in evpn_udn_subnets.
     ##
     ## green and purple are the opposite case, and the reason this cluster is
     ## on the fabric at all. A macVRF on one L2VNI is MEANT to exist in both
@@ -1822,12 +1853,21 @@ clab_clusters:
     ## unambiguous because evpn_l2_excludes gives each cluster its own half of
     ## the prefix to allocate from.
     ##
-    ## To test a ROUTED tenant across clusters instead, add a tenant here with
-    ## its own subnet, its own evpn_ip_vni and its own route target - not a
-    ## second copy of an existing one.
+    ## violet is the routed version of the same idea, and is only here under
+    ## EVPN (tenants_evpn below): one tenant on both clusters, made
+    ## unambiguous by giving each cluster its own half of the subnet rather
+    ## than by excluding addresses from a shared one.
     tenants:
       - green
       - purple
+
+    ## Phase 4: the stretched Layer2 pair, plus violet as the routed tenant
+    ## that spans both clusters - see the hub's tenants_evpn for what the
+    ## pairing demonstrates.
+    tenants_evpn:
+      - green
+      - purple
+      - violet
 
     ## Per-phase override. `tenants_<phase>` wins over `tenants` for that
     ## phase; any phase without one falls back to the list above.
@@ -1858,8 +1898,8 @@ clab_clusters:
     ## transport phase was last applied, and a static list cannot know which
     ## that was. webload.yml deploys the tenants whose namespace exists right
     ## now and skips the rest with a note, so this is correct after EVPN
-    ## (green, purple) and after VRF-Lite (violet) without being edited
-    ## between runs.
+    ## (green, purple, violet) and after VRF-Lite (violet) without being
+    ## edited between runs.
     tenants_web:
       - green
       - purple
@@ -2205,7 +2245,8 @@ udn_bgp_tenants:
         - "10.204.255.0/24"
     evpn_ip_vni: 501
 
-  ## violet - the SNO's own tenant, and the only one that is not on the hub.
+  ## violet - the SNO's own tenant. The only one that is not on the hub,
+  ## except under EVPN, where it is on both (see evpn_udn_subnets below).
   ##
   ## Added for cross-cluster VRF-Lite. green and purple cannot serve that
   ## purpose: they are Layer2 and deliberately share 10.204.0.0/16 across both
@@ -2238,6 +2279,25 @@ udn_bgp_tenants:
     external_host: "10.226.10.10"
     evpn_mac_vni: 600
     evpn_ip_vni: 601
+    ## Phase 4 only: the slice of udn_subnet each cluster allocates from.
+    ##
+    ## violet is built on BOTH clusters under EVPN - one tenant, one L3VNI,
+    ## one route target - and each cluster's OVN-Kubernetes allocates node
+    ## subnets knowing nothing of the other's. Given the whole /16 each, both
+    ## would hand out 10.206.0.0/24 first, and the fabric would hold two
+    ## origins for one prefix under one route target: traffic for a hub pod
+    ## arriving at the SNO. Two disjoint halves make every type-5 route
+    ## unambiguous, and the per-node gateways (.1 of each node's /24) never
+    ## collide either - which is the limit green and purple cannot escape,
+    ## since a stretched Layer2 subnet has ONE gateway address for everyone.
+    ##
+    ## Replaces udn_subnet for the named cluster in the evpn phase only.
+    ## Shared and VRF-Lite build violet on the SNO alone and keep the /16.
+    ## Both halves are inside udn_subnet, so a fabric client's route to
+    ## 10.206.0.0/16 still covers them.
+    evpn_udn_subnets:
+      hub: "10.206.0.0/17"
+      sno: "10.206.128.0/17"
 
 ## Where the rendered containerlab topology and FRR configs are staged, on
 ## whichever host clab_deploy_mode selected.

@@ -31,10 +31,11 @@
 # does not have is skipped here rather than failing discovery below on a
 # namespace that never existed.
 #
-# PER PHASE, not just per cluster. The SNO builds green and purple under EVPN
-# and violet under VRF-Lite (clab_clusters.sno.tenants_vrflite), because a
-# stretched Layer2 tenant cannot work without a VNI to keep two clusters'
-# identical prefixes apart. Reading only `.tenants` sent the ingress looking
+# PER PHASE, not just per cluster. The SNO builds green, purple and violet
+# under EVPN and violet alone under VRF-Lite (clab_clusters.sno.tenants_*),
+# because a stretched Layer2 tenant cannot work without a VNI to keep two
+# clusters' identical prefixes apart - and the hub adds violet under EVPN
+# only, so its list differs by phase too. Reading only `.tenants` sent the ingress looking
 # for a purple web pod on a cluster that, in this phase, has no purple at all
 # - and the failure named --tags web, which would not have helped.
 #

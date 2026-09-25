@@ -20,12 +20,13 @@
 # DEPLOY WHAT IS THERE, and fail only when nothing is.
 #
 # This used to fail on the first missing namespace, which was right while a
-# cluster built the same tenants in every phase. The SNO does not: green and
-# purple under EVPN, violet under VRF-Lite, because a stretched Layer2 tenant
-# has no way to work without a VNI to keep two clusters' identical prefixes
-# apart. Its web list is the union of the two, so in any given phase some of
-# it is legitimately absent, and failing on that would make --tags web
-# impossible on that cluster in either phase.
+# cluster built the same tenants in every phase. Neither does now: the SNO
+# builds green, purple and violet under EVPN and violet alone under VRF-Lite,
+# because a stretched Layer2 tenant has no way to work without a VNI to keep
+# two clusters' identical prefixes apart; the hub adds violet under EVPN only.
+# Each web list is the union, so in any given phase some of it is
+# legitimately absent, and failing on that would make --tags web impossible
+# on that cluster in either phase.
 #
 # Nothing is lost by skipping. The namespace is what carries the primary-UDN
 # label, so a tenant without one has no UDN here in this phase - there is
@@ -65,6 +66,22 @@
       Web tenants present on '{{ udn_bgp_cluster }}':
       {{ udn_web_tenants_present | join(', ') }}.
 
+# The subnet the page prints is read off the live CUDN, not vars.yaml. This
+# phase does not know which transport phase built the network it attaches to,
+# and the declared value is right for only one of them: the shared phase
+# builds from udn_subnet_shared, and under EVPN a tenant on two clusters
+# allocates from its per-cluster slice (evpn_udn_subnets). One of the two
+# jsonpath halves is always empty - a CUDN is either layer3 or layer2.
+- name: Read the subnet each web tenant's network was actually built with
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusteruserdefinednetwork {{ item }}
+      -o jsonpath={.spec.network.layer3.subnets[0].cidr}{.spec.network.layer2.subnets[0]}
+  loop: "{{ udn_web_tenants_present }}"
+  register: udn_web_live_subnet
+  changed_when: false
+  failed_when: false
+
 - name: Render the web workload for each tenant
   ansible.builtin.template:
     src: webload.yaml.j2
@@ -72,6 +89,9 @@
     mode: '0644'
   vars:
     tenant: "{{ udn_bgp_tenants | selectattr('name', 'equalto', item) | first }}"
+    tenant_live_subnet: >-
+      {{ udn_web_live_subnet.results | selectattr('item', 'equalto', item)
+         | map(attribute='stdout') | first | default('', true) | trim }}
   loop: "{{ udn_web_tenants_present }}"
   delegate_to: localhost
 

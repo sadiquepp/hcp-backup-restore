@@ -53,6 +53,15 @@
     udn_bgp_cluster_asn: >-
       {{ clab_clusters[udn_bgp_cluster].asn | default(clab_cluster_asn) }}
 
+# Every tenant the lab declares, captured before the narrowing below
+# overwrites udn_bgp_tenants. Two readers need the whole list rather than
+# this cluster's slice of it: the teardown (see "Remove test namespaces left
+# over from a previous phase") and the EVPN check that a routed tenant built
+# on two clusters has a subnet slice on each.
+- name: Record every declared tenant, before narrowing to this cluster's
+  ansible.builtin.set_fact:
+    udn_bgp_all_tenant_names: "{{ udn_bgp_tenants | map(attribute='name') | list }}"
+
 # Which tenants THIS cluster builds. Defaults to all of them, which is right
 # for a fabric with one cluster on it.
 #
@@ -78,11 +87,13 @@
 # phase, and a cluster with neither builds every tenant.
 #
 # The SNO is why it exists. Under EVPN it shares green and purple with the
-# hub, which is the stretched-Layer2 test. Under VRF-Lite that same sharing
-# is the fault: no VNI and no route target, so both clusters would advertise
-# 10.204.0.0/16 into leaf1's green VRF from different next hops and one of
-# them would lose. It builds violet there instead - its own routed tenant,
-# with a subnet the fabric can hold one unambiguous route to.
+# hub, which is the stretched-Layer2 test, and violet, the routed one (each
+# cluster on its own slice - see "EVPN: one routed tenant on more than one
+# cluster" below). Under VRF-Lite that same sharing is the fault: no VNI and
+# no route target, so both clusters would advertise 10.204.0.0/16 into
+# leaf1's green VRF from different next hops and one of them would lose. It
+# builds violet alone there - its own routed tenant, with a subnet the fabric
+# can hold one unambiguous route to. The hub builds violet under EVPN only.
 - name: Resolve which tenants this cluster builds in this phase
   ansible.builtin.set_fact:
     udn_bgp_cluster_tenant_names: >-
@@ -132,6 +143,112 @@
     udn_web_tenants: >-
       {{ udn_web_tenants | intersect(udn_bgp_cluster_tenant_names) }}
   when: udn_bgp_cluster_tenant_names | length > 0
+
+# ---------------------------------------------------------------------------
+# EVPN: one routed tenant on more than one cluster.
+#
+# A tenant's identity in the fabric is its route target, so a Layer3 tenant
+# built on two clusters is ONE network with two origins - legitimate, and
+# what violet is for, but only if the two clusters never originate the same
+# prefix. Each cluster's OVN-Kubernetes allocates node subnets from the CUDN's
+# cidr knowing nothing of the other's, so given one shared /16 both hand out
+# the same /24s first: two origins for one prefix under one route target, and
+# traffic for a hub pod arriving at the SNO. Nothing in OVN-Kubernetes or FRR
+# reports it; it looks like packet loss.
+#
+# evpn_udn_subnets gives each cluster its own slice, and the tasks below make
+# it impossible to forget: a Layer3 tenant that another fabric cluster also
+# builds under EVPN must name a slice for THIS cluster, and the slices must be
+# distinct. Layer2 tenants are exempt - a stretched broadcast domain is one
+# subnet on purpose, split instead by evpn_l2_excludes inside the CUDN.
+# ---------------------------------------------------------------------------
+- name: Start the list of tenants other fabric clusters build under EVPN
+  ansible.builtin.set_fact:
+    udn_bgp_evpn_elsewhere: []
+  when: udn_phase == 'evpn'
+
+# Same resolution rule as this cluster's own list above: tenants_evpn, else
+# tenants, else every tenant.
+- name: Collect the tenants other fabric clusters build under EVPN
+  ansible.builtin.set_fact:
+    udn_bgp_evpn_elsewhere: >-
+      {{ udn_bgp_evpn_elsewhere
+         + (clab_clusters[item]['tenants_evpn']
+            | default(clab_clusters[item].tenants | default(udn_bgp_all_tenant_names), true)) }}
+  loop: "{{ clab_fabric_clusters | default(clab_clusters | list) }}"
+  when:
+    - udn_phase == 'evpn'
+    - item != udn_bgp_cluster
+    - item in clab_clusters
+
+- name: Fail if a routed tenant spans clusters without its own slice here
+  ansible.builtin.assert:
+    that:
+      - (item.evpn_udn_subnets | default({}))[udn_bgp_cluster] is defined
+      - >-
+        (item.evpn_udn_subnets | default({})).values() | list | unique | length
+        == (item.evpn_udn_subnets | default({})) | length
+    fail_msg: >-
+      {{ item.name }} is a Layer3 tenant that another fabric cluster also
+      builds under EVPN, so both clusters originate it under one route target
+      ({{ clab_spine_asn }}:{{ item.evpn_ip_vni }}). Each needs its own slice
+      of {{ item.udn_subnet }} or they allocate the same node subnets and the
+      fabric holds two origins for one prefix - traffic for one cluster's pods
+      arriving at the other. Give the tenant evpn_udn_subnets in vars.yaml,
+      one DISTINCT entry per cluster, like violet's. Currently:
+      {{ item.evpn_udn_subnets | default('(none)') }}.
+    # .get(), not [ ]: this ansible-core templates success_msg even when the
+    # assert fails, so indexing the missing key would replace the fail_msg
+    # above with "object of type 'dict' has no attribute ...".
+    success_msg: >-
+      {{ item.name }} spans clusters; '{{ udn_bgp_cluster }}' allocates from
+      its own slice
+      {{ (item.evpn_udn_subnets | default({})).get(udn_bgp_cluster, '(none)') }}.
+  loop: >-
+    {{ udn_bgp_tenants
+       | rejectattr('topology', 'equalto', 'Layer2')
+       | selectattr('name', 'in', udn_bgp_evpn_elsewhere | default([]))
+       | list }}
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase == 'evpn'
+
+# One substitution, here, so every template and message downstream that reads
+# tenant.udn_subnet - the CUDN above all - gets this cluster's slice without
+# knowing slices exist. EVPN only: shared and VRF-Lite build such a tenant on
+# one cluster and keep the whole subnet.
+- name: Start the list of tenants with this cluster's EVPN subnet applied
+  ansible.builtin.set_fact:
+    udn_bgp_evpn_sliced: []
+  when: udn_phase == 'evpn'
+
+- name: Give each tenant this cluster's own slice of its subnet under EVPN
+  ansible.builtin.set_fact:
+    udn_bgp_evpn_sliced: >-
+      {{ udn_bgp_evpn_sliced
+         + [item | combine({'udn_subnet': item.evpn_udn_subnets[udn_bgp_cluster]})
+            if (item.evpn_udn_subnets | default({}))[udn_bgp_cluster] is defined
+            else item] }}
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase == 'evpn'
+
+- name: Use the sliced tenant list for the rest of this run
+  ansible.builtin.set_fact:
+    udn_bgp_tenants: "{{ udn_bgp_evpn_sliced }}"
+  when: udn_phase == 'evpn'
+
+- name: Report the tenants that allocate from a per-cluster slice here
+  ansible.builtin.debug:
+    msg: >-
+      {{ udn_bgp_tenants | selectattr('evpn_udn_subnets', 'defined')
+         | map(attribute='name') | zip(udn_bgp_tenants
+         | selectattr('evpn_udn_subnets', 'defined') | map(attribute='udn_subnet'))
+         | map('join', ' -> ') | list }}
+  when:
+    - udn_phase == 'evpn'
+    - udn_bgp_tenants | selectattr('evpn_udn_subnets', 'defined') | list | length > 0
 
 # What this cluster's API calls the Layer2 address reservation.
 #
@@ -652,12 +769,19 @@
       Each tenant has its own shared-VRF subnet.
   when: udn_phase == 'shared'
 
+# EVERY declared tenant, not just the ones this cluster builds now. A cluster
+# whose tenant list differs by phase - the SNO (green, purple and violet
+# under EVPN, violet alone under VRF-Lite) and the hub (violet under EVPN
+# only) - would
+# otherwise keep the previous phase's tenants on their old transport: an EVPN
+# violet left on the hub after a switch to VRF-Lite makes violet look present
+# in both clusters, which udn-xcluster-curl.sh reads as EVPN and scores
+# against the wrong expectations. Deleting a namespace that is not there is a
+# no-op, and everything in these is a test workload.
 - name: Remove test namespaces left over from a previous phase
   ansible.builtin.command:
-    cmd: "oc delete namespace udn-{{ item.name }} --ignore-not-found --wait=true --timeout=300s"
-  loop: "{{ udn_bgp_tenants }}"
-  loop_control:
-    label: "{{ item.name }}"
+    cmd: "oc delete namespace udn-{{ item }} --ignore-not-found --wait=true --timeout=300s"
+  loop: "{{ udn_bgp_all_tenant_names }}"
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
 # Two reasons this is a delete rather than an apply: the phases use different
@@ -666,10 +790,8 @@
 # moved to transport: EVPN in place.
 - name: Remove CUDNs from a previous phase (subnets differ, and transport is immutable)
   ansible.builtin.command:
-    cmd: "oc delete clusteruserdefinednetwork {{ item.name }} --ignore-not-found --wait=true --timeout=300s"
-  loop: "{{ udn_bgp_tenants }}"
-  loop_control:
-    label: "{{ item.name }}"
+    cmd: "oc delete clusteruserdefinednetwork {{ item }} --ignore-not-found --wait=true --timeout=300s"
+  loop: "{{ udn_bgp_all_tenant_names }}"
   when: udn_phase in ['shared', 'vrflite', 'evpn']
 
 # Before the CUDNs, not with the rest of phase 4. A phase-4 CUDN names a VTEP

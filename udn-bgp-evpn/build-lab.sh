@@ -392,7 +392,14 @@ run_step() {
     bmhost)
         guard_clusters
         say "$(pos bmhost)  helper VM (DNS, LB, inventory)"
-        play ../setup_bm_host.yaml ;;
+        # clab_topology because the helper's DNS zone carries the tenant
+        # ingress hostnames, and which tenants each cluster builds - so which
+        # names exist - differs by phase (udn_proxy_phase in vars.yaml). Left
+        # unset it defaulted to the VRF-Lite list, so an --evpn build got a
+        # zone naming violet-sno but not green-sno, purple-sno or the hub's
+        # violet. The demo sends an explicit Host header and never noticed;
+        # anything resolving the names did.
+        play ../setup_bm_host.yaml -e "clab_topology=$TOPOLOGY" ;;
     clusters)
         guard_clusters
         say "$(pos clusters)  hub and SNO, in parallel"

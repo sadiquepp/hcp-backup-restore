@@ -249,15 +249,18 @@ one address. There is no cross-cluster IPAM; `evpn_l2_excludes` on the tenant
 carves the prefix per cluster. `green` and `purple` give hub `10.204.0.0/17`
 and the SNO `10.204.128.0/17`.
 
-**Its own tenants, for anything routed.** A tenant's identity in the fabric
-is its route target, and that belongs to the tenant rather than to the
-cluster. Build the Layer3 tenant `blue` in two clusters and both originate
-`10.200.0.0/16` into RT `65000:101`, so leaf2 imports two equally good paths
-to one prefix pointing at two different VTEPs - and traffic for a hub pod
-starts arriving at the SNO, where nothing answers. `clab_clusters.<name>.tenants`
-limits what a cluster builds; the SNO builds `green` and `purple` only. A
-routed tenant that genuinely spans clusters needs its own subnet, VNI and
-route target, not a second copy of an existing one.
+**Its own slice of a routed tenant's subnet.** A tenant's identity in the
+fabric is its route target, and that belongs to the tenant rather than to the
+cluster. Build the Layer3 tenant `blue` in two clusters from one `/16` and both
+allocate the same node `/24`s into RT `65000:101`, so leaf2 imports two equally
+good paths to one prefix pointing at two different VTEPs - and traffic for a
+hub pod starts arriving at the SNO, where nothing answers. A routed tenant can
+span clusters, but only with a slice per cluster: `violet` does exactly that
+under EVPN, `10.206.0.0/17` on the hub and `10.206.128.0/17` on the SNO, from
+`evpn_udn_subnets` on the tenant. `setup-udn-bgp` refuses a Layer3 tenant built
+on two clusters without distinct slices. `clab_clusters.<name>.tenants_evpn`
+says what each cluster builds in this phase: the SNO builds `green`, `purple`
+and `violet`, the hub its five plus `violet`.
 
 ### Testing it
 
@@ -282,7 +285,55 @@ unresolvable by ping is the most informative one here.
 
 A pass means same tenant reached same tenant in **both** clusters and nothing
 else answered at all, and the summary counts how many of those answers crossed
-a cluster boundary.
+a cluster boundary - and says which were bridged (`green`, `purple`) and which
+routed (`violet`). The cell worth looking at first is `sno/violet` against the
+hub's `blue`: same fabric, same VTEPs, different route target, and it must be
+silent while the hub's `violet` answers.
+
+### What a routed Layer3 UDN across two clusters does
+
+`violet` is the routed counterpart of `green` and `purple`: one tenant, one
+L3VNI (`601`) and one route target (`65000:601`), built on both clusters, with
+each cluster allocating from its own half of `10.206.0.0/16`. Where a stretched
+Layer2 network is one broadcast domain and carries MAC routes (type-2), this is
+one routed network carrying prefix routes (type-5) - each node advertises its
+own node subnet, the same per-node `/24`s VRF-Lite advertises.
+
+The expected path, a SNO violet pod to a hub violet pod:
+
+```
+violet pod 10.206.128.x (SNO)
+  → SNO's violet VRF: type-5 route for the hub node's /24
+        RT 65000:601, next hop 100.64.0.<hub node>, VNI 601
+  → VXLAN  outer src 100.64.0.20 (SNO vtep0)  dst 100.64.0.<hub node>  VNI 601
+  → outer packet: 100.64.0.0/24 from leaf1 → leaf1 → static /32 → hub node
+  → hub node decapsulates VNI 601 → violet VRF → pod
+```
+
+The tunnel runs **node to node** across the cluster boundary; leaf1 carries
+the outer packet and relays the EVPN routes, and leaf2 is not in the path.
+That relies on EVPN next hops surviving leaf1 unchanged, which this lab
+already depends on for every node-to-leaf2 tunnel.
+
+Two things this avoids that the stretched Layer2 pair cannot. Each cluster's
+node subnets are its own, so the per-node gateway addresses never collide -
+green and purple share one `10.204.0.1` and one cluster's is shadowed at the
+VTEP. And isolation from `blue` beside it on the hub comes purely from the
+route target, which is the property the test's control cell exists to show.
+
+**Expected, not yet measured** - violet was added to the EVPN phase after the
+results elsewhere in this document. To confirm it is routed and node to node:
+
+```bash
+# the SNO holds the hub's violet /24s, next hop a HUB node's VTEP
+oc debug node/<sno node> -- chroot /host ip route show table all | grep '^10\.206\.'
+
+# the type-5 routes themselves, as leaf1 relays them - RT 65000:601, VNI 601
+docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp l2vpn evpn route type prefix'
+
+# routed, so the TTL drops below 64 - where green's stays at 64, bridged
+oc --kubeconfig=<sno> -n udn-violet exec <pod> -- ping -c3 <hub violet pod>
+```
 
 The other two views are still per-cluster and still worth running:
 `scripts/udn-vrf-isolation.sh --pods` for the isolation matrix, and

@@ -79,7 +79,7 @@ spec:
                   printf '%-9s %s\n' 'pod:'    "${POD_NAME}"
                   printf '%-9s %s\n' 'node:'   "${NODE_NAME}"
                   printf '%-9s %s\n' 'udn:'    "${udn:-(no ovn-udn1 - this pod is not on its UDN)}"
-                  printf '%-9s %s\n' 'subnet:' '{{ tenant.udn_subnet }}'
+                  printf '%-9s %s\n' 'subnet:' '{{ tenant_live_subnet | default('', true) or tenant.udn_subnet }}'
               } > /page/index.html
               cat /page/index.html
           env:
