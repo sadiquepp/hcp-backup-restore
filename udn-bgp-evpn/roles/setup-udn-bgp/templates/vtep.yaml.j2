@@ -15,24 +15,24 @@
   tunnels that form and then carry traffic to the wrong place.
 
   mode is 'Unmanaged' - capitalised; the API enum is Managed/Unmanaged.
-  Managed means OVN-Kubernetes allocates an IP per node out of the CIDRs
-  here; Unmanaged means something external assigns them and OVN-Kubernetes
-  discovers what is already on each node.
+  Unmanaged means something external assigns each node's address - the
+  NNCPs this role renders - and OVN-Kubernetes discovers what is there.
 
-  Unmanaged, because this lab's fabric is three FRR containers with no IGP
-  and something has to give them a route to each VTEP. With Managed
-  allocation you do not know which node holds which address until after the
-  fact; with Unmanaged, the NNCPs this role renders put a known address on a
-  known node and the border leaf carries static /32s written at the same
-  time. One less moving part when a tunnel does not form.
+  DO NOT DROP THE mode LINE. It defaults to Managed, and Managed - where
+  OVN-Kubernetes would allocate the addresses itself - is not implemented as
+  of OpenShift 4.22 and 4.23: the CR comes up Accepted=False, reason
+  ManagedModeNotSupported, and ovnkube-node deletes its EVPN devices.
+  Source lines and a re-check command are in real-fabric.md section 6.
+
+  Unmanaged suits this lab on its own merits too: the fabric is three FRR
+  containers with no IGP, so leaf1 needs a static /32 per VTEP, and assigning
+  the addresses here means those routes are written at render time. One less
+  moving part when a tunnel does not form.
 
   Exactly one address per node may fall inside these CIDRs. If a node has two
   the VTEP goes to a failed status rather than picking one - so if you widen
   this block, check nothing else on the nodes is already inside it.
 
-  (Managed mode is the right answer on a real fabric. It also makes cidrs
-  append-only: entries cannot then be removed, reordered or narrowed, only
-  widened or appended to.)
 #}
 apiVersion: k8s.ovn.org/v1
 kind: VTEP

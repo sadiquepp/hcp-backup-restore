@@ -54,9 +54,9 @@ instead.
 
 | | Fabric (network team) | Cluster (you) |
 |---|---|---|
-| **Underlay** | Reachability between every node and its leaf, and a route to the VTEP block from every leaf | An address on each node's fabric interface, and that interface forwarding |
+| **Underlay** | Reachability between every node and its leaf, and a route to **each node's VTEP address** from every leaf | An address on each node's fabric interface, and that interface forwarding |
 | **BGP** | A session per node, right ASN, both address families activated | `FRRConfiguration` naming the leaf, both AFs, `allowAsIn: origin` |
-| **VTEP** | A route to the whole VTEP block; VXLAN decap | The `VTEP` CR, and an address per node inside its CIDRs |
+| **VTEP** | A route to each node's VTEP `/32` - a route to the block alone cannot pick the node; VXLAN decap | The `VTEP` CR in `Unmanaged` mode, and a `/32` per node inside its CIDRs |
 | **Tenants** | VNI per tenant, route targets, VRF or bridge domain per tenant, external gateway for Layer3 | `ClusterUserDefinedNetwork` per tenant carrying the same VNI and RT |
 | **Advertising** | Import what the cluster sends, export what the cluster needs | `RouteAdvertisements` selecting the networks and the FRR config |
 
@@ -330,15 +330,66 @@ done
 ## 6. The VTEP
 
 The VTEP CR tells OVN-Kubernetes which addresses are tunnel endpoints. The
-fabric uses them as the next hop for every EVPN route, so **the underlay must
-route to the whole block from every leaf**.
+fabric uses them as the next hop for every EVPN route, so **every leaf must be
+able to reach each node's own VTEP address** - see "How the fabric reaches it"
+below for why a route to the block is not enough.
 
-**On a real fabric use `Managed`.** The lab uses `Unmanaged` because its
-fabric is three FRR containers with no IGP, so something has to hand the leaf
-a static route per VTEP, and `Unmanaged` lets the cluster put a known address
-on a known node. A real underlay has a route to the block already, and then
-`Managed` is simpler - OVN-Kubernetes allocates one address per node and you
-create no per-node policies at all.
+**Use `Unmanaged`, and set it explicitly.** The other mode, `Managed` - where
+OVN-Kubernetes would allocate an address per node itself - is **not
+implemented** as of OpenShift 4.22 and 4.23. A `Managed` VTEP comes up
+`Accepted=False`, `reason: ManagedModeNotSupported`, and ovnkube-node deletes
+its EVPN devices and clears the node annotation. And `mode` **defaults to
+`Managed`**, so a VTEP CR written without a `mode:` line is rejected the same
+way.
+
+| What | Source, `openshift/ovn-kubernetes` |
+|---|---|
+| cluster-manager rejects `Managed` | [`release-4.22` `clustermanager/vtep/controller.go` L169, L457](https://github.com/openshift/ovn-kubernetes/blob/e2082ef4a1aaad8fa5acc7b24880394b60a4e8ae/go-controller/pkg/clustermanager/vtep/controller.go#L169) - same lines on [`release-4.23`](https://github.com/openshift/ovn-kubernetes/blob/69562fb7062b12b271c3b7393680594fbfe0c9f7/go-controller/pkg/clustermanager/vtep/controller.go#L169) |
+| ovnkube-node tears it down | [`release-4.22` `node/controllers/evpn/evpn_node_controller.go` L351](https://github.com/openshift/ovn-kubernetes/blob/e2082ef4a1aaad8fa5acc7b24880394b60a4e8ae/go-controller/pkg/node/controllers/evpn/evpn_node_controller.go#L351) |
+| `mode` defaults to it | [`release-4.22` `crd/vtep/v1/types.go` L81](https://github.com/openshift/ovn-kubernetes/blob/e2082ef4a1aaad8fa5acc7b24880394b60a4e8ae/go-controller/pkg/crd/vtep/v1/types.go#L81) - `+kubebuilder:default=Managed` |
+
+Checked at `release-4.22` synced from upstream 2026-08-18; upstream `main`
+said the same. To re-check a newer release:
+
+```bash
+git clone -q --depth 1 --branch release-4.24 --filter=blob:none --sparse \
+    https://github.com/openshift/ovn-kubernetes ovnk && cd ovnk
+git sparse-checkout set go-controller/pkg/clustermanager/vtep
+grep -n "not yet implemented" go-controller/pkg/clustermanager/vtep/controller.go \
+  || echo "the rejection is gone - read the controller before relying on Managed"
+```
+
+On a live cluster the Reason column answers it: `oc get vtep -o wide`.
+
+`Unmanaged` means **you** put the address on each node and OVN-Kubernetes
+discovers it; it never creates one. One `NodeNetworkConfigurationPolicy` per
+node, **masters included** (constraint 4 below):
+
+```yaml
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: vtep-<node>
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: <node>
+  desiredState:
+    interfaces:
+      - name: vtep0
+        type: dummy
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 100.64.0.<n>        # unique per node
+              prefix-length: 32
+        ipv6:
+          enabled: false
+```
+
+Then the CR - addresses first, CR second. A CR created against nodes that do
+not have their address yet goes straight to a failed status.
 
 ```yaml
 apiVersion: k8s.ovn.org/v1
@@ -348,8 +399,26 @@ metadata:
 spec:
   cidrs:
     - 100.64.0.0/24
-  mode: Managed
+  mode: Unmanaged        # never omit: the default is the unimplemented Managed
 ```
+
+**Why a dummy, and why `/32`.** The VTEP address is the node's identity in
+the overlay, not an address of any one link - the same shape as a router
+loopback, so it stays up whatever happens to an interface, and works on a
+master with no fabric NIC. It has to be a `/32`: a `/24` on the dummy would
+install a connected route claiming the whole block is on-link via `vtep0`,
+and every outbound tunnel to another VTEP would be routed into a dummy
+interface and vanish. What OVN-Kubernetes builds on top is a flow-based VXLAN
+device whose `local` address is this one; the dummy only holds the address.
+
+**How the fabric reaches it.** A dummy is not attached to any link, so a leaf
+reaches `100.64.0.<n>` by routing, with the node's fabric-interface address as
+the next hop; Linux accepts a packet for any local address on whichever
+interface it arrives. The FRR configuration in [7](#7-bgp-peering) advertises
+the `/24` aggregate from **every** node, and identical routes to a `/24`
+cannot tell a leaf which node holds which address - so the per-node `/32`s
+must reach the leaf some other way: static routes (what the lab's `leaf1`
+does), the IGP, or a per-node advertisement. **[verify on site]**
 
 Four constraints worth knowing before you pick the block:
 
@@ -359,9 +428,11 @@ Four constraints worth knowing before you pick the block:
 2. **Exactly one address per node may fall inside the CIDRs.** If a node has
    two, the CR goes to a failed status rather than picking one. Before
    widening the block, check nothing already on the nodes is inside it.
-3. **`cidrs` is append-only in `Managed` mode** - entries cannot be removed,
-   reordered or narrowed afterwards, only widened or appended to. Size it
-   with room to grow. **[verify on site]**
+3. **In `Unmanaged` mode `cidrs` can be edited freely** - added, removed,
+   reordered, resized - though changing a CIDR that is in use disrupts
+   traffic. The append-only rule you may read about belongs to `Managed`; the
+   CRD's CEL validation enforces it even though the mode itself does nothing
+   yet.
 4. **Every node needs an address, including masters**, even though no tenant
    pod runs on one. A single unannotated node fails the whole CR with
    `reason: AllocationFailed`.
@@ -700,6 +771,6 @@ ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml \
   --tags evpn -e udn_bgp_cluster=<cluster>
 ```
 
-You would need to replace the `clab_*` values with your fabric's, and the
-per-node VTEP policies disappear entirely if you use `Managed` mode per
-[6](#6-the-vtep).
+You would need to replace the `clab_*` values with your fabric's. The
+per-node VTEP policies stay: `Managed` mode, which would make them
+unnecessary, is not implemented - see [6](#6-the-vtep).

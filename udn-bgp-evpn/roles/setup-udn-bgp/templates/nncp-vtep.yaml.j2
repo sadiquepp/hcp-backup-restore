@@ -15,19 +15,17 @@
   Their VTEPs are never a next hop for any tenant route and leaf1 carries no
   route to them; they exist so the CR can be accepted.
 
-  The VTEP CR is deliberately in Unmanaged mode, and this policy is why.
+  The VTEP CR runs in Unmanaged mode, and this policy is what that mode
+  requires: OVN-Kubernetes discovers an address already on the node, it
+  never creates one. Managed mode, which would allocate addresses itself, is
+  not implemented as of OpenShift 4.22 and 4.23 (see vtep.yaml.j2), so on a
+  real fabric too, this policy or an equivalent is how every node gets its
+  VTEP address.
 
-  In Managed mode OVN-Kubernetes allocates a VTEP IP per node out of the CR's
-  CIDRs, which is the right choice on a real fabric where the underlay
-  already has a route to the whole block. This lab's fabric is three FRR
-  containers with no IGP, so something has to give leaf1 a route to each
-  VTEP - and with Managed allocation you do not know which node got which
-  address until after the fact.
-
-  Unmanaged inverts that: this policy puts a known address on a known node,
-  OVN-Kubernetes discovers it, and the fabric can carry static /32s written
-  at render time. Deterministic, and one less moving part when a tunnel does
-  not form.
+  It also makes the addressing deterministic - a known address on a known
+  node - so leaf1 can carry static /32s written at render time. This lab's
+  fabric is three FRR containers with no IGP, and something has to give
+  leaf1 a route to each VTEP.
 
   The octet is the node's own last octet on {{ lab_network_prefix }}.0/24,
   taken from what the cluster reports as its InternalIP rather than from

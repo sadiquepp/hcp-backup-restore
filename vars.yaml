@@ -2349,19 +2349,19 @@ udn_bgp_evpn_l3_min_version: "4.22.10"
 ##
 ## The VTEP CR runs in Unmanaged mode and these addresses are assigned by
 ## NMState, one per node, at <prefix>.<the node's usual ip_list octet> - so
-## worker1 is .34 here exactly as it is on virbr0 and on the fabric. In
-## Managed mode OVN-Kubernetes would allocate them itself, which is right on
-## a real fabric with an IGP but leaves this lab's FRR containers with no way
-## to know which node got which address. Assigning them here means the
-## border leaf can carry static /32s written at render time.
+## worker1 is .34 here exactly as it is on virbr0 and on the fabric.
+## Unmanaged is the only mode that works: Managed, where OVN-Kubernetes would
+## allocate them itself, is not implemented as of OpenShift 4.22 and 4.23
+## (source lines in udn-bgp-evpn/real-fabric.md section 6). Assigning them
+## here also means the border leaf can carry static /32s written at render
+## time.
 ##
 ## Deliberately a block that appears nowhere else in this lab - not
 ## lab_network_prefix, not clab_fabric_prefix, not any tenant prefix. A VTEP
 ## address that collides with a real one builds tunnels to the wrong place.
 ##
-## Note the VTEP CR's cidrs are append-only in Managed mode; in Unmanaged
-## they can be changed freely, which is another small reason to prefer
-## Unmanaged in a lab you expect to re-address.
+## In Unmanaged mode the VTEP CR's cidrs can be changed freely, so this lab
+## can be re-addressed. (The append-only rule belongs to Managed.)
 udn_bgp_vtep_prefix: "100.64.0"
 ## Dummy interface the VTEP address is put on. A dummy rather than an address
 ## on the fabric NIC because the VTEP address is the node's identity in the

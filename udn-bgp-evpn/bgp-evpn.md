@@ -3677,8 +3677,10 @@ oc get vtep evpn-vtep -o wide
 
 `Unmanaged` means OVN-Kubernetes finds each node's address inside the CIDR
 rather than assigning one. Exactly one match per node is required — **an
-ambiguous match is a failure, not a choice**. `Managed` mode makes `cidrs`
-append-only.
+ambiguous match is a failure, not a choice**. `mode: Unmanaged` has to be
+spelled out: the default is `Managed`, which is not implemented as of 4.22 and
+4.23 and is rejected with `ManagedModeNotSupported` - see
+[real-fabric.md 6](real-fabric.md#6-the-vtep).
 
 ### 4c. The CUDNs, recreated
 

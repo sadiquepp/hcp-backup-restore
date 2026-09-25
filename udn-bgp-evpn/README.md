@@ -29,8 +29,8 @@ the sections for that path with the test and expected output after each one.
 **[real-fabric.md](real-fabric.md)** is for the other case: no containerlab at
 all, a real fabric the network team has already configured for the tenants.
 The cluster-side objects on their own, with the lab scaffolding removed and
-the places a real fabric legitimately differs - `Managed` VTEP allocation
-above all - called out.
+the places a real fabric legitimately differs - how the underlay reaches
+each node's VTEP above all - called out.
 
 **[troubleshooting.md](troubleshooting.md)** is the case files: long-form
 records of faults that were hard to find, with the real command output, what
@@ -583,15 +583,15 @@ fabric at a border leaf rather than running VTEPs on nodes, and it exercises
 the same VNI and route-target mapping. What it does not exercise is
 node-level VTEPs.
 
-**VTEP addressing is deliberately `Unmanaged`.** The `VTEP` CR supports
-`Managed` (OVN-Kubernetes allocates a VTEP IP per node) and `Unmanaged` (it
-discovers an address something else put there). This lab uses `Unmanaged`
-and assigns `100.64.0.<the node's usual octet>` via NMState, because the
-fabric is three FRR containers with no IGP: something has to give `leaf1` a
-route to each VTEP, and with `Managed` you do not know which node holds
-which address until after allocation. Assigning them means `leaf1` carries
-static `/32`s written at render time. On a real fabric with an IGP, `Managed`
-is the right answer. Exactly one address per node may fall inside the CR's
+**VTEP addressing is `Unmanaged`, and has to be.** The `VTEP` CR's other
+mode, `Managed` (OVN-Kubernetes allocates a VTEP IP per node), is not
+implemented as of OpenShift 4.22 and 4.23 - a `Managed` VTEP is rejected with
+`ManagedModeNotSupported` - and `mode` defaults to it, so the CR here sets
+`Unmanaged` explicitly. Source references and a re-check command are in
+[real-fabric.md 6](real-fabric.md#6-the-vtep). The lab assigns
+`100.64.0.<the node's usual octet>` via NMState on a `vtep0` dummy, which
+also lets `leaf1` - three FRR containers, no IGP - carry static `/32`s written
+at render time. Exactly one address per node may fall inside the CR's
 CIDRs - two is a failed status, not a choice.
 
 **Layer 2 / MAC-VRF is not wired up.** Both tenants here are `Layer3` with
