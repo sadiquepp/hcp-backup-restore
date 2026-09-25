@@ -330,10 +330,18 @@ the internet uplink. Still silent; the refusal just moved to the border.
 `ttl=61` - three routers in the path, where green's stays at `ttl=64`, bridged.
 Each cluster allocated from its own slice, so there are no duplicate origins.
 
-**Not yet measured:** that the tunnel is node to node rather than through
-leaf2, and that `sno/violet` against blue's address stays silent. TTL alone
-does not settle the first - OVN's routers count as well as the VRFs. To check
-both:
+**Measured: the tunnel is node to node.** The SNO's violet VRF holds each hub
+node's `/24` with that node's own VTEP as next hop - TTL alone could not show
+this, OVN's routers count as well as the VRFs:
+
+```
+10.206.3.0/24 via 100.64.0.34 dev svl3-violet table 1151 proto bgp onlink
+10.206.4.0/24 via 100.64.0.35 dev svl3-violet table 1151 proto bgp onlink
+10.206.5.0/24 via 100.64.0.36 dev svl3-violet table 1151 proto bgp onlink
+```
+
+**Not yet measured:** that `sno/violet` against blue's address stays silent.
+To check it, and to re-check the rest:
 
 ```bash
 # the SNO holds the hub's violet /24s, next hop a HUB node's VTEP
