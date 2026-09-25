@@ -325,8 +325,15 @@ the node - it follows that default to leaf2 - and leaf2 refuses it, because
 violet's VRF there holds private space unreachable rather than handing it to
 the internet uplink. Still silent; the refusal just moved to the border.
 
-**Expected, not yet measured** - violet was added to the EVPN phase after the
-results elsewhere in this document. To confirm it is routed and node to node:
+**Measured: pod to pod works, and is routed.** A SNO violet pod at
+`10.206.128.4` pings a hub violet pod at `10.206.5.3` with 0% loss and
+`ttl=61` - three routers in the path, where green's stays at `ttl=64`, bridged.
+Each cluster allocated from its own slice, so there are no duplicate origins.
+
+**Not yet measured:** that the tunnel is node to node rather than through
+leaf2, and that `sno/violet` against blue's address stays silent. TTL alone
+does not settle the first - OVN's routers count as well as the VRFs. To check
+both:
 
 ```bash
 # the SNO holds the hub's violet /24s, next hop a HUB node's VTEP
@@ -335,8 +342,8 @@ oc debug node/<sno node> -- chroot /host ip route show table all | grep '^10\.20
 # the type-5 routes themselves, as leaf1 relays them - RT 65000:601, VNI 601
 docker exec clab-udnbgp-leaf1 vtysh -c 'show bgp l2vpn evpn route type prefix'
 
-# routed, so the TTL drops below 64 - where green's stays at 64, bridged
-oc --kubeconfig=<sno> -n udn-violet exec <pod> -- ping -c3 <hub violet pod>
+# silent: blue's routes are imported into no violet VRF
+oc --kubeconfig=<sno> -n udn-violet exec <pod> -- curl -m5 -s <hub blue udn-web pod>:8080
 ```
 
 The other two views are still per-cluster and still worth running:
@@ -384,6 +391,9 @@ isolation: violet still cannot reach `blue`, or the lab's management network.
 `10.200.0.0/16` by design, and one NAT cannot tell their return traffic apart
 - that needs per-VRF NAT, which is what the border firewall is for in a real
 design.
+
+**Measured:** a violet pod on the hub and one on the SNO each ping
+`www.google.com` with 0% loss.
 
 The EVPN phase checks it end to end from a violet pod on each cluster
 (`udn_bgp_internet_probe`, `http://1.1.1.1/` by default; `""` to skip), and on
