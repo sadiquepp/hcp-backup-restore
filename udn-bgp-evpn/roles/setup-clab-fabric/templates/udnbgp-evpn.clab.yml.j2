@@ -126,6 +126,7 @@ topology:
         - leaf2/frr.conf:/etc/frr/frr.conf
         - leaf2/daemons:/etc/frr/daemons
         - leaf2/vtysh.conf:/etc/frr/vtysh.conf
+        - leaf2/lab-egress.sh:/usr/local/bin/lab-egress.sh
       exec:
         - ip link add lo0 type dummy
         - ip addr add 10.0.0.2/32 dev lo0
@@ -217,6 +218,12 @@ topology:
         - ip addr add {{ seg.prefix }}.{{ udn_client_segment_gw_octet }}/{{ clab_fabric_netmask_bits }} dev eth1.{{ seg.vlan }}
 {% endif %}
 {% endfor %}
+{% if udn_bgp_tenants | selectattr('evpn_internet', 'defined') | selectattr('evpn_internet') | list %}
+        ## Internet egress for {{ udn_bgp_tenants | selectattr('evpn_internet', 'defined') | selectattr('evpn_internet') | map(attribute='name') | join(', ') }} - after the VRFs above exist, before FRR
+        ## applies default-originate. What it does and why it is a script:
+        ## leaf2/lab-egress.sh. The NAT is on the containerlab host.
+        - sh /usr/local/bin/lab-egress.sh
+{% endif %}
         ## vtysh -b, never frrinit.sh restart - see leaf1 above.
         - vtysh -b
 

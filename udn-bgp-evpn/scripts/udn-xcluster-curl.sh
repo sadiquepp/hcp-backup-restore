@@ -489,8 +489,11 @@ PY2
         echo "  route target. The source node routed the packet into the tenant's VRF,"
         echo "  onto the L3VNI, straight to the destination node's VTEP - leaf1 only"
         echo "  carries the outer packet. A different route target on the same fabric"
-        echo "  (blue beside violet on the hub) stayed silent above: the boundary is"
-        echo "  the route target, not the cluster."
+        echo "  (blue beside violet on the hub) stayed silent above: blue's routes are"
+        echo "  in no violet VRF, so the boundary is the route target, not the cluster."
+        echo "  (With violet's internet default, those packets now travel as far as"
+        echo "  leaf2, which refuses private destinations in violet's VRF rather than"
+        echo "  sending them to the internet uplink.)"
     fi
     for a in "${addrs[@]}"; do
         if [[ "${TARGETS[$a]}" == *" "* ]]; then

@@ -110,6 +110,15 @@ router bgp {{ clab_leaf2_asn }} vrf {{ t.name }}
  !
  address-family l2vpn evpn
   advertise ipv4 unicast
+{% if t.evpn_internet | default(false) | bool %}
+  ! leaf2 is {{ t.name }}'s internet border. A default route as a type-5, so
+  ! every node's {{ t.name }} VRF learns "default via 10.0.0.2, VNI {{ t.evpn_ip_vni }}" - without
+  ! it a pod's egress to anything not advertised ends in its node's VRF as
+  ! Destination Host Unreachable. Unconditional in FRR (it does not wait for
+  ! a default in this VRF's RIB); the path behind it is lab-egress.sh plus
+  ! the NAT on the containerlab host.
+  default-originate ipv4
+{% endif %}
   route-target import {{ clab_spine_asn }}:{{ t.evpn_ip_vni }}
   route-target export {{ clab_spine_asn }}:{{ t.evpn_ip_vni }}
  exit-address-family

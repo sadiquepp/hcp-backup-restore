@@ -362,6 +362,10 @@ auto-detects this mode from the duplicate tenants and asks that question.
 `violet` asks it for a routed tenant: the SNO's violet reaches the hub's over
 type-5 routes and a node-to-node tunnel on VNI 601, while `blue` beside it on
 the hub - a different route target on the same fabric - stays silent.
+`violet` also reaches the **internet**: leaf2 originates a default route into
+its VRF and the containerlab host NATs it, checked from a violet pod on each
+cluster. The other tenants have no default and cannot - see "Reaching the
+internet from a UDN" in `README.md`.
 
 **Needs 4.22** and local gateway mode. The border-leaf handoff variant works
 on 4.21 and is described in `README.md`.

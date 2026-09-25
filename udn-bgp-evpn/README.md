@@ -318,8 +318,12 @@ already depends on for every node-to-leaf2 tunnel.
 Two things this avoids that the stretched Layer2 pair cannot. Each cluster's
 node subnets are its own, so the per-node gateway addresses never collide -
 green and purple share one `10.204.0.1` and one cluster's is shadowed at the
-VTEP. And isolation from `blue` beside it on the hub comes purely from the
-route target, which is the property the test's control cell exists to show.
+VTEP. And isolation from `blue` beside it on the hub comes from the route
+target: blue's routes are imported into no violet VRF, anywhere. Since violet
+gained an internet default (below), a packet for blue's address does leave
+the node - it follows that default to leaf2 - and leaf2 refuses it, because
+violet's VRF there holds private space unreachable rather than handing it to
+the internet uplink. Still silent; the refusal just moved to the border.
 
 **Expected, not yet measured** - violet was added to the EVPN phase after the
 results elsewhere in this document. To confirm it is routed and node to node:
@@ -339,6 +343,57 @@ The other two views are still per-cluster and still worth running:
 `scripts/udn-vrf-isolation.sh --pods` for the isolation matrix, and
 `scripts/udn-web-demo.sh --proxy` for the ingress, which fronts every cluster
 at once.
+
+### Reaching the internet from a UDN
+
+A UDN reaches a network through the fabric only if **a router in the tenant's
+VRF advertises it** into the tenant's route target. VXLAN never goes looking
+for a next hop: each packet is encapsulated toward whatever VTEP the route for
+its destination names, so an address nobody advertises has no tunnel to take.
+It ends in the node's copy of the tenant VRF, and the pod sees
+`Destination Host Unreachable` from its node subnet's `.2` - the management
+port, the host's end of OVN.
+
+`blue` reaching `10.210.10.10` works because leaf2 originates
+`10.210.10.0/24` into `65000:101`. The internet works the same way for
+`violet` (`evpn_internet: true`): leaf2 originates `0.0.0.0/0` into violet's
+VRF (`default-originate ipv4`), so every node's copy of it learns
+`default via 10.0.0.2, VNI 601`:
+
+```
+violet pod 10.206.x.y
+  → node's violet VRF: default via 10.0.0.2 (leaf2's VTEP), VNI 601
+  → VXLAN to leaf2 → decapsulated into leaf2's violet VRF
+  → default via eth0, the containerlab management NIC      leaf2-egress.sh
+  → the containerlab host: MASQUERADE out its uplink       egress-nat.yml
+  → the internet, from the host's address
+replies: host un-NATs → 10.206.0.0/16 via leaf2 → leaf2 main → violet VRF
+         → type-5 route to the node holding the pod → VXLAN → pod
+```
+
+**"No NAT" means inside the cluster.** Pods keep their own addresses on the
+fabric, but the internet cannot route to `10.206.x`, so the NAT moves to the
+border. leaf2 cannot do it itself - the FRR image ships no `iptables` - so the
+host that runs containerlab does, and routes the replies back to leaf2.
+
+**Public destinations only.** leaf2 keeps `10/8`, `172.16/12` and `192.168/16`
+unreachable inside violet's VRF, so the default is not a way round tenant
+isolation: violet still cannot reach `blue`, or the lab's management network.
+
+**Why violet and not blue.** Nothing overlaps violet. `blue` and `red` share
+`10.200.0.0/16` by design, and one NAT cannot tell their return traffic apart
+- that needs per-VRF NAT, which is what the border firewall is for in a real
+design.
+
+The EVPN phase checks it end to end from a violet pod on each cluster
+(`udn_bgp_internet_probe`, `http://1.1.1.1/` by default; `""` to skip), and on
+failure names the hops to walk in order. By hand:
+
+```bash
+oc -n udn-violet exec <udn-test pod> -- curl -sI http://1.1.1.1/
+oc debug node/<node> -- chroot /host ip route show vrf <violet vrf> default
+docker exec clab-udnbgp-leaf2 vtysh -c 'show bgp l2vpn evpn route type prefix'
+```
 
 ### What a stretched Layer2 UDN across two clusters actually does
 
@@ -711,7 +766,7 @@ required for `Layer3`.
 | `Failed to execute command "/usr/lib/frr/frrinit.sh restart" rc=137` | FRR is the container's PID 1. Stopping it stops the container, Docker restarts it, and the restart wipes every containerlab veth. Use `vtysh -b` to apply the config instead - never restart FRR from an `exec:` block |
 | A clab node has only `lo` and `eth0`; its other interfaces vanished | The container was restarted. containerlab builds every link but the management one as a veth into the container's netns, and a restart destroys it - the node comes back running and healthy-looking with no fabric connection, and the `exec:` block that addressed those links does not re-run. Redeploy (`--tags clabdeploy`), never `docker start` |
 | BGP `Active`, never `Established`, and the node has its fabric address | The same underlay failure as the row below - the session cannot open a TCP connection to a neighbour it cannot ARP. Run `--tags clabverify` to check leaf1's address and the fabric bridge's ports before looking at any FRR configuration |
-| Pod ping returns `Destination Host Unreachable` from the node subnet's `.2` | That address is `ovn-k8s-mp0` - the host, not OVN. The packet reached the node's kernel and it could not ARP the next hop. Underlay problem: check the fabric NIC's address on the node, then `virbr1` on the lab host, then the bridge inside the clab VM. The BGP session will be down too, for the same reason |
+| Pod ping returns `Destination Host Unreachable` from the node subnet's `.2` | That address is `ovn-k8s-mpN` - the host, not OVN: the packet got through OVN and the node's kernel refused it. **Two causes give this identical symptom**, and one command tells them apart - on the pod's node, `ip route get <dst> vrf <tenant vrf>` (VRF names from `ip -br link show type vrf`). **`unreachable`**: no route in the tenant's VRF. Nothing on the fabric advertises that destination into the tenant's route target - under EVPN a tunnel is only ever built toward a VTEP some route names, so an address nobody advertises ends here. Expected for anything outside the tenant; for the internet, see *Reaching the internet from a UDN* above. **A route, via a next hop**: the kernel could not ARP it. Underlay problem: check the fabric NIC's address on the node, then `virbr1` on the lab host, then the bridge inside the clab VM - the BGP session will be down too, for the same reason |
 | `tcpdump: executable file not found` inside a clab node | The FRR image does not ship tcpdump. Capture on `virbr1` on the lab host (or `br-fabric` in the clab VM) instead - all fabric traffic crosses it |
 | Session up, `RouteAdvertisements` Accepted, no `route-advertisements-*` FRRConfiguration | `frrConfigurationSelector` matched zero or more than one FRRConfiguration |
 | `RouteAdvertisements` not Accepted: "has no VRF matching the target VRF" | `targetVRF` was set to the string `default`. Unset means the default VRF; a value is matched literally against the routers' `vrf` field, and a default-VRF router has none. Only `auto` or unset are meaningful |

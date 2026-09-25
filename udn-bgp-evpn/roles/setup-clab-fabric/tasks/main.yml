@@ -423,6 +423,18 @@
       tags: [fabric, clabdeploy]
   tags: [fabric, clabdeploy]
 
+# EVPN only: the tenants with evpn_internet set get a default route from
+# leaf2, and the NAT that makes it work lives on this host. After the deploy
+# because the deploy recreates leaf2, whose management address it routes to.
+- name: Give the internet-border tenants their NAT on the containerlab host
+  ansible.builtin.include_tasks:
+    file: egress-nat.yml
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, clabdeploy, clabegress]
+  when: clab_topology == 'evpn'
+  tags: [fabric, clabdeploy, clabegress]
+
 # Separate from clab-deploy.yml so it can be re-run on its own against a
 # fabric that is already up, which is what you want when the cluster side
 # says the session is down and you need to know which end to look at.

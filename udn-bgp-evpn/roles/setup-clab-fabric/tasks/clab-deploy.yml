@@ -67,6 +67,15 @@
     - leaf2
   when: clab_topology == 'evpn'
 
+# Rendered whether or not any tenant asks for egress, so the bind in the
+# topology always has a file behind it; with none it only reads the gateway.
+- name: Render leaf2's internet egress script (EVPN topology only)
+  ansible.builtin.template:
+    src: leaf2-egress.sh.j2
+    dest: "{{ clab_lab_dir }}/leaf2/lab-egress.sh"
+    mode: '0755'
+  when: clab_topology == 'evpn'
+
 - name: Render the containerlab topology
   ansible.builtin.template:
     src: "udnbgp{{ '-evpn' if clab_topology == 'evpn' else '' }}.clab.yml.j2"

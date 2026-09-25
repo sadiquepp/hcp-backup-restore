@@ -416,6 +416,71 @@
       `oc get node <node> -o yaml | grep -i vtep` instead of trusting it.
   when: udn_phase == 'evpn'
 
+# Internet egress, asked from INSIDE a pod on each tenant whose VRF leaf2
+# gives a default route (evpn_internet in vars.yaml). It is the only check
+# that exercises the whole path: pod -> node VRF -> type-5 default -> VXLAN to
+# leaf2 -> leaf2's management NIC -> NAT on the containerlab host -> out, and
+# the reply all the way back.
+#
+# Retried, because the default arrives by BGP - but in the shell, not with
+# until/retries: when those run out this ansible-core prints "[ERROR]: Task
+# failed" and then reports the item ok, which is noise right before the assert
+# below says what actually went wrong.
+#
+# Literal block, not folded: a folded scalar keeps the newline before a more
+# indented line, which splits a shell command in two.
+- name: Probe the internet from each egress tenant's test pod
+  ansible.builtin.shell:
+    cmd: |
+      pod=$(oc -n udn-{{ item.name }} get pods -l app=udn-test -o jsonpath='{.items[0].metadata.name}')
+      [ -n "$pod" ] || { echo "no-pod"; exit 0; }
+      for try in 1 2 3 4 5 6; do
+          code=$(oc -n udn-{{ item.name }} exec "$pod" -- curl -s -o /dev/null -w '%{http_code}' --max-time 8 {{ udn_bgp_internet_probe }} 2>/dev/null)
+          case "$code" in 000|'') sleep 10 ;; *) break ;; esac
+      done
+      echo "${code:-000}"
+  loop: >-
+    {{ udn_bgp_tenants | selectattr('evpn_internet', 'defined')
+       | selectattr('evpn_internet') | list }}
+  loop_control:
+    label: "{{ item.name }}"
+  register: udn_bgp_egress_probe
+  changed_when: false
+  when:
+    - udn_phase == 'evpn'
+    - udn_bgp_internet_probe | length > 0
+
+- name: Fail naming the break if a tenant cannot reach the internet
+  ansible.builtin.assert:
+    that: item.stdout not in ['000', '', 'no-pod']
+    fail_msg: |-
+      {{ item.item.name }} on '{{ udn_bgp_cluster }}' could not reach {{ udn_bgp_internet_probe }}
+      from its udn-test pod (curl said: {{ item.stdout | default('', true) or '(nothing)' }}).
+
+      Walk the path in order - each hop only works if the one before it did:
+        1. the node's {{ item.item.name }} VRF learned the default from leaf2:
+             oc debug node/<node> -- chroot /host sh -c 'ip -br link show type vrf; ip route show vrf <vrf> default'
+           expect: default via 10.0.0.2, onlink. Absent means the type-5 never
+           arrived - check leaf2 below, then the EVPN sessions.
+        2. leaf2 originates it and has a real path behind it:
+             docker exec clab-{{ clab_lab_name }}-leaf2 vtysh -c 'show bgp l2vpn evpn route type prefix' | grep -A3 0.0.0.0
+             docker exec clab-{{ clab_lab_name }}-leaf2 ip route show table {{ 1000 + item.item.vlan }} default
+        3. the containerlab host NATs it - the counters should rise on each try:
+             iptables -t nat -L POSTROUTING -v -n | grep {{ item.item.udn_subnet.split('/')[0].rsplit('.', 2)[0] }}
+        4. the host itself can reach the probe:  curl -sI {{ udn_bgp_internet_probe }}
+
+      No pod, or a lab with no internet at all: set udn_bgp_internet_probe: "".
+    success_msg: >-
+      {{ item.item.name }} on '{{ udn_bgp_cluster }}' reached
+      {{ udn_bgp_internet_probe }} (HTTP {{ item.stdout }}) through leaf2's
+      default route and the border NAT.
+  loop: "{{ udn_bgp_egress_probe.results | default([]) | selectattr('stdout', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when:
+    - udn_phase == 'evpn'
+    - udn_bgp_internet_probe | length > 0
+
 - name: Print the reachability tests to run by hand
   ansible.builtin.debug:
     msg: "{{ udn_bgp_manual_checks.splitlines() }}"

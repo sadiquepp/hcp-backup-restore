@@ -175,3 +175,10 @@ udn_bgp_session_check_delay: 10
 udn_bgp_vtep_annotation_retries: 12
 udn_bgp_vtep_annotation_delay: 10
 udn_bgp_vtep_annotation_retries_after_restart: 30
+
+## What a tenant with evpn_internet probes, from one of its own pods, at the
+## end of the evpn phase. An IP rather than a name, so it tests the route and
+## the NAT and nothing about DNS; HTTP rather than ICMP, because some networks
+## drop outbound ping. Any HTTP status means the path works - 1.1.1.1 answers
+## plain HTTP with a redirect. Set to "" where the lab host has no internet.
+udn_bgp_internet_probe: "http://1.1.1.1/"

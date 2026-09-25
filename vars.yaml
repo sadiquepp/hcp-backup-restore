@@ -2298,6 +2298,31 @@ udn_bgp_tenants:
     evpn_udn_subnets:
       hub: "10.206.0.0/17"
       sno: "10.206.128.0/17"
+    ## Phase 4 only: leaf2 is this tenant's internet border.
+    ##
+    ## A UDN reaches a network through the fabric only if a router in the
+    ## tenant's VRF advertises it - VXLAN never goes looking for a next hop, it
+    ## encapsulates towards whatever VTEP the route names. Nothing advertised
+    ## a default, so a pod's egress to the internet ended in its node's VRF
+    ## with "Destination Host Unreachable" from the management port (.2).
+    ##
+    ## With this set, leaf2 originates 0.0.0.0/0 into the tenant's VRF as a
+    ## type-5 route (default-originate ipv4), so every node's copy of the VRF
+    ## gets "default via 10.0.0.2, VNI <evpn_ip_vni>". leaf2 hands the traffic
+    ## to its management NIC, and the host running containerlab NATs it -
+    ## "no NAT" is true inside the cluster; the internet still needs it, so it
+    ## moves to the border. leaf2 itself cannot NAT: the FRR image has no
+    ## iptables.
+    ##
+    ## PUBLIC destinations only. leaf2 keeps 10/8, 172.16/12 and 192.168/16
+    ## unreachable in the tenant's VRF, so the default is not a way round
+    ## tenant isolation: violet still cannot reach blue, or the lab's
+    ## management network.
+    ##
+    ## violet because nothing overlaps it. A tenant sharing its subnet with
+    ## another (blue and red, green and purple) would need per-VRF NAT at the
+    ## border - one NAT cannot tell their return traffic apart.
+    evpn_internet: true
 
 ## Where the rendered containerlab topology and FRR configs are staged, on
 ## whichever host clab_deploy_mode selected.
