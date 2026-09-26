@@ -523,8 +523,10 @@ run_step() {
     esac
 }
 
+# The mode goes into the hint: it defaults to --evpn, so a --vrflite or
+# --shared build resumed with a bare --from would carry on in the wrong one.
 trap 'echo; echo "FAILED at step: ${CURRENT:-?}" >&2;
-      echo "  resume with: $0 --from ${CURRENT:-?}" >&2' ERR
+      echo "  resume with: $0 --$MODE --from ${CURRENT:-?}" >&2' ERR
 
 # Warn, do not block: someone may be running this under nohup, or from a
 # console, or re-running a single quick step where it does not matter.

@@ -20,6 +20,7 @@ on its own, with the lab scaffolding removed.
 
 ## Contents
 
+- [One command, for any path](#one-command-for-any-path)
 - [0. Pick your destination](#0-pick-your-destination)
   - [Moving between paths later](#moving-between-paths-later)
 - [1. Prerequisites](#1-prerequisites)
@@ -63,13 +64,22 @@ three; **9** is written to be used after any of them.
 
 ---
 
-## One command, for path C
+## One command, for any path
 
-Everything below, for the two-cluster EVPN lab, is also a single script:
+`build-lab.sh` runs this document end to end - the base lab, both clusters, the
+fabric, the tenants, the web pages, the ingress and every test - for whichever
+path from [section 0](#0-pick-your-destination) you name:
+
+| Flag | Path | Fabric | Tenant step | The last two steps ask |
+| --- | --- | --- | --- | --- |
+| `--evpn` (default) | **C**, two clusters - sections 7 and 8 | `clab_topology=evpn` | `--tags evpn` | the ingress by hostname; each tenant reaching itself in the other cluster |
+| `--vrflite` | **B** - section 6 | `bgp` | `--tags vrflite` | the ingress by hostname; the `udn_vrf_leaks` openings work and the pairs left out stay shut |
+| `--shared` | **A** - section 5 | `bgp` | `--tags shared` | every pod from one client; every cross-cluster cell silent, by design |
 
 > **Start tmux first.** A full build installs two OpenShift clusters and runs
 > for hours; if your ssh session drops, the shell is SIGHUPed and the build dies
-> with it, usually mid-install. The script warns if it is not under tmux.
+> with it, usually mid-install. The script warns and waits 10s if it is not
+> under tmux or screen.
 >
 > ```bash
 > tmux new -s lab          # ctrl-b d to detach, tmux attach -t lab to return
@@ -77,16 +87,64 @@ Everything below, for the two-cluster EVPN lab, is also a single script:
 
 ```bash
 cd udn-bgp-evpn
-./build-lab.sh                      # all ten steps, from a BARE lab host
-./build-lab.sh --from fabric        # clusters already up - the usual entry point
-./build-lab.sh --list               # the ten steps
-./build-lab.sh --dry-run            # print every command, run nothing
-./build-lab.sh --from evpn          # resume after a failure
-./build-lab.sh --only web           # re-run one step
+./build-lab.sh --list                   # this mode's steps, and the extras
+./build-lab.sh --dry-run                # print every command, run nothing
+./build-lab.sh                          # EVPN, everything, from a BARE lab host
+./build-lab.sh --from fabric            # clusters already up - the usual entry point
+./build-lab.sh --vrflite --from fabric  # the same, for path B
+./build-lab.sh --from tenants           # resume after a failure
+./build-lab.sh --only web               # re-run one step
+./build-lab.sh --help                   # the script's header: every flag, and why
 ```
 
-**The vault password comes from a file**, so the script does not prompt nine
-times. Create it once:
+**Repeat the mode on every run.** It defaults to `--evpn`, and it decides the
+fabric topology that `fabric`, `nsclient` and `nsproxy` render. `--from web` on
+a VRF-Lite lab without `--vrflite` runs the client steps against the EVPN
+topology. The resume hint printed on a failure carries the mode for you.
+
+### The steps
+
+| Step | What it runs | By hand |
+| --- | --- | --- |
+| `bmhost` | the helper VM - DNS, load balancer, `inventory/hosts`. Passes `clab_topology`, so the DNS zone holds this mode's tenant ingress names | [1.1](#11-the-base-lab) |
+| `clusters` | the hub (`--skip-tags acm`) and the SNO **in parallel**, each to its own log under `build-logs/` | [1.1](#11-the-base-lab), [1.2](#12-the-sno) |
+| `fabric` | containerlab leaf1 / spine / leaf2 and the node NICs. Under EVPN also leaf2's internet egress for `violet` and the NAT for it on the containerlab host | [2](#2-the-fabric) |
+| `preflight` | reports what the clusters can do; changes nothing | [3](#3-pre-flight) |
+| `tenants` | `--tags <mode>` on the hub, then the SNO. Each ends in the phase's own verify - under EVPN that includes the internet probe from a violet pod | [5](#5-path-a-shared-vrf) / [6](#6-path-b-vrf-lite) / [7](#7-path-c-evpn), [8.2](#82-build) |
+| `web` | one web pod per tenant, hub then SNO | [9.1](#91-web-pages) |
+| `nsclient` | the namespace client VM, one netns per tenant | [6.1](#61-test-the-isolation-matrix) |
+| `nsproxy` | the tenant ingress on that VM. **Not in `--shared`**: no two tenants share an address, so there is nothing to separate | [9.2](#92-the-tenant-ingress) |
+| `verify` | `scripts/udn-web-demo.sh --proxy`; under `--shared`, `--host` against every pod on both clusters | [8.5](#85-test-the-same-question-from-outside) |
+| `xcluster` | `scripts/udn-xcluster-curl.sh`, pod to pod across the two clusters. Skipped with a note if there is no SNO kubeconfig | [8.4](#84-test-pod-to-pod-across-clusters) |
+
+Section 4 (advertise the default pod network) is not a step: it is an optional
+diagnostic. The tenant step already runs the common prefix from section 0.
+
+`--parallel-tenants` overlaps the hub and SNO tenant runs. The default is one
+after the other, because the SNO's session depends on leaf1 already holding the
+hub's. The step called `evpn` before there were three modes is `tenants` now;
+`--from evpn` still works.
+
+Three more steps are in no mode's sequence and run only with `--only`:
+
+- `image` - a prebuilt guest image with every package the lab's VMs need, so
+  they are created with no registration and no dnf. Its presence is the switch.
+- `image-publish` - upload that image to S3, from the one host that built it.
+- `image-fetch` - pull it onto another host instead of building it there,
+  checked against the published checksum. The workshop path.
+
+### Before the first run
+
+- `vault.yaml` filled in, and the base RHEL9 image in `/opt/lab-images` -
+  [section 1.1](#11-the-base-lab).
+- On AWS, `terraform/lab-up.sh` gets you from nothing to a metal host ready
+  for this script - see [terraform/README.md](../terraform/README.md).
+- Once per lab host, the helper-DNS step in the root README
+  ([Do this once](../README.md#do-this-once-point-the-host-at-the-helper-so-your-own-routes-resolve)),
+  so any route you add later resolves from the host too.
+
+**The vault password comes from a file**, so nothing prompts at each step.
+Create it once:
 
 ```bash
 # 0600 from the moment it exists - touch-then-chmod leaves a readable window,
@@ -104,26 +162,35 @@ also lets you drop `--ask-vault-pass` from the per-step commands below. Keep the
 file **outside this repository**: it is public, and only `vault.yaml` itself is
 in `.gitignore`.
 
+The kubeconfigs default to `/var/lib/libvirt/images/{hub,sno}_install/auth/kubeconfig`;
+set `KUBECONFIG_HUB` / `KUBECONFIG_SNO` if yours live elsewhere, and `LOGDIR`
+to move `build-logs/`.
+
+### Rebuilding the clusters
+
 > **A bare `./build-lab.sh` builds the clusters**, and the cluster playbooks
 > are **not idempotent** - `qemu-img create` overwrites an existing disk and
 > `virt-install` fails on an existing domain, so re-running them against a live
 > cluster destroys it rather than skipping. The script refuses if it finds a
-> hub kubeconfig or the libvirt domains, and points at `--from fabric`. Pass
-> `--rebuild-clusters` only when you really mean from scratch.
+> hub kubeconfig or the libvirt domains, and points at `--from fabric`.
 
-It reads the vault password from a file - `--vault-password-file PATH`, or
-`$ANSIBLE_VAULT_PASSWORD_FILE` - rather than prompting nine times. The hub and
-the SNO install **in parallel**, each to its own log under `build-logs/`,
-because two Ansible runs sharing a terminal interleave line by line. On a
-failure it names the step and prints the `--from` that resumes it.
+`--rebuild-clusters` is the way to really start again, and it is **destructive
+by design**: it runs `../cleanup.yaml` first, then every step. That removes
+every VM of this lab on the host - the hub, the SNO, the helper, the
+containerlab VM with the fabric inside it, the tenant client VMs, and hub2, the
+mirror registry, minio and the Ceph VMs if you have them. It prints that list
+and waits 10s; `-y` skips the wait.
 
-It is **not** a playbook, and `import_playbook` cannot replace it: each phase
-here is tagged `never`, so it runs only when its tag is named on the command
-line, and an import has no way to name one. The details are in the script's own
-header.
+### Why a script and not a playbook
 
-The per-step commands below are still the ones to use when a phase fails -
-the script runs exactly these, in this order.
+Every phase in `setup_udn_bgp_lab.yaml` is tagged `never`, so it runs only when
+its tag is named on the command line, and `import_playbook` has no way to name
+one. The hub and the SNO also install in parallel, which one playbook cannot do
+with both on localhost. The full reasoning is in the script's header
+(`--help`).
+
+The per-step commands below run the same playbooks with the same tags. Use
+them when a step fails and you want to take it apart by hand.
 
 ---
 
