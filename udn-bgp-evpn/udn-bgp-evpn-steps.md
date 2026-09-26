@@ -26,6 +26,7 @@ on its own, with the lab scaffolding removed.
   - [Moving between paths later](#moving-between-paths-later)
 - [1. Prerequisites](#1-prerequisites)
   - [1.1 The base lab](#11-the-base-lab)
+    - [The vault password file](#the-vault-password-file)
     - [One command, for any path](#one-command-for-any-path)
     - [Or step by step](#or-step-by-step)
   - [1.2 The SNO](#12-the-sno)
@@ -228,9 +229,32 @@ cp rhel-9.8-x86_64-kvm.qcow2 /opt/lab-images/
 > VM. Run the playbook from the root instead and it fails with
 > `the role 'setup-rhsm' was not found`.
 
+#### The vault password file
+
+`build-lab.sh` reads the vault password from a file, so nothing prompts at
+each step - and without it the script stops before running anything. The
+step-by-step commands can use it too. Create it once:
+
+```bash
+# 0600 from the moment it exists - touch-then-chmod leaves a readable window,
+# and `echo <password> > file` puts the password in your shell history.
+install -m 600 /dev/null ~/.vault_pass
+read -rsp 'Vault password: ' pw && printf '%s' "$pw" > ~/.vault_pass && unset pw; echo
+
+# prove it before a build depends on it
+ansible-vault view ../vault.yaml --vault-password-file ~/.vault_pass >/dev/null && echo OK
+```
+
+`~/.vault_pass` is the default. Override with `--vault-password-file PATH`, or
+export `ANSIBLE_VAULT_PASSWORD_FILE` - Ansible honours that one natively, so it
+also lets you drop `--ask-vault-pass` from the step-by-step commands. Keep the
+file **outside this repository**: it is public, and only `vault.yaml` itself is
+in `.gitignore`.
+
 #### One command, for any path
 
-With the vault and the base image in place, one script can take it from here.
+With the vault, its password file and the base image in place, one script
+can take it from here.
 `build-lab.sh` runs the rest of this document end to end - the helper, both
 clusters, the fabric, the tenants, the web pages, the ingress and every test -
 for whichever path from [section 0](#0-pick-your-destination) you name. The
@@ -299,30 +323,11 @@ Three more steps are in no mode's sequence and run only with `--only`:
 - `image-fetch` - pull it onto another host instead of building it there,
   checked against the published checksum. The workshop path.
 
-##### The vault password file
-
-The script reads the vault password from a file, so nothing prompts at each
-step. Create it once:
-
-```bash
-# 0600 from the moment it exists - touch-then-chmod leaves a readable window,
-# and `echo <password> > file` puts the password in your shell history.
-install -m 600 /dev/null ~/.vault_pass
-read -rsp 'Vault password: ' pw && printf '%s' "$pw" > ~/.vault_pass && unset pw; echo
-
-# prove it before a build depends on it
-ansible-vault view ../vault.yaml --vault-password-file ~/.vault_pass >/dev/null && echo OK
-```
-
-`~/.vault_pass` is the default. Override with `--vault-password-file PATH`, or
-export `ANSIBLE_VAULT_PASSWORD_FILE` - Ansible honours that one natively, so it
-also lets you drop `--ask-vault-pass` from the per-step commands below. Keep the
-file **outside this repository**: it is public, and only `vault.yaml` itself is
-in `.gitignore`.
-
-Once per lab host, do the helper-DNS step in the root README
+Once the `bmhost` step has run - the helper has to exist first - do the
+helper-DNS step in the root README once per lab host
 ([Do this once](../README.md#do-this-once-point-the-host-at-the-helper-so-your-own-routes-resolve)),
-so any route you add later resolves from the host too.
+so any route you add later resolves from the host too. The build itself does
+not need it: `bmhost` puts every name it uses in `/etc/hosts`.
 
 The kubeconfigs default to `/var/lib/libvirt/images/{hub,sno}_install/auth/kubeconfig`;
 set `KUBECONFIG_HUB` / `KUBECONFIG_SNO` if yours live elsewhere, and `LOGDIR`
@@ -360,6 +365,9 @@ take it apart by hand.
 ```bash
 # the helper VM: DNS, load balancer, and the generated inventory/hosts
 ansible-playbook -i ../inventory/hosts ../setup_bm_host.yaml --ask-vault-pass
+
+# now, once per lab host, the helper-DNS step from the root README
+# ("Do this once") - so routes you add later resolve from the host too
 
 # the hub. --skip-tags acm because ACM/MCE belongs to the hosted-cluster and
 # backup flows - nothing in this lab reads it, and it is not a small install.
