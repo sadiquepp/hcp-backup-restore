@@ -11,8 +11,10 @@ host, the helper VM, both cluster installs, the containerlab fabric, NMState,
 OpenShift Virtualization - is one command. Everything that *is* BGP, EVPN or
 UDN - enabling the feature, every `FRRConfiguration`, the `VTEP`, every
 `ClusterUserDefinedNetwork`, the `RouteAdvertisements`, the node interfaces,
-the workloads - you create yourself from the `cat <<EOF | oc apply -f -`
-blocks below.
+the workloads - you create yourself from the blocks below. Each one writes a
+manifest to a file and then applies that file, so you can read exactly what
+your shell produced before it reaches the cluster, and it stays on disk
+afterwards.
 
 > **`ClusterUserDefinedNetwork`, never `cudn`.** The short name does not work
 > reliably against this API. Every `oc` line here spells it out.
@@ -318,13 +320,36 @@ lab hub          # oc -> the hub, and $ASN / $CLUSTER to match
 
 | Helper | Does |
 | --- | --- |
-| `lab hub` / `lab sno` | switches `oc`, `$ASN` and `$CLUSTER` to that cluster |
+| `lab hub` / `lab sno` | switches `oc`, `$ASN`, `$CLUSTER` and `$M` to that cluster |
 | `leaf1 '<cmd>'`, `leaf2 ...`, `spine ...` | `vtysh -c '<cmd>'` on that fabric router |
 | `onleaf2 <cmd>` | any command inside leaf2 (`onleaf2 ip route show vrf blue`) |
 | `ext <tenant> <cmd>` | a command on that tenant's external endpoint behind leaf2 |
 | `nodevtysh <node> '<cmd>'` | vtysh in the `frr-k8s` pod on that node - the cluster's side of BGP |
 | `inpod <tenant> <cmd>` | a command in that tenant's test pod |
 | `podip <tenant> [node]` | that tenant's test pod's UDN address |
+
+**Every manifest is a file.** Each block below writes its manifest into
+`$M` - `/root/workshop-manifests/hub` or `.../sno`, set by `lab` - and then
+applies it:
+
+```text
+cat > "$M/lab02-frrconfiguration-default.yaml" <<EOF   # 1. write it: your shell expands $ASN etc.
+...
+EOF
+oc apply -f "$M/lab02-frrconfiguration-default.yaml"    # 2. apply it
+```
+
+Between the two, look at what you are about to apply - every variable
+expanded, nothing left to guess:
+
+```bash
+cat "$M/lab02-frrconfiguration-default.yaml"
+oc apply --dry-run=server -f "$M/lab02-frrconfiguration-default.yaml"   # the API's verdict, nothing changed
+```
+
+Afterwards `ls -tr $M` is the record of what you built on that cluster, in
+the order you wrote it, and `diff $WS_MANIFESTS/hub $WS_MANIFESTS/sno` shows how the two
+clusters differ.
 
 **Look before you touch anything:**
 
@@ -354,7 +379,7 @@ Three switches on the cluster network operator, in one patch:
 
 ```bash
 lab hub
-oc patch network.operator.openshift.io cluster --type=merge --patch-file=/dev/stdin <<'EOF'
+cat > "$M/lab01-network-operator-patch.yaml" <<'EOF'
 spec:
   additionalRoutingCapabilities:
     providers: [FRR]                  # deploy frr-k8s on every node
@@ -365,6 +390,7 @@ spec:
         routingViaHost: true          # local gateway mode
         ipForwarding: Global          # let the host forward for the fabric NIC
 EOF
+oc patch network.operator.openshift.io cluster --type=merge --patch-file="$M/lab01-network-operator-patch.yaml"
 ```
 
 - **`providers: [FRR]`** deploys the `frr-k8s` DaemonSet in
@@ -408,7 +434,7 @@ One BGP session from every node to leaf1, in the default VRF. This is the
 underlay: EVPN will ride on it in Lab 4.
 
 ```bash
-cat <<EOF | oc apply -f -
+cat > "$M/lab02-frrconfiguration-default.yaml" <<EOF
 apiVersion: frrk8s.metallb.io/v1beta1
 kind: FRRConfiguration
 metadata:
@@ -434,6 +460,7 @@ spec:
               allowed:
                 mode: filtered        # advertise nothing of our own
 EOF
+oc apply -f "$M/lab02-frrconfiguration-default.yaml"
 ```
 
 `toAdvertise: filtered` with no prefixes is deliberate. Everything these
@@ -441,8 +468,10 @@ sessions will advertise comes later from `RouteAdvertisements`, which
 generates its own FRR configuration. `mode: all` here would put the node's
 connected routes - the lab's management network among them - into the fabric.
 
-The `unquoted EOF` matters: `$ASN`, `$LEAF1_IP` and `$FRR_NS` are expanded by
-your shell from `workshop.env`. `echo $ASN` if in doubt.
+The unquoted `<<EOF` matters: `$ASN`, `$LEAF1_IP` and `$FRR_NS` are expanded
+by your shell from `workshop.env` as the file is written. `cat` the file to
+see the numbers that actually went in. Blocks with nothing to expand use
+`<<'EOF'`, which writes the text exactly as shown.
 
 **Check**
 
@@ -480,7 +509,7 @@ node has one:
 ```bash
 oc get nodes -o jsonpath='{range .items[*]}{.metadata.name} {.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' |
 while read -r node ip; do
-cat <<EOF | oc apply -f -
+cat > "$M/lab03-nncp-vtep-$node.yaml" <<EOF
 apiVersion: nmstate.io/v1
 kind: NodeNetworkConfigurationPolicy
 metadata:
@@ -502,6 +531,7 @@ spec:
         ipv6:
           enabled: false
 EOF
+oc apply -f "$M/lab03-nncp-vtep-$node.yaml"
 done
 oc wait nncp --all --for=condition=Available --timeout=5m
 ```
@@ -509,7 +539,7 @@ oc wait nncp --all --for=condition=Available --timeout=5m
 Now tell OVN-Kubernetes where to find them:
 
 ```bash
-cat <<EOF | oc apply -f -
+cat > "$M/lab03-vtep.yaml" <<EOF
 apiVersion: k8s.ovn.org/v1
 kind: VTEP
 metadata:
@@ -519,6 +549,7 @@ spec:
     - $VTEP_CIDR
   mode: Unmanaged
 EOF
+oc apply -f "$M/lab03-vtep.yaml"
 ```
 
 `mode: Unmanaged` means "the addresses are already on the nodes; find each
@@ -547,7 +578,7 @@ The same session to leaf1, now also carrying the `l2vpn evpn` address
 family, and advertising the VTEP block so the fabric can send VXLAN back:
 
 ```bash
-cat <<EOF | oc apply -f -
+cat > "$M/lab04-frrconfiguration-evpn.yaml" <<EOF
 apiVersion: frrk8s.metallb.io/v1beta1
 kind: FRRConfiguration
 metadata:
@@ -580,6 +611,7 @@ spec:
                 prefixes:
                   - $VTEP_CIDR
 EOF
+oc apply -f "$M/lab04-frrconfiguration-evpn.yaml"
 ```
 
 - **`addressFamilies: [unicast, evpn]`** - the EVPN routes travel on the same
@@ -609,7 +641,7 @@ A tenant is three things: the **network** (`ClusterUserDefinedNetwork`), a
 *same* subnet on purpose.
 
 ```bash
-cat <<'EOF' | oc apply -f -
+cat > "$M/lab05-cudn-blue-red.yaml" <<'EOF'
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
 metadata:
@@ -658,6 +690,7 @@ spec:
         vni: 201                   # a different VNI...
         routeTarget: "65000:201"   # ...and a different route target: a different network
 EOF
+oc apply -f "$M/lab05-cudn-blue-red.yaml"
 ```
 
 `ipVRF` is required for Layer3 and rejected for Layer2 (which takes `macVRF`,
@@ -668,7 +701,7 @@ because every tenant gets the same shape:
 
 ```bash
 workload() {
-cat <<EOF | oc apply -f -
+cat > "$M/workload-$1.yaml" <<EOF
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -728,6 +761,7 @@ spec:
           resources:
             requests: {cpu: 10m, memory: 32Mi}
 EOF
+oc apply -f "$M/workload-$1.yaml"
 oc -n udn-$1 rollout status ds/udn-test --timeout=10m
 }
 
@@ -762,7 +796,7 @@ The object that ties it together: *these* networks, over *that* FRR
 configuration, into their own VRFs.
 
 ```bash
-cat <<'EOF' | oc apply -f -
+cat > "$M/lab06-routeadvertisements-udn-evpn.yaml" <<'EOF'
 apiVersion: k8s.ovn.org/v1
 kind: RouteAdvertisements
 metadata:
@@ -782,6 +816,7 @@ spec:
     matchLabels:
       routeAdvertisements: fabric-evpn   # Lab 4's configuration
 EOF
+oc apply -f "$M/lab06-routeadvertisements-udn-evpn.yaml"
 ```
 
 `targetVRF: auto` is the isolation: blue's routes go out of blue's VRF with
@@ -841,7 +876,7 @@ oc explain clusteruserdefinednetwork.spec.network.layer2 | grep -iE 'reserved|ex
 ```
 
 ```bash
-cat <<'EOF' | oc apply -f -
+cat > "$M/lab07-cudn-green-purple.yaml" <<'EOF'
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
 metadata:
@@ -896,6 +931,7 @@ spec:
         vni: 500
         routeTarget: "65000:500"
 EOF
+oc apply -f "$M/lab07-cudn-green-purple.yaml"
 workload green
 workload purple
 ```
@@ -953,7 +989,7 @@ hosts at `.255.x`:
 
 ```bash
 for t in green:400 purple:500; do
-cat <<EOF | oc apply -f -
+cat > "$M/lab08-cudn-${t%:*}.yaml" <<EOF
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
 metadata:
@@ -995,6 +1031,7 @@ spec:
         vni: ${t#*:}
         routeTarget: "65000:${t#*:}"
 EOF
+oc apply -f "$M/lab08-cudn-${t%:*}.yaml"
 done
 workload green
 workload purple
@@ -1028,7 +1065,7 @@ ends up with two paths to one prefix, one of them wrong.
 
 ```bash
 violet() {   # violet <slice>
-cat <<EOF | oc apply -f -
+cat > "$M/lab09-cudn-violet.yaml" <<EOF
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
 metadata:
@@ -1053,6 +1090,7 @@ spec:
         vni: 601
         routeTarget: "65000:601"
 EOF
+oc apply -f "$M/lab09-cudn-violet.yaml"
 workload violet
 }
 
@@ -1101,7 +1139,7 @@ it. One per tenant, on both clusters:
 
 ```bash
 webpod() {   # webpod <tenant> - on the cluster `lab` points at
-cat <<EOF | oc -n udn-$1 apply -f -
+cat > "$M/lab10-web-banner-$1.yaml" <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1111,7 +1149,8 @@ data:
   tenant: "$1"
   cluster: "$CLUSTER"
 EOF
-oc -n udn-$1 apply -f - <<'EOF'
+oc apply -n udn-$1 -f "$M/lab10-web-banner-$1.yaml"
+cat > "$M/lab10-web-deployment.yaml" <<'EOF'
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1151,6 +1190,7 @@ spec:
           volumeMounts: [{name: page, mountPath: /var/www/html}]
       volumes: [{name: page, emptyDir: {}}]
 EOF
+oc apply -n udn-$1 -f "$M/lab10-web-deployment.yaml"
 oc -n udn-$1 rollout status deploy/udn-web --timeout=5m
 }
 
@@ -1158,9 +1198,11 @@ lab hub; for t in blue red green purple violet; do webpod $t; done
 lab sno; for t in green purple violet; do webpod $t; done
 ```
 
-Two heredocs, on purpose: the ConfigMap's `<<EOF` lets your shell fill in the
-tenant and cluster; the Deployment's `<<'EOF'` keeps `$BANNER`, `$udn` and
-friends for the container to expand at run time.
+Two files, two kinds of heredoc, on purpose: the ConfigMap's `<<EOF` lets your
+shell fill in the tenant and cluster (one file per tenant); the Deployment's
+`<<'EOF'` keeps `$BANNER`, `$udn` and friends for the container to expand at
+run time, so it is the same file for every tenant - `cat` it and you will see
+them unexpanded.
 
 **Check**
 
@@ -1222,7 +1264,7 @@ OpenShift Virtualization is installed (day 0). A VM on green, on the hub:
 
 ```bash
 lab hub
-cat <<'EOF' | oc apply -f -
+cat > "$M/lab12-green-vm.yaml" <<'EOF'
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -1258,6 +1300,7 @@ spec:
               password: green
               chpasswd: { expire: False }
 EOF
+oc apply -f "$M/lab12-green-vm.yaml"
 oc -n udn-green wait vm/green-vm --for=condition=Ready --timeout=10m
 ```
 
@@ -1342,7 +1385,7 @@ Then migrate:
 
 ```bash
 lab hub
-cat <<'EOF' | oc apply -f -
+cat > "$M/lab12-green-vm-migrate-1.yaml" <<'EOF'
 apiVersion: kubevirt.io/v1
 kind: VirtualMachineInstanceMigration
 metadata:
@@ -1351,6 +1394,7 @@ metadata:
 spec:
   vmiName: green-vm
 EOF
+oc apply -f "$M/lab12-green-vm-migrate-1.yaml"
 oc -n udn-green get vmim green-vm-migrate-1 -w     # ... Running, Succeeded; ctrl-c
 ```
 
@@ -1502,7 +1546,7 @@ for t in blue:Layer3 red:Layer3 green:Layer2 purple:Layer2; do
       ipam:
         lifecycle: Persistent"
   fi
-cat <<EOF | oc apply -f -
+cat > "$M/partc-cudn-$n.yaml" <<EOF
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
 metadata:
@@ -1516,6 +1560,7 @@ spec:
   network:
     $net
 EOF
+oc apply -f "$M/partc-cudn-$n.yaml"
   workload $n
 done
 ```
@@ -1544,7 +1589,7 @@ for t in blue:110:192.168.141 red:120:192.168.142 green:140:192.168.144 purple:1
     o=${ip##*.}
     table=$(oc debug node/$node --quiet -- chroot /host ip -d link show dev $n | grep -o 'table [0-9]*' | cut -d' ' -f2)
     ports=$(oc debug node/$node --quiet -- chroot /host ip -o link show master $n | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -v "\.$vlan$" | sed 's/^/            - /')
-cat <<EOF | oc apply -f -
+cat > "$M/partc-nncp-vrflite-$n-$node.yaml" <<EOF
 apiVersion: nmstate.io/v1
 kind: NodeNetworkConfigurationPolicy
 metadata:
@@ -1580,6 +1625,7 @@ spec:
 $ports
             - "{{ capture.fabric-nic.interfaces.0.name }}.$vlan"
 EOF
+oc apply -f "$M/partc-nncp-vrflite-$n-$node.yaml"
   done
 done
 oc wait nncp --all --for=condition=Available --timeout=5m
@@ -1588,7 +1634,7 @@ oc wait nncp --all --for=condition=Available --timeout=5m
 **C6. A BGP session per tenant, inside its VRF, and the advertisement:**
 
 ```bash
-cat <<EOF | oc apply -f -
+cat > "$M/partc-vrflite-frr-and-ra.yaml" <<EOF
 apiVersion: frrk8s.metallb.io/v1beta1
 kind: FRRConfiguration
 metadata:
@@ -1631,6 +1677,7 @@ spec:
     matchLabels:
       routeAdvertisements: fabric-vrflite
 EOF
+oc apply -f "$M/partc-vrflite-frr-and-ra.yaml"
 ```
 
 **Check**

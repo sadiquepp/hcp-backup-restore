@@ -191,3 +191,6 @@ udn_bgp_internet_probe: "http://1.1.1.1/"
 udn_workshop_cnv_clusters: [hub]
 ## Where the attendee's environment file is written. `source` it.
 udn_workshop_env_file: /root/workshop.env
+## Where workshop.md has attendees write each manifest before applying it
+## ($M, one subdirectory per cluster, created by the `lab` helper).
+udn_workshop_manifest_dir: /root/workshop-manifests
