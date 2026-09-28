@@ -1259,19 +1259,86 @@ spec:
               chpasswd: { expire: False }
 EOF
 oc -n udn-green wait vm/green-vm --for=condition=Ready --timeout=10m
-oc -n udn-green get vmi green-vm -o custom-columns='IP:.status.interfaces[0].ipAddress,MAC:.status.interfaces[0].mac,NODE:.status.nodeName'
 ```
 
 A `containerDisk` is migratable: the disk is an immutable image present on
-every node. Record the IP and the node, then **start a ping from the SNO** -
-from another cluster, across the L2VNI - in a second window:
+every node.
+
+#### Before: where does the other cluster think the VM is?
+
+Three views of one fact, from the VM outward. Save the output of each; you
+will run the same three again after the migration and compare.
+
+**1. The VM itself** - its address, its MAC, and the node it runs on:
+
+```bash
+lab hub
+oc -n udn-green get vmi green-vm -o custom-columns=\
+NAME:.metadata.name,IP:.status.interfaces[0].ipAddress,MAC:.status.interfaces[0].mac,NODE:.status.nodeName
+MAC=$(oc -n udn-green get vmi green-vm -o jsonpath='{.status.interfaces[0].mac}')
+VMIP=$(oc -n udn-green get vmi green-vm -o jsonpath='{.status.interfaces[0].ipAddress}')
+```
+
+```
+NAME       IP           MAC                 NODE
+green-vm   10.204.0.9   0a:58:0a:cc:00:09   worker1
+```
+
+The MAC is not random: OVN-Kubernetes derives it from the IP - `0a:58`
+followed by `10.204.0.9` in hex. So a VM that keeps its IP keeps its MAC.
+
+**2. The SNO's VXLAN forwarding table** - which VTEP the SNO node sends
+frames for that MAC to. This is the *other cluster's* data plane:
+
+```bash
+KUBECONFIG=$SNO_KUBECONFIG oc debug node/sno --quiet -- chroot /host \
+  bridge fdb show dev evx4-evpn-vtep | grep $MAC
+```
+
+```
+0a:58:0a:cc:00:09 vlan 2 extern_learn master evbr-evpn-vtep
+0a:58:0a:cc:00:09 dst 100.64.0.34 src_vni 400 self extern_learn
+```
+
+`evx4-evpn-vtep` is the VXLAN device OVN-Kubernetes created for the VTEP
+named `evpn-vtep` in Lab 3. `dst 100.64.0.34` is worker1's VTEP - the node the
+VM is on.
+
+**3. The BGP route that programmed it** - from the SNO's own FRR, which runs
+in the `frr-k8s` pod rather than on the host:
+
+```bash
+KUBECONFIG=$SNO_KUBECONFIG oc -n $FRR_NS exec ds/frr-k8s -c frr -- \
+  vtysh -c 'show bgp l2vpn evpn route type macip' | grep -A2 "$MAC"
+```
+
+```
+ *>  [2]:[0]:[48]:[0a:58:0a:cc:00:09]
+                    100.64.0.34                            0 64513 64512 i
+                    RT:65000:400 ET:8
+ *>  [2]:[0]:[48]:[0a:58:0a:cc:00:09]:[32]:[10.204.0.9]
+                    100.64.0.34                            0 64513 64512 i
+                    RT:65000:400 ET:8
+```
+
+A **type-2** (MAC/IP) route: "MAC `0a:58:0a:cc:00:09` is reachable at VTEP
+`100.64.0.34`, in the tenant with route target `65000:400`". Its next hop is
+worker1's own VTEP, the AS path `64513 64512` says it came from the hub
+(64512) through leaf1 (64513), and `ET:8` marks VXLAN encapsulation. There are two because a type-2 route
+can carry the MAC alone - which programs the FDB above - or the MAC and IP,
+which lets the SNO answer ARP for `10.204.0.9` locally instead of flooding.
+
+#### Migrate, while the other cluster watches
+
+In a second window, start a ping **from the SNO** - another cluster, across
+the L2VNI - and leave it running:
 
 ```bash
 source /root/workshop.env; lab sno
 inpod green ping -i 0.2 <vm ip>
 ```
 
-Migrate it, and watch:
+Then migrate:
 
 ```bash
 lab hub
@@ -1284,20 +1351,79 @@ metadata:
 spec:
   vmiName: green-vm
 EOF
-oc -n udn-green get vmim green-vm-migrate-1 -w     # ... Running, Succeeded
+oc -n udn-green get vmim green-vm-migrate-1 -w     # ... Running, Succeeded; ctrl-c
 ```
 
-**Check**
+#### After: the same three commands
 
-| Where | Expect |
-| --- | --- |
-| `oc -n udn-green get vmi green-vm -o wide` | `NODE` changed, `IP` the same |
-| the ping from the SNO | a handful of packets lost at most - not a timeout and reconnect |
-| `leaf2 'show evpn mac vni 400'`, before and after | the VM's MAC, behind a **different** VTEP |
+```bash
+oc -n udn-green get vmi green-vm -o custom-columns=\
+NAME:.metadata.name,IP:.status.interfaces[0].ipAddress,MAC:.status.interfaces[0].mac,NODE:.status.nodeName
+KUBECONFIG=$SNO_KUBECONFIG oc debug node/sno --quiet -- chroot /host \
+  bridge fdb show dev evx4-evpn-vtep | grep $MAC
+KUBECONFIG=$SNO_KUBECONFIG oc -n $FRR_NS exec ds/frr-k8s -c frr -- \
+  vtysh -c 'show bgp l2vpn evpn route type macip' | grep -A2 "$MAC"
+```
 
-That last row is the mechanism. Nothing re-addressed anything: the new node
-advertised a type-2 route for the MAC, the SNO node started encapsulating to
-the new node's VTEP, and the pod on the other cluster never knew.
+```
+NAME       IP           MAC                 NODE
+green-vm   10.204.0.9   0a:58:0a:cc:00:09   worker2
+
+0a:58:0a:cc:00:09 vlan 2 extern_learn master evbr-evpn-vtep
+0a:58:0a:cc:00:09 dst 100.64.0.35 src_vni 400 self extern_learn
+
+ *>  [2]:[0]:[48]:[0a:58:0a:cc:00:09]
+                    100.64.0.35                            0 64513 64512 i
+                    RT:65000:400 ET:8 MM:1
+ *>  [2]:[0]:[48]:[0a:58:0a:cc:00:09]:[32]:[10.204.0.9]
+                    100.64.0.35                            0 64513 64512 i
+                    RT:65000:400 ET:8 MM:1
+```
+
+And the ping in the other window, stopped with ctrl-c:
+
+```
+--- 10.204.0.9 ping statistics ---
+144 packets transmitted, 144 received, 0% packet loss, time 145983ms
+```
+
+The *after* output and the ping are measured on this lab (see
+[bgp-evpn.md](bgp-evpn.md#live-migration-on-the-layer2-tenant)); the FDB read
+`dst 100.64.0.34` before, and the *before* route is what that entry implies.
+Your node names and addresses may differ; the pattern will not.
+
+#### Compare: how BGP moved the MAC
+
+| | Before | After | What changed it |
+| --- | --- | --- | --- |
+| VM IP / MAC | `10.204.0.9` / `0a:58:0a:cc:00:09` | the same | `ipam.lifecycle: Persistent` (Lab 7) kept the IP; the MAC follows from the IP |
+| VM node | worker1 | worker2 | the migration |
+| BGP next hop | `100.64.0.34` | `100.64.0.35` | a **different originator**: worker2 now advertises the MAC with its own VTEP, and worker1 withdrew its route |
+| `MM:` | absent (sequence 0) | `MM:1` | **MAC Mobility**: the sequence number goes up each time the MAC moves, so every router prefers the newer location even if the old withdraw arrives late |
+| SNO FDB `dst` | `100.64.0.34` | `100.64.0.35` | zebra on the SNO reprogrammed the VXLAN device from the new route |
+
+Read it bottom-up and it is the whole mechanism:
+
+1. The VM lands on worker2. OVN-Kubernetes on worker2 sees the MAC locally
+   and FRR on worker2 advertises a type-2 route for it, next hop its own VTEP,
+   with the MAC-mobility sequence number raised to 1.
+2. worker1 withdraws its route for the MAC.
+3. leaf1 passes both to the spine and on to every EVPN speaker - including
+   the SNO, in another AS, which is why the two clusters must not share one.
+4. The SNO's FRR picks the route with the higher sequence number, and zebra
+   rewrites the FDB entry from `dst 100.64.0.34` to `dst 100.64.0.35`.
+5. The SNO's next frame to the VM is encapsulated to worker2. The ping never
+   noticed.
+
+`extern_learn` on both lines is what proves step 4 rather than a data-plane
+guess: the VXLAN device is on a bridge port with learning **off**, so the only
+thing that can write this entry is zebra acting on a BGP route. Nothing
+between the SNO and worker2 could have made the change either - leaf1 and the
+spine only ever see the outer packet, addressed to a `/32`.
+
+leaf2 sees the same move for its own copy of the domain:
+`leaf2 'show evpn mac vni 400'` before and after shows the MAC behind the new
+VTEP.
 
 ---
 

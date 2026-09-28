@@ -4643,7 +4643,7 @@ Decoding the rest:
 | `RT:65000:400` | Route target. `65000` is the **spine** ASN, not either cluster's - deliberately, so both clusters import the same value; `400` is the tenant's MAC VNI |
 | `ET:8` | Encapsulation extended community, tunnel type 8 = **VXLAN** (RFC 8365) |
 | `MM:1` | **MAC Mobility, sequence 1** |
-| `RD 192.168.140.35:6` | Route distinguisher, derived from worker2's fabric address |
+| `Route Distinguisher: 192.168.140.35:6` | **Not this route's.** FRR prints the RD as a header *above* each group of routes, so the line `grep -A3` caught after the second route is the header of the *next* group. This route's own RD is the header above it - `grep -B` far enough to reach it, or read the whole group |
 
 **`MM:1` is the prediction landing.** The mobility sequence was absent before
 the VM had ever moved; this is the first migration, so it reads 1. The next
