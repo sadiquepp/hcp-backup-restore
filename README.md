@@ -1974,6 +1974,7 @@ you ever run it.
 | --- | --- |
 | [udn-bgp-evpn/README.md](udn-bgp-evpn/README.md) | Overview, the phase sequence, the playbook reference and the traps |
 | [udn-bgp-evpn/udn-bgp-evpn-steps.md](udn-bgp-evpn/udn-bgp-evpn-steps.md) | Build it step by step, branched by transport |
+| [udn-bgp-evpn/workshop.md](udn-bgp-evpn/workshop.md) | The workshop: one command for the lab, then the BGP/EVPN/UDN objects by hand |
 | [udn-bgp-evpn/bgp-evpn.md](udn-bgp-evpn/bgp-evpn.md) | The cluster side, in depth |
 | [udn-bgp-evpn/clab-fabric.md](udn-bgp-evpn/clab-fabric.md) | The fabric side, in depth |
 

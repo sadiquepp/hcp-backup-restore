@@ -182,3 +182,12 @@ udn_bgp_vtep_annotation_retries_after_restart: 30
 ## drop outbound ping. Any HTTP status means the path works - 1.1.1.1 answers
 ## plain HTTP with a redirect. Set to "" where the lab host has no internet.
 udn_bgp_internet_probe: "http://1.1.1.1/"
+
+## Workshop (udn_phase: prep, and -e udn_bgp_check_only=true).
+##
+## Which clusters get OpenShift Virtualization on day 0. The live-migration
+## lab runs its VM on the hub and pings it from the SNO, so the SNO does not
+## need it - and it is the cluster with the least memory to spare.
+udn_workshop_cnv_clusters: [hub]
+## Where the attendee's environment file is written. `source` it.
+udn_workshop_env_file: /root/workshop.env

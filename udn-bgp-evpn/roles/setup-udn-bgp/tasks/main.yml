@@ -20,10 +20,10 @@
 
 - name: Validate udn_phase
   ansible.builtin.assert:
-    that: udn_phase in ['preflight', 'enable', 'default', 'shared', 'vrflite', 'evpn', 'web']
+    that: udn_phase in ['preflight', 'enable', 'default', 'shared', 'vrflite', 'evpn', 'web', 'prep']
     fail_msg: >-
       udn_phase must be one of preflight, enable, default, shared, vrflite,
-      evpn, web - got '{{ udn_phase | default("(unset)") }}'.
+      evpn, web, prep - got '{{ udn_phase | default("(unset)") }}'.
 
 # ---------------------------------------------------------------------------
 # Which cluster this run is targeting, and therefore which nodes it owns.
@@ -94,11 +94,18 @@
 # leaf1's green VRF from different next hops and one of them would lose. It
 # builds violet alone there - its own routed tenant, with a subnet the fabric
 # can hold one unambiguous route to. The hub builds violet under EVPN only.
+#
+# udn_tenants_skip then takes tenants out of whatever list that produced -
+# the workshop drops orange this way, without restating any tenant. With no
+# list and no skip the result is every tenant, exactly as before.
 - name: Resolve which tenants this cluster builds in this phase
   ansible.builtin.set_fact:
     udn_bgp_cluster_tenant_names: >-
-      {{ clab_clusters[udn_bgp_cluster]['tenants_' ~ udn_phase]
-         | default(clab_clusters[udn_bgp_cluster].tenants | default([]), true) }}
+      {{ (clab_clusters[udn_bgp_cluster]['tenants_' ~ udn_phase]
+          | default(clab_clusters[udn_bgp_cluster].tenants | default([]), true)
+          or udn_bgp_all_tenant_names)
+         | reject('in', udn_tenants_skip | default([]))
+         | list }}
 
 - name: Report the tenant list when the phase overrides it
   ansible.builtin.debug:
@@ -174,7 +181,8 @@
     udn_bgp_evpn_elsewhere: >-
       {{ udn_bgp_evpn_elsewhere
          + (clab_clusters[item]['tenants_evpn']
-            | default(clab_clusters[item].tenants | default(udn_bgp_all_tenant_names), true)) }}
+            | default(clab_clusters[item].tenants | default(udn_bgp_all_tenant_names), true)
+            | reject('in', udn_tenants_skip | default([])) | list) }}
   loop: "{{ clab_fabric_clusters | default(clab_clusters | list) }}"
   when:
     - udn_phase == 'evpn'
@@ -415,9 +423,60 @@
 - name: Pre-flight checks
   ansible.builtin.include_tasks: preflight.yml
 
+# ---------------------------------------------------------------------------
+# Check only (-e udn_bgp_check_only=true, with the phase tag of what was
+# built): read what is on the cluster and verify it, changing nothing the
+# phase would apply. The workshop runs this after an attendee has applied
+# the phase by hand. verify.yml still makes its three REPAIRS - forwarding on
+# the fabric NIC, a session stuck on a stale zebra nexthop, and a missing SNAT
+# exclusion - because those are platform faults the attendee did not cause
+# and has not been taught to fix; every one of them is reported as it is made.
+# ---------------------------------------------------------------------------
+- name: Check what was built by hand, and stop
+  when: udn_bgp_check_only | default(false) | bool
+  block:
+    - name: Resolve the node names the checks address
+      ansible.builtin.include_tasks: node-names.yml
+
+    # Check what IS built, not what vars.yaml declares: an attendee checks
+    # after each lab, when only some tenants exist yet. A declared tenant
+    # with no CUDN is reported and left out rather than failed.
+    - name: List the tenant CUDNs that exist on this cluster
+      ansible.builtin.command:
+        cmd: oc get clusteruserdefinednetwork -o jsonpath={.items[*].metadata.name}
+      register: udn_bgp_check_cudns
+      changed_when: false
+      failed_when: false
+
+    - name: Report which declared tenants are built and which are not yet
+      ansible.builtin.debug:
+        msg: >-
+          Checking {{ udn_bgp_tenants | map(attribute='name')
+                      | select('in', udn_bgp_check_cudns.stdout.split()) | list }}.
+          Not built yet on '{{ udn_bgp_cluster }}', so not checked:
+          {{ udn_bgp_tenants | map(attribute='name')
+             | reject('in', udn_bgp_check_cudns.stdout.split()) | list or 'none' }}.
+
+    - name: Narrow the checks to the tenants that exist
+      ansible.builtin.set_fact:
+        udn_bgp_tenants: >-
+          {{ udn_bgp_tenants
+             | selectattr('name', 'in', udn_bgp_check_cudns.stdout.split()) | list }}
+        udn_web_tenants: >-
+          {{ udn_web_tenants | intersect(udn_bgp_check_cudns.stdout.split()) }}
+
+    - name: Verify
+      ansible.builtin.include_tasks: verify.yml
+
+    - name: End here - a check applies nothing
+      ansible.builtin.meta: end_host
+      when: udn_bgp_check_only | default(false) | bool
+
+# Not in 'prep': the workshop leaves this to the attendee (Lab 1), because
+# the three switches it flips are the first thing there is to learn.
 - name: Enable FRR and route advertisements
   ansible.builtin.include_tasks: enable.yml
-  when: udn_phase not in ['preflight', 'web']
+  when: udn_phase not in ['preflight', 'web', 'prep']
 
 # Must precede apply.yml: the NNCP templates select nodes by name, and the
 # only name that works is the one the cluster actually registered.
@@ -648,7 +707,7 @@
       --dry-run=client -o yaml | oc apply -f -
   no_log: true
   when:
-    - udn_phase not in ['preflight', 'web']
+    - udn_phase not in ['preflight', 'web', 'prep']
     - udn_bgp_password | default('') | length > 0
 
 - name: Report whether BGP sessions are authenticated
@@ -661,12 +720,14 @@
          if (udn_bgp_password | default('') | length > 0)
          else 'BGP sessions are unauthenticated (udn_bgp_password unset in
                vault.yaml). This is the default.' }}
-  when: udn_phase not in ['preflight', 'web']
+  when: udn_phase not in ['preflight', 'web', 'prep']
 
+# Not in 'prep' either: the FRRConfiguration API does not exist until Lab 1
+# enables FRR, and the peering itself is Lab 2.
 - name: Create the base BGP peering in the default VRF
   ansible.builtin.command:
     cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/frrconfiguration-default.yaml"
-  when: udn_phase not in ['preflight', 'web']
+  when: udn_phase not in ['preflight', 'web', 'prep']
 
 # ---------------------------------------------------------------------------
 # Phase: default - advertise the cluster default pod network
@@ -1049,6 +1110,19 @@
   ansible.builtin.include_tasks: webload.yml
   when: udn_phase == 'web'
 
+# ---------------------------------------------------------------------------
+# Phase: prep - the workshop's day-0 plumbing on a cluster. Everything above
+# that is not BGP/EVPN learning material has already run (NMState, forwarding,
+# the fabric NIC addressing); this adds OpenShift Virtualization for the live
+# migration lab and writes the attendee's environment file. Nothing here is
+# something the workshop asks an attendee to type.
+# ---------------------------------------------------------------------------
+- name: Workshop day-0 extras
+  ansible.builtin.include_tasks: prep.yml
+  when: udn_phase == 'prep'
+
 - name: Verify
   ansible.builtin.include_tasks: verify.yml
-  when: udn_phase not in ['preflight', 'web']
+  when:
+    - udn_phase not in ['preflight', 'web', 'prep']
+    - not (udn_bgp_check_only | default(false) | bool)

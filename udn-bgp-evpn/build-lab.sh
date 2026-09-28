@@ -11,6 +11,29 @@
 #   ./build-lab.sh --dry-run             # print the commands, run nothing
 #   ./build-lab.sh --rebuild-clusters    # cleanup.yaml first, then all of it
 #   ./build-lab.sh --rebuild-clusters -y # ... without the 10s abort window
+#   ./build-lab.sh --workshop            # day 0 of the workshop, then stop
+#   ./build-lab.sh --workshop --only check-hub   # verify what an attendee built
+#   ./build-lab.sh -e @my-overrides.yaml # extra vars, passed to every playbook
+#   ./build-lab.sh --vrflite --from fabric --switch-topology
+#                                        # rebuild an EVPN fabric as VRF-Lite
+#
+# THE WORKSHOP. --workshop builds only what an attendee is not there to learn
+# - the helper, both clusters, the fabric, the namespace client VM, and per
+# cluster NMState, forwarding, the fabric NIC addressing and OpenShift
+# Virtualization (the 'prep' step) - and stops. Enabling BGP, every
+# FRRConfiguration, the VTEP, the CUDNs, the RouteAdvertisements and the
+# workloads are the attendee's, typed from workshop.md. It combines with the
+# mode: --workshop alone is EVPN, --workshop --vrflite builds the fabric for
+# the optional VRF-Lite lab. It adds -e @workshop/vars-workshop.yaml to every
+# playbook. Steps it does not run by default are reachable with --only:
+# check-hub / check-sno (verify a cluster, repairing the three known platform
+# faults and nothing else), nsproxy (the tenant ingress), and every step of
+# the full build as a catch-up for an attendee who has fallen behind.
+#
+# HOST OVERRIDES. ../vars-metal.yaml, which terraform/lab-up.sh's bootstrap
+# writes on an AWS metal host (base_image_dir, worker sizing, VNC), is passed
+# to every playbook when it exists - it is this host's own file, and building
+# without it on a 192 GiB host oversubscribes memory. -e adds more.
 #
 # TWO LABS, ONE SCRIPT. --evpn (the default) builds the stretched-Layer2
 # EVPN lab; --vrflite builds the VRF-Lite one. They share every step but
@@ -104,6 +127,11 @@ DRY_RUN=0
 WANT_LIST=0
 FROM=""
 ONLY=""
+WORKSHOP=0
+SWITCH_TOPOLOGY=0
+EXTRA_VARS=()
+HOST_VARS="../vars-metal.yaml"
+WORKSHOP_VARS="workshop/vars-workshop.yaml"
 
 # Filled in from MODE once the arguments are parsed - xcluster is EVPN-only.
 STEPS=()
@@ -136,6 +164,14 @@ list_steps() {
              NOT in --shared: nothing to separate behind one address
   verify     scripts/udn-web-demo.sh - the ingress by hostname (--proxy), or
              under --shared every pod from one client (--host)
+  prep       --workshop only: per cluster NMState, IP forwarding, the fabric
+             NIC addressing, OpenShift Virtualization (hub), and
+             /root/workshop.env. NOT the network operator switches or any
+             FRRConfiguration - those are the attendee's
+  check-hub, check-sno
+             --workshop, with --only: verify what was built by hand on that
+             cluster with the phase's own checks. Applies nothing, except
+             the three known platform repairs, each reported as it is made
   xcluster   scripts/udn-xcluster-curl.sh - pod to pod ACROSS the two
              clusters. Needs both kubeconfigs and web on both. Under EVPN,
              same tenant over the stretched L2; under VRF-Lite, the
@@ -160,7 +196,7 @@ list_steps() {
              Verified against the published checksum before it is moved
              into place, so a truncated download never becomes the image
 EOF
-    printf '\n  this run (--%s): %s\n' "$MODE" "${STEPS[*]}"
+    printf '\n  this run (--%s%s): %s\n' "$MODE" "$( (( WORKSHOP )) && echo ' --workshop')" "${STEPS[*]}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -171,6 +207,9 @@ while [[ $# -gt 0 ]]; do
         --evpn)                MODE="evpn"; shift ;;
         --vrflite)             MODE="vrflite"; shift ;;
         --shared)              MODE="shared"; shift ;;
+        --workshop)            WORKSHOP=1; shift ;;
+        --switch-topology)     SWITCH_TOPOLOGY=1; shift ;;
+        -e|--extra-vars)       EXTRA_VARS+=(-e "$2"); shift 2 ;;
         --parallel-tenants|--parallel-evpn)
                                PARALLEL_TENANTS=1; shift ;;
         --rebuild-clusters)    REBUILD_CLUSTERS=1; shift ;;
@@ -200,6 +239,19 @@ case "$MODE" in
     shared) DEMO_FLAG="--host";  XCLUSTER_FLAG="--shared" ;;
     *)      DEMO_FLAG="--proxy"; XCLUSTER_FLAG="" ;;
 esac
+# The workshop keeps the mode's topology and tenant tag but runs only the
+# day-0 steps. Everything else in the mode's list stays reachable with
+# --only, as a catch-up.
+if (( WORKSHOP )); then
+    EXTRA_STEPS+=("${STEPS[@]}" check-hub check-sno)
+    STEPS=(bmhost clusters fabric nsclient prep)
+    EXTRA_VARS=(-e "@$WORKSHOP_VARS" "${EXTRA_VARS[@]}")
+fi
+# First of all, so it is the weakest: the workshop file and any -e given on
+# the command line both override it. (Later -e wins in ansible-playbook.)
+if [[ -r "$HOST_VARS" ]]; then
+    EXTRA_VARS=(-e "@$HOST_VARS" "${EXTRA_VARS[@]}")
+fi
 TOTAL=${#STEPS[@]}
 
 (( WANT_LIST )) && { list_steps; exit 0; }
@@ -239,7 +291,7 @@ skip() { printf '    (skipping %s)\n' "$*"; }
 # play <playbook> [args...]  - one ansible-playbook invocation, in the foreground
 play() {
     local pb="$1"; shift
-    local -a cmd=(ansible-playbook -i "$INVENTORY" "$pb" --vault-password-file "$VAULT_FILE" "$@")
+    local -a cmd=(ansible-playbook -i "$INVENTORY" "$pb" --vault-password-file "$VAULT_FILE" "${EXTRA_VARS[@]}" "$@")
     if (( DRY_RUN )); then printf '    %s\n' "${cmd[*]}"; return 0; fi
     "${cmd[@]}"
 }
@@ -252,7 +304,7 @@ play() {
 BG_NAMES=(); BG_PIDS=()
 play_bg() {
     local name="$1" pb="$2"; shift 2
-    local -a cmd=(ansible-playbook -i "$INVENTORY" "$pb" --vault-password-file "$VAULT_FILE" "$@")
+    local -a cmd=(ansible-playbook -i "$INVENTORY" "$pb" --vault-password-file "$VAULT_FILE" "${EXTRA_VARS[@]}" "$@")
     if (( DRY_RUN )); then printf '    %s   > %s/%s.log &\n' "${cmd[*]}" "$LOGDIR" "$name"; return 0; fi
     printf '    %s -> %s/%s.log\n' "$name" "$LOGDIR" "$name"
     "${cmd[@]}" >"$LOGDIR/$name.log" 2>&1 &
@@ -426,7 +478,12 @@ run_step() {
         play build-lab-image.yaml ;;
     fabric)
         say "$(pos fabric)  containerlab fabric (leaf1 / spine / leaf2), topology $TOPOLOGY"
-        play setup_udn_bgp_lab.yaml --tags fabric -e "clab_topology=$TOPOLOGY" ;;
+        # --switch-topology is the deliberate way to rebuild an existing
+        # fabric in the other shape (evpn <-> bgp). Without it the role
+        # refuses, because a forgotten flag looks exactly like a switch.
+        local -a switch=()
+        if (( SWITCH_TOPOLOGY )); then switch=(-e clab_topology_switch=true); fi
+        play setup_udn_bgp_lab.yaml --tags fabric -e "clab_topology=$TOPOLOGY" "${switch[@]}" ;;
     preflight)
         say "$(pos preflight)  pre-flight - changes nothing"
         play setup_udn_bgp_lab.yaml --tags preflight ;;
@@ -458,6 +515,21 @@ run_step() {
     nsclient)
         say "$(pos nsclient)  namespace client VM"
         play setup_udn_bgp_lab.yaml --tags clabnsclient -e "clab_topology=$TOPOLOGY" ;;
+    prep)
+        # Parallel: the hub's half waits a quarter of an hour on OpenShift
+        # Virtualization and the SNO's has nothing to wait for. Separate
+        # logs, as with the cluster installs.
+        say "$(pos prep)  workshop plumbing on the hub and the SNO, in parallel"
+        play_bg prep-hub setup_udn_bgp_lab.yaml --tags prep -e udn_bgp_cluster=hub -e "clab_topology=$TOPOLOGY"
+        play_bg prep-sno setup_udn_bgp_lab.yaml --tags prep -e udn_bgp_cluster=sno -e "clab_topology=$TOPOLOGY"
+        wait_all ;;
+    check-hub|check-sno)
+        # The phase's own verify, against what the attendee applied by hand.
+        # Same tag as the build, so the same tenant lists and the same checks;
+        # udn_bgp_check_only stops it before it applies anything.
+        say "check what was built on ${step#check-} ($MODE)"
+        play setup_udn_bgp_lab.yaml --tags "$MODE" -e "udn_bgp_cluster=${step#check-}" \
+            -e udn_bgp_check_only=true -e "clab_topology=$TOPOLOGY" ;;
     nsproxy)
         say "$(pos nsproxy)  tenant ingress"
         play setup_udn_bgp_lab.yaml --tags clabnsproxy -e "clab_topology=$TOPOLOGY" ;;
@@ -526,7 +598,7 @@ run_step() {
 # The mode goes into the hint: it defaults to --evpn, so a --vrflite or
 # --shared build resumed with a bare --from would carry on in the wrong one.
 trap 'echo; echo "FAILED at step: ${CURRENT:-?}" >&2;
-      echo "  resume with: $0 --$MODE --from ${CURRENT:-?}" >&2' ERR
+      echo "  resume with: $0 --$MODE$( (( WORKSHOP )) && echo " --workshop") --from ${CURRENT:-?}" >&2' ERR
 
 # Warn, do not block: someone may be running this under nohup, or from a
 # console, or re-running a single quick step where it does not matter.
@@ -560,6 +632,8 @@ if [[ -n "$ONLY" ]]; then
     say "done - step '$ONLY' only. The lab as a whole was not built or checked."
 elif [[ -n "$FROM" ]]; then
     say "done - resumed from '$FROM' through the end."
+elif (( WORKSHOP )); then
+    say "day 0 done - source /root/workshop.env and start Lab 1 in workshop.md"
 else
     say "done - the lab is up"
 fi

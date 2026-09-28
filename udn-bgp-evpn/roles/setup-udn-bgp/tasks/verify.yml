@@ -481,7 +481,10 @@
     - udn_phase == 'evpn'
     - udn_bgp_internet_probe | length > 0
 
+# Not on a workshop check (udn_bgp_check_only): workshop.md already gives
+# each lab its own tests, and this assumes the phase's full tenant list.
 - name: Print the reachability tests to run by hand
+  when: not (udn_bgp_check_only | default(false) | bool)
   ansible.builtin.debug:
     msg: "{{ udn_bgp_manual_checks.splitlines() }}"
   vars:

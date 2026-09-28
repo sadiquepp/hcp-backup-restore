@@ -2615,6 +2615,13 @@ udn_nsclient_segment_host_octet: 21
 ## Active, the blank row was hiding a real failure, not demonstrating one.
 udn_web_tenants: [blue, red, orange, green, purple, violet]
 
+## Tenants to leave out everywhere a cluster's tenant list is read - the
+## build, the web pods, the check - without restating any tenant. The
+## workshop sets [orange] (udn-bgp-evpn/workshop/vars-workshop.yaml): orange
+## is a third non-overlapping Layer3 tenant and teaches nothing blue and
+## violet do not. The fabric still carries its VRF, unused.
+udn_tenants_skip: []
+
 ## UBI, not registry.redhat.io: this needs no entitlement, and unlike the ping
 ## DaemonSet it needs no privileged SCC either - httpd-24 listens on 8080 as a
 ## non-root user, which restricted-v2 allows. The init container is the same
@@ -2654,7 +2661,7 @@ udn_web_port: 8080
 ## a real tenant-facing ingress is, which is why it is worth building on
 ## purpose rather than meeting by accident. It changes nothing for the other
 ## tests: those run inside the namespaces, which this does not touch.
-udn_proxy_tenants: "{{ udn_web_tenants }}"
+udn_proxy_tenants: "{{ udn_web_tenants | reject('in', udn_tenants_skip) | list }}"
 
 ## Which phase's tenant lists the ingress should mirror.
 ##

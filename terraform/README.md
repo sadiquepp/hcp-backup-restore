@@ -175,13 +175,15 @@ read -rsp 'Vault password: ' pw && printf '%s' "$pw" > ~/.vault_pass && unset pw
 tmux new -s lab
 cd /root/hcp-backup-restore/udn-bgp-evpn
 ./build-lab.sh --evpn        # or --vrflite / --shared
+./build-lab.sh --workshop    # or: day 0 of the workshop only - see workshop.md
 ```
 
 Under `tmux`: a full build installs two OpenShift clusters and takes hours,
 and an ssh drop otherwise takes the build with it.
 
-The sizing in `vars-metal.yaml` is applied with `-e @vars-metal.yaml`, or
-merge it into `vars.yaml`. `worker_memory: 24576` and `worker_cpu: 16` suit
+`build-lab.sh` passes `vars-metal.yaml` to every playbook it runs whenever the
+file exists, so the sizing applies without a flag. Running a playbook by hand,
+add `-e @../vars-metal.yaml` yourself. `worker_memory: 24576` and `worker_cpu: 16` suit
 192 GiB of host RAM; see the memory note in that file before changing them.
 
 ## Cost

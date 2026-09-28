@@ -222,7 +222,7 @@
       ansible.builtin.stat:
         path: "{{ hub_kubeconfig }}"
       register: udn_bgp_kubeconfig_stat
-      tags: [preflight, default, shared, vrflite, evpn, web]
+      tags: [preflight, default, shared, vrflite, evpn, web, prep]
 
     - name: Say which kubeconfig is missing rather than letting oc say nothing
       ansible.builtin.assert:
@@ -237,8 +237,20 @@
           hub instead and look like it worked.
         success_msg: >-
           Cluster '{{ udn_bgp_cluster }}' -> {{ hub_kubeconfig }}
-      tags: [preflight, default, shared, vrflite, evpn, web]
+      tags: [preflight, default, shared, vrflite, evpn, web, prep]
   tasks:
+    # The workshop's day 0 on a cluster: NMState, forwarding, the fabric NIC
+    # addressing, OpenShift Virtualization and the attendee's environment
+    # file - and deliberately NOT the network operator switches or any
+    # FRRConfiguration, which are the attendee's first two labs. See
+    # workshop.md and "Phase: prep" in roles/setup-udn-bgp/tasks/main.yml.
+    - name: Workshop day-0 plumbing
+      ansible.builtin.import_role:
+        name: setup-udn-bgp
+      vars:
+        udn_phase: prep
+      tags: [prep, never]
+
     - name: Pre-flight only
       ansible.builtin.import_role:
         name: setup-udn-bgp

@@ -96,7 +96,9 @@
 
 - name: Fail if clab_topology disagrees with the fabric that is actually deployed
   ansible.builtin.assert:
-    that: clab_deployed_as == '' or clab_deployed_as == clab_topology
+    that: >-
+      clab_deployed_as == '' or clab_deployed_as == clab_topology
+      or (clab_topology_switch | default(false) | bool)
     fail_msg: >-
       The fabric on this host was deployed as '{{ clab_deployed_as }}', but
       this run has clab_topology='{{ clab_topology }}'. Everything the fabric
@@ -110,10 +112,15 @@
       Add the flag:
         -e clab_topology={{ clab_deployed_as }}
 
-      To rebuild the fabric in the other topology instead, run --tags
-      clabdeploy with the new value; that is what rewrites this marker.
+      To rebuild the fabric in the other topology on purpose, say so:
+        --tags fabric -e clab_topology={{ clab_topology }} -e clab_topology_switch=true
+      (build-lab.sh: --switch-topology). The redeploy rewrites this marker,
+      so every later run is checked against the new shape.
     success_msg: >-
-      {{ 'Topology matches the deployed fabric: ' ~ clab_topology
+      {{ ('SWITCHING the fabric from ' ~ clab_deployed_as ~ ' to ' ~ clab_topology
+          ~ ' (clab_topology_switch=true).')
+         if (clab_deployed_as and clab_deployed_as != clab_topology) else
+         'Topology matches the deployed fabric: ' ~ clab_topology
          if clab_deployed_as else
          'No fabric deployed from this checkout yet; building '
          ~ clab_topology ~ '.' }}

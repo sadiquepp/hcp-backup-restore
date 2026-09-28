@@ -1,0 +1,9 @@
+## The workshop's overrides, passed to every playbook by
+## `build-lab.sh --workshop` (as -e @workshop/vars-workshop.yaml). Anything
+## here beats vars.yaml, so keep it to what the workshop actually changes.
+
+## Orange is a third non-overlapping Layer3 tenant; blue, red and violet
+## already teach everything it would. Leaving it out saves a namespace per
+## lab step and keeps the checks and the ingress to the tenants attendees
+## actually build. leaf2 still carries an orange VRF, unused.
+udn_tenants_skip: [orange]

@@ -11,6 +11,9 @@ actually builds, and how to build it by hand:
 **[clab-fabric.md](clab-fabric.md)**. Design notes, constraints and the
 troubleshooting table: **[README.md](README.md#udn-over-bgp-vrf-lite-and-evpn-containerlab-fabric)**.
 
+Running this as a workshop - lab automated, every BGP/EVPN/UDN object typed
+by hand? **[workshop.md](workshop.md)**.
+
 Not using the simulated fabric at all - a real fabric the network team has
 already configured? **[real-fabric.md](real-fabric.md)** is the cluster side
 on its own, with the lab scaffolding removed.
@@ -102,6 +105,11 @@ a different shape for C.
 command** once the EVPN fabric is up. Omit it and the run succeeds while
 rendering the phase-3 shape; the role now records what it deployed and refuses
 a mismatched run, but the flag is still yours to pass.
+
+That refusal also covers a change of shape you *do* mean - moving from B to
+C, or back. Say so with `-e clab_topology_switch=true` on that one `--tags
+fabric` run (`build-lab.sh --switch-topology`); the redeploy rewrites the
+record, and later runs are checked against the new shape.
 
 ### Moving between paths later
 

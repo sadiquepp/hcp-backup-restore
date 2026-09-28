@@ -630,7 +630,9 @@ ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass -
 ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags vrflite
 
 # 4. EVPN. Rebuild the fabric as leaf/spine/leaf first, then the cluster side.
-ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric -e clab_topology=evpn
+#    clab_topology_switch: the fabric was deployed as 'bgp', and the role
+#    refuses a different shape unless the change is declared.
+ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags fabric -e clab_topology=evpn -e clab_topology_switch=true
 ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml --ask-vault-pass --tags evpn
 ```
 
@@ -833,6 +835,7 @@ required for `Layer3`.
 | Document | What it covers |
 | --- | --- |
 | **[udn-bgp-evpn-steps.md](udn-bgp-evpn-steps.md)** | Build it step by step, branched by transport. Start here |
+| **[workshop.md](workshop.md)** | The hands-on version: day 0 automated, then every BGP/EVPN/UDN object typed by hand, through live migration |
 | **[bgp-evpn.md](bgp-evpn.md)** | The cluster side: every phase, every CR, packet walks, live migration |
 | **[clab-fabric.md](clab-fabric.md)** | The fabric side: what containerlab builds, and the manual equivalent |
 | **[troubleshooting.md](troubleshooting.md)** | Case files: hard faults, the traces that found them, and the wrong turns |
