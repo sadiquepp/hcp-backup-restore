@@ -1255,8 +1255,34 @@ workload green
 workload purple
 ```
 
-Then the same `RouteAdvertisements` as Lab 6 - paste that block unchanged; it
-is the SNO's first, and it advertises every tenant the SNO has from here on.
+Then the same `RouteAdvertisements` as Lab 6, unchanged. It is the SNO's
+first, and it advertises every tenant the SNO has from here on. `lab sno` set
+`$M` to the SNO's directory, so this writes the SNO's own copy:
+
+```bash
+cat > "$M/lab06-routeadvertisements-udn-evpn.yaml" <<'EOF'
+apiVersion: k8s.ovn.org/v1
+kind: RouteAdvertisements
+metadata:
+  name: udn-evpn
+spec:
+  targetVRF: auto                  # each network into its OWN VRF
+  advertisements:
+    - PodNetwork
+  networkSelectors:
+    - networkSelectionType: ClusterUserDefinedNetworks
+      clusterUserDefinedNetworkSelector:
+        networkSelector:
+          matchLabels:
+            bgp: enabled
+  nodeSelector: {}
+  frrConfigurationSelector:
+    matchLabels:
+      routeAdvertisements: fabric-evpn   # Lab 4's configuration
+EOF
+oc apply -f "$M/lab06-routeadvertisements-udn-evpn.yaml"
+```
+
 It is also what turns EVPN on for the SNO's session:
 
 ```bash
