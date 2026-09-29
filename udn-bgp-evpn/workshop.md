@@ -1769,8 +1769,8 @@ VTEP.
 
 The design many fabrics already run: no VXLAN, no VTEPs - a VLAN and a BGP
 session **per tenant** between each node and the leaf, each in its own VRF.
-It uses the fabric's other shape, with the tenant VRFs on leaf1. About 45
-minutes.
+It uses the fabric's other shape, with the tenant VRFs on leaf1. About an
+hour, the web pages and the ingress included.
 
 Part C is a **hub** exercise. The SNO's only part in it is C1: its EVPN
 tenants are removed, so nothing of theirs is left on the fabric, and it then
@@ -1782,6 +1782,8 @@ sits idle - VRF-Lite has no stretched Layer2 for it to join.
 | C2. Rebuild the fabric | the lab host - no cluster, no `lab` |
 | C3-C6. Tenants, VRFs, VLANs, sessions | the hub only |
 | Check | the hub only |
+| C7. A web page per tenant | the hub only |
+| C8. The tenant ingress | the lab host |
 
 **C1. Clear the EVPN tenants** (the clusters' BGP enablement, the fabric NIC
 and the underlay session stay).
@@ -2027,6 +2029,78 @@ cd /root/hcp-backup-restore/udn-bgp-evpn
 > VRF instances before the VRFs had their VLAN, and bgpd does not rebind.
 > `oc -n $FRR_NS rollout restart ds/frr-k8s` - the check above does the same
 > when it finds it.
+
+**C7. A web page per tenant.** Lab 10's `webpod`, unchanged - the page, the
+Deployment and the way it finds its own UDN address know nothing about how
+the tenant reaches the fabric. C1 deleted the Lab 10 pods with their
+namespaces, so these are new ones.
+
+> **Where:** the hub only.
+
+```bash
+lab hub
+type webpod >/dev/null || echo "webpod missing: paste Lab 10's block first"
+for t in blue red green purple; do webpod $t; done
+```
+
+**Check** - each tenant's external host fetches its own tenant's page, now
+through leaf1's VRFs rather than leaf2's. The address to fetch is the pod's
+UDN address, which the page itself reports (`oc get pod -o wide` shows the
+default-network one, which `blue-ext` has no route to). The `-ext` hosts
+are plain Alpine, so it is busybox `wget`, not `curl`:
+
+```bash
+for t in blue red green purple; do
+  pod=$(oc -n udn-$t get pod -l app=udn-web -o jsonpath='{.items[0].metadata.name}')
+  ip=$(oc -n udn-$t exec $pod -c httpd -- cat /var/www/html/index.html | awk '/^udn:/ {split($2,a,"/"); print a[1]}')
+  printf '%-7s %-13s ' $t $ip; ext $t wget -qO- -T5 http://$ip:8080/ | head -1
+done
+# blue    10.200.x.y    I am blue on hub
+# red     10.200.x.y    I am red on hub      <- quite possibly the same address as blue's
+# green   10.204.x.y    I am green on hub
+# purple  10.204.x.y    I am purple on hub
+```
+
+**C8. The tenant ingress.** Lab 11's, rebuilt for this shape. The ingress
+runs on the namespace client, whose per-tenant namespaces C2 re-plumbed onto
+leaf1's VRF-Lite VLANs; haproxy does not care which - it dials each backend
+from inside its tenant's namespace, exactly as before.
+
+> **Where:** the lab host. No cluster switching.
+
+```bash
+cd /root/hcp-backup-restore/udn-bgp-evpn
+./build-lab.sh --workshop --vrflite --only nsproxy -e '{"udn_proxy_clusters": ["hub"]}'
+```
+
+- **`--vrflite`** makes the ingress read the VRF-Lite tenant lists. On its
+  own, the default is to front the hub *and* the SNO.
+- **`udn_proxy_clusters: [hub]`** - hub only, because Part C left the SNO
+  without tenants. The full automated VRF-Lite build puts violet on the SNO
+  (a cluster-local tenant: with no VNI or route target, green and purple
+  cannot be shared the way Lab 8 shared them), and without this override the
+  ingress stops on `no udn-web pod in udn-violet on sno`.
+
+Re-run it whenever you recreate the web pods; it records their addresses.
+
+**Check**
+
+```bash
+for h in blue red green purple; do
+  printf '%-8s ' $h; curl -s -m5 http://$h.hub.mylab.com/ | head -1
+done
+# blue     I am blue on hub
+# red      I am red on hub
+# green    I am green on hub
+# purple   I am purple on hub
+labssh 192.168.122.88 grep -E '^backend|server' /etc/haproxy/udn-tenants.cfg
+KUBECONFIG=$HUB_KUBECONFIG scripts/udn-web-demo.sh --proxy
+```
+
+Four hostnames, one address, and two pairs of backends with overlapping
+addresses - the same result as Lab 11, over a fabric with no VXLAN at all.
+The cross-cluster matrix (`udn-xcluster-curl.sh`) has no VRF-Lite
+counterpart: nothing is stretched between the clusters here.
 
 **What changed, compared with EVPN:** four VLANs, four addresses and four
 BGP sessions per node where EVPN needed one session and one VTEP; and no
