@@ -173,6 +173,10 @@ dns_forwarders:                       # see below
   - <the host's nameserver>
 ```
 
+Leave `udn_bgp_password` **out** unless you want the workshop to include BGP
+authentication. Set, it is built into the fabric on day 0, and Lab 2 then has
+one more step - which it tells you about.
+
 The helper VM and the containerlab VM are bare RHEL, so `org_id` and
 `activation_key` are what let them install packages.
 
@@ -441,6 +445,34 @@ oc -n openshift-frr-k8s get pods -o wide                        # one frr-k8s pe
 One BGP session from every node to leaf1, in the default VRF. This is the
 underlay: EVPN will ride on it in Lab 4.
 
+**First: does this fabric authenticate its sessions?**
+
+```bash
+echo "${BGP_AUTH_SECRET:-none}"
+```
+
+`none` is the workshop's default - skip to the manifest. A name
+(`udn-bgp-fabric-key`) means `vault.yaml` has a `udn_bgp_password`, so leaf1
+signs every BGP segment with it (TCP-MD5), and a node without the same key is
+never answered. Put the key where frr-k8s can read it, as a Secret:
+
+```bash
+if [ -n "$BGP_AUTH_SECRET" ]; then
+  ansible-vault view /root/hcp-backup-restore/vault.yaml --vault-password-file ~/.vault_pass \
+    | python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["udn_bgp_password"], end="")' \
+    | oc -n $FRR_NS create secret generic $BGP_AUTH_SECRET --type=kubernetes.io/basic-auth \
+        --from-file=password=/dev/stdin --dry-run=client -o yaml \
+    | oc apply -f -
+fi
+```
+
+This is the one object the workshop does **not** write to `$M`: it would put
+the key on disk in the clear. The manifests refer to it by name instead
+(`$BGP_AUTH_YAML` below becomes `passwordSecret: {name, namespace}`), so the
+key itself is never in a file you keep.
+
+**The peering:**
+
 ```bash
 cat > "$M/lab02-frrconfiguration-default.yaml" <<EOF
 apiVersion: frrk8s.metallb.io/v1beta1
@@ -458,6 +490,7 @@ spec:
         neighbors:
           - address: $LEAF1_IP        # leaf1, on the fabric network
             asn: $LEAF1_ASN
+$BGP_AUTH_YAML
             port: 179
             holdTime: 9s              # lab timers: converge in seconds
             keepaliveTime: 3s
@@ -604,6 +637,7 @@ spec:
         neighbors:
           - address: $LEAF1_IP
             asn: $LEAF1_ASN
+$BGP_AUTH_YAML
             port: 179
             holdTime: 9s
             keepaliveTime: 3s
@@ -1660,6 +1694,7 @@ $(for t in blue:192.168.141 red:192.168.142 green:192.168.144 purple:192.168.145
         neighbors:
           - address: ${t#*:}.1
             asn: $LEAF1_ASN
+$BGP_AUTH_YAML
             port: 179
             holdTime: 9s
             keepaliveTime: 3s
@@ -1764,6 +1799,7 @@ and a missing SNAT exclusion.
 | --- | --- |
 | `no matches for kind "FRRConfiguration"` | Lab 1 has not finished rolling out |
 | A node `Active` on leaf1 while others are up | Lab 2's note: restart that node's frr-k8s pod |
+| **Every** node `Connect` on leaf1, `MsgRcvd 0`, though `onleaf1 ping` reaches them and the node's `show bgp nexthop` is `valid` | TCP-MD5 on one end only: `leaf1 'show bgp neighbor <ip>' \| grep -i auth`. Lab 2's first step - the Secret, and `$BGP_AUTH_YAML` in the manifest |
 | `VTEP` never `Accepted` | a node without a `100.64.0.x` address or annotation - Lab 3's note |
 | DaemonSet `desired=3 scheduled=0` | the privileged SCC binding in `workload` |
 | CUDN applied, `reservedSubnets` missing from the live object | the field name - `oc explain`, Lab 7 |

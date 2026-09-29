@@ -1000,6 +1000,94 @@ of the wrong subsystem.
 
 ---
 
+## Case 6 — every workshop session in `Connect`, with the network provably fine
+
+**Date:** 2026-09-29 · **Cluster:** hub · **Workshop:** Lab 2
+**Fix:** `workshop.env.j2` (`BGP_AUTH_SECRET`, `BGP_AUTH_YAML`) and Lab 2's
+first step in `workshop.md`
+**Same family as:** Case 1 - a TCP-MD5 segment nobody will answer.
+
+### Symptom
+
+Right after the attendee applied Lab 2's `FRRConfiguration`:
+
+```
+Neighbor        V   AS  MsgRcvd MsgSent  Up/Down  State/PfxRcd  Desc
+192.168.140.34  4 64512       0       0    never  Connect       worker1 [hub]
+192.168.140.35  4 64512       0       0    never  Connect       worker2 [hub]
+192.168.140.36  4 64512       0       0    never  Connect       worker3 [hub]
+```
+
+**Every** hub node, not one. Restarting frr-k8s on worker1, then the whole
+DaemonSet, changed nothing.
+
+### Ruled out, and by what
+
+| Hypothesis | Evidence that killed it |
+| --- | --- |
+| Fabric unreachable | `onleaf1 ping -c2 192.168.140.34` → 0% loss; `enp8s0 UP 192.168.140.34/24` on the node; the NNCPs `Available` |
+| The manifest's variables were empty | `grep -E 'namespace\|asn\|address'` on the written file: `openshift-frr-k8s`, `64512`, `192.168.140.1`, `64513` |
+| frr-k8s never took the config | `frrnodestate worker1 .status.runningConfig` has `router bgp 64512` and `neighbor 192.168.140.1 remote-as 64513` |
+| Case 1, the stale nexthop | `show bgp nexthop` → `192.168.140.1 valid ... Resolved prefix 192.168.140.0/24 if enp8s0`; and the node is in `Connect` with `FD used: 21` - it *has* a socket and is trying |
+
+### What was left
+
+Both ends are actively connecting (`Connect` on leaf1, `Connect` with a live
+socket on the node), both can ping each other, and neither ever gets a
+SYN-ACK. ICMP passes and TCP 179 is silently dropped in both directions,
+and no `RST` either way, which is the TCP-MD5 signature again:
+
+* leaf1's SYN carries an MD5 option. The node has no key for that peer, and
+  the kernel will not send an unsigned RST for a signed segment - it drops it.
+* The node's SYN is unsigned. leaf1 has a key configured for that peer, so
+  its kernel drops unsigned segments from it - silently as well.
+
+`leaf1 'show bgp neighbor 192.168.140.34' | grep -i auth` confirms it:
+`Peer Authentication Enabled`.
+
+### Root cause
+
+The workshop build gave the fabric a key and the cluster none.
+`udn_bgp_password` was set in this host's `vault.yaml` (it is how Case 1 was
+captured), so `--tags fabric` rendered `neighbor ... password` on leaf1 for
+every node. On the cluster side, the automated phases create the
+`udn-bgp-fabric-key` Secret and add `passwordSecret` to every neighbor. The
+workshop splits that work, and the split lost it: `prep` must skip the
+Secret, because `openshift-frr-k8s` does not exist until Lab 1 enables FRR.
+Lab 2's manifest had no `passwordSecret`. Neither half was wrong alone.
+
+### Fix
+
+- `workshop.env` exports `BGP_AUTH_SECRET` (the Secret's name, or empty) and
+  `BGP_AUTH_YAML` - the two `passwordSecret` keys indented to sit in a
+  neighbor, or a comment. Every workshop `FRRConfiguration` puts
+  `$BGP_AUTH_YAML` on a line of its own, so one manifest is right for either
+  kind of fabric. Checked against the role's templates both ways.
+- Lab 2 opens with `echo "${BGP_AUTH_SECRET:-none}"`, and when it names a
+  Secret, creates it from `vault.yaml`. It is piped straight to `oc`, never
+  written into `$M`, so the key is not on disk in the clear. It is piped
+  with `print(..., end="")` on purpose: a trailing newline from `echo`
+  would be part of the key, and that is a second silent mismatch of exactly
+  this shape.
+
+For the lab in hand:
+
+```bash
+ansible-vault view /root/hcp-backup-restore/vault.yaml --vault-password-file ~/.vault_pass \
+  | python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["udn_bgp_password"], end="")' \
+  | oc -n openshift-frr-k8s create secret generic udn-bgp-fabric-key \
+      --type=kubernetes.io/basic-auth --from-file=password=/dev/stdin
+# then add passwordSecret {name: udn-bgp-fabric-key, namespace: openshift-frr-k8s}
+# to the neighbor in $M/lab02-frrconfiguration-default.yaml and re-apply
+```
+
+**The lesson** is the one Case 1 already taught, from the other side: with
+TCP-MD5, "the peer is not configured" and "the peer has the wrong key" look
+exactly like a network that drops TCP. When `ping` works and both ends sit in
+`Connect`, check authentication before anything else.
+
+---
+
 ## Closed — client segments ran at MTU 9000 against a path carrying ~1400
 
 Found during Case 2, not its cause. Fixed in `a8d6325`.
