@@ -182,7 +182,9 @@ Under `tmux`: a full build installs two OpenShift clusters and takes hours,
 and an ssh drop otherwise takes the build with it.
 
 `build-lab.sh` passes `vars-metal.yaml` to every playbook it runs whenever the
-file exists, so the sizing applies without a flag. Running a playbook by hand,
+file exists, so the sizing applies without a flag. Building on a host that is
+not from this terraform, start from `vars-metal.yaml.example` at the
+repository root. Running a playbook by hand,
 add `-e @../vars-metal.yaml` yourself. `worker_memory: 24576` and `worker_cpu: 16` suit
 192 GiB of host RAM; see the memory note in that file before changing them.
 

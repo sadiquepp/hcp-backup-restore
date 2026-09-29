@@ -133,11 +133,18 @@ tmux and the libvirt bindings, clones this repository to
 the next steps; `./lab-up.sh destroy` when you are done. Details:
 [terraform/README.md](../terraform/README.md).
 
-> **Not on AWS?** Any RHEL 9 host with 192 GiB of RAM, 96 threads, ~1 TB of
-> disk and nested virtualisation works. Clone the repository to
+> **Not on AWS?** Any RHEL 9 host with at least 192 GiB of RAM, ~1 TB of disk
+> and nested virtualisation works. Clone the repository to
 > `/root/hcp-backup-restore`, install `ansible-core`, `tmux` and `git`, put the
-> image in `/opt/lab-images/`, and write your own `vars-metal.yaml` from the
-> one in the terraform bootstrap. Then continue at A2.
+> image in `/opt/lab-images/`, and create this host's overrides from the
+> example - it lists what the host needs and sizes the workers to its memory:
+>
+> ```bash
+> cd /root/hcp-backup-restore
+> cp vars-metal.yaml.example vars-metal.yaml && vi vars-metal.yaml
+> ```
+>
+> Then continue at A2.
 
 ### A2. Prerequisites, by hand
 
