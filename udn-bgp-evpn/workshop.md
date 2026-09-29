@@ -1756,12 +1756,23 @@ session **per tenant** between each node and the leaf, each in its own VRF.
 It uses the fabric's other shape, with the tenant VRFs on leaf1. About 45
 minutes.
 
-> **Where:** the hub. C1 also clears the SNO's EVPN tenants, so their routes
-> leave the fabric; C2 runs on the lab host; C3-C6 are the hub only - start
-> them with `lab hub`.
+Part C is a **hub** exercise. The SNO's only part in it is C1: its EVPN
+tenants are removed, so nothing of theirs is left on the fabric, and it then
+sits idle - VRF-Lite has no stretched Layer2 for it to join.
+
+| Step | Where |
+| --- | --- |
+| C1. Clear the EVPN tenants | the hub, then the SNO |
+| C2. Rebuild the fabric | the lab host - no cluster, no `lab` |
+| C3-C6. Tenants, VRFs, VLANs, sessions | the hub only |
+| Check | the hub only |
 
 **C1. Clear the EVPN tenants** (the clusters' BGP enablement, the fabric NIC
-and the underlay session stay):
+and the underlay session stay).
+
+> **Where:** the hub, then the SNO.
+
+On the hub - all five tenants, and the Lab 12 VM:
 
 ```bash
 lab hub
@@ -1770,20 +1781,26 @@ oc delete frrconfiguration -n $FRR_NS fabric-peering-evpn
 oc delete vm -n udn-green green-vm --ignore-not-found
 for t in blue red green purple violet; do oc delete namespace udn-$t --wait=true; done
 oc delete clusteruserdefinednetwork blue red green purple violet
-# the same on the SNO, so its old routes are gone from the fabric too:
+```
+
+**Now the SNO** - it has three of them, and its routes would otherwise stay
+on the fabric:
+
+```bash
 lab sno
 oc delete routeadvertisements udn-evpn
 oc delete frrconfiguration -n $FRR_NS fabric-peering-evpn
 for t in green purple violet; do oc delete namespace udn-$t --wait=true; done
 oc delete clusteruserdefinednetwork green purple violet
-lab hub
 ```
 
-`transport` is immutable, so a CUDN cannot be switched from EVPN - it is
-deleted and created again.
+That is the last thing Part C does on the SNO. `transport` is immutable, so
+a CUDN cannot be switched from EVPN - it is deleted and created again.
 
-**C2. Rebuild the fabric in the VRF-Lite shape** (the clusters are not
-touched):
+**C2. Rebuild the fabric in the VRF-Lite shape.**
+
+> **Where:** the lab host. This rebuilds the containerlab fabric and leaves
+> both clusters alone, so it does not matter which one `lab` points at.
 
 ```bash
 cd /root/hcp-backup-restore/udn-bgp-evpn
@@ -1807,7 +1824,13 @@ leaf1 now holds a VRF per tenant, with gateway `<vrf_prefix>.1` on VLAN
 | purple | 150 | 192.168.145.1 | 192.168.145.<node octet> |
 
 **C3. The tenants, without transport.** Same subnets, no `transport`/`evpn`,
-and no reservation - no second cluster shares these here:
+and no reservation - no second cluster shares these here.
+
+> **Where:** the hub only - and from here to the end of Part C.
+
+```bash
+lab hub
+```
 
 ```bash
 for t in blue:Layer3 red:Layer3 green:Layer2 purple:Layer2; do
@@ -1849,7 +1872,9 @@ done
 
 **C4. Find the VRFs OVN-Kubernetes made.** Each node has one per tenant,
 named after the CUDN, with its own routing table and some ports already in
-it:
+it.
+
+> **Where:** the hub, on one of its workers.
 
 ```bash
 W=<a worker>
@@ -1861,7 +1886,9 @@ oc debug node/$W --quiet -- chroot /host ip -br link show master blue
 **C5. Put a VLAN into each VRF, on each worker.** One NNCP per node per
 tenant. The VRF must be restated with **every port it already has**: an NNCP
 declares the whole VRF, and a port it leaves out is removed from it. The
-fabric NIC is found by MAC, which the lab derives from the node's address:
+fabric NIC is found by MAC, which the lab derives from the node's address.
+
+> **Where:** the hub. The loop covers every hub worker; you run it once.
 
 ```bash
 for t in blue:110:192.168.141 red:120:192.168.142 green:140:192.168.144 purple:150:192.168.145; do
@@ -1913,7 +1940,9 @@ done
 oc wait nncp --all --for=condition=Available --timeout=5m
 ```
 
-**C6. A BGP session per tenant, inside its VRF, and the advertisement:**
+**C6. A BGP session per tenant, inside its VRF, and the advertisement.**
+
+> **Where:** the hub.
 
 ```bash
 cat > "$M/partc-vrflite-frr-and-ra.yaml" <<EOF
@@ -1965,11 +1994,15 @@ oc apply -f "$M/partc-vrflite-frr-and-ra.yaml"
 
 **Check**
 
+> **Where:** the hub (`podip` reads the hub's pods); `leaf1`, `onleaf1` and
+> `ext` go to the fabric whichever cluster `lab` points at.
+
 ```bash
-leaf1 'show bgp vrf all summary'      # one session per tenant per worker, Established
+leaf1 'show bgp vrf all summary'      # one session per tenant per HUB worker, Established - no SNO rows
 onleaf1 ip route show vrf blue | grep 10.200
 ext blue ping -c3 $(podip blue)       # blue-ext, now behind leaf1
 ext red  ping -c3 $(podip red)
+cd /root/hcp-backup-restore/udn-bgp-evpn
 ./build-lab.sh --workshop --vrflite --only check-hub
 ```
 
@@ -1983,9 +2016,29 @@ BGP sessions per node where EVPN needed one session and one VTEP; and no
 stretched Layer2 - green is reachable, but it is not one domain with the SNO.
 That is the argument for EVPN, now measured on your own lab.
 
-To go back: `./build-lab.sh --workshop --from fabric --switch-topology`, clear the
-VRF-Lite objects as in C1 (`udn-vrflite`, `fabric-peering-vrflite`, the
-`vrflite-*` NNCPs), and redo Labs 5-9.
+**To go back to EVPN:**
+
+1. **The hub** - clear the VRF-Lite objects, the way C1 cleared the EVPN
+   ones:
+
+   ```bash
+   lab hub
+   oc delete routeadvertisements udn-vrflite
+   oc delete frrconfiguration -n $FRR_NS fabric-peering-vrflite
+   oc get nncp -o name | grep /vrflite- | xargs -r oc delete
+   for t in blue red green purple; do oc delete namespace udn-$t --wait=true; done
+   oc delete clusteruserdefinednetwork blue red green purple
+   ```
+
+2. **The lab host** - rebuild the fabric in the EVPN shape:
+
+   ```bash
+   cd /root/hcp-backup-restore/udn-bgp-evpn
+   ./build-lab.sh --workshop --from fabric --switch-topology
+   ```
+
+3. **Both clusters** - Lab 4 on each (C1 deleted its `FRRConfiguration` on
+   both), then Labs 5-9, each on the cluster it names.
 
 ---
 
