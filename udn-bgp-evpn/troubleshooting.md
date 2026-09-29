@@ -32,6 +32,7 @@ next hunt more than any individual command does.
 | **A check scoped to the wrong objects** | A VRF-Lite assert read *every* frr-k8s pod, masters included. Masters have no fabric NIC and sit at `never/Active` by design. | The assert fails on nodes that were never in scope, and the real state is hidden in the noise. |
 | **A status field that is a receipt, not a statement** | `Profile.status.conditions[Applied]=True` from the Node Tuning Operator. NTO runs tuned in `no_daemon` mode - it applies once and exits. | `Applied=True` means "this was written at some point", not "this is the value now". Last writer wins permanently. |
 | **`ping` succeeding while the thing you care about is broken** | See both cases below. It happened twice in one day for two unrelated reasons. | ICMP takes a different path through NAT, ACLs and MTU than the TCP flow you are actually testing. |
+| **A field the API dropped, read back from the wrong place** | `addressFamilies` and `allowAsIn` in an `FRRConfiguration`, `reservedSubnets` under the wrong parent in a CUDN. `oc apply` succeeds; `-o yaml \| grep` still finds the field, in the `last-applied-configuration` annotation. | The manifest, the apply and the grep all agree. Only `.spec` read by jsonpath, or `oc explain`, says the field is not there. |
 | **A check that reads the global knob when the per-interface one decides** | `conf.all.rp_filter=0` looks fine; `conf.enp8s0.rp_filter=1` is what drops the packet, because the effective value is `max(all, iface)`. | The reassuring value is the one that is easy to read, and it is not the one in force. |
 | **A component that is internally consistent but stale** | leaf1's config was self-consistent and correct - built from a `vars.yaml` two commits old, so a whole VLAN was simply absent. | Everything you inspect agrees with everything else you inspect. |
 | **A test that asserts a conclusion instead of measuring it** | The `--shared` cross-cluster verdict was reasoned out from one VRF-Lite observation and never run against a shared lab. It contradicted a row in this repo's own README. | The test fails loudly and correctly, and ten cells of real output get read as a lab fault. Hours go into repairing something that was behaving as designed and documented. |
@@ -1085,6 +1086,94 @@ ansible-vault view /root/hcp-backup-restore/vault.yaml --vault-password-file ~/.
 TCP-MD5, "the peer is not configured" and "the peer has the wrong key" look
 exactly like a network that drops TCP. When `ping` works and both ends sit in
 `Connect`, check authentication before anything else.
+
+---
+
+## Case 7 — NoNeg after the EVPN peering, and two fields that never existed
+
+**Date:** 2026-09-29 · **Cluster:** hub and SNO · **Workshop:** Lab 4
+**Fix:** `workshop.md` Labs 4, 6 and 8; `frrconfiguration-evpn.yaml.j2`;
+`bgp-evpn.md` 4d; `real-fabric.md`
+**Not a fault** - an expectation the repo had written down wrong.
+
+### Symptom
+
+At the end of Lab 4, with `fabric-peering-evpn` applied on both clusters and
+no tenants yet, every node's session was up and none carried EVPN:
+
+```
+Neighbor                V    AS  MsgRcvd MsgSent  Up/Down State/PfxRcd  PfxSnt Desc
+spine(10.0.0.254)       4 65000     2010    2010 01:39:06           11      11 spine-evpn
+sno(192.168.140.20)     4 64515      158     164 00:07:41        NoNeg   NoNeg sno [sno]
+worker1(192.168.140.34) 4 64512      315     321 00:15:31        NoNeg   NoNeg worker1 [hub]
+```
+
+The lab text said to expect `Established`. The automated build never showed
+this state, because it creates the `RouteAdvertisements` seconds after the
+peering.
+
+### The trail
+
+`NoNeg` is "session up, address family not negotiated": one side offered
+`l2vpn evpn` and the other did not. Three reads settled which side:
+
+| Read | Result | Meaning |
+| --- | --- | --- |
+| `nodevtysh worker1 'show bgp neighbor 192.168.140.1'` | `Address Family L2VPN EVPN: received` | leaf1 offers it; the node does not - it would say `advertised and received` |
+| `oc get frrnodestate worker1 -o jsonpath='{.status.runningConfig}' \| sed -n '/address-family l2vpn evpn/,/exit-address-family/p'` | nothing | the node's FRR has no EVPN family at all |
+| `oc -n openshift-frr-k8s get frrconfiguration fabric-peering-evpn -o jsonpath='{.spec.bgp.routers[0]}'` | no `addressFamilies`, no `allowAsIn` | the manifest's two EVPN-looking fields are not in the stored object |
+
+`grep addressFamilies` on `-o yaml` *did* match - once, inside the
+`kubectl.kubernetes.io/last-applied-configuration` annotation. That
+annotation is a copy of what was sent, not of what was kept, and it is what
+made the fields look present.
+
+`oc explain frrconfiguration.spec.bgp.routers.neighbors` has neither field.
+The nearest is `dualStackAddressFamily` (IPv4 + IPv6 unicast) and the
+deprecated `disableMP`. There is no way to name `l2vpn evpn` in an
+`FRRConfiguration`.
+
+### Root cause
+
+Two things, one visible only because of the other:
+
+1. **The EVPN address family belongs to OVN-Kubernetes.** It is activated in
+   the `ovnk-generated-*` configurations OVN-Kubernetes writes once a
+   `RouteAdvertisements` selects an EVPN network and names the peering by
+   its label - alongside the per-tenant VRFs, VNIs and route targets. The
+   route-advertisements controller's `rawconfig.go` writes, per neighbor,
+   `activate` and `allowas-in origin` under `l2vpn evpn` (plus
+   `advertise-all-vni`), and `allowas-in origin` under unicast. Before
+   that the node has nothing to put in the family, so it does not offer it.
+   `NoNeg` between Lab 4 and Lab 6 (Lab 8 for the SNO) is correct.
+2. **`addressFamilies` and `allowAsIn` were never in the API.** The role's
+   template, `bgp-evpn.md`, `real-fabric.md` and the workshop all carried
+   them, with a paragraph each on why they were required. The API server
+   prunes unknown fields in a structural CRD without an error or a warning,
+   so every build since has applied them and dropped them. The lab worked
+   anyway, for reason 1 - including the `allowas-in origin` the second field
+   was meant to set.
+
+Same shape as the Layer2 `reservedSubnets` field name in the Lab 7 note: an
+`oc apply` that succeeds is not evidence the field did anything.
+
+### Fix
+
+- The fields are out of every manifest, and the explanations that justified
+  them are rewritten around what actually turns EVPN on.
+- Lab 4 now expects `NoNeg`, says why, and shows the annotation-versus-spec
+  comparison as the way to catch a pruned field. Its check is the unicast
+  session and the node's route to the VTEP block.
+- Lab 6 and Lab 8 carry the check that EVPN is negotiated: numbers instead
+  of `NoNeg` on leaf1, `ovnk-generated-*` present, and the `l2vpn evpn`
+  section in the node's running config.
+
+### What to take from it
+
+When a field matters, read it back from `.spec`, never from `-o yaml | grep`:
+the annotation will match whatever you wrote. And a `NoNeg` is a statement
+about the *node's* configuration, not the session - resetting the session or
+restarting frr-k8s cannot change it.
 
 ---
 

@@ -55,7 +55,7 @@ instead.
 | | Fabric (network team) | Cluster (you) |
 |---|---|---|
 | **Underlay** | Reachability between every node and its leaf, and a route to **each node's VTEP address** from every leaf | An address on each node's fabric interface, and that interface forwarding |
-| **BGP** | A session per node, right ASN, both address families activated | `FRRConfiguration` naming the leaf, both AFs, `allowAsIn: origin` |
+| **BGP** | A session per node, right ASN, both address families activated | `FRRConfiguration` naming the leaf; the `RouteAdvertisements` that makes OVN-Kubernetes activate EVPN on it |
 | **VTEP** | A route to each node's VTEP `/32` - a route to the block alone cannot pick the node; VXLAN decap | The `VTEP` CR in `Unmanaged` mode, and a `/32` per node inside its CIDRs |
 | **Tenants** | VNI per tenant, route targets, VRF or bridge domain per tenant, external gateway for Layer3 | `ClusterUserDefinedNetwork` per tenant carrying the same VNI and RT |
 | **Advertising** | Import what the cluster sends, export what the cluster needs | `RouteAdvertisements` selecting the networks and the FRR config |
@@ -468,10 +468,6 @@ spec:
         neighbors:
           - address: 192.168.140.1      # the leaf
             asn: 64513
-            addressFamilies:
-              - unicast
-              - evpn
-            allowAsIn: origin
             holdTime: 9s
             keepaliveTime: 3s
             port: 179
@@ -489,17 +485,32 @@ spec:
 
 Why each part:
 
-- **`unicast` as well as `evpn`.** The unicast family is the underlay: it is
-  how a node learns a route to the *other* VTEPs. Without it the EVPN session
-  comes up, routes appear on both sides, and no tunnel ever forms because
-  neither end can reach the other's endpoint. That failure looks exactly like
-  a data-plane problem and is not one. If your underlay already provides
-  those routes by IGP, you may not need the cluster to advertise its VTEP
-  prefix - but the node still needs a route to the remote VTEPs from
-  somewhere. **[verify on site]**
-- **`allowAsIn: origin`** - required, not optional, whenever a route comes
-  back having already traversed the cluster's ASN. Without it each end drops
-  the other's routes as a loop.
+- **No address family is named, and none can be.** The `FRRConfiguration`
+  neighbor has no such field (`oc explain
+  frrconfiguration.spec.bgp.routers.neighbors`: `dualStackAddressFamily` is
+  IPv4 + IPv6 unicast). OVN-Kubernetes activates `l2vpn evpn` on this
+  neighbor itself, in the `ovnk-generated-*` configuration it writes once a
+  `RouteAdvertisements` selects an EVPN network and names this CR by its
+  label: `activate`, `allowas-in origin` and `advertise-all-vni` under
+  `address-family l2vpn evpn`, plus a `vni` block per MAC-VRF and a VRF per
+  IP-VRF. Until then the leaf sees the session up for unicast and `NoNeg` for
+  EVPN - expected, not a fault. Do not add `addressFamilies` or `allowAsIn`:
+  the API server prunes unknown fields silently, and the lab carried both for
+  a while without either doing anything.
+- **The unicast session is the underlay.** It is how a node learns a route to
+  the *other* VTEPs (`toReceive`). Without one the EVPN session comes up,
+  routes appear on both sides, and no tunnel ever forms because neither end
+  can reach the other's endpoint. That failure looks exactly like a
+  data-plane problem and is not one. If your underlay already provides those
+  routes by IGP, you may not need the cluster to advertise its VTEP prefix -
+  but the node still needs a route to the remote VTEPs from somewhere.
+  **[verify on site]**
+- **AS-path loops are handled for you.** Every node of a cluster shares its
+  ASN, so a route one node originates comes back to another with that ASN
+  already in its path. OVN-Kubernetes' generated configuration adds
+  `neighbor <leaf> allowas-in origin` to every address family on every
+  neighbor it touches (`rawconfig.go` in the route-advertisements
+  controller), so there is nothing to set here.
 - **`nodeSelector: {}`** applies it to every node. Every node that peers needs
   it; a node the CR does not select simply never peers, and nothing says so.
 - **Do not hand-write VNIs, route distinguishers or route targets here.**

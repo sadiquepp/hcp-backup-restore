@@ -3861,10 +3861,6 @@ spec:
         neighbors:
           - address: 192.168.140.1
             asn: 64513
-            addressFamilies:
-              - unicast
-              - evpn
-            allowAsIn: origin
             holdTime: 9s
             keepaliveTime: 3s
             port: 179
@@ -3879,11 +3875,18 @@ spec:
 EOF
 ```
 
-The session carries **both** address families. `unicast` advertises the VTEP
-addresses so the nodes can find each other — without a route to a node's VTEP
-there is no tunnel to it, whatever the EVPN table says — and `evpn` carries
-the type-5 routes. `allowAsIn: origin` is needed because every node is in AS
-64512, so a node would otherwise discard its peers' routes as a loop.
+The session's own job is the underlay: the node takes leaf1's route for the
+VTEP block, so it can find the other VTEPs — without a route to a node's VTEP
+there is no tunnel to it, whatever the EVPN table says. It does **not** name
+the `l2vpn evpn` family, because the `FRRConfiguration` neighbor has no field
+for it. OVN-Kubernetes activates EVPN on this neighbor in its own generated
+configuration once the `RouteAdvertisements` below selects EVPN networks and
+names this CR by its label - `activate`, `allowas-in origin` and
+`advertise-all-vni` under `address-family l2vpn evpn`, and `allowas-in origin`
+under unicast, which covers every node of the cluster sharing AS 64512. Until
+then leaf1 shows the node as `NoNeg` in `show bgp l2vpn evpn summary`. An earlier version of this manifest carried
+`addressFamilies: [unicast, evpn]` and `allowAsIn: origin`; the API server
+pruned both silently (troubleshooting.md, "NoNeg after the EVPN peering").
 
 ```bash
 cat <<'EOF' | oc apply -f -

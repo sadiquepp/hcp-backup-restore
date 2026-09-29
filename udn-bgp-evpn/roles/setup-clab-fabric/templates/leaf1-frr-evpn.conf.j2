@@ -66,7 +66,10 @@ router bgp {{ clab_leaf1_asn }}
  ! The OCP nodes. One session each, carrying BOTH address families: ipv4
  ! unicast so the node can learn its way to the other VTEPs, and l2vpn evpn
  ! for the tenant routes. The node side of this is the FRRConfiguration
- ! roles/setup-udn-bgp renders as fabric-peering-evpn.
+ ! roles/setup-udn-bgp renders as fabric-peering-evpn, plus the ovnk-generated-*
+ ! configuration that activates l2vpn evpn on the node once a
+ ! RouteAdvertisements selects an EVPN network. Until then this side shows the
+ ! node as NoNeg in "show bgp l2vpn evpn summary".
 {% for n in clab_fabric_nodes %}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ n.asn | default(clab_cluster_asn) }}
  neighbor {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }} [{{ n.cluster | default('?') }}]

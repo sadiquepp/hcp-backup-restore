@@ -34,7 +34,7 @@ afterwards.
   - [Lab 1. Turn on BGP in OVN-Kubernetes](#lab-1-turn-on-bgp-in-ovn-kubernetes)
   - [Lab 2. Peer every node with the fabric](#lab-2-peer-every-node-with-the-fabric)
   - [Lab 3. Give every node a VTEP](#lab-3-give-every-node-a-vtep)
-  - [Lab 4. Carry EVPN on the session](#lab-4-carry-evpn-on-the-session)
+  - [Lab 4. The session EVPN will use](#lab-4-the-session-evpn-will-use)
   - [Lab 5. Two tenants, one subnet: blue and red](#lab-5-two-tenants-one-subnet-blue-and-red)
   - [Lab 6. Advertise them](#lab-6-advertise-them)
   - [Lab 7. Layer2 tenants: green and purple](#lab-7-layer2-tenants-green-and-purple)
@@ -477,7 +477,7 @@ while the hub's runs.
 > **Where:** the hub, then the SNO.
 
 One BGP session from every node to leaf1, in the default VRF. This is the
-underlay: EVPN will ride on it in Lab 4. Start on the hub:
+underlay: EVPN will ride on it from Lab 6. Start on the hub:
 
 ```bash
 lab hub
@@ -680,13 +680,13 @@ then the check. Its one node gets `100.64.0.20`:
 lab sno
 ```
 
-### Lab 4. Carry EVPN on the session
+### Lab 4. The session EVPN will use
 
 > **Where:** the hub, then the SNO.
 
-The same session to leaf1, now also carrying the `l2vpn evpn` address
-family, and advertising the VTEP block so the fabric can send VXLAN back.
-Start on the hub:
+The same session to leaf1, now about the VTEP block: the node learns
+leaf1's route for `$VTEP_CIDR`, which is how its VXLAN packets reach every
+other VTEP. Start on the hub:
 
 ```bash
 lab hub
@@ -715,10 +715,6 @@ $BGP_AUTH_YAML
             port: 179
             holdTime: 9s
             keepaliveTime: 3s
-            addressFamilies:
-              - unicast
-              - evpn
-            allowAsIn: origin
             toReceive:
               allowed:
                 mode: all
@@ -730,23 +726,80 @@ EOF
 oc apply -f "$M/lab04-frrconfiguration-evpn.yaml"
 ```
 
-- **`addressFamilies: [unicast, evpn]`** - the EVPN routes travel on the same
-  TCP session as ordinary BGP.
-- **`allowAsIn: origin`** - every hub node is AS 64512. A route one hub node
-  originates comes back to another through leaf1 with 64512 already in its
-  path, and BGP's loop prevention would drop it. `origin` accepts it when our
-  AS is only the originator.
+- **`toReceive: mode: all`** - takes leaf1's `$VTEP_CIDR`. leaf1 originates
+  it and holds a static `/32` per node VTEP behind it, so a packet to any VTEP
+  goes to leaf1 and leaf1 hands it to the right node.
+- **`prefixes` and `toAdvertise`: `$VTEP_CIDR` only** - an explicit list, not
+  `mode: all`, which would also offer the lab's management network.
 - **The label** is how Lab 6's `RouteAdvertisements` finds this
   configuration; it must match exactly one.
 
 Two `FRRConfiguration`s for one neighbor is fine: frr-k8s merges them.
 
+**What this manifest does *not* say: `l2vpn evpn`.** Nothing you write turns
+on the EVPN address family. OVN-Kubernetes does, in a configuration of its
+own (`ovnk-generated-*`), once a `RouteAdvertisements` selects an EVPN network
+and names this `FRRConfiguration` - that is Lab 6. For every neighbor in the
+configurations it names, it writes:
+
+```
+router bgp 64512
+ address-family ipv4 unicast
+  neighbor 192.168.140.1 allowas-in origin    <- every hub node is AS 64512
+ exit-address-family
+ address-family l2vpn evpn
+  neighbor 192.168.140.1 activate             <- this is what ends NoNeg
+  neighbor 192.168.140.1 allowas-in origin
+  advertise-all-vni
+  vni 400                                     <- one per Layer2 tenant (MAC-VRF)
+   route-target import 65000:400
+   route-target export 65000:400
+  exit-vni
+ exit-address-family
+```
+
+and a `vrf`/`router bgp 64512 vrf <tenant>` pair per Layer3 tenant (IP-VRF).
+`allowas-in origin` matters: a route one hub node originates comes back to
+another through leaf1 with 64512 already in its path, and BGP's loop
+prevention would drop it. `origin` accepts it when our AS is only the
+originator.
+
+Ask the API: there is no per-neighbor address-family field to write any of
+this yourself.
+
+```bash
+oc explain frrconfiguration.spec.bgp.routers.neighbors | grep -iE 'famil|allow'
+# dualStackAddressFamily <boolean>    <- IPv4 + IPv6 unicast, not EVPN
+```
+
+Write `addressFamilies: [unicast, evpn]` or `allowAsIn: origin` here anyway -
+older write-ups of this lab did - and `oc apply` accepts it without a word:
+the API server drops fields its schema doesn't have. The only trace is the
+`last-applied-configuration` annotation, which records what you *sent*, not
+what was kept. Comparing the two is how you catch it:
+
+```bash
+oc -n $FRR_NS get frrconfiguration fabric-peering-evpn -o jsonpath='{.spec.bgp.routers[0].neighbors[0]}{"\n"}'
+# what the cluster kept - the fields frr-k8s will act on
+```
+
 **Check**
 
 ```bash
-leaf1 'show bgp l2vpn evpn summary'              # the hub workers, Established
-nodevtysh <worker> 'show bgp l2vpn evpn summary' # and leaf1, from the node's side
+leaf1 'show bgp summary'                         # ipv4 unicast: the hub workers, Established
+nodevtysh <worker> "show ip route $VTEP_CIDR"    # B>* ... via 192.168.140.1 - the way to every VTEP
+leaf1 'show bgp l2vpn evpn summary'              # the hub workers: NoNeg - and that is right
 ```
+
+`NoNeg` means the session is up but the address family was not negotiated:
+leaf1 offers `l2vpn evpn`, the node doesn't yet. From the node's side it
+reads `Address Family L2VPN EVPN: received` - received, not advertised:
+
+```bash
+nodevtysh <worker> 'show bgp neighbor 192.168.140.1' | grep -A1 'L2VPN EVPN'
+```
+
+It turns into numbers in Lab 6. Don't reset sessions or restart pods over it.
 
 **Now the SNO.** Switch, paste the block above again, and check:
 
@@ -755,11 +808,13 @@ lab sno
 ```
 
 ```bash
-leaf1 'show bgp l2vpn evpn summary'   # all four: three hub workers and 192.168.140.20
+leaf1 'show bgp summary'                         # all four up: three hub workers and 192.168.140.20
+nodevtysh sno "show ip route $VTEP_CIDR"         # B>* ... via 192.168.140.1
 ```
 
-No EVPN routes yet - there are no tenants. The foundation is done on both
-clusters; from here each lab says which cluster it is for.
+No EVPN yet on either cluster - there are no tenants to advertise. The
+foundation is done on both clusters; from here each lab says which cluster it
+is for.
 
 ### Lab 5. Two tenants, one subnet: blue and red
 
@@ -959,10 +1014,28 @@ oc apply -f "$M/lab06-routeadvertisements-udn-evpn.yaml"
 blue's route target. Every network labelled `bgp: enabled` from now on is
 advertised the moment it exists - you will not touch this object again.
 
-**Check**
+This is also the object that turns EVPN on at the node. OVN-Kubernetes now
+writes its own `FRRConfiguration`s next to yours - the `l2vpn evpn` section
+Lab 4 showed, on the neighbor Lab 4's configuration names, with a `vni` or a
+VRF per tenant - and frr-k8s merges them into one running FRR.
+
+**Check: EVPN is negotiated**
 
 ```bash
 oc get routeadvertisements udn-evpn -o jsonpath='{.status.status}{"\n"}'   # Accepted
+oc -n $FRR_NS get frrconfiguration      # yours two, and ovnk-generated-* next to them
+leaf1 'show bgp l2vpn evpn summary'     # hub workers: numbers, not NoNeg. The SNO: NoNeg until Lab 8
+oc get frrnodestate <worker> -o jsonpath='{.status.runningConfig}' \
+  | sed -n '/address-family l2vpn evpn/,/exit-address-family/p'   # activate, allowas-in, advertise-all-vni
+```
+
+If the hub workers still read `NoNeg`, the `RouteAdvertisements` did not
+match Lab 4's label, or selected no network - `oc get ra udn-evpn -o yaml`
+says which in its status.
+
+**Check: routes and traffic**
+
+```bash
 leaf2 'show bgp l2vpn evpn route type prefix'
 # (abbreviated) every 10.200.x.0/24 appears twice, from the same node VTEP:
 #   [5]:[0]:[24]:[10.200.3.0]  100.64.0.34  ...  RT:65000:101   <- blue
@@ -1166,6 +1239,11 @@ workload purple
 
 Then the same `RouteAdvertisements` as Lab 6 - paste that block unchanged; it
 is the SNO's first, and it advertises every tenant the SNO has from here on.
+It is also what turns EVPN on for the SNO's session:
+
+```bash
+leaf1 'show bgp l2vpn evpn summary'   # 192.168.140.20 now shows numbers, like the hub workers
+```
 
 **Check: one broadcast domain, two clusters.**
 
@@ -1902,6 +1980,7 @@ and a missing SNAT exclusion.
 | `no matches for kind "FRRConfiguration"` | Lab 1 has not finished rolling out |
 | A node `Active` on leaf1 while others are up | Lab 2's note: restart that node's frr-k8s pod |
 | **Every** node `Connect` on leaf1, `MsgRcvd 0`, though `onleaf1 ping` reaches them and the node's `show bgp nexthop` is `valid` | TCP-MD5 on one end only: `leaf1 'show bgp neighbor <ip>' \| grep -i auth`. Lab 2's first step - the Secret, and `$BGP_AUTH_YAML` in the manifest |
+| `NoNeg` in `leaf1 'show bgp l2vpn evpn summary'` | before Lab 6 (the hub) or Lab 8 (the SNO): expected - OVN-Kubernetes turns EVPN on when the `RouteAdvertisements` exists. After it: the RA's `frrConfigurationSelector` does not match Lab 4's label, or it selected no network - `oc get ra udn-evpn -o yaml` |
 | `VTEP` never `Accepted` | a node without a `100.64.0.x` address or annotation - Lab 3's note |
 | DaemonSet `desired=3 scheduled=0` | the privileged SCC binding in `workload` |
 | CUDN applied, `reservedSubnets` missing from the live object | the field name - `oc explain`, Lab 7 |
