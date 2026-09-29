@@ -348,6 +348,11 @@ you on every check.
 | `inpod <tenant> <cmd>` | a command in that tenant's test pod | `oc -n udn-<tenant> rsh <first udn-test pod>` and run `<cmd>` there - so from inside the tenant's network |
 | `podip <tenant> [node]` | that tenant's test pod's UDN address, optionally the pod on `<node>` | `oc -n udn-<tenant> rsh <pod> ip -4 addr show ovn-udn1`. Not `oc get pod -o wide`: that shows the pod's cluster-default-network address, not the tenant one |
 
+`inpod` runs the command without a terminal (`oc exec`, not `oc exec -it`),
+so ctrl-c stops your local `oc`, not the command in the pod - a ping killed
+that way never prints its statistics. Give anything long-running a count
+(`-c`) or a deadline (`-w`) instead.
+
 `inpod` always picks the tenant's *first* test pod, on whichever node that
 happens to be. When the node matters, `podip <tenant> <node>` gives you the
 address of the one on a particular node to aim at.
@@ -1640,10 +1645,16 @@ the L2VNI - and leave it running:
 
 ```bash
 source /root/workshop.env; lab sno
-inpod green ping -i 0.2 <vm ip>
+inpod green ping -i 0.2 -w 120 <vm ip>     # 5 a second, for two minutes
 ```
 
-Then migrate:
+`-w 120` is a deadline: ping stops itself after two minutes and prints its
+statistics. Don't plan on ctrl-c here - `inpod` runs the command with no
+terminal, so ctrl-c stops your local `oc`, and ping inside the pod is killed
+without printing the summary that is the whole point. If the migration needs
+longer, raise the deadline and start again.
+
+Then migrate - within the two minutes:
 
 ```bash
 lab hub
@@ -1686,12 +1697,17 @@ green-vm   10.204.0.9   0a:58:0a:cc:00:09   worker2
                     RT:65000:400 ET:8 MM:1
 ```
 
-And the ping in the other window, stopped with ctrl-c:
+And the ping in the other window, once its deadline is up:
 
 ```
 --- 10.204.0.9 ping statistics ---
 144 packets transmitted, 144 received, 0% packet loss, time 145983ms
 ```
+
+Your counts depend on the interval and the deadline (at `-i 0.2 -w 120`,
+about 600); the number that matters is `0% packet loss`. A migration that
+drops frames shows here as a handful lost, and `ping -D` timestamps each
+reply if you want to see exactly where the gap fell.
 
 The *after* output and the ping are measured on this lab (see
 [bgp-evpn.md](bgp-evpn.md#live-migration-on-the-layer2-tenant)); the FDB read
@@ -1983,8 +1999,8 @@ If time is short, these prove the whole of Part B:
 | 2 | `oc get vtep evpn-vtep` + the node annotations | every node has a VTEP OVN-Kubernetes accepted |
 | 3 | `leaf2 'show bgp l2vpn evpn route type prefix'` | blue and red advertise the same prefixes under different route targets |
 | 4 | `inpod blue ping -c2 -W2 10.211.10.10` | silent - tenancy by route target |
-| 5 | `inpod green ping <hub green pod>` from the SNO | TTL 64: one Layer2 domain across clusters |
-| 6 | `inpod violet ping <hub violet pod>` from the SNO | TTL 61: one routed tenant across clusters |
+| 5 | `inpod green ping -c3 <hub green pod>` from the SNO | TTL 64: one Layer2 domain across clusters |
+| 6 | `inpod violet ping -c3 <hub violet pod>` from the SNO | TTL 61: one routed tenant across clusters |
 | 7 | `inpod violet curl -sI http://1.1.1.1/` | internet egress through the fabric |
 | 8 | `curl http://blue.hub.mylab.com/` and `red` | overlapping tenants told apart from outside |
 | 9 | the Lab 12 ping during a migration | a VM moved and the fabric followed |
