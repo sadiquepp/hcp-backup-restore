@@ -82,6 +82,35 @@
     dest: "{{ clab_lab_dir }}/{{ clab_lab_name }}.clab.yml"
     mode: '0644'
 
+# 'deploy --reconfigure' destroys the lab it is GIVEN - the nodes in the
+# topology file just rendered - not the lab that is running. The two
+# topologies share a lab name and a file name, so switching from evpn to bgp
+# (--switch-topology) leaves the EVPN-only nodes (spine, leaf2) running, and
+# containerlab then refuses: "the 'udnbgp' lab has already been deployed".
+# Remove every container of this lab that the new topology does not have
+# first. On an ordinary redeploy the lists match and this removes nothing.
+- name: Read the node names of the topology about to be deployed
+  ansible.builtin.slurp:
+    src: "{{ clab_lab_dir }}/{{ clab_lab_name }}.clab.yml"
+  register: clab_topology_file
+
+- name: Remove containers of this lab that the new topology does not have
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      keep=" {{ (clab_topology_file.content | b64decode | from_yaml).topology.nodes.keys()
+                | map('regex_replace', '^', 'clab-' ~ clab_lab_name ~ '-') | join(' ') }} "
+      docker ps -a --filter "label=containerlab={{ clab_lab_name }}" | awk 'NR>1 {print $NF}' |
+      while read -r c; do
+        case "$keep" in
+          *" $c "*) ;;
+          *) docker rm -f "$c" >/dev/null && echo "removed $c" ;;
+        esac
+      done
+    executable: /bin/bash
+  register: clab_stale
+  changed_when: clab_stale.stdout | length > 0
+
 # containerlab is destructive about a lab of the same name that is already
 # running, and 'deploy --reconfigure' is the documented way to redeploy
 # cleanly. Without it a second run fails on existing containers rather than
