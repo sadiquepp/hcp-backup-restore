@@ -422,9 +422,10 @@ what lets you paste the same block on both.
 | 12 live migration | the VM | the observer |
 
 The helper functions you define along the way (`workload` in Lab 5,
-`violet` in Lab 9, `webpod` in Lab 10) live in your shell. In a new shell,
-`source /root/workshop.env` and paste the function's block again before using
-it. Each lab ends with a **Check**: the fewest commands that prove it worked,
+`violet` in Lab 9, `webpod` in Lab 10) are written to
+`$WS_MANIFESTS/functions/` as well as defined, and `workshop.env` loads
+everything in that directory - so a new shell has them after
+`source /root/workshop.env`, like the rest. Each lab ends with a **Check**: the fewest commands that prove it worked,
 and what they should print.
 
 ### Lab 1. Turn on BGP in OVN-Kubernetes
@@ -908,9 +909,14 @@ oc apply -f "$M/lab05-cudn-blue-red.yaml"
 Lab 7). `transport` is immutable: changing it later means deleting the CUDN.
 
 Now the namespace and a test pod on every worker. Defined as a function,
-because every tenant gets the same shape:
+because every tenant gets the same shape - and saved to a file, which
+`workshop.env` loads, so it is still there in your next shell. The quoted
+`'FN'` keeps `$1` and `$M` literal in the file; they are filled in each time
+you call it:
 
 ```bash
+mkdir -p "$WS_MANIFESTS/functions"
+cat > "$WS_MANIFESTS/functions/workload.sh" <<'FN'
 workload() {
 cat > "$M/workload-$1.yaml" <<EOF
 apiVersion: v1
@@ -975,6 +981,8 @@ EOF
 oc apply -f "$M/workload-$1.yaml"
 oc -n udn-$1 rollout status ds/udn-test --timeout=10m
 }
+FN
+source "$WS_MANIFESTS/functions/workload.sh"
 
 workload blue
 workload red
@@ -1322,6 +1330,8 @@ other `/17`. Without slices, both allocate the same `/24`s first and leaf2
 ends up with two paths to one prefix, one of them wrong.
 
 ```bash
+mkdir -p "$WS_MANIFESTS/functions"
+cat > "$WS_MANIFESTS/functions/violet.sh" <<'FN'
 violet() {   # violet <slice>
 cat > "$M/lab09-cudn-violet.yaml" <<EOF
 apiVersion: k8s.ovn.org/v1
@@ -1351,6 +1361,8 @@ EOF
 oc apply -f "$M/lab09-cudn-violet.yaml"
 workload violet
 }
+FN
+source "$WS_MANIFESTS/functions/violet.sh"
 
 lab hub; violet 10.206.0.0/17
 lab sno; violet 10.206.128.0/17
@@ -1398,6 +1410,8 @@ share addresses. A page that names its tenant, cluster, pod and node settles
 it. One per tenant, on both clusters:
 
 ```bash
+mkdir -p "$WS_MANIFESTS/functions"
+cat > "$WS_MANIFESTS/functions/webpod.sh" <<'FN'
 webpod() {   # webpod <tenant> - on the cluster `lab` points at
 cat > "$M/lab10-web-banner-$1.yaml" <<EOF
 apiVersion: v1
@@ -1453,6 +1467,8 @@ EOF
 oc apply -n udn-$1 -f "$M/lab10-web-deployment.yaml"
 oc -n udn-$1 rollout status deploy/udn-web --timeout=5m
 }
+FN
+source "$WS_MANIFESTS/functions/webpod.sh"
 
 lab hub; for t in blue red green purple violet; do webpod $t; done
 lab sno; for t in green purple violet; do webpod $t; done
@@ -1824,7 +1840,8 @@ leaf1 now holds a VRF per tenant, with gateway `<vrf_prefix>.1` on VLAN
 | purple | 150 | 192.168.145.1 | 192.168.145.<node octet> |
 
 **C3. The tenants, without transport.** Same subnets, no `transport`/`evpn`,
-and no reservation - no second cluster shares these here.
+and no reservation - no second cluster shares these here. `workload` is
+Lab 5's function; `type workload` should say it is defined.
 
 > **Where:** the hub only - and from here to the end of Part C.
 
