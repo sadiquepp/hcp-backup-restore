@@ -327,18 +327,36 @@ lab hub          # oc -> the hub, and $ASN / $CLUSTER to match
 ```
 
 `workshop.env` gives you the numbers every manifest uses (`$ASN`, `$LEAF1_IP`,
-`$VTEP_CIDR`, ...) and a few helpers:
+`$VTEP_CIDR`, ...) and a few helpers. They are shorthand, nothing more: each
+one is a command you could type yourself, and the right-hand column is that
+command.
 
-| Helper | Does |
-| --- | --- |
-| `lab hub` / `lab sno` | switches `oc`, `$ASN`, `$CLUSTER` and `$M` to that cluster |
-| `leaf1 '<cmd>'`, `leaf2 ...`, `spine ...` | `vtysh -c '<cmd>'` on that fabric router |
-| `onleaf2 <cmd>` | any command inside leaf2 (`onleaf2 ip route show vrf blue`) |
-| `ext <tenant> <cmd>` | a command on that tenant's external endpoint behind leaf2 |
-| `labssh <ip> <cmd>` | root on any lab VM, with the lab's key (`/root/.ssh/lab_rsa`) |
-| `nodevtysh <node> '<cmd>'` | vtysh in the `frr-k8s` pod on that node - the cluster's side of BGP |
-| `inpod <tenant> <cmd>` | a command in that tenant's test pod |
-| `podip <tenant> [node]` | that tenant's test pod's UDN address |
+The fabric routers (leaf1, leaf2, spine) and the tenants' external endpoints
+are containers, run by containerlab on its own VM (`$CLAB_IP`) and named
+`clab-$CLAB_LAB-<name>`. So "run something on leaf1" means ssh to that VM,
+then `docker exec` into the container - which is two hops the helpers save
+you on every check.
+
+| Helper | Does | Same as |
+| --- | --- | --- |
+| `lab hub` / `lab sno` | switches `oc`, `$ASN`, `$CLUSTER` and `$M` to that cluster | `export KUBECONFIG=$HUB_KUBECONFIG ASN=$HUB_ASN CLUSTER=hub M=$WS_MANIFESTS/hub` |
+| `leaf1 '<cmd>'` (`leaf2`, `spine`) | one FRR command on that fabric router | `ssh root@$CLAB_IP`, then `docker exec -it clab-$CLAB_LAB-leaf1 vtysh` and type `<cmd>` at its prompt |
+| `onleaf1 <cmd>`, `onleaf2 <cmd>` | any Linux command inside that router - `ip route show vrf blue`, `bridge fdb`, `tcpdump` | `ssh root@$CLAB_IP`, then `docker exec -it clab-$CLAB_LAB-leaf2 sh` and run `<cmd>` there |
+| `ext <tenant> <cmd>` | a command on that tenant's external host behind leaf2 - the "outside world" the tenant talks to | `ssh root@$CLAB_IP`, then `docker exec -it clab-$CLAB_LAB-blue-ext sh` and run `<cmd>` |
+| `labssh <ip> <cmd>` | root on any other lab VM (the namespace client, the helper) | `ssh -i $LAB_SSH_KEY root@<ip> '<cmd>'` - the lab's own key, not yours |
+| `nodevtysh <node> '<cmd>'` | one FRR command on a cluster node - the cluster's side of each BGP session | find the `frr-k8s` pod on `<node>` (`oc -n $FRR_NS get pods -l component=frr-k8s -o wide`), then `oc -n $FRR_NS rsh -c frr <pod>`, `vtysh`, and type `<cmd>` |
+| `inpod <tenant> <cmd>` | a command in that tenant's test pod | `oc -n udn-<tenant> rsh <first udn-test pod>` and run `<cmd>` there - so from inside the tenant's network |
+| `podip <tenant> [node]` | that tenant's test pod's UDN address, optionally the pod on `<node>` | `oc -n udn-<tenant> rsh <pod> ip -4 addr show ovn-udn1`. Not `oc get pod -o wide`: that shows the pod's cluster-default-network address, not the tenant one |
+
+`inpod` always picks the tenant's *first* test pod, on whichever node that
+happens to be. When the node matters, `podip <tenant> <node>` gives you the
+address of the one on a particular node to aim at.
+
+To see exactly what a helper runs, ask the shell:
+
+```bash
+type nodevtysh
+```
 
 **Every manifest is a file.** Each block below writes its manifest into
 `$M` - `/root/workshop-manifests/hub` or `.../sno`, set by `lab` - and then
