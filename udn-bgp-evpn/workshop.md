@@ -2099,8 +2099,11 @@ KUBECONFIG=$HUB_KUBECONFIG scripts/udn-web-demo.sh --proxy
 
 Four hostnames, one address, and two pairs of backends with overlapping
 addresses - the same result as Lab 11, over a fabric with no VXLAN at all.
-The cross-cluster matrix (`udn-xcluster-curl.sh`) has no VRF-Lite
-counterpart: nothing is stretched between the clusters here.
+The cross-cluster matrix (`udn-xcluster-curl.sh`) needs a tenant on the SNO,
+which Part C does not build. The automated VRF-Lite build does - violet on
+the SNO, with deliberate leaks on leaf1 to blue, green and orange - and its
+measured matrix is in
+[udn-bgp-evpn-steps.md 6.4](udn-bgp-evpn-steps.md#64-test-the-leak-matrix-from-inside-a-pod-across-clusters).
 
 **What changed, compared with EVPN:** four VLANs, four addresses and four
 BGP sessions per node where EVPN needed one session and one VTEP; and no
