@@ -38,7 +38,7 @@ afterwards.
   - [Lab 5. Two tenants, one subnet: blue and red](#lab-5-two-tenants-one-subnet-blue-and-red)
   - [Lab 6. Advertise them](#lab-6-advertise-them)
   - [Lab 7. Layer2 tenants: green and purple](#lab-7-layer2-tenants-green-and-purple)
-  - [Lab 8. The second cluster](#lab-8-the-second-cluster)
+  - [Lab 8. The SNO's half of green and purple](#lab-8-the-snos-half-of-green-and-purple)
   - [Lab 9. A routed tenant on both clusters, with the internet: violet](#lab-9-a-routed-tenant-on-both-clusters-with-the-internet-violet)
   - [Lab 10. A web page per tenant](#lab-10-a-web-page-per-tenant)
   - [Lab 11. The tenant ingress](#lab-11-the-tenant-ingress)
@@ -380,17 +380,42 @@ on the cluster side answers yet. That is the starting line.
 
 ## Part B - Hands-on: EVPN
 
-Labs 1-7 are on the hub. Lab 8 repeats the foundation on the SNO - by pasting
-the same blocks again, because they are written against `$ASN` and friends
-rather than against one cluster. Each lab ends with a **Check**: the fewest
-commands that prove it worked, and what they should print.
+**Every `oc` command goes to whichever cluster you last named with `lab`.**
+So every lab starts with a **Where:** line, and every switch is a small block
+of its own - `lab hub` or `lab sno` - that you run *before* the blocks it
+applies to. The manifest blocks themselves never switch cluster, which is
+what lets you paste the same block on both.
+
+| Lab | Hub | SNO |
+| --- | --- | --- |
+| 1-4 the foundation: BGP on, peering, VTEPs, EVPN | yes | yes - right after the hub, in the same lab |
+| 5 blue and red | yes | - |
+| 6 the `RouteAdvertisements` | yes | in Lab 8 |
+| 7 green and purple, low half | yes | - |
+| 8 green and purple, high half | - | yes |
+| 9 violet | yes | yes |
+| 10 web pages | yes (5 tenants) | yes (3 tenants) |
+| 11 the ingress | - (a script on the lab host) | - |
+| 12 live migration | the VM | the observer |
+
+The helper functions you define along the way (`workload` in Lab 5,
+`violet` in Lab 9, `webpod` in Lab 10) live in your shell. In a new shell,
+`source /root/workshop.env` and paste the function's block again before using
+it. Each lab ends with a **Check**: the fewest commands that prove it worked,
+and what they should print.
 
 ### Lab 1. Turn on BGP in OVN-Kubernetes
 
-Three switches on the cluster network operator, in one patch:
+> **Where:** the hub, then the SNO.
+
+Three switches on the cluster network operator, in one patch. Start on the
+hub:
 
 ```bash
 lab hub
+```
+
+```bash
 cat > "$M/lab01-network-operator-patch.yaml" <<'EOF'
 spec:
   additionalRoutingCapabilities:
@@ -429,10 +454,6 @@ until oc -n openshift-frr-k8s get ds/frr-k8s >/dev/null 2>&1; do sleep 10; done
 oc -n openshift-frr-k8s rollout status ds/frr-k8s --timeout=10m
 ```
 
-> Do the SNO now too, in a second tmux window (`ctrl-b c`), so its rollout
-> runs while you work on the hub: `source /root/workshop.env; lab sno`, then
-> paste the same patch and waits. Lab 8 picks it up from there.
-
 **Check**
 
 ```bash
@@ -440,10 +461,27 @@ oc get crd routeadvertisements.k8s.ovn.org vteps.k8s.ovn.org   # both exist
 oc -n openshift-frr-k8s get pods -o wide                        # one frr-k8s per node, Running
 ```
 
+**Now the SNO.** Switch, then paste the patch block and the wait block above
+again, and the check:
+
+```bash
+lab sno
+```
+
+The rollout takes a few minutes per cluster. To overlap them, run the SNO's
+in a second tmux window (`ctrl-b c`, then `source /root/workshop.env; lab sno`)
+while the hub's runs.
+
 ### Lab 2. Peer every node with the fabric
 
+> **Where:** the hub, then the SNO.
+
 One BGP session from every node to leaf1, in the default VRF. This is the
-underlay: EVPN will ride on it in Lab 4.
+underlay: EVPN will ride on it in Lab 4. Start on the hub:
+
+```bash
+lab hub
+```
 
 **First: does this fabric authenticate its sessions?**
 
@@ -519,7 +557,7 @@ see the numbers that actually went in. Blocks with nothing to expand use
 ```bash
 leaf1 'show bgp summary'
 # 192.168.140.34 ... 64512 ... <uptime> ... 0      <- hub workers: Established
-# 192.168.140.20 ... 64515 ... Active              <- the SNO: not yet, Lab 8
+# 192.168.140.20 ... 64515 ... Connect             <- the SNO: next
 ```
 
 A number (prefixes received, 0 for now) in the last column means
@@ -536,7 +574,25 @@ nodevtysh <worker> 'show bgp summary'
 > sometimes keeps a stale view of it - `show bgp nexthop` on that node says
 > `invalid`. A restart makes it re-read the kernel.
 
+**Now the SNO.** It joins the same fabric with its own AS, 64515 - `lab sno`
+sets `$ASN` for you. **Every cluster needs its own AS**: share one and leaf1
+reflects one cluster's routes to the other, which drops them all as a loop,
+silently.
+
+```bash
+lab sno
+```
+
+Paste again, in order: the authentication block (the Secret lives in each
+cluster, so the SNO needs its own) and the peering block. Then:
+
+```bash
+leaf1 'show bgp summary'         # 192.168.140.20 (AS 64515) Established too
+```
+
 ### Lab 3. Give every node a VTEP
+
+> **Where:** the hub, then the SNO.
 
 A VTEP is the address VXLAN packets are sent *to* and *from*. Each node gets
 one `/32` on a dummy interface - loopback-shaped, so it belongs to no subnet
@@ -545,7 +601,11 @@ them via the node's fabric address.
 
 The address is `100.64.0.<last octet of the node's InternalIP>`, and it goes
 on **every** node, masters included - the VTEP CR is only accepted once every
-node has one:
+node has one. Start on the hub:
+
+```bash
+lab hub
+```
 
 ```bash
 oc get nodes -o jsonpath='{range .items[*]}{.metadata.name} {.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' |
@@ -613,10 +673,24 @@ oc get vtep evpn-vtep -o jsonpath='{.status.conditions[?(@.type=="Accepted")].st
 > An address that is missing entirely is an NMState problem:
 > `oc get nnce | grep vtep`.
 
+**Now the SNO.** Switch, and paste the NNCP loop and the `VTEP` block again,
+then the check. Its one node gets `100.64.0.20`:
+
+```bash
+lab sno
+```
+
 ### Lab 4. Carry EVPN on the session
 
+> **Where:** the hub, then the SNO.
+
 The same session to leaf1, now also carrying the `l2vpn evpn` address
-family, and advertising the VTEP block so the fabric can send VXLAN back:
+family, and advertising the VTEP block so the fabric can send VXLAN back.
+Start on the hub:
+
+```bash
+lab hub
+```
 
 ```bash
 cat > "$M/lab04-frrconfiguration-evpn.yaml" <<EOF
@@ -674,9 +748,26 @@ leaf1 'show bgp l2vpn evpn summary'              # the hub workers, Established
 nodevtysh <worker> 'show bgp l2vpn evpn summary' # and leaf1, from the node's side
 ```
 
-No EVPN routes yet - there are no tenants. That is next.
+**Now the SNO.** Switch, paste the block above again, and check:
+
+```bash
+lab sno
+```
+
+```bash
+leaf1 'show bgp l2vpn evpn summary'   # all four: three hub workers and 192.168.140.20
+```
+
+No EVPN routes yet - there are no tenants. The foundation is done on both
+clusters; from here each lab says which cluster it is for.
 
 ### Lab 5. Two tenants, one subnet: blue and red
+
+> **Where:** the hub only.
+
+```bash
+lab hub
+```
 
 A tenant is three things: the **network** (`ClusterUserDefinedNetwork`), a
 **namespace** it selects, and something running there. Blue and red get the
@@ -834,6 +925,9 @@ oc debug node/<worker> -- chroot /host ip -br link show type vrf   # blue, red
 
 ### Lab 6. Advertise them
 
+> **Where:** the hub now (you are still on it). The SNO gets the same object
+> in Lab 8, once it has tenants.
+
 The object that ties it together: *these* networks, over *that* FRR
 configuration, into their own VRFs.
 
@@ -902,6 +996,12 @@ cd /root/hcp-backup-restore/udn-bgp-evpn
 It checks only the tenants that exist so far and says which it skipped.
 
 ### Lab 7. Layer2 tenants: green and purple
+
+> **Where:** the hub only. The SNO's half is Lab 8.
+
+```bash
+lab hub
+```
 
 A Layer2 tenant is one subnet across every node - and, with EVPN, across
 every cluster on its L2VNI. Two clusters sharing one subnet need to agree who
@@ -1000,30 +1100,15 @@ arrives with less. On leaf2 the pod is a MAC, not a prefix:
 leaf2 'show evpn mac vni 400'      # the green pods' MACs, each behind a node VTEP
 ```
 
-### Lab 8. The second cluster
+### Lab 8. The SNO's half of green and purple
 
-The SNO joins the same fabric with its own AS (64515). **Every cluster needs
-its own AS**: share one and leaf1 reflects one cluster's EVPN routes to the
-other, which drops them all as a loop - silently.
-
-**8.1 The foundation - Labs 1 to 4, again.**
+> **Where:** the SNO only.
 
 ```bash
-lab sno            # ASN is now 64515
+lab sno
 ```
 
-Scroll back and paste, unchanged: the Lab 1 patch and waits (skip them if you
-did them in the second window), the Lab 2 `FRRConfiguration`, the Lab 3 NNCP
-loop and `VTEP`, and the Lab 4 `FRRConfiguration`. They are written against
-`$ASN`, `$LEAF1_IP` and the node list, so they are correct for the SNO as
-they stand.
-
-```bash
-leaf1 'show bgp l2vpn evpn summary'   # now 192.168.140.20 (AS 64515) too
-```
-
-**8.2 Green and purple, the other half.** The SNO allocates from the high
-half. Its reservation is everything *else*, and it cannot just be
+The SNO allocates from the high half of `10.204.0.0/16`. Its reservation is everything *else*, and it cannot just be
 `10.204.0.0/17`: `.1` is the switch's gateway and `.2` the node's management
 port, and reserving either crashes ovnkube-node on start. So it reserves the
 low half *except* those two, which takes fifteen CIDRs - plus the external
@@ -1079,7 +1164,8 @@ workload green
 workload purple
 ```
 
-Then the same `RouteAdvertisements` as Lab 6 - paste it unchanged.
+Then the same `RouteAdvertisements` as Lab 6 - paste that block unchanged; it
+is the SNO's first, and it advertises every tenant the SNO has from here on.
 
 **Check: one broadcast domain, two clusters.**
 
@@ -1098,6 +1184,9 @@ node's VTEP directly. Neither leaf decapsulated it.
 ```
 
 ### Lab 9. A routed tenant on both clusters, with the internet: violet
+
+> **Where:** both. The block below switches between them itself, because the
+> two clusters get different slices.
 
 A Layer3 tenant can span clusters too - as one routed network with one route
 target - as long as the two clusters never originate the same prefix. So
@@ -1174,6 +1263,8 @@ node's own VTEP as next hop.
 ```
 
 ### Lab 10. A web page per tenant
+
+> **Where:** both. The last lines of the block switch between them.
 
 A ping reply proves something answered, not *what* did - and blue and red
 share addresses. A page that names its tenant, cluster, pod and node settles
@@ -1256,6 +1347,9 @@ oc -n udn-blue exec $BLUE_WEB -- cat /var/www/html/index.html    # "I am blue on
 
 ### Lab 11. The tenant ingress
 
+> **Where:** the lab host. No cluster switching: the build script reads both
+> clusters' web pods itself.
+
 One address, one port, a hostname per tenant - in front of tenants whose pods
 share addresses. The ingress runs on the namespace client VM, which already
 has one network namespace per tenant; haproxy opens each backend connection
@@ -1301,6 +1395,10 @@ everywhere else - including between green and purple, whose addresses
 overlap.
 
 ### Lab 12. Live migration across a stretched Layer2
+
+> **Where:** the VM runs on the hub; the SNO watches it move. Every block
+> below names its cluster (`lab hub`, `lab sno`, or `KUBECONFIG=$SNO_KUBECONFIG`
+> on a single command).
 
 OpenShift Virtualization is installed (day 0). A VM on green, on the hub:
 
@@ -1517,8 +1615,12 @@ VTEP.
 
 The design many fabrics already run: no VXLAN, no VTEPs - a VLAN and a BGP
 session **per tenant** between each node and the leaf, each in its own VRF.
-It uses the fabric's other shape, with the tenant VRFs on leaf1. Hub only;
-about 45 minutes.
+It uses the fabric's other shape, with the tenant VRFs on leaf1. About 45
+minutes.
+
+> **Where:** the hub. C1 also clears the SNO's EVPN tenants, so their routes
+> leave the fabric; C2 runs on the lab host; C3-C6 are the hub only - start
+> them with `lab hub`.
 
 **C1. Clear the EVPN tenants** (the clusters' BGP enablement, the fabric NIC
 and the underlay session stay):
