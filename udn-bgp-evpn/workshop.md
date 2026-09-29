@@ -331,6 +331,7 @@ lab hub          # oc -> the hub, and $ASN / $CLUSTER to match
 | `leaf1 '<cmd>'`, `leaf2 ...`, `spine ...` | `vtysh -c '<cmd>'` on that fabric router |
 | `onleaf2 <cmd>` | any command inside leaf2 (`onleaf2 ip route show vrf blue`) |
 | `ext <tenant> <cmd>` | a command on that tenant's external endpoint behind leaf2 |
+| `labssh <ip> <cmd>` | root on any lab VM, with the lab's key (`/root/.ssh/lab_rsa`) |
 | `nodevtysh <node> '<cmd>'` | vtysh in the `frr-k8s` pod on that node - the cluster's side of BGP |
 | `inpod <tenant> <cmd>` | a command in that tenant's test pod |
 | `podip <tenant> [node]` | that tenant's test pod's UDN address |
@@ -1244,7 +1245,7 @@ done
 # red          I am red on hub
 # ...
 # violet-sno   I am violet on sno
-ssh root@192.168.122.88 grep -E '^backend|server' /etc/haproxy/udn-tenants.cfg
+labssh 192.168.122.88 grep -E '^backend|server' /etc/haproxy/udn-tenants.cfg
 # blue and red backends: the same kind of address, different "namespace"
 ```
 
