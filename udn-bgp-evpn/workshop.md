@@ -1999,25 +1999,48 @@ Deeper: [troubleshooting.md, "client segments ran at MTU 9000"](troubleshooting.
 ### X9. Take the advertisement away
 
 Everything a tenant reaches, it reaches because a route for it exists. Remove
-the one object that advertises the hub's tenants and watch:
+the one object that advertises the hub's tenants and watch the fabric catch
+up. It is not instant - OVN-Kubernetes has to notice, rewrite its generated
+FRR configuration, and FRR has to withdraw - so watch rather than look once:
 
 ```bash
 lab hub
+leaf2 'show bgp l2vpn evpn route type prefix' | grep -c 10.200    # before: blue's and red's /24s
+ext blue ping -c2 -W2 $(podip blue)                               # before: replies
 oc delete routeadvertisements udn-evpn
-leaf2 'show bgp l2vpn evpn route type prefix' | grep -c 10.200    # the hub's blue and red /24s go
-ext blue ping -c2 -W2 $(podip blue)                               # silent
-leaf1 'show bgp l2vpn evpn summary'                               # and the hub workers' EVPN column?
+for i in $(seq 24); do                    # up to two minutes
+  n=$(leaf2 'show bgp l2vpn evpn route type prefix' | grep -c 10.200)
+  echo "$(date +%T)  10.200 routes on leaf2: $n"; [ "$n" -eq 0 ] && break; sleep 5
+done
+ext blue ping -c2 -W2 $(podip blue)       # now silent
+leaf1 'show bgp l2vpn evpn summary'       # the hub workers?
 ```
 
-Nothing you wrote changed: the CUDNs, the pods, the VTEP and the sessions are
-all still there. What went is what OVN-Kubernetes generated from the
-`RouteAdvertisements` - including, as Lab 4 showed, the `l2vpn evpn`
-activation itself, so expect the hub workers to fall back towards `NoNeg`.
-Put it back from the file Lab 6 left:
+Measured on this lab - 12 routes before, and a minute after the delete:
+
+```
+worker1(192.168.140.34) 4  64512 ... 00:00:48   NoNeg   NoNeg worker1 [hub]
+worker2(192.168.140.35) 4  64512 ... 00:00:48   NoNeg   NoNeg worker2 [hub]
+worker3(192.168.140.36) 4  64512 ... 00:00:48   NoNeg   NoNeg worker3 [hub]
+```
+
+Nothing you wrote changed: the CUDNs, the pods, the VTEP and Lab 4's peering
+are all still there. What went is everything OVN-Kubernetes generated from
+the `RouteAdvertisements` - the tenant VRFs' routes, and, as Lab 4 showed,
+the `l2vpn evpn` activation itself. So the hub workers are back to `NoNeg`,
+and `Up/Down` restarted: a BGP session cannot drop an address family in
+place, so FRR reset it to renegotiate without one. The SNO's row keeps its
+numbers - its own `RouteAdvertisements` is untouched.
+
+Put it back from the file Lab 6 left, and watch it return:
 
 ```bash
 oc apply -f "$WS_MANIFESTS/hub/lab06-routeadvertisements-udn-evpn.yaml"
-leaf1 'show bgp l2vpn evpn summary'     # numbers again
+for i in $(seq 24); do
+  n=$(leaf2 'show bgp l2vpn evpn route type prefix' | grep -c 10.200)
+  echo "$(date +%T)  10.200 routes on leaf2: $n"; [ "$n" -gt 0 ] && break; sleep 5
+done
+leaf1 'show bgp l2vpn evpn summary'     # numbers again - after another session reset
 ext blue ping -c2 $(podip blue)         # replies
 ```
 
