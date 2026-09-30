@@ -1586,6 +1586,12 @@ NAME       IP           MAC                 NODE
 green-vm   10.204.0.9   0a:58:0a:cc:00:09   worker1
 ```
 
+> **The outputs in this lab are examples.** Your VM may get a different IP,
+> and so a different MAC, and land on a different worker - and with it a
+> different VTEP (`100.64.0.<worker's octet>`). The commands read the MAC and
+> IP into `$MAC` and `$VMIP`, so they need no editing; compare your output
+> with the pattern, not the numbers.
+
 The MAC is not random: OVN-Kubernetes derives it from the IP - `0a:58`
 followed by `10.204.0.9` in hex. So a VM that keeps its IP keeps its MAC.
 
