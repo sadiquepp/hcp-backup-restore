@@ -1775,6 +1775,7 @@ any order. Each ends with where the repo goes deeper.
 | X7 | Blue and red advertise the same prefix - how does BGP keep them apart? | the fabric, the hub |
 | X8 | How big a packet does the overlay carry? | the SNO |
 | X9 | What happens when the advertisement goes away? | the hub |
+| X10 | How does a packet get from the SNO to a hub worker - bridged, and routed? | the SNO |
 
 ### X1. Three route types, one table
 
@@ -2022,6 +2023,100 @@ ext blue ping -c2 $(podip blue)         # replies
 
 If anything is still off a minute later, `./build-lab.sh --workshop --only
 check-hub` repairs the three platform faults it knows about.
+
+### X10. One packet, SNO to hub: green, then violet
+
+Both tenants cross the same underlay between the same two nodes, and take
+opposite decisions in the overlay: green is **bridged** on a MAC, violet is
+**routed** on a prefix. Follow one ping from the SNO to worker1 for each,
+step by step, on the SNO's side where every decision is made.
+
+Aim at the pods on worker1, so the VTEP to expect is known (`100.64.0.34`):
+
+```bash
+lab sno
+GREEN_DST=$(KUBECONFIG=$HUB_KUBECONFIG podip green worker1)
+VIOLET_DST=$(KUBECONFIG=$HUB_KUBECONFIG podip violet worker1)
+echo "green -> $GREEN_DST   violet -> $VIOLET_DST"
+inpod green ping -c2 $GREEN_DST; inpod violet ping -c2 $VIOLET_DST   # ttl 64, ttl 61
+```
+
+#### green, Layer2 - one broadcast domain, VNI 400
+
+```bash
+# 1. In the pod: the destination is ON-LINK - same /16, no gateway
+inpod green ip route get $GREEN_DST
+#    10.204.0.y dev ovn-udn1 src 10.204.128.x          <- no "via"
+
+# 2. So the pod ARPs for it, and gets the MAC - which is the IP in hex (X3)
+inpod green ip neigh show $GREEN_DST
+GREEN_MAC=$(printf '0a:58:%02x:%02x:%02x:%02x' ${GREEN_DST//./ })
+
+# 3. The node bridges on that MAC: which VTEP is it behind? A type-2 route put it there
+oc debug node/sno --quiet -- chroot /host bridge fdb show dev evx4-evpn-vtep | grep $GREEN_MAC
+#    ... dst 100.64.0.34 src_vni 400 self extern_learn
+
+# 4. Encapsulate: outer 100.64.0.20 -> 100.64.0.34, VNI 400. How the OUTER packet leaves:
+oc debug node/sno --quiet -- chroot /host ip route get 100.64.0.34
+#    via 192.168.140.34 ... cache    <- leaf1's redirect (X6), or via 192.168.140.1 before it
+```
+
+worker1 finds `100.64.0.34` on its own VTEP interface, so it is *delivered*,
+not forwarded: decapsulated into green's switch, and handed to the pod by
+MAC. Nothing routed it at any point - TTL 64.
+
+#### violet, Layer3 - one routed network, VNI 601
+
+```bash
+# 1. In the pod: the destination is OFF-LINK - a different node's /24, so via the gateway
+inpod violet ip route get $VIOLET_DST
+#    10.206.3.y via <violet's gateway> dev ovn-udn1 ...
+
+# 2. OVN routes it and hands it to the SNO's violet VRF. That table's
+#    route for the hub node's /24 names a VTEP - no MAC anywhere:
+oc debug node/sno --quiet -- chroot /host ip route show vrf violet | grep '^10.206.3'
+#    10.206.3.0/24 via 100.64.0.34 dev svl3-violet proto bgp onlink
+
+# 3. Where that route came from: a type-5, RT 65000:601, next hop worker1's VTEP
+nodevtysh sno 'show bgp l2vpn evpn route type prefix' | grep -A2 '10.206.3.0'
+
+# 4. Encapsulate: outer 100.64.0.20 -> 100.64.0.34, VNI 601 - the same underlay
+#    decision as green's step 4
+oc debug node/sno --quiet -- chroot /host ip route get 100.64.0.34
+```
+
+worker1 decapsulates VNI 601 into its own violet VRF, which routes it to its
+node subnet, and OVN delivers it to the pod. Three routing hops across the
+two nodes in all - TTL 61.
+
+(`10.206.3` is worker1's slice on this lab; use the first three octets of
+your `$VIOLET_DST`.)
+
+#### Side by side
+
+| | green (Layer2, macVRF) | violet (Layer3, ipVRF) |
+| --- | --- | --- |
+| Pod's first decision | on-link: ARP for the destination | off-link: send to the gateway |
+| What the SNO looks up | the destination **MAC** | the destination **prefix** |
+| Where that lives | the FDB of `evx4-evpn-vtep` | the violet VRF's routing table |
+| Put there by | a **type-2** route | a **type-5** route |
+| VNI | 400, an L2VNI | 601, an L3VNI |
+| Routed on the way? | never - TTL 64 | on both nodes, three hops - TTL 61 |
+| Outer packet, tunnel ends | `100.64.0.20 -> 100.64.0.34` | `100.64.0.20 -> 100.64.0.34` - identical |
+| leaf1 / leaf2 | leaf1 carries the outer packet (or redirects it, X6); leaf2 is not involved | same |
+
+The last two rows are the point: **the underlay cannot tell them apart.** Both
+are node-to-node VXLAN between the same two VTEPs. Only the VNI and what the
+node did before encapsulating differ - which is exactly what EVPN's route
+types exist to program.
+
+To see both on the wire, run X5's `tcpdump -ni virbr1 -c 8 'udp port 4789'`
+on the lab host while the two pings run: the same outer addresses, `vni 400`
+and `vni 601`.
+
+Deeper: [bgp-evpn.md, cluster to cluster](bgp-evpn.md#following-one-packet-cluster-to-cluster)
+for green, and [README, a routed Layer3 UDN across two clusters](README.md#what-a-routed-layer3-udn-across-two-clusters-does)
+for violet.
 
 ---
 
