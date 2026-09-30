@@ -1,0 +1,240 @@
+## SPIFFE/SPIRE workload identity on the hub and the SNO.
+##
+## Red Hat's operator packaging of SPIRE - the Zero Trust Workload Identity
+## Manager, from redhat-operators - gives each cluster its own trust domain
+## (hub.mylab.com, sno.mylab.com). A demo workload fetches an X.509-SVID over
+## the Workload API (through the SPIFFE CSI driver) and uses it for mTLS to a
+## peer; a workload with no registration entry gets no SVID and is refused.
+## Then the two trust domains are federated, and a hub workload authenticates
+## to a SNO workload.
+##
+## WHAT THIS DOES TO THE EXISTING LAB: nothing outside the objects it creates.
+## No base role is run or changed, no VM is added, no DNS record is added -
+## every name it needs is under a cluster's *.apps wildcard. On each cluster it
+## adds one operator (its own namespace), one StorageClass and one PV of its
+## own when the cluster has no default StorageClass, and the spiffe-demo
+## namespace. `--tags cleanup` removes all of it.
+##
+## Run from inside spiffe-spire/ (ansible.cfg is read from the working
+## directory). build-lab.sh runs every phase in order; by hand:
+##
+##   cd spiffe-spire
+##   PB="ansible-playbook setup_spiffe_spire.yaml --vault-password-file ~/.vault_pass -e @../vars-metal.yaml"
+##
+## Per cluster - pass -e spire_cluster=hub or -e spire_cluster=sno:
+##
+##   --tags preflight   is the operator in the catalog, what channel, is there
+##                      a StorageClass. Changes nothing.
+##   --tags operator    Namespace, OperatorGroup, Subscription; waits for the
+##                      CSV and checks the API is the 1.x one this lab is
+##                      written against.
+##   --tags storage     the SPIRE server's PersistentVolume, when the cluster
+##                      has no default StorageClass.
+##   --tags spire       the five CRs: ZeroTrustWorkloadIdentityManager,
+##                      SpireServer, SpireAgent, SpiffeCSIDriver, and the
+##                      federation Route. Waits for each to be Ready.
+##   --tags demo        spiffe-demo: the ClusterSPIFFEID and three workloads.
+##   --tags verify      assert only: SVIDs issued, mTLS works, the intruder is
+##                      refused. Also the workshop's check of what was built
+##                      by hand.
+##   --tags prep        the workshop's environment file. Nothing on a cluster.
+##   --tags cleanup     remove everything above from that cluster.
+##
+## Both clusters at once - no spire_cluster:
+##
+##   --tags federation  exchange the bootstrap bundles, a
+##                      ClusterFederatedTrustDomain on each side, force a
+##                      refresh over each Route, and re-register the demo
+##                      identities with federatesWith.
+##   --tags xverify     hub client -> SNO echo-server and back, across the two
+##                      trust domains.
+##
+## Every phase is `tags: [<phase>, never]`: it runs only when named. A bare
+## run does nothing but the kubeconfig check, deliberately.
+
+- name: SPIFFE/SPIRE on one cluster
+  hosts: localhost
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../vars.yaml          # base (and, for now, everyone else's)
+    - vars.yaml             # this use case - may refer to base variables freely
+    - ../vault.yaml
+  vars:
+    # The selected cluster, and the other one. Guarded with defaults so the
+    # assert below, not a templating error, is what reports a missing or
+    # misspelt -e spire_cluster.
+    spire_c: "{{ spire_clusters[spire_cluster | default('')] | default({}) }}"
+    spire_peer: "{{ spire_clusters[spire_c.peer | default('')] | default({}) }}"
+  environment:
+    KUBECONFIG: "{{ spire_c.kubeconfig | default('/nonexistent') }}"
+  pre_tasks:
+    - name: Fail unless -e spire_cluster names a cluster
+      ansible.builtin.assert:
+        that:
+          - spire_cluster is defined
+          - spire_cluster in spire_clusters
+        fail_msg: >-
+          Pass -e spire_cluster=<{{ spire_clusters.keys() | join('|') }}>.
+          Every per-cluster phase runs against exactly one cluster; the
+          federation and xverify phases take none and use both.
+      tags: &spire_phase_tags [preflight, operator, storage, spire, demo, verify, prep, cleanup]
+
+    - name: Look for the selected cluster's kubeconfig
+      ansible.builtin.stat:
+        path: "{{ spire_c.kubeconfig }}"
+      register: spire_kubeconfig_stat
+      tags: *spire_phase_tags
+
+    # Same guard as the UDN lab's: without it every `oc` below talks to
+    # whatever the ambient KUBECONFIG is, which on this host is usually the
+    # hub - so a SNO run would configure the hub and look like it worked.
+    - name: Say which kubeconfig is missing rather than letting oc say nothing
+      ansible.builtin.assert:
+        that: spire_kubeconfig_stat.stat.exists
+        fail_msg: >-
+          spire_cluster is '{{ spire_cluster }}', whose kubeconfig should be at
+          {{ spire_c.kubeconfig }} - and there is no file there. Build the
+          cluster first (setup_hub_cluster.yaml / setup_sno.yaml, or
+          ./build-lab.sh --only clusters).
+        success_msg: "Cluster '{{ spire_cluster }}' -> {{ spire_c.kubeconfig }}"
+      tags: *spire_phase_tags
+
+    - name: Create the manifest directory for this cluster
+      ansible.builtin.file:
+        path: "{{ spire_manifest_dir }}"
+        state: directory
+        mode: '0755'
+      tags: *spire_phase_tags
+
+  tasks:
+    - name: Pre-flight - changes nothing
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: preflight.yml
+      tags: [preflight, never]
+
+    - name: The Zero Trust Workload Identity Manager operator
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: operator.yml
+      tags: [operator, never]
+
+    - name: Storage for the SPIRE server
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: storage.yml
+      tags: [storage, never]
+
+    - name: SPIRE server, agents and CSI driver
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: spire.yml
+      tags: [spire, never]
+
+    - name: The demo workloads
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: demo.yml
+      tags: [demo, never]
+
+    - name: Verify - asserts only
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: verify.yml
+      tags: [verify, never]
+
+    - name: The workshop's environment file
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: prep.yml
+      tags: [prep, never]
+
+    - name: Remove everything this lab created on the cluster
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: cleanup.yml
+      tags: [cleanup, never]
+
+## ---------------------------------------------------------------------------
+## Federation. Four plays, because each cluster's half runs with its own
+## KUBECONFIG and a play's environment is fixed: the first reads both trust
+## bundles (explicit --kubeconfig per command) into facts on localhost, which
+## the next two - one per cluster - read back. Facts persist across plays in
+## one run; that is the whole hand-off.
+## ---------------------------------------------------------------------------
+
+- name: Federation - read both clusters' trust bundles
+  hosts: localhost
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../vars.yaml
+    - vars.yaml
+    - ../vault.yaml
+  vars:
+    # Templates reached from here resolve spire_c; the hub is as good as any.
+    spire_c: "{{ spire_clusters.hub }}"
+  tasks:
+    - name: Read both trust bundles
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: federation-bundles.yml
+      tags: [federation, never]
+
+- name: Federation - the hub trusts the SNO
+  hosts: localhost
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../vars.yaml
+    - vars.yaml
+    - ../vault.yaml
+  vars:
+    spire_c: "{{ spire_clusters.hub }}"
+    spire_peer: "{{ spire_clusters[spire_c.peer] }}"
+  environment:
+    KUBECONFIG: "{{ spire_c.kubeconfig }}"
+  tasks:
+    - name: Federate the hub with the SNO
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: federation.yml
+      tags: [federation, never]
+
+- name: Federation - the SNO trusts the hub
+  hosts: localhost
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../vars.yaml
+    - vars.yaml
+    - ../vault.yaml
+  vars:
+    spire_c: "{{ spire_clusters.sno }}"
+    spire_peer: "{{ spire_clusters[spire_c.peer] }}"
+  environment:
+    KUBECONFIG: "{{ spire_c.kubeconfig }}"
+  tasks:
+    - name: Federate the SNO with the hub
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: federation.yml
+      tags: [federation, never]
+
+- name: Cross-cluster mTLS - hub to SNO and back
+  hosts: localhost
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../vars.yaml
+    - vars.yaml
+    - ../vault.yaml
+  vars:
+    spire_c: "{{ spire_clusters.hub }}"
+  tasks:
+    - name: Call across the trust domain boundary, both ways
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: xverify.yml
+      tags: [xverify, never]

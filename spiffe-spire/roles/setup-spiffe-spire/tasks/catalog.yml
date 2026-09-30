@@ -1,0 +1,68 @@
+---
+# Find Red Hat's SPIRE operator in this cluster's catalog. Included by the
+# preflight and operator phases; sets spire_pkg and spire_chan.
+#
+# The package name is looked up rather than assumed, and this is the check the
+# lab turns on: if redhat-operators on this cluster does not carry it, there
+# is nothing to install and the run stops here with the reason. There is no
+# fallback to the upstream Helm charts - on OpenShift 4.19 and later the
+# operator is the supported route, and the charts would need their own SCCs,
+# CSI driver profile and route plumbing that the operator already does.
+
+- name: List the packages in {{ spire_catalog_source }}
+  ansible.builtin.command:
+    cmd: >-
+      oc get packagemanifests -n {{ spire_catalog_namespace }}
+      -l catalog={{ spire_catalog_source }}
+      -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.defaultChannel}{"\n"}{end}'
+  register: spire_catalog_list
+  changed_when: false
+  retries: 6
+  delay: 10
+  until: spire_catalog_list.rc == 0
+
+- name: Pick out the Zero Trust Workload Identity Manager
+  ansible.builtin.set_fact:
+    spire_catalog_matches: >-
+      {{ spire_catalog_list.stdout_lines
+         | select('search', spire_operator_package if spire_operator_package else spire_operator_package_match)
+         | map('split') | list }}
+
+- name: Fail if the operator is not in the catalog
+  ansible.builtin.assert:
+    that: spire_catalog_matches | length == 1
+    fail_msg: >-
+      {{ 'No package matching' if spire_catalog_matches | length == 0 else 'More than one package matching' }}
+      '{{ spire_operator_package if spire_operator_package else spire_operator_package_match }}'
+      in catalog {{ spire_catalog_source }} ({{ spire_catalog_list.stdout_lines | length }} packages listed).
+      {{ 'Matches: ' ~ (spire_catalog_matches | map('first') | join(', ')) ~ ' - set spire_operator_package to one.'
+         if spire_catalog_matches | length > 1 else
+         'Red Hat ships SPIRE as the Zero Trust Workload Identity Manager from OpenShift 4.19;
+         check the catalog pod in ' ~ spire_catalog_namespace ~ ' is healthy
+         (oc -n ' ~ spire_catalog_namespace ~ ' get catalogsource,pods). This lab does not fall
+         back to the upstream Helm charts.' }}
+
+- name: Settle on the package and channel
+  ansible.builtin.set_fact:
+    spire_pkg: "{{ spire_catalog_matches[0][0] }}"
+    spire_chan: "{{ spire_operator_channel if spire_operator_channel else spire_catalog_matches[0][1] }}"
+
+- name: Read the channels the package offers
+  ansible.builtin.command:
+    cmd: >-
+      oc get packagemanifests -n {{ spire_catalog_namespace }}
+      -l catalog={{ spire_catalog_source }}
+      -o 'jsonpath={range .items[?(@.metadata.name=="{{ spire_pkg }}")].status.channels[*]}{.name}{" "}{.currentCSV}{"\n"}{end}'
+  register: spire_catalog_channels
+  changed_when: false
+
+- name: Fail if the chosen channel does not exist
+  ansible.builtin.assert:
+    that: spire_chan in (spire_catalog_channels.stdout_lines | map('split') | map('first') | list)
+    fail_msg: >-
+      Channel '{{ spire_chan }}' is not offered by {{ spire_pkg }}. It has:
+      {{ spire_catalog_channels.stdout_lines | join('; ') }}
+    success_msg: >-
+      {{ spire_pkg }} from {{ spire_catalog_source }}, channel {{ spire_chan }}
+      ({{ (spire_catalog_channels.stdout_lines | select('match', spire_chan ~ ' ') | first | default('')).split() | last }}).
+      Channels: {{ spire_catalog_channels.stdout_lines | map('split') | map('first') | join(', ') }}

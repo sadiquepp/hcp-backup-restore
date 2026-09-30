@@ -1,0 +1,115 @@
+---
+# Install the Zero Trust Workload Identity Manager: Namespace, OperatorGroup,
+# Subscription, then wait for the CSV and the CRDs, then check the API is the
+# one this lab is written against.
+#
+# The same Subscription -> CSV -> CRD -> CR sequence as OpenShift
+# Virtualization in udn-bgp-evpn/roles/setup-udn-bgp/tasks/prep.yml, with the
+# CR half in spire.yml.
+
+- name: Look the operator up in the catalog
+  ansible.builtin.include_tasks: catalog.yml
+
+# An installed operator keeps the channel it was installed from. Re-running
+# this phase must not move it to whatever the catalog's default is today -
+# a channel change is an upgrade, and that is a decision, not a side effect.
+- name: Read the channel of an existing Subscription
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} get subscriptions.operators.coreos.com {{ spire_pkg }}
+      -o jsonpath={.spec.channel}
+  register: spire_op_existing
+  changed_when: false
+  failed_when: false
+
+- name: Keep the existing channel
+  ansible.builtin.set_fact:
+    spire_chan: "{{ spire_op_existing.stdout }}"
+  when:
+    - spire_op_existing.rc == 0
+    - spire_op_existing.stdout | length > 0
+    - not spire_operator_channel
+
+- name: Render the Namespace, OperatorGroup and Subscription
+  ansible.builtin.template:
+    src: operator.yaml.j2
+    dest: "{{ spire_manifest_dir }}/01-operator.yaml"
+    mode: '0644'
+
+- name: Apply them
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/01-operator.yaml
+  register: spire_op_apply
+  changed_when: spire_op_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+- name: Wait for the Subscription to name an installed CSV
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} get subscriptions.operators.coreos.com {{ spire_pkg }}
+      -o jsonpath={.status.installedCSV}
+  register: spire_op_csv
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: spire_op_csv.stdout | length > 0
+  changed_when: false
+
+- name: Wait for the CSV to succeed
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} get csv {{ spire_op_csv.stdout }}
+      -o jsonpath={.status.phase}
+  register: spire_op_phase
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: spire_op_phase.stdout == 'Succeeded'
+  changed_when: false
+
+- name: Wait for the operator's CRDs to be established
+  ansible.builtin.command:
+    cmd: oc wait --for=condition=Established --timeout=300s crd/{{ item }}
+  loop:
+    - zerotrustworkloadidentitymanagers.operator.openshift.io
+    - spireservers.operator.openshift.io
+    - spireagents.operator.openshift.io
+    - spiffecsidrivers.operator.openshift.io
+    - clusterspiffeids.spire.spiffe.io
+    - clusterfederatedtrustdomains.spire.spiffe.io
+  changed_when: false
+
+# The 0.x tech-preview API put the trust domain on SpireServer and SpireAgent;
+# 1.0 moved it to the ZeroTrustWorkloadIdentityManager CR and added
+# federation to SpireServer. Every manifest in this lab is 1.x-shaped, and a
+# 0.x operator would reject them with messages about unknown fields - so ask
+# the CRDs, and say what is wrong in words.
+- name: Read the API shape the installed operator serves
+  ansible.builtin.command:
+    cmd: >-
+      oc get crd {{ item.crd }}
+      -o 'jsonpath={.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.spec.properties.{{ item.field }}.type}'
+  loop:
+    - {crd: zerotrustworkloadidentitymanagers.operator.openshift.io, field: trustDomain}
+    - {crd: spireservers.operator.openshift.io, field: federation}
+  loop_control:
+    label: "{{ item.crd }} .spec.{{ item.field }}"
+  register: spire_op_api
+  changed_when: false
+
+- name: Fail if the operator predates the 1.x API
+  ansible.builtin.assert:
+    that: spire_op_api.results | map(attribute='stdout') | select('in', ['string', 'object']) | list | length == 2
+    fail_msg: >-
+      {{ spire_op_csv.stdout }} serves an API without
+      {{ spire_op_api.results | rejectattr('stdout', 'in', ['string', 'object'])
+         | map(attribute='item') | map(attribute='field') | join(' and ') }}
+      - it is older than the 1.0 API this lab is written against (trustDomain on
+      the ZeroTrustWorkloadIdentityManager, federation on SpireServer). Choose a
+      1.x channel with -e spire_operator_channel=<name> (see the preflight
+      phase's channel list), delete the Subscription and CSV, and re-run.
+    success_msg: "{{ spire_op_csv.stdout }} installed, 1.x API"
+
+- name: Wait for the operator's own Deployment
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} wait deployment --all
+      --for=condition=Available --timeout=300s
+  changed_when: false

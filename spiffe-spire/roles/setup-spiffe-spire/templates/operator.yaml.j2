@@ -1,0 +1,32 @@
+{# The Zero Trust Workload Identity Manager: its namespace, an OperatorGroup
+   and the Subscription. Rendered to <manifest dir>/01-operator.yaml.
+
+   The OperatorGroup names no targetNamespaces, which is AllNamespaces mode -
+   the operator's CRs are cluster-scoped singletons and the ClusterSPIFFEIDs
+   it reconciles are cluster-scoped too, so there is no namespace to scope it
+   to. The namespace itself is fixed: the operator's Route and some of its
+   RBAC name it as a constant. #}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ spire_operator_namespace }}
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: {{ spire_pkg }}
+  namespace: {{ spire_operator_namespace }}
+spec:
+  upgradeStrategy: Default
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: {{ spire_pkg }}
+  namespace: {{ spire_operator_namespace }}
+spec:
+  channel: {{ spire_chan }}
+  name: {{ spire_pkg }}
+  source: {{ spire_catalog_source }}
+  sourceNamespace: {{ spire_catalog_namespace }}
+  installPlanApproval: Automatic

@@ -1,0 +1,36 @@
+---
+# Across the trust domain boundary, both ways: a client in one cluster calls
+# the other cluster's echo-server through its passthrough Route. Asserts only.
+#
+# Each call proves both directions of trust at once. The client verifies the
+# server's SVID (spiffe://<other>/.../echo-server) against the peer CA its
+# own bundle now carries; the server verifies the client's SVID
+# (spiffe://<this>/.../client) against the peer CA ITS bundle carries, and
+# finds the ID on its allowlist.
+#
+# Retried: after the federation plays re-register the demo identities with
+# federatesWith, each agent pushes the new bundle to its workloads, and
+# spiffe-helper rewrites svid_bundle.pem - a minute or so, not instant.
+
+- name: Call the other cluster's echo-server
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ spire_clusters[item.src].kubeconfig }}
+      -n {{ spire_demo_namespace }} exec deploy/client -c app --
+      python3 /app/spiffe_client.py
+      https://echo-{{ spire_demo_namespace }}.{{ spire_clusters[item.dst].apps_domain }}/
+      spiffe://{{ spire_clusters[item.dst].trust_domain }}/ns/{{ spire_demo_namespace }}/sa/echo-server
+  loop:
+    - {src: hub, dst: sno}
+    - {src: sno, dst: hub}
+  loop_control:
+    label: "{{ item.src }} client -> {{ item.dst }} echo-server"
+  register: spire_xv
+  retries: 12
+  delay: 10
+  until: spire_xv.rc == 0
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ spire_xv.results | map(attribute='stdout_lines') | map('join', ' | ') | list }}"

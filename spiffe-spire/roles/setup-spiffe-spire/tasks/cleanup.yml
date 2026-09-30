@@ -1,0 +1,125 @@
+---
+# Remove everything this lab created on one cluster, in dependency order, so
+# the cluster is as the base build left it. Every delete tolerates the object
+# being absent, so this is safe to re-run and safe on a half-built lab.
+#
+# Left behind, deliberately:
+#   - the operator's CRDs. OLM never deletes CRDs on uninstall, and deleting
+#     them by hand deletes every CR of those kinds cluster-wide. Nothing uses
+#     them once the operator is gone. `oc get crd | grep -e spiffe -e spire`.
+#
+# The peer cluster still has a ClusterFederatedTrustDomain naming this one
+# until cleanup runs there too; it just fails to refresh meanwhile.
+
+- name: Delete the demo namespace and its registration
+  ansible.builtin.command:
+    cmd: oc delete {{ item }} --ignore-not-found --wait=true --timeout=300s
+  loop:
+    - namespace/{{ spire_demo_namespace }}
+    - clusterspiffeid/{{ spire_demo_namespace }}
+    - clusterfederatedtrustdomain/{{ spire_peer.trust_domain }}
+  register: spire_cl_demo
+  changed_when: "'deleted' in spire_cl_demo.stdout"
+  failed_when: spire_cl_demo.rc != 0 and 'the server doesn\'t have a resource type' not in spire_cl_demo.stderr
+
+# The operand CRs are owned by the ZeroTrustWorkloadIdentityManager, and
+# everything they create by them - so deleting it lets garbage collection
+# take the server, the agents, the CSI driver, their SCC, RBAC and webhook.
+- name: Delete the federation Route and the trust domain
+  ansible.builtin.command:
+    cmd: oc delete {{ item }} --ignore-not-found --wait=true --timeout=300s
+  loop:
+    - -n {{ spire_operator_namespace }} route/{{ spire_federation_route_name }}
+    - zerotrustworkloadidentitymanager/cluster
+    - spireserver/cluster
+    - spireagent/cluster
+    - spiffecsidriver/cluster
+    - spireoidcdiscoveryprovider/cluster
+  register: spire_cl_cr
+  changed_when: "'deleted' in spire_cl_cr.stdout"
+  failed_when: spire_cl_cr.rc != 0 and 'the server doesn\'t have a resource type' not in spire_cl_cr.stderr
+
+- name: Wait for the SPIRE server pod to go
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} wait pod/spire-server-0
+      --for=delete --timeout=300s
+  register: spire_cl_wait
+  changed_when: false
+  failed_when: false
+
+# A StatefulSet's PVCs outlive it by design.
+- name: Delete the SPIRE server's PVC
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} delete pvc spire-data-spire-server-0
+      --ignore-not-found --wait=true --timeout=120s
+  register: spire_cl_pvc
+  changed_when: "'deleted' in spire_cl_pvc.stdout"
+
+# The CSV by the Subscription's installedCSV, not by listing CSVs: an
+# AllNamespaces operator elsewhere on the cluster has a COPY of its CSV in
+# every namespace, this one included, and those are not ours to delete.
+- name: Find the operator's Subscription and the CSV it installed
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} get subscriptions.operators.coreos.com
+      -o 'jsonpath={range .items[*]}{{ item.path }}{"\n"}{end}'
+  loop:
+    - {kind: subscriptions.operators.coreos.com, path: "{.metadata.name}"}
+    - {kind: clusterserviceversions.operators.coreos.com, path: "{.status.installedCSV}"}
+  loop_control:
+    label: "{{ item.kind }}"
+  register: spire_cl_olm
+  changed_when: false
+  failed_when: false
+
+# Subscription first, so OLM does not reinstall the CSV it is about to lose.
+- name: Uninstall the operator
+  ansible.builtin.command:
+    cmd: oc -n {{ spire_operator_namespace }} delete {{ item.0.item.kind }}/{{ item.1 }} --ignore-not-found
+  loop: "{{ spire_cl_olm.results | subelements('stdout_lines') }}"
+  loop_control:
+    label: "{{ item.0.item.kind }}/{{ item.1 }}"
+  register: spire_cl_op
+  changed_when: "'deleted' in spire_cl_op.stdout"
+
+- name: Delete the operator's namespace
+  ansible.builtin.command:
+    cmd: oc delete namespace {{ spire_operator_namespace }} --ignore-not-found --wait=true --timeout=600s
+  register: spire_cl_ns
+  changed_when: "'deleted' in spire_cl_ns.stdout"
+
+- name: Find the local PV's node
+  ansible.builtin.command:
+    cmd: >-
+      oc get pv spire-server-data-{{ spire_c.name }} -o
+      'jsonpath={.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]}'
+  register: spire_cl_pvnode
+  changed_when: false
+  failed_when: false
+
+- name: Delete the local PV and its StorageClass
+  ansible.builtin.command:
+    cmd: oc delete {{ item }} --ignore-not-found --wait=true --timeout=120s
+  loop:
+    - pv/spire-server-data-{{ spire_c.name }}
+    - storageclass/{{ spire_local_storage_class }}
+  register: spire_cl_pv
+  changed_when: "'deleted' in spire_cl_pv.stdout"
+
+# The CA keys and the datastore. Left in place, a rebuild would come back as
+# the SAME trust domain root - which the peer may no longer trust, and which
+# is not what "start again" means.
+- name: Wipe the SPIRE server's data directory on the node
+  ansible.builtin.command:
+    cmd: >-
+      oc debug node/{{ spire_cl_pvnode.stdout }} --quiet --
+      chroot /host rm -rf {{ spire_local_pv_path }}
+  when: spire_cl_pvnode.rc == 0 and spire_cl_pvnode.stdout | length > 0
+  changed_when: true
+
+- name: Remove this cluster's rendered manifests
+  ansible.builtin.file:
+    path: "{{ spire_manifest_dir }}"
+    state: absent

@@ -1,0 +1,48 @@
+{# The SPIRE server's PersistentVolume on a cluster with no default
+   StorageClass. Rendered to <manifest dir>/02-storage.yaml.
+
+   A StorageClass of this lab's own, not a cluster default: nothing else on the
+   cluster will ever bind to it, and it goes away with --tags cleanup.
+
+   WaitForFirstConsumer, and a local PV with nodeAffinity, is what makes the
+   scheduler put the spire-server pod on the node that has the directory.
+   claimRef reserves the PV for the one PVC the operator creates
+   (volumeClaimTemplate 'spire-data' of StatefulSet 'spire-server'), so no
+   other claim of the same size and class can take it first.
+
+   Retain: the directory holds the trust domain's CA keys. Deleting the PVC
+   must not delete them by accident; --tags cleanup removes them on purpose. #}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ spire_local_storage_class }}
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: spire-server-data-{{ spire_c.name }}
+  labels:
+    app.kubernetes.io/part-of: spiffe-spire-lab
+spec:
+  capacity:
+    storage: {{ spire_server_pv_size }}
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ spire_local_storage_class }}
+  claimRef:
+    namespace: {{ spire_operator_namespace }}
+    name: spire-data-spire-server-0
+  local:
+    path: {{ spire_local_pv_path }}
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - {{ spire_local_node }}

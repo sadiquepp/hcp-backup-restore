@@ -1,0 +1,40 @@
+---
+# The workshop's shell environment: nothing on the cluster. Writes
+#
+#   /root/spiffe-workshop.env          the file attendees source
+#   /root/spiffe-workshop.d/<c>.env    what `lab <c>` loads for one cluster
+#   /root/spiffe-workshop-manifests/<c>/   where their manifests go
+#
+# The per-cluster file carries the one value the attendee cannot know in
+# advance - which StorageClass the SPIRE server's PVC must name - so it is
+# decided the same way the automated build decides it (storage-decide.yml).
+
+- name: Decide where the SPIRE server's data will live
+  ansible.builtin.include_tasks: storage-decide.yml
+
+- name: Create the workshop directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ spire_workshop_cluster_dir }}"
+    - "{{ spire_workshop_manifest_root }}/{{ spire_c.name }}"
+
+- name: Write this cluster's settings
+  ansible.builtin.template:
+    src: workshop-cluster.env.j2
+    dest: "{{ spire_workshop_cluster_dir }}/{{ spire_c.name }}.env"
+    mode: '0644'
+
+- name: Write the workshop environment file
+  ansible.builtin.template:
+    src: workshop.env.j2
+    dest: "{{ spire_workshop_env_file }}"
+    mode: '0644'
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "source {{ spire_workshop_env_file }}; lab {{ spire_c.name }}"
+      - "SPIRE server storage on {{ spire_c.name }}: {{ spire_storage_summary }}"

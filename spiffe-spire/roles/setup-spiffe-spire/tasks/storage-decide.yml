@@ -1,0 +1,72 @@
+---
+# Which StorageClass the SPIRE server's PVC uses, and - for a local PV - which
+# node. Reads only. Included by preflight, storage and spire, so all three
+# reach the same answer from the same cluster state.
+#
+# Sets:
+#   spire_storage_mode        default | local | named
+#   spire_server_storage_sc   the class name written into the SpireServer CR
+#   spire_local_node          the node a local PV is pinned to (local only)
+#   spire_storage_summary     one line for reports
+
+- name: Find the cluster's default StorageClass
+  ansible.builtin.command:
+    cmd: >-
+      oc get storageclass
+      -o 'jsonpath={range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}'
+  register: spire_sd_default
+  changed_when: false
+
+- name: Choose the storage mode
+  ansible.builtin.set_fact:
+    spire_storage_mode: >-
+      {{ ('default' if spire_sd_default.stdout_lines else 'local')
+         if spire_storage_class == 'auto' else
+         ('local' if spire_storage_class == 'local' else 'named') }}
+
+- name: Pick the node for the local PV
+  when: spire_storage_mode == 'local'
+  block:
+    - name: List the worker nodes
+      ansible.builtin.command:
+        cmd: >-
+          oc get nodes -l node-role.kubernetes.io/worker
+          -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}'
+      register: spire_sd_workers
+      changed_when: false
+
+    # An existing PV wins over a fresh choice: the node holds the CA keys,
+    # and moving the PV to a different node would be a new trust domain root
+    # under the old name.
+    - name: Read the node an existing PV is pinned to
+      ansible.builtin.command:
+        cmd: >-
+          oc get pv spire-server-data-{{ spire_c.name }} -o
+          'jsonpath={.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]}'
+      register: spire_sd_existing
+      changed_when: false
+      failed_when: false
+
+    - name: Settle on the node
+      ansible.builtin.set_fact:
+        spire_local_node: >-
+          {{ spire_sd_existing.stdout if (spire_sd_existing.rc == 0 and spire_sd_existing.stdout)
+             else (spire_local_pv_node if spire_local_pv_node else (spire_sd_workers.stdout_lines | sort | first | default(''))) }}
+
+    - name: Fail if there is no node to put the PV on
+      ansible.builtin.assert:
+        that: spire_local_node | length > 0
+        fail_msg: >-
+          No node labelled node-role.kubernetes.io/worker, and spire_local_pv_node
+          is not set. Name one with -e spire_local_pv_node=<node>.
+
+- name: Settle on the StorageClass
+  ansible.builtin.set_fact:
+    spire_server_storage_sc: >-
+      {{ spire_sd_default.stdout_lines[0] if spire_storage_mode == 'default'
+         else (spire_local_storage_class if spire_storage_mode == 'local' else spire_storage_class) }}
+    spire_storage_summary: >-
+      {{ 'the default StorageClass, ' ~ spire_sd_default.stdout_lines[0] if spire_storage_mode == 'default'
+         else ('a local PV on ' ~ spire_local_node ~ ':' ~ spire_local_pv_path ~ ' (StorageClass '
+               ~ spire_local_storage_class ~ '; the cluster has no default)' if spire_storage_mode == 'local'
+               else 'StorageClass ' ~ spire_storage_class ~ ', as set') }}

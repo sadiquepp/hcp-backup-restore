@@ -1,0 +1,37 @@
+{# The registration: which pods get which SPIFFE ID. Rendered to
+   <manifest dir>/22-demo-clusterspiffeid.yaml.
+
+   spire-controller-manager turns this into one SPIRE registration entry per
+   matching pod, parented to the agent on that pod's node, with the pod's UID
+   as a selector - so the entry is only ever served to that pod, through the
+   agent on its own node. No label, no entry, no SVID.
+
+   className is not optional here: the operator runs the controller with
+   watchClassless: false, and a ClusterSPIFFEID without the class is accepted
+   by the API and then ignored.
+
+   The ID template is spire-controller-manager's, not Jinja's - hence raw. #}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ spire_demo_namespace }}
+spec:
+  className: {{ spire_class_name }}
+  spiffeIDTemplate: {% raw %}"spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"{% endraw %}
+
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ spire_demo_namespace }}
+  podSelector:
+    matchLabels:
+      {{ spire_demo_identity_label }}: "true"
+{% if spire_demo_federates_with | default([]) %}
+{# Set once a ClusterFederatedTrustDomain exists for the peer: the SVID's
+     bundle then includes the peer's CA too, which is what lets these pods
+     verify a certificate from the other cluster. Naming a trust domain the
+     server has no bundle for fails the entry, so it is added only after. #}
+  federatesWith:
+{% for td in spire_demo_federates_with %}
+    - {{ td }}
+{% endfor %}
+{% endif %}

@@ -1,0 +1,119 @@
+---
+# The operator's CRs: trust domain, server, agents, CSI driver - and the
+# federation Route. Then wait until each reports Ready and every agent has
+# attested.
+
+- name: Fail unless the operator is installed
+  ansible.builtin.command:
+    cmd: oc get crd spireservers.operator.openshift.io -o name
+  register: spire_sp_crd
+  changed_when: false
+  failed_when: spire_sp_crd.rc != 0
+
+- name: Decide where the SPIRE server's data will live
+  ansible.builtin.include_tasks: storage-decide.yml
+
+# The storage phase makes it; without it the PVC stays Pending and the
+# SpireServer never goes Ready, with nothing in its status to say why.
+- name: Fail if a local PV is needed and has not been made
+  when: spire_storage_mode == 'local'
+  block:
+    - name: Look for the local PV
+      ansible.builtin.command:
+        cmd: oc get pv spire-server-data-{{ spire_c.name }} -o name
+      register: spire_sp_pv
+      changed_when: false
+      failed_when: false
+
+    - name: Say so
+      ansible.builtin.assert:
+        that: spire_sp_pv.rc == 0
+        fail_msg: >-
+          This cluster has no default StorageClass, so the SPIRE server needs the
+          local PV spire-server-data-{{ spire_c.name }}, and it is not there. Run
+          --tags storage first.
+
+- name: Render the operator's CRs
+  ansible.builtin.template:
+    src: spire-operands.yaml.j2
+    dest: "{{ spire_manifest_dir }}/10-spire.yaml"
+    mode: '0644'
+
+- name: Apply them
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/10-spire.yaml
+  register: spire_sp_apply
+  changed_when: spire_sp_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+- name: Publish the federation bundle endpoint
+  when: spire_federation_enabled | bool
+  block:
+    - name: Render the federation Route
+      ansible.builtin.template:
+        src: federation-route.yaml.j2
+        dest: "{{ spire_manifest_dir }}/11-federation-route.yaml"
+        mode: '0644'
+
+    - name: Apply it
+      ansible.builtin.command:
+        cmd: oc apply -f {{ spire_manifest_dir }}/11-federation-route.yaml
+      register: spire_sp_route
+      changed_when: spire_sp_route.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+# Status conditions, not pod phases: each operand CR reports Ready=True only
+# when everything it owns is up. The CR can be briefly absent from the cache
+# right after the apply, hence the retries around oc wait rather than one
+# long wait.
+- name: Wait for each operand to report Ready
+  ansible.builtin.command:
+    cmd: oc wait {{ item }}/cluster --for=condition=Ready --timeout=60s
+  loop:
+    - spireserver
+    - spireagent
+    - spiffecsidriver
+  register: spire_sp_ready
+  retries: "{{ (spire_wait_retries | int / 3) | int }}"
+  delay: "{{ spire_wait_delay }}"
+  until: spire_sp_ready.rc == 0
+  changed_when: false
+
+- name: Count the nodes the agent DaemonSet runs on
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} get daemonset spire-agent
+      -o jsonpath={.status.desiredNumberScheduled}
+  register: spire_sp_ds
+  changed_when: false
+
+# Ready on the SpireAgent CR means the DaemonSet is rolled out. It does not
+# mean each agent has proved its node to the server - that is node
+# attestation, and it is what the agent list shows.
+- name: Wait for every agent to attest
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server --
+      spire-server agent list
+  register: spire_sp_agents
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: >-
+    spire_sp_agents.rc == 0 and
+    (spire_sp_agents.stdout | regex_findall('Found ([0-9]+) attested agent') | first | default('0') | int)
+    >= (spire_sp_ds.stdout | int)
+  changed_when: false
+
+- name: Read the server's own trust bundle
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server --
+      spire-server bundle show
+  register: spire_sp_bundle
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "trust domain {{ spire_c.trust_domain }}: server, {{ spire_sp_ds.stdout }} agent(s) and the CSI driver Ready"
+      - "{{ spire_sp_agents.stdout_lines | select('search', 'SPIFFE ID') | list }}"
+      - "trust bundle: {{ spire_sp_bundle.stdout | regex_findall('BEGIN CERTIFICATE') | length }} CA certificate(s)"
+      - "{{ ('federation endpoint https://' ~ spire_federation_route_host) if spire_federation_enabled | bool else 'federation disabled' }}"

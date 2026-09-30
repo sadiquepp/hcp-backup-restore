@@ -1,0 +1,183 @@
+{# The demo namespace and its three workloads. Rendered to
+   <manifest dir>/20-demo.yaml; the app code is 21-demo-app.yaml and the
+   registration is 22-demo-clusterspiffeid.yaml.
+
+   Every pod is the same two containers:
+
+     spiffe-helper  talks to the SPIRE agent over the Workload API socket that
+                    the CSI driver mounts at /spiffe-workload-api, writes the
+                    X.509-SVID, its key and the trust bundle to /svid, and
+                    rewrites them as they rotate
+     app            Python, reading /svid - the echo server, or a shell for
+                    the client to be run from
+
+   The ONLY difference between 'client' and 'intruder' is the
+   {{ spire_demo_identity_label }} label, which is what the ClusterSPIFFEID
+   selects. Same image, same CSI volume, same socket: the intruder can reach
+   the agent perfectly well - the agent simply has nothing to give it. #}
+{% macro workload(name, command, registered, extra_mounts=[], extra_volumes=[], port=0) %}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ name }}
+  namespace: {{ spire_demo_namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ name }}
+  template:
+    metadata:
+      labels:
+        app: {{ name }}
+{% if registered %}
+        {{ spire_demo_identity_label }}: "true"
+{% endif %}
+    spec:
+      serviceAccountName: {{ name }}
+      containers:
+        - name: spiffe-helper
+          image: {{ spire_demo_helper_image }}
+          args: ["-config", "/etc/spiffe-helper/helper.conf"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            runAsNonRoot: true
+            seccompProfile: {type: RuntimeDefault}
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {memory: 64Mi}
+          volumeMounts:
+            - {name: spiffe-workload-api, mountPath: /spiffe-workload-api, readOnly: true}
+            - {name: svid, mountPath: /svid}
+            - {name: helper-config, mountPath: /etc/spiffe-helper, readOnly: true}
+        - name: app
+          image: {{ spire_demo_python_image }}
+          command: {{ command | to_json }}
+          env:
+            - {name: SVID_DIR, value: /svid}
+            - {name: PYTHONUNBUFFERED, value: "1"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            runAsNonRoot: true
+            seccompProfile: {type: RuntimeDefault}
+          resources:
+            requests: {cpu: 5m, memory: 32Mi}
+            limits: {memory: 128Mi}
+{# Listening means it has an SVID: the server waits for one before it
+   binds. So Ready is "has an identity and is serving". #}
+{% if port %}
+          ports:
+            - {name: https, containerPort: {{ port }}}
+          readinessProbe:
+            tcpSocket: {port: {{ port }}}
+            periodSeconds: 5
+{% endif %}
+          volumeMounts:
+            - {name: svid, mountPath: /svid, readOnly: true}
+            - {name: app, mountPath: /app, readOnly: true}
+{% for m in extra_mounts %}
+            - {{ m | to_json }}
+{% endfor %}
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: {{ spire_csi_driver_name }}
+            readOnly: true
+        - {name: svid, emptyDir: {medium: Memory}}
+        - {name: helper-config, configMap: {name: spiffe-helper}}
+        - {name: app, configMap: {name: spiffe-demo-app}}
+{% for v in extra_volumes %}
+        - {{ v | to_json }}
+{% endfor %}
+{% endmacro %}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ spire_demo_namespace }}
+  labels:
+    app.kubernetes.io/part-of: spiffe-spire-lab
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: echo-server, namespace: {{ spire_demo_namespace }}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: client, namespace: {{ spire_demo_namespace }}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: intruder, namespace: {{ spire_demo_namespace }}}
+---
+{# include_federated_domains: the bundle file also carries the CAs of every
+   trust domain this workload's entry federates with - empty until the
+   federation phase, and then what lets it verify a peer from the other
+   cluster. The key is written 0600 and the helper and app run as the same
+   UID (restricted-v2 gives every container in the pod the same one). #}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spiffe-helper
+  namespace: {{ spire_demo_namespace }}
+data:
+  helper.conf: |
+    agent_address = "/spiffe-workload-api/spire-agent.sock"
+    cert_dir = "/svid"
+    svid_file_name = "svid.pem"
+    svid_key_file_name = "svid_key.pem"
+    svid_bundle_file_name = "svid_bundle.pem"
+    include_federated_domains = true
+    daemon_mode = true
+---
+{# Authorisation, as data. The echo server re-reads it on every request and
+   the kubelet refreshes a mounted ConfigMap within a minute or so, so an edit
+   takes effect with no restart.
+
+   The peer cluster's client is listed from the start. Before federation it
+   cannot even complete a handshake - its certificate chains to a CA this
+   server has never heard of - so the entry is inert until the trust domains
+   are federated, and then it is the one line that lets it in. #}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echo-allowed-ids
+  namespace: {{ spire_demo_namespace }}
+data:
+  allowed-ids: |
+    spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_demo_namespace }}/sa/client
+{% if spire_peer %}
+    spiffe://{{ spire_peer.trust_domain }}/ns/{{ spire_demo_namespace }}/sa/client
+{% endif %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-server
+  namespace: {{ spire_demo_namespace }}
+spec:
+  selector: {app: echo-server}
+  ports:
+    - {name: https, port: 8443, targetPort: 8443}
+---
+{# Passthrough for the same reason as the federation Route: the TLS session is
+   the authentication, end to end, between the two workloads. #}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: echo-server
+  namespace: {{ spire_demo_namespace }}
+spec:
+  host: {{ spire_demo_route_host }}
+  to: {kind: Service, name: echo-server, weight: 100}
+  port: {targetPort: https}
+  tls: {termination: passthrough, insecureEdgeTerminationPolicy: None}
+---
+{{ workload('echo-server', ['python3', '/app/echo_server.py'], true,
+            [{'name': 'allowed', 'mountPath': '/config', 'readOnly': true}],
+            [{'name': 'allowed', 'configMap': {'name': 'echo-allowed-ids'}}], 8443) }}
+---
+{{ workload('client', ['sleep', 'infinity'], true) }}
+---
+{{ workload('intruder', ['sleep', 'infinity'], false) }}
