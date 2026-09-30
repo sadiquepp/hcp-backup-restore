@@ -43,6 +43,7 @@ afterwards.
   - [Lab 10. A web page per tenant](#lab-10-a-web-page-per-tenant)
   - [Lab 11. The tenant ingress](#lab-11-the-tenant-ingress)
   - [Lab 12. Live migration across a stretched Layer2](#lab-12-live-migration-across-a-stretched-layer2)
+- [Explore - Optional: look closer at what you built](#explore---optional-look-closer-at-what-you-built)
 - [Part C - Optional: the same tenants over VRF-Lite](#part-c---optional-the-same-tenants-over-vrf-lite)
 - [The minimal test set](#the-minimal-test-set)
 - [Catching up, checking, and when something is wrong](#catching-up-checking-and-when-something-is-wrong)
@@ -1753,6 +1754,274 @@ spine only ever see the outer packet, addressed to a `/32`.
 leaf2 sees the same move for its own copy of the domain:
 `leaf2 'show evpn mac vni 400'` before and after shows the MAC behind the new
 VTEP.
+
+---
+
+## Explore - Optional: look closer at what you built
+
+Nothing to build here - a set of short explorations on the finished EVPN lab,
+each answering one question the labs raised and left in passing. They read
+state; only X9 changes anything, and it puts it back. Take any of them, in
+any order. Each ends with where the repo goes deeper.
+
+| | Question | Where |
+| --- | --- | --- |
+| X1 | What are the three EVPN route types, and who sends which? | the fabric |
+| X2 | How does a frame for a MAC nobody has seen yet get anywhere? | the SNO |
+| X3 | Why are the pod MACs so regular? | anywhere |
+| X4 | Can you tell bridged from routed without reading any state? | both |
+| X5 | What does the tunnel look like on the wire? | the lab host |
+| X6 | Why does the SNO talk to a hub node without going through leaf1? | the SNO |
+| X7 | Blue and red advertise the same prefix - how does BGP keep them apart? | the fabric, the hub |
+| X8 | How big a packet does the overlay carry? | the SNO |
+| X9 | What happens when the advertisement goes away? | the hub |
+
+### X1. Three route types, one table
+
+```bash
+leaf2 'show bgp l2vpn evpn route type multicast'   # type-3
+leaf2 'show bgp l2vpn evpn route type macip'       # type-2
+leaf2 'show bgp l2vpn evpn route type prefix'      # type-5
+```
+
+The first bracket of each route is its type; the rest is lengths and values:
+
+```
+[3]:[0]:[32]:[100.64.0.35]                          type-3: "VTEP 100.64.0.35 is in this VNI"
+[2]:[0]:[48]:[0a:58:0a:cc:00:09]                    type-2: "this MAC is behind this VTEP"
+[2]:[0]:[48]:[0a:58:0a:cc:00:09]:[32]:[10.204.0.9]  type-2, with the IP as well
+[5]:[0]:[24]:[10.210.10.0]                          type-5: "this prefix is behind this VTEP"
+```
+
+Look for the pattern, not the numbers:
+
+- **Type-3 and type-2 come only from the Layer2 tenants** (green VNI 400,
+  purple VNI 500) - they have a broadcast domain to join and MACs to place.
+  **Type-5 comes only from the Layer3 ones** (blue, red, violet). A type-3 for
+  blue does not exist and is not missing: an L3VNI has nothing to flood.
+- **Count the type-3s for VNI 400:** one per VTEP in that VNI - each hub
+  worker, the SNO, and leaf2 itself, which has green's external host on it.
+- Type-2 grows with every pod and VM; type-3 changes only when a VTEP joins
+  or leaves.
+
+leaf2's summary of the same thing:
+
+```bash
+leaf2 'show evpn vni 400'        # "Remote VTEPs" - built from type-3
+leaf2 'show evpn mac vni 400'    # every MAC and the VTEP it is behind - from type-2
+```
+
+Deeper: [bgp-evpn.md, 4g](bgp-evpn.md#4g-the-route-types-side-by-side).
+
+### X2. The flood list
+
+An endpoint nobody has seen yet is reached by flooding - ARP is a broadcast.
+There is no multicast in this underlay, so a VTEP floods by sending one
+unicast copy to every other VTEP in the VNI. That list comes from nothing
+but type-3 routes, and it is in the kernel next to the MACs:
+
+```bash
+lab sno
+oc debug node/sno --quiet -- chroot /host bridge fdb show dev evx4-evpn-vtep | grep -v '^00:00:00:00:00:00'
+# real MACs, each "dst <a VTEP>"                  <- type-2
+oc debug node/sno --quiet -- chroot /host bridge fdb show dev evx4-evpn-vtep | grep '^00:00:00:00:00:00'
+# the all-zeros MAC, once per remote VTEP per VNI <- type-3: "flood BUM here"
+```
+
+That ordering is the point: **type-3 first**. Without the flood list the
+first ARP goes nowhere, so the reply that would produce a type-2 never
+happens, and the tenant has no connectivity at all - with every session up.
+
+Deeper: [bgp-evpn.md, "Type-3 comes first"](bgp-evpn.md#type-3-comes-first-and-that-ordering-is-the-point).
+
+### X3. The MAC is the IP
+
+```bash
+printf '0a:58:%02x:%02x:%02x:%02x\n' 10 204 0 9      # 0a:58:0a:cc:00:09
+```
+
+OVN-Kubernetes derives a pod's MAC from its address: `0a:58` and then the
+four octets in hex. Pick any `10.204.x.y` from `podip green` and find its MAC
+in `leaf2 'show evpn mac vni 400'` without looking anything up. It is also
+why Lab 12's VM kept its MAC: it kept its IP.
+
+### X4. The TTL tells you the path
+
+```bash
+lab sno
+inpod green  ping -c1 $(KUBECONFIG=$HUB_KUBECONFIG podip green)    # ttl=64
+inpod violet ping -c1 $(KUBECONFIG=$HUB_KUBECONFIG podip violet)   # ttl=61
+lab hub
+inpod blue   ping -c1 10.210.10.10                                  # ttl=62
+```
+
+| | TTL | Why |
+| --- | --- | --- |
+| green, SNO to hub | 64 | Bridged. The inner frame crosses in VXLAN untouched; nothing routes it |
+| blue, pod to `blue-ext` | 62 | Routed twice: into the L3VNI at the node, out of it at leaf2 (symmetric IRB) |
+| violet, SNO to hub | 61 | Routed: each cluster's copy of the violet VRF routes it, over a node-to-node tunnel on the L3VNI (Lab 9) |
+
+A Layer3 ping that comes back with TTL 64 did not take the path you think.
+
+Deeper: [bgp-evpn.md, one packet routed](bgp-evpn.md#following-one-packet-in-phase-4-routed)
+and [cluster to cluster](bgp-evpn.md#following-one-packet-cluster-to-cluster).
+
+### X5. The tunnel on the wire
+
+**Node to node, green.** Every node's fabric NIC is on the lab host's
+`virbr1`, so the host sees every VXLAN packet between them. In one window, on
+the lab host (`dnf -y install tcpdump` if it is missing):
+
+```bash
+tcpdump -ni virbr1 -c 6 'udp port 4789'
+```
+
+In another, from the SNO:
+
+```bash
+lab sno; inpod green ping -c3 $(KUBECONFIG=$HUB_KUBECONFIG podip green)
+```
+
+```
+IP 100.64.0.20.xxxxx > 100.64.0.3x.4789: VXLAN, flags [I] (0x08), vni 400
+IP 10.204.128.x > 10.204.0.y: ICMP echo request ...
+```
+
+tcpdump decodes the VXLAN header and prints the inner packet under it. The
+outer addresses are the SNO's VTEP and a hub worker's, directly - no leaf is
+a tunnel endpoint. The VNI is green's, and the inner packet is the pod's own,
+addresses untouched.
+
+**Out to the internet, violet.** Inside leaf2, where the tunnel ends and the
+packet leaves as plain IP. The FRR image has no tcpdump, so it runs from the
+containerlab VM in leaf2's network namespace; the filter keeps VNI 601 with
+ICMP inside:
+
+```bash
+_clab bash -c "nsenter -t \$(docker inspect -f '{{.State.Pid}}' clab-$CLAB_LAB-leaf2) -n \
+  tcpdump -lni any -c 8 '(udp port 4789 and (udp[12:4] >> 8) = 601 and udp[39] = 1) or icmp'"
+```
+
+and in another window `lab sno; inpod violet ping -c2 1.1.1.1`:
+
+```
+eth10  In  100.64.0.20 > 10.0.0.2 VXLAN vni 601   10.206.128.4 > 1.1.1.1 echo request
+eth0   Out                                         10.206.128.4 > 1.1.1.1 echo request
+eth0   In                                          1.1.1.1 > 10.206.128.4 echo reply
+eth10  Out 10.0.0.2 > 100.64.0.20 VXLAN vni 601   1.1.1.1 > 10.206.128.4 echo reply
+```
+
+Encapsulated in, plain out, and the reverse. The source is still the pod's
+own address on `eth0`: the NAT is one hop further, on the containerlab host.
+
+Deeper: [README, "Reaching the internet from a UDN"](README.md#reaching-the-internet-from-a-udn).
+
+### X6. The shortcut leaf1 teaches
+
+The SNO learned one route for every VTEP, the aggregate, via leaf1. Ask the
+kernel where a hub worker's VTEP actually goes:
+
+```bash
+lab sno
+oc debug node/sno --quiet -- chroot /host ip route show 100.64.0.0/24   # via 192.168.140.1 (leaf1), proto bgp
+oc debug node/sno --quiet -- chroot /host ip route get 100.64.0.34
+# 100.64.0.34 via 192.168.140.34 dev ... src 192.168.140.20
+#     cache                                <- not via leaf1
+```
+
+Both VTEPs are on one segment. The first packet went to leaf1, leaf1 saw it
+had to send it straight back out the interface it arrived on, and answered
+with an **ICMP redirect**; the SNO cached it, and from then on sends
+node-to-node. `cache` is the tell: an exception in front of the BGP route,
+which is unchanged. A real fabric, with nodes behind different leaves, routes
+the whole way and never redirects.
+
+Deeper: [bgp-evpn.md, "Confirming each hop yourself"](bgp-evpn.md#confirming-each-hop-yourself).
+
+### X7. Route distinguisher and route target
+
+Blue and red both originate `10.200.x.0/24`. In one BGP table, two routes
+for one prefix would have to compete; these do not, because each carries a
+**route distinguisher** that makes it unique, and a **route target** that
+decides which VRF may import it:
+
+```bash
+leaf2 'show bgp l2vpn evpn route type prefix'
+```
+
+Pick one of the `10.200.x.0/24`s and find both copies. Each sits under its
+own `Route Distinguisher:` line (`<router-id>:<n>`), and each carries a
+different `RT:` - `65000:101` for blue, `65000:201` for red. Read the RD from
+the heading the route is under, not from the line next to it: the output is
+grouped, and a `grep -A` pairs routes with the wrong heading.
+
+```bash
+onleaf2 ip route show vrf blue | grep 10.200    # the /24s, in blue's table
+onleaf2 ip route show vrf red  | grep 10.200    # the same /24s, in red's
+```
+
+**The RD answers "which route is this", the RT answers "who gets it".** Two
+routes can share a prefix and an RT (one tenant on two nodes); they cannot
+share an RD. Isolation comes from the RT alone - which is why violet and blue,
+on different RTs, never see each other's routes anywhere.
+
+What you wrote versus what OVN-Kubernetes wrote from it - the VRF, VNI and
+RTs in the node's FRR, from your `ClusterUserDefinedNetwork`:
+
+```bash
+lab hub
+oc -n $FRR_NS get frrconfiguration                       # yours two, and ovnk-generated-*
+oc get frrnodestate worker1 -o jsonpath='{.status.runningConfig}' | grep -E '^vrf|^ vni|route-target|^router bgp'
+```
+
+### X8. How big a packet the overlay carries
+
+The fabric runs at MTU 9000; the pods do not:
+
+```bash
+lab sno
+inpod green ip link show ovn-udn1 | grep -o 'mtu [0-9]*'          # mtu 1400 on this lab
+HUB_GREEN=$(KUBECONFIG=$HUB_KUBECONFIG podip green)
+inpod green ping -c2 -M do -s 1372 $HUB_GREEN    # 1372 + 28 = 1400: arrives
+inpod green ping -c2 -M do -s 1373 $HUB_GREEN    # ping: local error: message too long, mtu=1400
+```
+
+VXLAN adds 50 bytes to every frame, so the pod MTU has to leave room for
+them wherever the path is smallest. A failure *below* 1372 would mean the path
+is smaller than OVN-Kubernetes assumed - and it would not show up in any web
+test, because TCP clamps its segment size and only UDP and DF traffic would
+notice. That exact trap, on the client side of this lab, went unseen for
+months.
+
+Deeper: [troubleshooting.md, "client segments ran at MTU 9000"](troubleshooting.md#closed--client-segments-ran-at-mtu-9000-against-a-path-carrying-1400).
+
+### X9. Take the advertisement away
+
+Everything a tenant reaches, it reaches because a route for it exists. Remove
+the one object that advertises the hub's tenants and watch:
+
+```bash
+lab hub
+oc delete routeadvertisements udn-evpn
+leaf2 'show bgp l2vpn evpn route type prefix' | grep -c 10.200    # the hub's blue and red /24s go
+ext blue ping -c2 -W2 $(podip blue)                               # silent
+leaf1 'show bgp l2vpn evpn summary'                               # and the hub workers' EVPN column?
+```
+
+Nothing you wrote changed: the CUDNs, the pods, the VTEP and the sessions are
+all still there. What went is what OVN-Kubernetes generated from the
+`RouteAdvertisements` - including, as Lab 4 showed, the `l2vpn evpn`
+activation itself, so expect the hub workers to fall back towards `NoNeg`.
+Put it back from the file Lab 6 left:
+
+```bash
+oc apply -f "$WS_MANIFESTS/hub/lab06-routeadvertisements-udn-evpn.yaml"
+leaf1 'show bgp l2vpn evpn summary'     # numbers again
+ext blue ping -c2 $(podip blue)         # replies
+```
+
+If anything is still off a minute later, `./build-lab.sh --workshop --only
+check-hub` repairs the three platform faults it knows about.
 
 ---
 
