@@ -11,6 +11,7 @@
 #   ./build-lab.sh --list              # what the steps are
 #   ./build-lab.sh --dry-run           # print the commands, run nothing
 #   ./build-lab.sh --only cleanup      # remove SPIRE from both clusters
+#   ./build-lab.sh --no-boutique       # everything but Online Boutique
 #   ./build-lab.sh -e @my-vars.yaml    # extra vars, passed to every playbook
 #
 # THE BASE LAB. The first two steps are the repository's own playbooks,
@@ -57,12 +58,13 @@ ASSUME_YES=0
 FROM=""
 ONLY=""
 CLUSTERS=(hub sno)
+NO_BOUTIQUE=0
 EXTRA_VARS=()
 
-ALL_STEPS=(bmhost clusters preflight operator storage spire demo verify federation xverify)
+ALL_STEPS=(bmhost clusters preflight operator storage spire demo verify federation xverify boutique boutique-federate)
 WORKSHOP_STEPS=(bmhost clusters preflight operator storage prep)
 # Valid for --only, in no sequence.
-EXTRA_STEPS=(prep check cleanup)
+EXTRA_STEPS=(prep check boutique-verify cleanup)
 
 usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
@@ -86,11 +88,19 @@ list_steps() {
   federation both: exchange bundles, a ClusterFederatedTrustDomain each side,
              refresh over each Route, re-register the demo with federatesWith
   xverify    both: hub client -> SNO echo-server, and SNO -> hub
+  boutique   per cluster: Online Boutique, every service registered,
+             checkoutservice -> paymentservice under mTLS (ghostunnel), then
+             its asserts. After federation, so its identities federate too
+  boutique-federate
+             hub's checkoutservice pays through the SNO's paymentservice,
+             across the trust domains; asserts on both
 
   Not in any sequence, with --only:
 
   prep       per cluster: /root/spiffe-workshop.env (--workshop runs it)
   check      per cluster: verify, for the workshop - what was built by hand
+  boutique-verify
+             per cluster: the Online Boutique asserts alone (workshop Part C)
   cleanup    per cluster: remove the demo, SPIRE and the operator. Asks first
 EOF
     printf '\n  this run (%s): %s\n' "$( (( WORKSHOP )) && echo workshop || echo full)" "${STEPS[*]}"
@@ -106,6 +116,7 @@ while [[ $# -gt 0 ]]; do
         --cluster)             CLUSTERS=("$2"); shift 2 ;;
         -e|--extra-vars)       EXTRA_VARS+=(-e "$2"); shift 2 ;;
         -y|--yes)              ASSUME_YES=1; shift ;;
+        --no-boutique)         NO_BOUTIQUE=1; shift ;;
         --dry-run)             DRY_RUN=1; shift ;;
         --list)                WANT_LIST=1; shift ;;
         -h|--help)             usage; exit 0 ;;
@@ -115,6 +126,12 @@ done
 
 if (( WORKSHOP )); then STEPS=("${WORKSHOP_STEPS[@]}"); EXTRA_STEPS+=("${ALL_STEPS[@]}")
 else STEPS=("${ALL_STEPS[@]}"); fi
+# Thirteen more images and ~1.4 GiB per cluster; still reachable with --only.
+if (( NO_BOUTIQUE )); then
+    STEPS=("${STEPS[@]/boutique-federate}"); STEPS=("${STEPS[@]/boutique}")
+    read -r -a STEPS <<< "${STEPS[*]}"
+    EXTRA_STEPS+=(boutique boutique-federate)
+fi
 [[ -r "$HOST_VARS" ]] && EXTRA_VARS=(-e "@$HOST_VARS" "${EXTRA_VARS[@]}")
 TOTAL=${#STEPS[@]}
 
@@ -263,6 +280,15 @@ EOF
         per_cluster "$step" ;;
     check)
         per_cluster verify ;;
+    boutique)
+        per_cluster boutique,boutique-verify ;;
+    boutique-verify)
+        per_cluster boutique-verify ;;
+    boutique-federate)
+        both_clusters boutique-federate || { [[ $? == 1 ]] && return 0; return 1; }
+        say "$(pos boutique-federate)  hub checkoutservice -> SNO paymentservice"
+        play "$PB" --tags boutique,boutique-verify -e spire_cluster=hub -e spire_boutique_remote_payments=true
+        play "$PB" --tags boutique-verify -e spire_cluster=sno ;;
     cleanup)
         if (( ! DRY_RUN )) && (( ! ASSUME_YES )); then
             cat >&2 <<EOF

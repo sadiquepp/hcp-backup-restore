@@ -1,0 +1,50 @@
+{# paymentservice: the app behind a ghostunnel server. Strategic merge:
+   containers merge by name, env by name, so only what is listed changes. #}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paymentservice
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - name: PORT                       # the app, off the Service port
+              value: "{{ spire_boutique_app_port }}"
+          readinessProbe:
+            grpc:
+              port: {{ spire_boutique_app_port }}
+          livenessProbe:
+            grpc:
+              port: {{ spire_boutique_app_port }}
+        - name: ghostunnel
+          image: {{ spire_boutique_ghostunnel_image }}
+          args:
+            - server
+            - --listen=0.0.0.0:{{ spire_boutique_mtls_port }}
+            - --target=localhost:{{ spire_boutique_app_port }}
+            - --use-workload-api-addr=unix:///spiffe-workload-api/spire-agent.sock
+{% for id in spire_boutique_payment_allowed %}
+            - --allow-uri={{ id }}
+{% endfor %}
+            - --status=0.0.0.0:{{ spire_boutique_status_port }}
+          ports:
+            - {name: mtls, containerPort: {{ spire_boutique_mtls_port }}}
+            - {name: status, containerPort: {{ spire_boutique_status_port }}}
+          readinessProbe:                      # ready = has an SVID and the app answers
+            httpGet: {path: /_status, port: {{ spire_boutique_status_port }}}
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: {type: RuntimeDefault}
+          resources:
+            {{ spire_boutique_ghostunnel_resources | to_nice_yaml(indent=2) | indent(12) | trim }}
+          volumeMounts:
+            - {name: spiffe-workload-api, mountPath: /spiffe-workload-api, readOnly: true}
+      volumes:
+        - name: spiffe-workload-api
+          csi: {driver: {{ spire_csi_driver_name }}, readOnly: true}

@@ -1,0 +1,65 @@
+{# The SPIFFE overlay on Online Boutique, rendered to
+   <manifest dir>/boutique/kustomization.yaml. `oc kustomize` of that
+   directory is written to <manifest dir>/40-boutique.yaml and applied.
+
+   The upstream application comes from {{ spire_boutique_repo }} at
+   {{ spire_boutique_ref }}, cloned to {{ spire_boutique_src_dir }} and never
+   edited: everything SPIFFE is in this overlay. It builds on the repo's own
+   overlays/{{ spire_boutique_overlay }}, so the namespace, the SCC fixes and
+   the Route are theirs.
+
+   What it changes, for the one hop checkoutservice -> paymentservice:
+     paymentservice   the app moves to localhost:{{ spire_boutique_app_port }};
+                      a ghostunnel server on :{{ spire_boutique_mtls_port }}
+                      terminates mTLS with the pod's SVID and lets in only
+                      the SPIFFE IDs in payment-server.yaml
+     Service          paymentservice:50051 now targets ghostunnel
+     NetworkPolicy    nothing reaches the pod except on the ghostunnel ports,
+                      so :{{ spire_boutique_app_port }} cannot be dialled
+                      around it
+     checkoutservice  a ghostunnel client on localhost:50051 dials the
+                      paymentservice with the pod's SVID and insists on the
+                      server's SPIFFE ID; PAYMENT_SERVICE_ADDR points at it
+   and registers EVERY pod in the namespace (clusterspiffeid.yaml). #}
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Relative: kustomize refuses an absolute path for a directory resource
+  # ("new root cannot be absolute").
+  - {{ (spire_boutique_src_dir ~ '/' ~ spire_boutique_path ~ '/overlays/' ~ spire_boutique_overlay)
+       | relpath(spire_boutique_render_dir) }}
+  - clusterspiffeid.yaml
+  - networkpolicy.yaml
+  - payment-route.yaml
+
+patches:
+  - path: payment-server.yaml
+  - path: checkout-client.yaml
+  # The Service keeps its port and name - every caller still dials
+  # paymentservice:50051 - but the traffic now lands on ghostunnel.
+  - target:
+      kind: Service
+      name: paymentservice
+    patch: |
+      - op: test
+        path: /spec/ports/0/port
+        value: 50051
+      - op: replace
+        path: /spec/ports/0/targetPort
+        value: {{ spire_boutique_mtls_port }}
+  # The app's own port list, replaced rather than merged: a strategic merge
+  # keys container ports by number and would keep 50051 beside 50052. JSON
+  # 6902 with a `test` first, so an upstream change fails the build instead
+  # of patching the wrong container.
+  - target:
+      kind: Deployment
+      name: paymentservice
+    patch: |
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: server
+      - op: replace
+        path: /spec/template/spec/containers/0/ports
+        value:
+          - containerPort: {{ spire_boutique_app_port }}

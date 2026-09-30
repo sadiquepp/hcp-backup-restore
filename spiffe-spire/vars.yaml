@@ -190,6 +190,61 @@ spire_demo_helper_image: ghcr.io/spiffe/spiffe-helper:0.11.0
 spire_demo_route_host: "echo-{{ spire_demo_namespace }}.{{ spire_c.apps_domain }}"
 
 ## ---------------------------------------------------------------------------
+## Online Boutique - SPIFFE on a real application (--tags boutique)
+## ---------------------------------------------------------------------------
+## Eleven gRPC services, each with its own ServiceAccount. The lab registers
+## all of them and puts one hop under mTLS - checkoutservice ->
+## paymentservice - with ghostunnel sidecars that take their SVIDs straight
+## from the Workload API. See README.md "Online Boutique".
+##
+## The application is cloned from this repo at this commit and never edited;
+## the SPIFFE changes are a kustomize overlay the lab renders on top of
+## overlays/<spire_boutique_overlay>. Pinned, so an upstream change cannot
+## move under a lab that worked yesterday.
+spire_boutique_repo: https://github.com/sadiquepp/openshift
+spire_boutique_ref: 2ae4f18ed03e719669cff4883650bd7a24bdb6a2
+spire_boutique_path: test-workloads/online-boutique
+spire_boutique_src_dir: /root/spiffe-spire-src/openshift
+## Where the overlay is rendered; `oc kustomize` runs on this directory.
+spire_boutique_render_dir: "{{ spire_manifest_dir }}/boutique"
+## 'default' includes the load generator, which is what keeps orders - and
+## so payments over the mTLS hop - flowing without anyone clicking.
+spire_boutique_overlay: default
+## Fixed by that overlay; it is here so templates can name it.
+spire_boutique_namespace: online-boutique
+
+spire_boutique_ghostunnel_image: docker.io/ghostunnel/ghostunnel:v1.11.3-distroless
+spire_boutique_ghostunnel_resources:
+  requests: {cpu: 10m, memory: 32Mi}
+  limits: {memory: 128Mi}
+## The paymentservice app moves to this port, on the pod only; ghostunnel
+## takes the Service's traffic on the mTLS port.
+spire_boutique_app_port: 50052
+spire_boutique_mtls_port: 8443
+spire_boutique_status_port: 8081
+
+## Where this cluster's checkoutservice sends payments. false: its own
+## paymentservice. true: the PEER cluster's, through that cluster's
+## passthrough Route - across the federation. build-lab.sh's
+## boutique-federate step sets it true for the hub.
+spire_boutique_remote_payments: false
+spire_boutique_payment_route_host: "payment-{{ spire_boutique_namespace }}.{{ spire_c.apps_domain }}"
+
+## Who paymentservice lets in: this cluster's checkoutservice, and the peer's.
+## The peer's line is inert until the trust domains are federated - its
+## certificate does not even chain before then.
+spire_boutique_payment_allowed:
+  - "spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_boutique_namespace }}/sa/checkoutservice"
+  - "spiffe://{{ spire_peer.trust_domain }}/ns/{{ spire_boutique_namespace }}/sa/checkoutservice"
+## What checkoutservice dials, and who must answer. Derived from the switch.
+spire_boutique_payment_target: >-
+  {{ ('payment-' ~ spire_boutique_namespace ~ '.' ~ spire_peer.apps_domain ~ ':443')
+     if spire_boutique_remote_payments | bool else 'paymentservice:50051' }}
+spire_boutique_payment_server_id: >-
+  spiffe://{{ (spire_peer if spire_boutique_remote_payments | bool else spire_c).trust_domain
+  }}/ns/{{ spire_boutique_namespace }}/sa/paymentservice
+
+## ---------------------------------------------------------------------------
 ## Where things are written on the lab host
 ## ---------------------------------------------------------------------------
 ## Every manifest the playbook applies is rendered here first, one directory per

@@ -37,6 +37,14 @@
 ##   --tags verify      assert only: SVIDs issued, mTLS works, the intruder is
 ##                      refused. Also the workshop's check of what was built
 ##                      by hand.
+##   --tags boutique    Online Boutique from sadiquepp/openshift, every service
+##                      registered, checkoutservice -> paymentservice under
+##                      mTLS via ghostunnel. -e spire_boutique_remote_payments=true
+##                      sends this cluster's payments to the PEER's
+##                      paymentservice, across the federation.
+##   --tags boutique-verify
+##                      assert only: registrations, the mTLS hop carrying
+##                      orders, an outsider refused, the bypass blocked.
 ##   --tags prep        the workshop's environment file. Nothing on a cluster.
 ##   --tags cleanup     remove everything above from that cluster.
 ##
@@ -78,7 +86,7 @@
           Pass -e spire_cluster=<{{ spire_clusters.keys() | join('|') }}>.
           Every per-cluster phase runs against exactly one cluster; the
           federation and xverify phases take none and use both.
-      tags: &spire_phase_tags [preflight, operator, storage, spire, demo, verify, prep, cleanup]
+      tags: &spire_phase_tags [preflight, operator, storage, spire, demo, verify, boutique, boutique-verify, prep, cleanup]
 
     - name: Look for the selected cluster's kubeconfig
       ansible.builtin.stat:
@@ -143,6 +151,18 @@
         name: setup-spiffe-spire
         tasks_from: verify.yml
       tags: [verify, never]
+
+    - name: Online Boutique - every service registered, one hop under mTLS
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: boutique.yml
+      tags: [boutique, never]
+
+    - name: Online Boutique - asserts only
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: boutique-verify.yml
+      tags: [boutique-verify, never]
 
     - name: The workshop's environment file
       ansible.builtin.import_role:

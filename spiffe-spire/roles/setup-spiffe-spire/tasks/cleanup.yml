@@ -11,12 +11,14 @@
 # The peer cluster still has a ClusterFederatedTrustDomain naming this one
 # until cleanup runs there too; it just fails to refresh meanwhile.
 
-- name: Delete the demo namespace and its registration
+- name: Delete the demo namespaces and their registrations
   ansible.builtin.command:
     cmd: oc delete {{ item }} --ignore-not-found --wait=true --timeout=300s
   loop:
     - namespace/{{ spire_demo_namespace }}
     - clusterspiffeid/{{ spire_demo_namespace }}
+    - namespace/{{ spire_boutique_namespace }}
+    - clusterspiffeid/{{ spire_boutique_namespace }}
     - clusterfederatedtrustdomain/{{ spire_peer.trust_domain }}
   register: spire_cl_demo
   changed_when: "'deleted' in spire_cl_demo.stdout"
