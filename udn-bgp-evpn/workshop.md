@@ -1846,6 +1846,11 @@ four octets in hex. Pick any `10.204.x.y` from `podip green` and find its MAC
 in `leaf2 'show evpn mac vni 400'` without looking anything up. It is also
 why Lab 12's VM kept its MAC: it kept its IP.
 
+The flip side: green and purple overlap, so a green pod and a purple pod can
+hold the same IP - and therefore the same MAC. Compare
+`leaf2 'show evpn mac vni 400'` with `... vni 500`. X10 shows what keeps
+them apart.
+
 ### X4. The TTL tells you the path
 
 ```bash
@@ -2077,12 +2082,36 @@ GREEN_MAC=$(printf '0a:58:%02x:%02x:%02x:%02x' ${GREEN_DST//./ })
 
 # 3. The node bridges on that MAC: which VTEP is it behind? A type-2 route put it there
 oc debug node/sno --quiet -- chroot /host bridge fdb show dev evx4-evpn-vtep | grep $GREEN_MAC
-#    ... dst 100.64.0.34 src_vni 400 self extern_learn
 
 # 4. Encapsulate: outer 100.64.0.20 -> 100.64.0.34, VNI 400. How the OUTER packet leaves:
 oc debug node/sno --quiet -- chroot /host ip route get 100.64.0.34
 #    via 192.168.140.34 ... cache    <- leaf1's redirect (X6), or via 192.168.140.1 before it
 ```
+
+Expect **two** answers for one MAC - measured on this lab:
+
+```
+0a:58:0a:cc:00:07 vlan 6 extern_learn master evbr-evpn-vtep
+0a:58:0a:cc:00:07 vlan 5 extern_learn master evbr-evpn-vtep
+0a:58:0a:cc:00:07 dst 100.64.0.34 src_vni 400 self extern_learn    <- green's pod, on worker1
+0a:58:0a:cc:00:07 dst 100.64.0.36 src_vni 500 self extern_learn    <- purple's pod, on worker3
+```
+
+Green and purple share `10.204.0.0/16` on purpose, so each has a pod at
+`10.204.0.7` - and since the MAC is the IP (X3), each has MAC
+`0a:58:0a:cc:00:07` too. One MAC, two tenants, two different VTEPs, and no
+conflict: the table is keyed by **MAC and VNI**, not MAC alone. The
+`src_vni 400` line is the one green's frame uses. The first two lines are the
+same split on the bridge side, where each VNI is a local VLAN (the numbers
+are the node's own and mean nothing outside it); the mapping between them:
+
+```bash
+oc debug node/sno --quiet -- chroot /host bridge vlan tunnelshow dev evx4-evpn-vtep
+```
+
+That is tenancy at Layer2: overlapping addresses are fine as long as every
+lookup includes the VNI. It is also why a type-2 route carries the route
+target and the VNI with the MAC, never the MAC alone.
 
 worker1 finds `100.64.0.34` on its own VTEP interface, so it is *delivered*,
 not forwarded: decapsulated into green's switch, and handed to the pod by
