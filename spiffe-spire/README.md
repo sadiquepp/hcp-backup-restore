@@ -6,7 +6,9 @@ SPIRE. A demo workload gets an X.509-SVID over the Workload API (through the
 SPIFFE CSI driver) and uses it to authenticate to a peer over mTLS; a
 workload with no registration entry gets no SVID and is refused. Then the
 two trust domains are federated, and a hub workload authenticates to a SNO
-workload across the boundary.
+workload across the boundary. Optionally, the same identities secure a hop
+inside a real application - [Online Boutique](#online-boutique-spiffe-on-a-real-application) -
+including a payment that crosses from one trust domain to the other.
 
 - **Build it:** [Quick start](#quick-start), or `./build-lab.sh --help`
 - **Learn it:** [workshop.md](workshop.md) - day 0 automated, then every
@@ -16,7 +18,8 @@ workload across the boundary.
 > **Status.** The playbook, templates and demo app have been rendered,
 > syntax-checked, linted, and run phase by phase against a simulated `oc`
 > on ansible-core 2.14 and 2.19; the mTLS app was tested against real
-> SPIFFE-shaped certificates. **None of it has yet run against a live
+> SPIFFE-shaped certificates; the Online Boutique overlay was built with
+> kustomize against the real source. **None of it has yet run against a live
 > cluster.** The operator's API was read from its source (release-1.0.0 and
 > release-1.1), not from a running catalog.
 
@@ -84,10 +87,14 @@ cd /root/hcp-backup-restore/spiffe-spire
 | `verify` | per cluster: asserts - entries, mTLS allowed, intruder refused | 1 min |
 | `federation` | both: bundles, `ClusterFederatedTrustDomain`s, refresh over each Route, `federatesWith` | 3 min |
 | `xverify` | both: hub client → SNO echo-server, and back | 1 min |
+| `boutique` | per cluster: [Online Boutique](#online-boutique-spiffe-on-a-real-application), every service registered, `checkoutservice → paymentservice` over mTLS, then its asserts | 10 min |
+| `boutique-federate` | the hub's checkoutservice pays through the SNO's paymentservice, across the trust domains | 3 min |
 
 `--from <step>` resumes, `--only <step>` runs one, `--cluster hub` limits the
 per-cluster steps to one cluster (federation then skips), `--dry-run` prints
 the commands. `--only cleanup` removes SPIRE from both clusters.
+`--no-boutique` leaves out the last two steps (13 more images, ~1.4 GiB per
+cluster); they stay reachable with `--only`.
 
 By hand, the same thing is one playbook with one tag per phase:
 
@@ -119,6 +126,7 @@ spiffe-spire/
   roles/setup-spiffe-spire/
     tasks/                 one file per phase; catalog.yml and storage-decide.yml are shared
     templates/             every manifest, one .j2 each
+    templates/boutique/    the Online Boutique overlay: ghostunnel patches, NetworkPolicy, Route, ClusterSPIFFEID
     files/                 echo_server.py, spiffe_client.py - the demo app, stdlib Python
 ```
 
@@ -252,6 +260,90 @@ and after it, it is the line that lets the peer in.
 
 ---
 
+## Online Boutique: SPIFFE on a real application
+
+The three-pod demo shows each SPIFFE decision in isolation. Online Boutique
+(from [sadiquepp/openshift `test-workloads/online-boutique`](https://github.com/sadiquepp/openshift/tree/main/test-workloads/online-boutique),
+Google's microservices demo with the OpenShift SCC fixes) shows it inside an
+application that was never written for it: eleven services talking plaintext
+gRPC, none of which presents or checks a certificate.
+
+**What the lab does with it** (`--tags boutique`, per cluster):
+
+| | |
+| --- | --- |
+| Source | cloned from `spire_boutique_repo` at a **pinned commit** (`spire_boutique_ref`) into `/root/spiffe-spire-src/openshift`, and never edited |
+| Overlay | rendered into `/root/spiffe-spire-manifests/<cluster>/boutique/` on top of the repo's own `overlays/default`; `oc kustomize` writes `40-boutique.yaml`, which is applied |
+| Registration | one ClusterSPIFFEID for the namespace with no pod selector: **every** pod gets `spiffe://<td>/ns/online-boutique/sa/<service>`. Only two of them use it - registration and use are separate things |
+| The hop | `checkoutservice → paymentservice`, under mTLS with [ghostunnel](https://github.com/ghostunnel/ghostunnel) sidecars that fetch SVIDs straight from the Workload API socket (no spiffe-helper, no files) |
+| paymentservice | the app moves to `localhost:50052`; a ghostunnel **server** on `:8443` takes the Service's traffic, requires a client SVID, and admits only `--allow-uri spiffe://<td>/ns/online-boutique/sa/checkoutservice` (and the peer cluster's checkoutservice, inert until federation) |
+| checkoutservice | `PAYMENT_SERVICE_ADDR=localhost:50051`, a ghostunnel **client** that dials paymentservice with the pod's SVID and refuses any server that is not `--verify-uri spiffe://<td>/ns/online-boutique/sa/paymentservice` |
+| NetworkPolicy | only the ghostunnel ports reach the paymentservice pod. Without it the mTLS would be decoration: the app still listens on every interface, and anything that can reach the pod IP could dial `:50052` around ghostunnel |
+| Route | `payment-online-boutique.apps.<cluster>`, passthrough - the other cluster's way in |
+
+The load generator places orders continuously, so payments cross the tunnel
+without anyone clicking.
+
+**What `boutique-verify` asserts:**
+
+1. every running pod in the namespace has a registration entry;
+2. checkoutservice's ghostunnel reports `backend_ok` on `/_status` (read
+   through the API server's pod proxy) - in client mode that is a full mTLS
+   handshake to the paymentservice with its SPIFFE ID checked - and orders
+   are opening connections through it;
+3. spiffe-demo's `client` - a registered workload with a perfectly valid SVID
+   from the same trust domain, but not checkoutservice - is refused by
+   paymentservice's ghostunnel during the handshake;
+4. a direct connection to the paymentservice pod's `:50052` is dropped, while
+   `:8443` on the same IP connects - so it is the policy doing it.
+
+**Across the federation** (`boutique-federate`): the hub's checkoutservice
+is re-pointed at `payment-online-boutique.apps.sno.mylab.com:443` and told to
+expect `spiffe://sno.mylab.com/ns/online-boutique/sa/paymentservice`; the SNO's
+paymentservice already admits `spiffe://hub.mylab.com/.../checkoutservice`.
+Both namespaces' ClusterSPIFFEIDs carry `federatesWith` once the trust domains
+are federated, which is why `boutique` runs after `federation`. The hub's
+orders are then paid in the other trust domain. The switch is
+`spire_boutique_remote_payments`; a plain `--tags boutique -e spire_cluster=hub`
+puts payments back on the hub.
+
+What it deliberately does not do: put every hop under mTLS. `frontend` alone
+calls seven services, and a sidecar pair per hop is exactly the plumbing a
+service mesh exists to remove - see the next section.
+
+## Service Mesh with SPIRE: support status
+
+Checked against the product documentation source (`openshift/openshift-docs`,
+`security/zero_trust_workload_identity_manager/`, as of 2026-09-30):
+
+- **Supported, not Technology Preview.** Zero Trust Workload Identity Manager
+  **1.1.0** (30 June 2026) added "single-cluster integration with Red Hat
+  OpenShift Service Mesh", where SPIRE replaces Istio's built-in CA and Envoy
+  sidecars fetch their certificates from the SPIRE agent over SDS, and
+  "multi-cluster integration through SPIRE federation". Neither page carries a
+  Technology Preview notice. 1.1.1 (26 August 2026) is a bug-fix release.
+- **Shape of it:** Service Mesh 3 (Sail operator: `IstioCNI` and `Istio` CRs),
+  sidecar mode, with custom injection templates (`spire`, `spireGateway`)
+  that mount the agent socket through the same `csi.spiffe.io` driver, and
+  the mesh's `trustDomain` set to SPIRE's. Workloads opt in with the `spire`
+  template.
+- **Multi-cluster** needs federation at two layers: SPIRE bundle exchange over
+  `https_spiffe` - which this lab already does - plus Istio's own:
+  east-west gateways and remote secrets. The documented prerequisites add
+  Istio **1.29.2 or later**, `istioctl` and `helm`.
+- Related, from the same 1.1.0 release: a **supported SPIFFE Helper image**,
+  `registry.redhat.io/zero-trust-workload-identity-manager/spiffe-helper-rhel9`.
+  The lab still defaults to upstream `ghcr.io/spiffe/spiffe-helper:0.11.0`,
+  because the docs give no tag and none could be listed from here; set
+  `spire_demo_helper_image` to the Red Hat image once you have picked a tag
+  (`skopeo list-tags docker://registry.redhat.io/zero-trust-workload-identity-manager/spiffe-helper-rhel9`).
+
+So the mesh is a supported next step for Online Boutique - every hop under
+SPIRE-issued mTLS, authorisation as AuthorizationPolicy on SPIFFE IDs - at the
+cost of a mesh control plane and an Envoy per pod. It is not built here.
+
+---
+
 ## Memory budget
 
 No VM is added, so the configured total in the sizing table of
@@ -268,7 +360,10 @@ existing hub workers and the SNO. Requests and limits are set explicitly
 | spire-agent (64/256 Mi) | 3 | 192 Mi / 768 Mi | 1 | 64 Mi / 256 Mi |
 | CSI driver (2 containers, 32/128 Mi each) | 3 | 192 Mi / 768 Mi | 1 | 64 Mi / 256 Mi |
 | demo (3 pods: helper 16/64 + app 32/128 Mi) | 3 | 144 Mi / 576 Mi | 3 | 144 Mi / 576 Mi |
-| **total** | | **~1.0 GiB / ~3.3 GiB** | | **~0.8 GiB / ~2.3 GiB** |
+| **total, SPIRE and demo** | | **~1.0 GiB / ~3.3 GiB** | | **~0.8 GiB / ~2.3 GiB** |
+| Online Boutique, upstream (12 Deployments incl. load generator) | 12 | 1368 Mi / 2542 Mi | 12 | 1368 Mi / 2542 Mi |
+| its two ghostunnel sidecars (32/128 Mi) | 2 | 64 Mi / 256 Mi | 2 | 64 Mi / 256 Mi |
+| **total with `boutique`** | | **~2.4 GiB / ~6.0 GiB** | | **~2.2 GiB / ~5.0 GiB** |
 
 Against the smallest supported sizing (3 × 24 GiB hub workers, a 32 GiB
 SNO): about 1.4% of the hub workers' memory requested, ~4.6% at the limits;
@@ -278,6 +373,11 @@ configured values, not measurements - measure with
 `oc adm top pods -n zero-trust-workload-identity-manager` once it runs. The
 SNO is the tighter of the two, because it already carries a whole control
 plane in 32 GiB; neither needs its VM resized.
+
+With Online Boutique on both clusters: ~3.4% of the hub workers requested
+(~8.4% at the limits) and ~6.8% of the SNO (~16% at the limits), plus 1.57
+CPU of requests per cluster, most of it the load generator keeping traffic
+flowing. Still no VM change; `--no-boutique` if the SNO is already busy.
 
 ---
 
@@ -317,6 +417,9 @@ oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py \
 | `federation refresh` fails | the message names DNS (`no such host`), the Route (connection refused / 503) or the endpoint's SVID (`x509`) |
 | cross-cluster call `SERVER NOT TRUSTED` | the pod's bundle lacks the peer CA: `federatesWith` on the ClusterSPIFFEID, then wait for spiffe-helper to rewrite it |
 | cross-cluster call `HTTP 403` | the peer's client is not in `echo-allowed-ids` |
+| boutique: checkoutservice or paymentservice ghostunnel restarting | `oc -n online-boutique logs deploy/<svc> -c ghostunnel` - it exits if no SVID arrives within `--use-workload-api-timeout` (10m): is the ClusterSPIFFEID `online-boutique` there, with its className? |
+| boutique: `backend_ok: false` | `backend_error` in the same JSON; `unauthorized` on the paymentservice side means the caller's SPIFFE ID is not in `--allow-uri` |
+| boutique-federate: handshake fails | both ClusterSPIFFEIDs need `federatesWith`: re-run `--tags boutique` on both clusters after `--tags federation` |
 
 Non-trivial debugging on a live cluster goes in a `troubleshooting.md` case
 file here, in the format of [`udn-bgp-evpn/troubleshooting.md`](../udn-bgp-evpn/troubleshooting.md).

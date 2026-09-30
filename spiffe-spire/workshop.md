@@ -35,6 +35,12 @@ exactly what your shell produced before it reaches the cluster.
   - [Lab 6. Mutual TLS, and who gets refused](#lab-6-mutual-tls-and-who-gets-refused)
   - [Lab 7. Federate the two trust domains](#lab-7-federate-the-two-trust-domains)
 - [Explore - Optional](#explore---optional)
+- [Part C - Optional: SPIFFE in a real application](#part-c---optional-spiffe-in-a-real-application)
+  - [C1. The application, as shipped](#c1-the-application-as-shipped)
+  - [C2. Register every service](#c2-register-every-service)
+  - [C3. Put the payment hop under mTLS](#c3-put-the-payment-hop-under-mtls)
+  - [C4. Who gets through now](#c4-who-gets-through-now)
+  - [C5. Pay in the other trust domain](#c5-pay-in-the-other-trust-domain)
 - [Catching up, checking, and when something is wrong](#catching-up-checking-and-when-something-is-wrong)
 - [Tearing it down](#tearing-it-down)
 
@@ -988,6 +994,364 @@ on one cluster shows the peer's CAs. The CA lives 24 hours; a new one is
 prepared ahead of time and published in the bundle. Compare the list over a
 day and watch the new CA arrive by itself, fetched from the peer's endpoint -
 the bootstrap copy in the `ClusterFederatedTrustDomain` never changes.
+
+---
+
+## Part C - Optional: SPIFFE in a real application
+
+The demo in Part B was written *for* SPIFFE. Online Boutique was not: eleven
+services from Google's microservices demo, in five languages, talking
+plaintext gRPC, none of which presents or checks a certificate. You register
+every one of them, then put one hop - `checkoutservice → paymentservice` - under
+mutual TLS without touching a line of their code, and finally send the hub's
+payments to the SNO's paymentservice, across the two trust domains.
+
+The tool is [ghostunnel](https://github.com/ghostunnel/ghostunnel), a small TLS
+proxy that fetches its certificate and trust bundle straight from the
+Workload API socket - no spiffe-helper, no files - and checks the peer's SPIFFE
+ID itself. The application is used exactly as
+[sadiquepp/openshift](https://github.com/sadiquepp/openshift/tree/main/test-workloads/online-boutique)
+ships it; everything SPIFFE is a kustomize overlay you write on top.
+
+About 1.4 GiB of memory per cluster, most of it the application and its load
+generator, which places orders continuously so the hop always has traffic.
+
+### C1. The application, as shipped
+
+> **Where:** the hub, then the SNO.
+
+```bash
+lab hub
+[ -d "$BQ_CLONE/.git" ] || git clone "$BQ_REPO" "$BQ_CLONE"
+git -C "$BQ_CLONE" checkout -q "$BQ_REF"
+oc kustomize "$BQ_SRC/overlays/default" > "$M/c1-boutique.yaml"
+oc apply -f "$M/c1-boutique.yaml"
+oc -n $BQ_NS rollout status deploy/frontend --timeout=15m
+oc -n $BQ_NS get route frontend -o jsonpath='https://{.spec.host}{"\n"}'   # a shop, in your browser
+```
+
+Now the point of this part. Part B's `intruder` - no registration, no SVID,
+no identity of any kind - can open a connection to the service that takes
+the payments:
+
+```bash
+inpod intruder python3 -c "import socket; socket.create_connection(('paymentservice.$BQ_NS.svc', 50051), 5); print('connected')"
+# connected
+```
+
+Nothing in the application would stop it asking for a charge. Identity is not
+in the picture at all.
+
+**Now the SNO:** `lab sno`, and paste both blocks again. C5 needs a
+paymentservice there.
+
+### C2. Register every service
+
+> **Where:** the hub, then the SNO.
+
+```bash
+lab hub
+cat > "$M/c2-clusterspiffeid.yaml" <<EOF
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: $BQ_NS
+spec:
+  className: $CLASS
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: $BQ_NS
+  federatesWith:              # Lab 7 must be done: naming an unknown trust domain fails the entries
+    - $PEER_TD
+EOF
+oc apply -f "$M/c2-clusterspiffeid.yaml"
+```
+
+No `podSelector`: every pod in the namespace. Each service already has its own
+ServiceAccount, so each gets a distinct identity for free.
+
+**Check**
+
+```bash
+oc get clusterspiffeid $BQ_NS -o jsonpath='{.status.stats}{"\n"}'     # entriesToSet = the pod count
+spire entry show | grep "SPIFFE ID" | grep $BQ_NS | sort -u
+inpod intruder python3 -c "import socket; socket.create_connection(('paymentservice.$BQ_NS.svc', 50051), 5); print('connected')"
+# still: connected
+```
+
+Twelve identities - and nothing changed. The services were not asked to fetch
+an SVID, so none did, and none checks anyone else's. Registration makes an
+identity *available*; using it is the workload's job.
+
+**Now the SNO:** `lab sno`, and paste again.
+
+### C3. Put the payment hop under mTLS
+
+> **Where:** the hub, then the SNO.
+
+Four small files, in an overlay directory next to your other manifests:
+
+```bash
+lab hub
+mkdir -p "$M/boutique"
+```
+
+**paymentservice**: the app moves to port 50052, where only ghostunnel - in
+the same pod, over `localhost` - is meant to reach it, and a ghostunnel
+*server* takes the Service's traffic on 8443. It requires a
+client SVID, and admits two SPIFFE IDs: this cluster's checkoutservice, and
+the other cluster's (for C5 - inert until then, since that certificate does
+not even chain yet).
+
+```bash
+cat > "$M/boutique/payment-server.yaml" <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paymentservice
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - {name: PORT, value: "50052"}
+          readinessProbe: {grpc: {port: 50052}}
+          livenessProbe: {grpc: {port: 50052}}
+        - name: ghostunnel
+          image: $GHOSTUNNEL_IMAGE
+          args:
+            - server
+            - --listen=0.0.0.0:8443
+            - --target=localhost:50052
+            - --use-workload-api-addr=unix:///spiffe-workload-api/spire-agent.sock
+            - --allow-uri=spiffe://$TD/ns/$BQ_NS/sa/checkoutservice
+            - --allow-uri=spiffe://$PEER_TD/ns/$BQ_NS/sa/checkoutservice
+            - --status=0.0.0.0:8081
+          ports:
+            - {name: mtls, containerPort: 8443}
+            - {name: status, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /_status, port: 8081}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: spiffe-workload-api, mountPath: /spiffe-workload-api, readOnly: true}
+      volumes:
+        - name: spiffe-workload-api
+          csi: {driver: csi.spiffe.io, readOnly: true}
+EOF
+```
+
+**checkoutservice**: payments go to a ghostunnel *client* on
+`localhost:50051`, which dials the paymentservice with this pod's SVID and
+refuses any server that is not the paymentservice:
+
+```bash
+cat > "$M/boutique/checkout-client.yaml" <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkoutservice
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - {name: PAYMENT_SERVICE_ADDR, value: "localhost:50051"}
+        - name: ghostunnel
+          image: $GHOSTUNNEL_IMAGE
+          args:
+            - client
+            - --listen=localhost:50051
+            - --target=paymentservice:50051
+            - --use-workload-api-addr=unix:///spiffe-workload-api/spire-agent.sock
+            - --verify-uri=spiffe://$TD/ns/$BQ_NS/sa/paymentservice
+            - --status=0.0.0.0:8081
+          ports:
+            - {name: status, containerPort: 8081}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: spiffe-workload-api, mountPath: /spiffe-workload-api, readOnly: true}
+      volumes:
+        - name: spiffe-workload-api
+          csi: {driver: csi.spiffe.io, readOnly: true}
+EOF
+```
+
+**The NetworkPolicy** - without which all of the above is decoration. The
+paymentservice app still listens on every interface; anything that can reach
+the pod IP could dial `:50052` and walk around ghostunnel. Only the ghostunnel
+ports get in:
+
+```bash
+cat > "$M/boutique/networkpolicy.yaml" <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: paymentservice-mtls-only
+  namespace: $BQ_NS
+spec:
+  podSelector:
+    matchLabels: {app: paymentservice}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: 8443}
+        - {protocol: TCP, port: 8081}
+EOF
+```
+
+**The overlay** ties it together on top of the application as shipped, and
+re-points the Service - callers still dial `paymentservice:50051`, and land on
+ghostunnel. The Route is for C5. kustomize refuses an absolute path to a base,
+hence `realpath --relative-to`:
+
+```bash
+cat > "$M/boutique/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - $(realpath --relative-to="$M/boutique" "$BQ_SRC/overlays/default")
+  - networkpolicy.yaml
+  - payment-route.yaml
+patches:
+  - path: payment-server.yaml
+  - path: checkout-client.yaml
+  - target: {kind: Service, name: paymentservice}
+    patch: |
+      - {op: test, path: /spec/ports/0/port, value: 50051}
+      - {op: replace, path: /spec/ports/0/targetPort, value: 8443}
+  - target: {kind: Deployment, name: paymentservice}
+    patch: |
+      - {op: test, path: /spec/template/spec/containers/0/name, value: server}
+      - {op: replace, path: /spec/template/spec/containers/0/ports, value: [{containerPort: 50052}]}
+EOF
+cat > "$M/boutique/payment-route.yaml" <<EOF
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata: {name: paymentservice, namespace: $BQ_NS}
+spec:
+  host: payment-$BQ_NS.$APPS
+  to: {kind: Service, name: paymentservice, weight: 100}
+  port: {targetPort: 8443}
+  tls: {termination: passthrough, insecureEdgeTerminationPolicy: None}
+EOF
+oc kustomize "$M/boutique" > "$M/c3-boutique-spiffe.yaml"
+diff "$M/c1-boutique.yaml" "$M/c3-boutique-spiffe.yaml" | head -80   # exactly what SPIFFE changed
+oc apply -f "$M/c3-boutique-spiffe.yaml"
+oc -n $BQ_NS rollout status deploy/paymentservice --timeout=10m
+oc -n $BQ_NS rollout status deploy/checkoutservice --timeout=10m
+```
+
+**Now the SNO:** `lab sno`, and paste every block of C3 again - `$TD`,
+`$PEER_TD` and `$APPS` follow `lab`.
+
+### C4. Who gets through now
+
+> **Where:** the hub (the SNO behaves the same).
+
+```bash
+lab hub
+bq_status
+# {"ok":true,"status":"ok","backend_ok":true,"backend_status":"ok",...}
+oc -n $BQ_NS logs deploy/checkoutservice -c ghostunnel --since=5m | grep -c 'opening pipe'   # orders, paying
+```
+
+`backend_ok` is checkoutservice's ghostunnel reporting that it just completed a
+full mTLS handshake with the paymentservice and found
+`spiffe://$TD/ns/$BQ_NS/sa/paymentservice` in its certificate. The load
+generator's orders are going through the tunnel.
+
+**The intruder, plaintext, as in C1:** the TCP connection still opens -
+ghostunnel is listening - but it now speaks only TLS, and wants a certificate:
+
+```bash
+call intruder https://paymentservice.$BQ_NS.svc:50051/ spiffe://$TD/ns/$BQ_NS/sa/paymentservice --no-cert
+# REFUSED: TLSV13_ALERT_CERTIFICATE_REQUIRED
+```
+
+**A registered workload with a perfect SVID - that is not checkoutservice:**
+
+```bash
+call client https://paymentservice.$BQ_NS.svc:50051/ spiffe://$TD/ns/$BQ_NS/sa/paymentservice
+# server is spiffe://hub.mylab.com/ns/online-boutique/sa/paymentservice - verified against the trust bundle
+# REFUSED: ...
+oc -n $BQ_NS logs deploy/paymentservice -c ghostunnel --since=2m | grep 'TLS handshake'
+# error on TLS handshake from 10.x.x.x: ... unauthorized: invalid principal, or principal not allowed
+```
+
+The client verified the paymentservice - same trust domain, valid chain, the
+right SPIFFE ID - and the paymentservice looked at the client's and said no.
+Authentication succeeded in both directions; authorisation did not.
+
+**Around ghostunnel, straight to the app:**
+
+```bash
+IP=$(oc -n $BQ_NS get pod -l app=paymentservice -o jsonpath='{.items[0].status.podIP}')
+inpod client python3 -c "import socket; socket.create_connection(('$IP', 50052), 5)"   # TimeoutError
+inpod client python3 -c "import socket; socket.create_connection(('$IP', 8443), 5); print('connected')"
+```
+
+The same IP answers on 8443 and not on 50052: the NetworkPolicy, not the
+network.
+
+### C5. Pay in the other trust domain
+
+> **Where:** the hub, after C1-C3 on both clusters.
+
+The SNO's paymentservice already admits `spiffe://hub.mylab.com/.../checkoutservice`
+(C3 listed it), both namespaces' identities federate (C2), and the SNO's
+paymentservice has a passthrough Route. Only the hub's checkoutservice has to
+be told where to go - and whom to expect:
+
+```bash
+lab hub
+sed -e "s|--target=paymentservice:50051|--target=payment-$BQ_NS.$PEER_APPS:443|" \
+    -e "s|--verify-uri=spiffe://$TD/|--verify-uri=spiffe://$PEER_TD/|" \
+    "$M/boutique/checkout-client.yaml" > "$M/boutique/checkout-client.yaml.new"
+mv "$M/boutique/checkout-client.yaml.new" "$M/boutique/checkout-client.yaml"
+grep -e target -e verify-uri "$M/boutique/checkout-client.yaml"
+oc kustomize "$M/boutique" > "$M/c5-boutique-remote-payments.yaml"
+oc apply -f "$M/c5-boutique-remote-payments.yaml"
+oc -n $BQ_NS rollout status deploy/checkoutservice --timeout=5m
+bq_status
+# backend_ok: true - a handshake with spiffe://sno.mylab.com/ns/online-boutique/sa/paymentservice
+```
+
+Watch the payments arrive on the other cluster:
+
+```bash
+lab sno
+oc -n $BQ_NS logs deploy/paymentservice -c ghostunnel -f --since=1m | grep 'opening pipe'
+# ctrl-c when you have seen enough
+```
+
+Some of those connections now come from the hub, through the SNO's router: a
+checkout in `hub.mylab.com` proving who it is to a payment service in
+`sno.mylab.com`, each checking the other against a CA it holds only because
+the two SPIRE servers exchanged bundles in Lab 7.
+
+To put the hub's payments back on the hub, reverse the `sed`, rebuild and
+apply - or `./build-lab.sh --only boutique --cluster hub`.
+
+**Check**
+
+```bash
+cd /root/hcp-backup-restore/spiffe-spire
+./build-lab.sh --workshop --only boutique-verify     # both clusters, the same asserts as the full build
+```
 
 ---
 
