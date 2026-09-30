@@ -141,9 +141,8 @@ Skip to 1.3 if the hub is already built - or, with the script, start at
 ansible-vault create vault.yaml
 ```
 
-Five required keys, and only five - this lab needs none of the OADP or Ceph
-credentials `steps.md` lists, because it runs neither. A sixth, optional one
-follows them:
+Four keys - this lab needs none of the OADP or Ceph credentials `steps.md`
+lists, because it runs neither. An optional fifth follows them:
 
 ```yaml
 ## Red Hat subscription, for the helper and the containerlab VM. Both are bare
@@ -155,16 +154,18 @@ activation_key: "your-activation-key"
 ## Connected installs pull their release payload from quay.io with this.
 pull_secret: '{"auths":{...}}'
 
-## Your SSH PUBLIC key, one line. Goes into the hub's install-config as sshKey,
-## so `core@<node>` works. (The SNO does not read this one - it takes the key
-## from sno_ssh_public_key_file on the lab host.)
-ssh_key: "ssh-ed25519 AAAA... you@host"
-
 ## Where the helper's named forwards anything it is not authoritative for.
 dns_forwarders:
   - 10.x.x.x
   - 10.x.x.x
 ```
+
+No `ssh_key`. setup-bm-host generates a lab key pair, `/root/.ssh/lab_rsa`,
+and every node and VM this lab builds trusts it: the hub's and the SNO's
+install-configs read `lab_rsa.pub` directly, so `ssh -i ~/.ssh/lab_rsa
+core@<node>` works on both. `vars.yaml` defaults `ssh_key` to the same file
+for the HCP flows that do read it; put one in `vault.yaml` only to use your
+own there.
 
 Both Red Hat credentials come from the Hybrid Cloud Console, and both need a
 Red Hat account (a free Developer Subscription is enough for this lab):

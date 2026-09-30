@@ -86,8 +86,8 @@
         - hub_selected in hub_install_folders
       fail_msg: >-
         Define hosted_clusters in vars.yaml (or pass -e hcp_cluster_name=<name>
-        to render a single cluster), and make sure pull_secret/ssh_key are
-        defined in vault.yaml. target_hub must be one of
+        to render a single cluster), and make sure pull_secret is defined in
+        vault.yaml (ssh_key defaults to the lab key in vars.yaml). target_hub must be one of
         {{ hub_install_folders.keys() | list | join(', ') }} - it selects both the
         kubeconfig this run uses and the MetalLB address each hosted cluster's
         api/api-int must resolve to.

@@ -1696,6 +1696,17 @@ customized_lab_image_url: ""
 ## login failing on an image-and-PAM detail.
 lab_ssh_pubkey_path: /root/.ssh/lab_rsa.pub
 
+## The ssh public key the HCP flows put on their nodes (create_hosted_cluster,
+## setup_bminfra). Defaults to the lab key above, which setup-bm-host
+## generates on its first run - so vault.yaml does not need one. Set ssh_key
+## in vault.yaml to use your own: vault.yaml is loaded after this file and wins.
+##
+## Read lazily: the lookup runs only when a play uses ssh_key, by which time
+## the key exists. The hub and the SNO do not use it at all - they read
+## lab_rsa.pub themselves (setup-hub-cluster, sno_ssh_public_key_file), so
+## `ssh -i ~/.ssh/lab_rsa core@<node>` is how you reach their nodes.
+ssh_key: "{{ lookup('ansible.builtin.file', lab_ssh_pubkey_path) }}"
+
 ## Rebuild the image even if it is already there. Off by default because the
 ## build takes several minutes and re-registers with Red Hat each time.
 customized_lab_image_force: false

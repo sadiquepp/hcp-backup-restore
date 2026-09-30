@@ -168,10 +168,14 @@ ansible-vault create vault.yaml
 org_id: "XXXXXXXX"                    # console.redhat.com/insights/connector/activation-keys
 activation_key: "your-activation-key" # same page
 pull_secret: '{"auths":{...}}'        # console.redhat.com/openshift/install/pull-secret, one line
-ssh_key: "ssh-ed25519 AAAA... you"    # a PUBLIC key; lands on the nodes as core@
 dns_forwarders:                       # see below
   - <the host's nameserver>
 ```
+
+No `ssh_key`: the build generates a lab key pair, `/root/.ssh/lab_rsa`, and
+puts it on every node and VM it creates - `ssh -i ~/.ssh/lab_rsa core@<node>`.
+(`vars.yaml` defaults `ssh_key` to that key for the flows that read it; set
+it here only to use your own.)
 
 Leave `udn_bgp_password` **out** unless you want the workshop to include BGP
 authentication. Set, it is built into the fabric on day 0, and Lab 2 then has

@@ -41,8 +41,9 @@
         - pull_secret is defined
         - ssh_key is defined
       fail_msg: >-
-        pull_secret / ssh_key must be defined in vault.yaml - they're the
-        same ones used by setup_hub_cluster.yaml. (A disconnected run renders
+        pull_secret must be defined in vault.yaml - the same one used by
+        setup_hub_cluster.yaml. (ssh_key defaults to the lab key in vars.yaml;
+        set it in vault.yaml only to use your own.) (A disconnected run renders
         the mirror registry's credentials into the pull-secret instead, but
         still expects the vault to be complete.)
 

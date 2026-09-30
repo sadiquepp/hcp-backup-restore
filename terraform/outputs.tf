@@ -46,7 +46,7 @@ output "next_steps" {
           sudo -i
           cd /root/hcp-backup-restore
           ansible-vault create vault.yaml      # pull_secret, org_id,
-                                               # activation_key, ssh_key,
+                                               # activation_key,
                                                # dns_forwarders
           echo '<vault password>' > ~/.vault_pass && chmod 600 ~/.vault_pass
 

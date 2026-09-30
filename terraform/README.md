@@ -164,7 +164,7 @@ ssh -i ~/.ssh/id_ed25519 ec2-user@<ip> 'sudo mv /tmp/rhel-9.8-x86_64-kvm.qcow2 /
 ```bash
 sudo -i && cd /root/hcp-backup-restore
 ansible-vault create vault.yaml     # pull_secret, org_id, activation_key,
-                                    # ssh_key, dns_forwarders
+                                    # dns_forwarders
 install -m 600 /dev/null ~/.vault_pass    # 0600 before it holds anything
 read -rsp 'Vault password: ' pw && printf '%s' "$pw" > ~/.vault_pass && unset pw; echo
 ```
