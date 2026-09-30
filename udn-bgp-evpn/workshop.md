@@ -1696,17 +1696,25 @@ green-vm   10.204.0.9   0a:58:0a:cc:00:09   worker2
                     RT:65000:400 ET:8 MM:1
 ```
 
-And the ping in the other window, once its deadline is up:
+And the ping in the other window, once its deadline is up. Two runs on this
+lab:
 
 ```
 --- 10.204.0.9 ping statistics ---
-144 packets transmitted, 144 received, 0% packet loss, time 145983ms
+144 packets transmitted, 144 received, 0% packet loss, time 145983ms          <- one a second
+
+--- 10.204.0.12 ping statistics ---
+597 packets transmitted, 595 received, 0.335008% packet loss, time 119884ms   <- -i 0.2 -w 120
 ```
 
-Your counts depend on the interval and the deadline (at `-i 0.2 -w 120`,
-about 600); the number that matters is `0% packet loss`. A migration that
-drops frames shows here as a handful lost, and `ping -D` timestamps each
-reply if you want to see exactly where the gap fell.
+**Expect none, or a few lost - not a stream of losses.** A live migration ends
+with a short switchover: the VM is paused on worker1 for the last memory copy
+and resumed on worker2, and worker2's new route has to reach the SNO. At five
+pings a second, that window can catch one or two; two lost here is about 0.4 s
+of gap. A gap of seconds, or losses that keep going after the migration
+`Succeeded`, would mean the SNO kept sending to worker1 - check the FDB
+entry below. `ping -D` timestamps each reply if you want to see exactly
+where the gap fell.
 
 The *after* output and the ping are measured on this lab (see
 [bgp-evpn.md](bgp-evpn.md#live-migration-on-the-layer2-tenant)); the FDB read
@@ -1733,8 +1741,8 @@ Read it bottom-up and it is the whole mechanism:
    the SNO, in another AS, which is why the two clusters must not share one.
 4. The SNO's FRR picks the route with the higher sequence number, and zebra
    rewrites the FDB entry from `dst 100.64.0.34` to `dst 100.64.0.35`.
-5. The SNO's next frame to the VM is encapsulated to worker2. The ping never
-   noticed.
+5. The SNO's next frame to the VM is encapsulated to worker2. The ping lost
+   at most the few frames sent during the switchover.
 
 `extern_learn` on both lines is what proves step 4 rather than a data-plane
 guess: the VXLAN device is on a bridge port with learning **off**, so the only
