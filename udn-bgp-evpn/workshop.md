@@ -1359,7 +1359,7 @@ HUB_VIOLET=$(KUBECONFIG=$HUB_KUBECONFIG podip violet)
 inpod violet ping -c3 $HUB_VIOLET
 # ttl=61 - ROUTED this time, cluster to cluster
 
-oc debug node/<sno node> -- chroot /host ip route show vrf violet
+oc debug node/sno --quiet -- chroot /host ip route show vrf violet
 # 10.206.3.0/24 via 100.64.0.34 dev ... proto bgp onlink    <- straight to a hub node's VTEP
 # default via 10.0.0.2 dev ... proto bgp onlink              <- leaf2's default
 
@@ -1637,7 +1637,8 @@ the L2VNI - and leave it running:
 
 ```bash
 source /root/workshop.env; lab sno
-inpod green ping -i 0.2 -w 120 <vm ip>     # 5 a second, for two minutes
+VMIP=$(KUBECONFIG=$HUB_KUBECONFIG oc -n udn-green get vmi green-vm -o jsonpath='{.status.interfaces[0].ipAddress}')
+inpod green ping -i 0.2 -w 120 $VMIP     # 5 a second, for two minutes
 ```
 
 `-w 120` is a deadline: ping stops itself after two minutes and prints its
@@ -2122,8 +2123,8 @@ If time is short, these prove the whole of Part B:
 | 2 | `oc get vtep evpn-vtep` + the node annotations | every node has a VTEP OVN-Kubernetes accepted |
 | 3 | `leaf2 'show bgp l2vpn evpn route type prefix'` | blue and red advertise the same prefixes under different route targets |
 | 4 | `inpod blue ping -c2 -W2 10.211.10.10` | silent - tenancy by route target |
-| 5 | `inpod green ping -c3 <hub green pod>` from the SNO | TTL 64: one Layer2 domain across clusters |
-| 6 | `inpod violet ping -c3 <hub violet pod>` from the SNO | TTL 61: one routed tenant across clusters |
+| 5 | `inpod green ping -c3 $(KUBECONFIG=$HUB_KUBECONFIG podip green)` from the SNO | TTL 64: one Layer2 domain across clusters |
+| 6 | `inpod violet ping -c3 $(KUBECONFIG=$HUB_KUBECONFIG podip violet)` from the SNO | TTL 61: one routed tenant across clusters |
 | 7 | `inpod violet curl -sI http://1.1.1.1/` | internet egress through the fabric |
 | 8 | `curl http://blue.hub.mylab.com/` and `red` | overlapping tenants told apart from outside |
 | 9 | the Lab 12 ping during a migration | a VM moved and the fabric followed |
