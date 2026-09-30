@@ -31,7 +31,7 @@ tmux new -s lab      # then ./build-lab.sh ...
 | Prerequisite | Detail |
 | --- | --- |
 | **Bare-metal host** | KVM/libvirt, enough disk and RAM for a 3-worker hub plus an SNO plus the helper and containerlab VMs. Run from the host itself. |
-| **`vault.yaml`** | Encrypted, at the repo root, **git-ignored**. Holds the pull secret, `org_id`, `activation_key`, `ssh_key`, and `dns_forwarders`. Resolver addresses belong here and **never** in `vars.yaml` — that file is committed to a public repo. |
+| **`vault.yaml`** | Encrypted, at the repo root, **git-ignored**. Holds the pull secret, `org_id` and `activation_key`. `ssh_key` and `dns_forwarders` are optional overrides: the lab key and the lab host's own resolvers are used without them. If you do set resolver addresses, they belong here and **never** in `vars.yaml` — that file is committed to a public repo. |
 | **Vault password file** | Outside the repo. `$ANSIBLE_VAULT_PASSWORD_FILE`, or `--vault-password-file`, or the default `~/.vault_pass`. The script never reads it, only passes it on. |
 | **OpenShift 4.19+** | For `--shared` and `--vrflite`. `--evpn` needs **4.22** — `vars.yaml` sets `ocp_major_version: "4.22"`, which covers all three. |
 | **Local gateway mode** | `--vrflite` and `--evpn` require `routingViaHost: true`. `udn_bgp_set_local_gateway: true` in `vars.yaml` makes the `tenants` step do it. Flipping it is a second full `ovnkube-node` rollout. |

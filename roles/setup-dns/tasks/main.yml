@@ -7,6 +7,41 @@
   register: result
   until: result.rc == 0
 
+# dns_forwarders: auto (the default) - use the lab host's own resolvers. See
+# defaults/main.yml for what is filtered out and why. Read on the lab host,
+# not the helper this role is delegated to: the helper's resolver is the
+# thing being configured.
+#
+# The last usable answer is kept in setup_dns_forwarders_file and used when
+# the host has none left to offer. That is the state after the workshop's A5
+# on a host with a STATIC resolver: `nmcli con mod ... ipv4.dns <helper>`
+# replaces it, the host then lists only the helper, and a re-run of this role
+# would otherwise have nothing to forward to. (With DHCP, the leased resolver
+# stays listed after the helper and is found again.)
+- name: Read the lab host's resolvers
+  ansible.builtin.shell:
+    cmd: |
+      found=$(for f in /etc/resolv.conf /run/systemd/resolve/resolv.conf; do
+                [ -r "$f" ] && awk '$1 == "nameserver" {print $2}' "$f"
+              done | grep -Ev '^(127[.]|::1$|{{ lab_network_prefix | regex_escape }}[.])' | awk '!seen[$0]++')
+      if [ -n "$found" ]; then
+        printf '%s\n' "$found" > {{ setup_dns_forwarders_file }}
+        printf '%s\n' "$found"
+      elif [ -s {{ setup_dns_forwarders_file }} ]; then
+        cat {{ setup_dns_forwarders_file }}
+      fi
+      true
+  register: setup_dns_host_resolvers
+  changed_when: false
+  delegate_to: localhost
+  when: dns_forwarders == 'auto'
+
+- name: Work out the forwarders
+  ansible.builtin.set_fact:
+    setup_dns_forwarders: >-
+      {{ setup_dns_host_resolvers.stdout_lines
+         if dns_forwarders == 'auto' else dns_forwarders }}
+
 # An empty list renders `forwarders { };` and named then SERVFAILs every
 # external name, while the zones it is authoritative for keep answering - so
 # nothing looks wrong until something needs an outside name. That exact failure
@@ -14,14 +49,17 @@
 # refused to start. Cheap to check here, expensive to find later.
 - name: Fail if no upstream resolver is configured
   ansible.builtin.assert:
-    that: (dns_forwarders | default([])) | length > 0
+    that: setup_dns_forwarders | length > 0
     fail_msg: >-
-      dns_forwarders is empty. named would forward to nothing and answer
-      SERVFAIL for every name it is not authoritative for. Set it in
-      vault.yaml, or leave it unset to use the role default
-      ({{ lab_network_prefix }}.1, libvirt's dnsmasq).
+      No upstream resolver for the helper.
+      {{ ('The lab host resolver configuration names none that can be used'
+          ~ ' (loopback and ' ~ lab_network_prefix ~ '.x addresses would have the helper'
+          ~ ' forwarding to itself), and ' ~ setup_dns_forwarders_file ~ ' has no earlier answer.')
+         if dns_forwarders == 'auto' else 'dns_forwarders is an empty list.' }}
+      Set dns_forwarders in vault.yaml to the resolvers the lab host should use.
     success_msg: >-
-      Forwarding to {{ dns_forwarders | join(', ') }}.
+      Forwarding to {{ setup_dns_forwarders | join(', ') }}{{
+      ' (read from the lab host resolver configuration)' if dns_forwarders == 'auto' else '' }}.
 
 # Installed, or - when the helper was built from the customized lab image -
 # verified present with rpm -q. See roles/lab-image/tasks/packages.yml.

@@ -141,8 +141,8 @@ Skip to 1.3 if the hub is already built - or, with the script, start at
 ansible-vault create vault.yaml
 ```
 
-Four keys - this lab needs none of the OADP or Ceph credentials `steps.md`
-lists, because it runs neither. An optional fifth follows them:
+Three keys - this lab needs none of the OADP or Ceph credentials `steps.md`
+lists, because it runs neither. An optional fourth follows them:
 
 ```yaml
 ## Red Hat subscription, for the helper and the containerlab VM. Both are bare
@@ -153,11 +153,6 @@ activation_key: "your-activation-key"
 ## The cluster pull secret, from console.redhat.com/openshift/install/pull-secret.
 ## Connected installs pull their release payload from quay.io with this.
 pull_secret: '{"auths":{...}}'
-
-## Where the helper's named forwards anything it is not authoritative for.
-dns_forwarders:
-  - 10.x.x.x
-  - 10.x.x.x
 ```
 
 Both Red Hat credentials come from the Hybrid Cloud Console, and both need a
@@ -188,14 +183,16 @@ udn_bgp_password: "a-shared-key"
 > `openshift-frr-k8s` and referenced with `passwordSecret`, so the key never
 > appears in the manifests written under `udn-bgp/`.
 
-> **`dns_forwarders` is the one with a working default**, so it is optional in
-> the strict sense: leave it out and the role forwards to
-> `<lab_network_prefix>.1`, libvirt's dnsmasq, which in turn uses the
-> hypervisor's own resolvers. Set it when you want queries to go straight to
-> site resolvers. It belongs in vault rather than `vars.yaml` because resolver
-> addresses are internal infrastructure and `vars.yaml` is committed.
+> **The helper's upstream resolvers are read from the lab host** at run time
+> (`dns_forwarders: auto` in `roles/setup-dns`): the `nameserver` lines of its
+> `/etc/resolv.conf`, minus loopback and anything on the lab network, which
+> would loop back to the helper. The answer is kept in
+> `/root/.lab-dns-forwarders`, so a re-run still has it after the host's own
+> resolver has been pointed at the helper. To name them yourself, set
+> `dns_forwarders` as a list in `vault.yaml` - not `vars.yaml`, which is
+> committed.
 >
-> Whatever it ends up as **must actually answer**. named returns SERVFAIL for
+> Whatever they are, they **must actually answer**. named returns SERVFAIL for
 > every external name when its forwarder does not, while the lab's own zones
 > keep resolving - so the failure is invisible until something needs an outside
 > name. That is how it shows up: a connected install refusing to start because

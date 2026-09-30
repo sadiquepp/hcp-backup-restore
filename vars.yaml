@@ -572,10 +572,13 @@ tftp_packages:
 
 ## Where the helper's named sends everything it is NOT authoritative for.
 ##
-## SET THIS IN vault.yaml, not here - resolver addresses are internal
-## infrastructure and this file is committed. The role defaults to
-## <lab_network_prefix>.1 (libvirt's dnsmasq, which forwards to the
-## hypervisor's own resolvers), which works without naming anything private.
+## Nothing to set: roles/setup-dns defaults to 'auto', which reads the lab
+## host's own resolvers from /etc/resolv.conf at run time (skipping loopback
+## and anything on the lab network, which would loop back to the helper) and
+## remembers the answer in /root/.lab-dns-forwarders for later re-runs.
+##
+## To name them yourself, SET THIS IN vault.yaml, not here - resolver
+## addresses are internal infrastructure and this file is committed:
 ##
 ##   dns_forwarders:
 ##     - 10.x.x.x

@@ -46,8 +46,7 @@ output "next_steps" {
           sudo -i
           cd /root/hcp-backup-restore
           ansible-vault create vault.yaml      # pull_secret, org_id,
-                                               # activation_key,
-                                               # dns_forwarders
+                                               # activation_key
           echo '<vault password>' > ~/.vault_pass && chmod 600 ~/.vault_pass
 
     3. BUILD, under tmux - it takes hours and an ssh drop kills it:

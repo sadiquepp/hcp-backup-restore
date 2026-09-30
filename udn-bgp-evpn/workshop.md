@@ -158,7 +158,7 @@ tmux new -s lab                  # ctrl-b d detaches; tmux attach -t lab returns
 cd /root/hcp-backup-restore
 ```
 
-**1. `vault.yaml` - your secrets.** Four keys:
+**1. `vault.yaml` - your secrets.** Three keys:
 
 ```bash
 ansible-vault create vault.yaml
@@ -168,29 +168,10 @@ ansible-vault create vault.yaml
 org_id: "XXXXXXXX"                    # console.redhat.com/insights/connector/activation-keys
 activation_key: "your-activation-key" # same page
 pull_secret: '{"auths":{...}}'        # console.redhat.com/openshift/install/pull-secret, one line
-dns_forwarders:                       # see below
-  - <the host's nameserver>
 ```
 
 The helper VM and the containerlab VM are bare RHEL, so `org_id` and
 `activation_key` are what let them install packages.
-
-`dns_forwarders` is where the helper's DNS sends every name it is not
-authoritative for. **Set it to the host's own resolver**, which is in
-`/etc/resolv.conf` right now, before A5 changes it:
-
-```bash
-awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf
-# on AWS, the VPC resolver: 10.0.0.2 with the terraform defaults
-```
-
-(That it is also leaf2's VTEP address inside the fabric is a coincidence and
-harmless: the helper, which does the forwarding, has no route into the
-fabric, so its queries go out through the host to the VPC.)
-
-Left out, the helper forwards to libvirt's dnsmasq, which forwards to
-whatever the host's resolv.conf says - and after A5 that is the helper
-itself, a loop that shows up as external names timing out.
 
 **2. The vault password file**, so the build does not prompt at every step:
 

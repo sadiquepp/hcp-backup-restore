@@ -27,17 +27,28 @@ setup_dns_hub_disconnected: hubd
 
 # Upstream resolvers for everything the helper is not authoritative for.
 #
-# Defaults to libvirt's dnsmasq on the lab network, which forwards to the
-# hypervisor's own resolvers - correct for this lab and, unlike a real
-# resolver address, safe to commit. Override in vault.yaml to send queries
-# straight to site resolvers instead.
+# 'auto' reads them from the lab host's own resolver configuration at run time
+# (/etc/resolv.conf, and systemd-resolved's upstream list when resolv.conf only
+# names its 127.0.0.53 stub) - the same resolvers the host itself uses, and
+# nothing written into a committed file. Set a list in vault.yaml to name
+# them yourself instead.
 #
-# Whatever this is set to must actually answer: named returns SERVFAIL for
+# What 'auto' drops, and why: loopback addresses (they would mean the helper
+# itself) and anything on the lab network. The lab network matters because
+# the workshop later points the host's resolver at the helper, and libvirt's
+# dnsmasq at <prefix>.1 forwards to whatever the host uses - either one kept
+# here would have the helper forwarding to itself, which shows up as every
+# external name timing out.
+#
+# Whatever this ends up as must actually answer: named returns SERVFAIL for
 # every external name when its forwarder does not, and the lab zones keep
 # working meanwhile, so the failure is invisible until something needs an
 # outside name.
-dns_forwarders:
-  - "{{ lab_network_prefix }}.1"
+dns_forwarders: auto
+
+# Where 'auto' keeps its last usable answer, on the lab host. Delete it to
+# make the next run read the host afresh with nothing to fall back on.
+setup_dns_forwarders_file: /root/.lab-dns-forwarders
 
 # Whether named validates DNSSEC on what its forwarders return.
 #

@@ -178,8 +178,8 @@
              if not lab_base_image.stat.exists else
              'Base image present.' }}
           {{ 'STILL NEEDED: ' ~ lab_repo_dir ~ '/vault.yaml - ansible-vault
-             create it with pull_secret, org_id, activation_key and
-             dns_forwarders, and put its password in ~/.vault_pass.'
+             create it with pull_secret, org_id and activation_key,
+             and put its password in ~/.vault_pass.'
              if not lab_vault.stat.exists else
              'vault.yaml present.' }}
           Then: tmux new -s lab; cd {{ lab_repo_dir }}/udn-bgp-evpn;
