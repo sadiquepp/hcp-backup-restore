@@ -158,7 +158,7 @@ tmux new -s lab                  # ctrl-b d detaches; tmux attach -t lab returns
 cd /root/hcp-backup-restore
 ```
 
-**1. `vault.yaml` - your secrets.** Four keys, and an optional fifth:
+**1. `vault.yaml` - your secrets.** Four keys:
 
 ```bash
 ansible-vault create vault.yaml
@@ -171,15 +171,6 @@ pull_secret: '{"auths":{...}}'        # console.redhat.com/openshift/install/pul
 dns_forwarders:                       # see below
   - <the host's nameserver>
 ```
-
-No `ssh_key`: the build generates a lab key pair, `/root/.ssh/lab_rsa`, and
-puts it on every node and VM it creates - `ssh -i ~/.ssh/lab_rsa core@<node>`.
-(`vars.yaml` defaults `ssh_key` to that key for the flows that read it; set
-it here only to use your own.)
-
-Leave `udn_bgp_password` **out** unless you want the workshop to include BGP
-authentication. Set, it is built into the fabric on day 0, and Lab 2 then has
-one more step - which it tells you about.
 
 The helper VM and the containerlab VM are bare RHEL, so `org_id` and
 `activation_key` are what let them install packages.

@@ -160,13 +160,6 @@ dns_forwarders:
   - 10.x.x.x
 ```
 
-No `ssh_key`. setup-bm-host generates a lab key pair, `/root/.ssh/lab_rsa`,
-and every node and VM this lab builds trusts it: the hub's and the SNO's
-install-configs read `lab_rsa.pub` directly, so `ssh -i ~/.ssh/lab_rsa
-core@<node>` works on both. `vars.yaml` defaults `ssh_key` to the same file
-for the HCP flows that do read it; put one in `vault.yaml` only to use your
-own there.
-
 Both Red Hat credentials come from the Hybrid Cloud Console, and both need a
 Red Hat account (a free Developer Subscription is enough for this lab):
 
