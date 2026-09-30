@@ -564,7 +564,7 @@ A number (prefixes received, 0 for now) in the last column means
 Established; a word means it is not. From the cluster's side:
 
 ```bash
-nodevtysh <worker> 'show bgp summary'
+nodevtysh worker1 'show bgp summary'
 ```
 
 > A node stuck in `Active`/`Connect` while the others are up: restart that
@@ -787,7 +787,7 @@ oc -n $FRR_NS get frrconfiguration fabric-peering-evpn -o jsonpath='{.spec.bgp.r
 
 ```bash
 leaf1 'show bgp summary'                         # ipv4 unicast: the hub workers, Established
-nodevtysh <worker> "show ip route $VTEP_CIDR"    # B>* ... via 192.168.140.1 - the way to every VTEP
+nodevtysh worker1 "show ip route $VTEP_CIDR"    # B>* ... via 192.168.140.1 - the way to every VTEP
 leaf1 'show bgp l2vpn evpn summary'              # the hub workers: NoNeg - and that is right
 ```
 
@@ -796,7 +796,7 @@ leaf1 offers `l2vpn evpn`, the node doesn't yet. From the node's side it
 reads `Address Family L2VPN EVPN: received` - received, not advertised:
 
 ```bash
-nodevtysh <worker> 'show bgp neighbor 192.168.140.1' | grep -A1 'L2VPN EVPN'
+nodevtysh worker1 'show bgp neighbor 192.168.140.1' | grep -A1 'L2VPN EVPN'
 ```
 
 It turns into numbers in Lab 6. Don't reset sessions or restart pods over it.
@@ -982,7 +982,7 @@ echo "blue $(podip blue)   red $(podip red)" # quite possibly the SAME address
 On a node, each is a VRF with its own table:
 
 ```bash
-oc debug node/<worker> -- chroot /host ip -br link show type vrf   # blue, red
+oc debug node/worker1 -- chroot /host ip -br link show type vrf   # blue, red
 ```
 
 ### Lab 6. Advertise them
@@ -1032,7 +1032,7 @@ VRF per tenant - and frr-k8s merges them into one running FRR.
 oc get routeadvertisements udn-evpn -o jsonpath='{.status.status}{"\n"}'   # Accepted
 oc -n $FRR_NS get frrconfiguration      # yours two, and ovnk-generated-* next to them
 leaf1 'show bgp l2vpn evpn summary'     # hub workers: numbers, not NoNeg. The SNO: NoNeg until Lab 8
-oc get frrnodestate <worker> -o jsonpath='{.status.runningConfig}' \
+oc get frrnodestate worker1 -o jsonpath='{.status.runningConfig}' \
   | sed -n '/address-family l2vpn evpn/,/exit-address-family/p'   # activate, allowas-in, advertise-all-vni
 ```
 
@@ -1872,7 +1872,7 @@ it.
 > **Where:** the hub, on one of its workers.
 
 ```bash
-W=<a worker>
+W=worker1
 oc debug node/$W --quiet -- chroot /host ip -d link show type vrf | grep -A1 -E '^[0-9]+: (blue|red)'
 # ... vrf table 1012 ...
 oc debug node/$W --quiet -- chroot /host ip -br link show master blue
