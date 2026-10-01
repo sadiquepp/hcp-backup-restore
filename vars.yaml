@@ -1,17 +1,356 @@
 # Lab-wide Ansible variables. Loaded by most playbooks via vars_files.
 #
-# Secrets (pull_secret, activation_key, org_id, oadp_aws_*) belong in
-# vault.yaml, not here. Values below override role defaults when the
+# Secrets (pull_secret, activation_key, org_id, oadp_aws_*) and anything that
+# names internal infrastructure (dns_forwarders) belong in vault.yaml, not
+# here. Values below override role defaults when the
 # same name is used.
 #
 # Optional role-default overrides are documented at the bottom of this file
 # as commented examples - uncomment and adjust as needed.
 
-# Lab L2 network (libvirt default / virbr0). ip_list values are last octets only.
+## ===========================================================================
+## START HERE - the settings most labs change
+##
+## Everything in this section is something you are likely to set before the
+## first run. Everything below it is either derived from these or is lab
+## plumbing (IP assignments, per-role defaults) you can usually leave alone.
+## Where a setting has a longer explanation further down, it says so.
+## ===========================================================================
+
+## --- Lab network and DNS ---------------------------------------------------
+
+# Lab L2 network (libvirt default / virbr0). The ip_list values further down are
+# last octets only, combined with this prefix.
 lab_network_prefix: "192.168.122"
 lab_network_netmask: "255.255.255.0"
-# Reverse zone for lab_network_prefix 192.168.122 — update if you change the prefix.
+# Reverse zone for lab_network_prefix - change it in lockstep with the prefix
+# (192.168.122 -> 122.168.192.in-addr.arpa).
 lab_network_reverse_zone: "122.168.192.in-addr.arpa"
+
+## The lab's DNS suffix - the one place it is written. hub_domain, hub2_domain,
+## hub_disconnected_domain, hub2_disconnected_domain and the hosted-cluster
+## zones all derive from it, and roles/setup-dns builds each hosted cluster's
+## zone as <cluster-name>.<base_domain>.
+base_domain: mylab.com
+
+## --- Host paths and base image ---------------------------------------------
+
+## Where the RHCOS images, the oc/openshift-install tarballs and the discovery
+## ISOs are staged, and the parent of every VM/install directory further down.
+##
+## No trailing slash - every consumer writes "{{ download_dir }}/<name>", so
+## adding one back here just produces doubled slashes in paths and log output.
+download_dir: /var/lib/libvirt/images
+
+## RHEL 9 KVM guest image for the helper, mirror registry, MinIO and Ceph VMs -
+## put it in base_image_dir before the first run. If you change it, check the
+## *_resize_partition values further down: they are image-specific.
+rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
+
+## Where that base image actually lives.
+##
+## It is a RUNTIME ARTIFACT, not role content: *.qcow2 is gitignored, it is
+## several GB, and FIVE roles consume it - setup-bm-host, setup-ceph-vm,
+## setup-minio-vm, setup-mirror-registry-vm and setup-clab-fabric. Nothing
+## owns it, so it does not belong inside any one role's files/ directory.
+##
+## It used to be read out of roles/setup-bm-host/files/, which made every
+## other role reach across into a role it does not own - three of them with a
+## bare relative path that only resolved when ansible-playbook was run from
+## the repository root. Addressing it through one variable removes both
+## problems and makes relocating it a one-line change.
+##
+## WHY NOT /var/lib/libvirt/images. This used to follow download_dir, and on
+## a host where libvirt has never been installed that directory does not
+## exist yet - the libvirt RPM creates it, and this lab is what installs
+## libvirt. So there was nowhere to stage the qcow2 before the first run, and
+## the only way forward was to hand-create a path an RPM owns. On a fresh
+## cloud metal instance that is not an edge case, it is the first thing that
+## happens.
+##
+## /opt/lab-images is owned by nobody, is created by setup-bm-host, and is
+## somewhere you can legitimately put a large file. base_image_dir is only
+## ever READ from - nothing here needs libvirt to resolve it - so it can be
+## any directory you control, including a mount point on a separate, larger
+## volume, which on a cloud metal instance with a small root disk is usually
+## where it should be.
+##
+## MIGRATING A LAB BUILT BEFORE THIS CHANGE. The image is where you put it;
+## the variable moved. Either move the image:
+##
+##   mkdir -p /opt/lab-images
+##   mv /var/lib/libvirt/images/rhel-9.8*.qcow2 /opt/lab-images/
+##
+## or set this back to "{{ download_dir }}" and leave it where it is. Both
+## work - it is one variable, read-only, and nothing else changes. The same
+## applies to the customized image, which sits beside the base one.
+##
+## download_dir is a DIFFERENT matter and has not moved: those are live VM
+## disks, so relocating it means giving the new path libvirt's SELinux
+## context (semanage fcontext -a -t virt_image_t "<path>(/.*)?" &&
+## restorecon -R).
+base_image_dir: /opt/lab-images
+
+## --- OpenShift version -----------------------------------------------------
+
+## The one place the lab's OCP version is set: bminfra_ocp_version and
+## mirror_ocp_version both follow it.
+##
+## QUOTED deliberately. Unquoted, YAML parses 4.21 as a float - harmless for
+## .21, but 4.20 becomes 4.2, so every version string built from it
+## ("{{ ocp_major_version }}.{{ ocp_minor_version }}") would silently render
+## 4.2.33 instead of 4.20.33. Everything downstream (release pullspecs, the
+## RHCOS download urls, the operator index tag, the openshift-install path)
+## interpolates this into a string, so keep the quotes.
+##
+## 4.22 rather than 4.21 because BGP EVPN for primary cluster user-defined
+## networks is GA in 4.22 - on 4.21 the VTEP CRD and the CUDN
+## network.transport/network.evpn fields do not exist at all. Everything else
+## in this lab works on either; see the UDN/BGP section of the README. To go
+## back to 4.21, set these three to "4.21" / 15 / 0 and drop the evpn phase.
+ocp_major_version: "4.22"
+
+## ocp_minor_version is the OpenShift RELEASE - it picks the openshift-install
+## binary from clients/ocp/<major>.<minor>/ and the hosted clusters' release
+## image. It is NOT the RHCOS version, and the two are published on separate
+## cadences: 4.22.10 is a released OpenShift version with no RHCOS 4.22.10
+## behind it. That is normal, not a mismatch - a node boots on whatever RHCOS
+## media it is given and the cluster then brings the OS to what this release
+## pins. Setting a coreos version to match this one just 404s.
+##
+## RHCOS is chosen by coreos_minor_version further down, which defaults to
+## "latest" for exactly that reason.
+##
+## 10 here because a Layer3 EVPN tenant is black-holed on 4.22.8 by the node's
+## iptables FORWARD policy - see udn_bgp_evpn_l3_min_version further down for
+## the measurement. Layer2 is unaffected, so a lab built on .8 comes up looking
+## half working and the half that fails looks like an EVPN fault.
+ocp_minor_version: 10
+
+## The RHCOS boot media for every hub node VM, used as a qcow2 backing file.
+##
+## "latest" by default, which is a directory the mirror publishes per stream:
+##   .../dependencies/rhcos/4.22/latest/rhcos-qemu.x86_64.qcow2.gz
+## so nothing here needs editing when a new RHCOS lands. Set it to a z-stream
+## number to pin instead - 8 gives 4.22.8 - and both the directory and the
+## FILENAME change, because the versioned builds carry the version in the name
+## and latest/ does not. The two expressions below handle that; it is the reason
+## this is not a straight directory swap.
+##
+## Floating is safe for THIS file in a way it is not for the release, and the
+## difference is worth being explicit about. This is only a boot medium: the
+## node comes up on it and the cluster immediately brings the OS to whatever
+## ocp_minor_version's payload specifies, so it has no bearing on what the
+## cluster ends up running. ocp_minor_version stays pinned precisely because it
+## does decide that.
+##
+## Two things to know before leaving it on "latest":
+##
+##  * latest/ can be NEWER than the release - 4.22.20 media under a 4.22.10
+##    payload. That is bounded, since rhcos/4.22/latest/ only ever serves
+##    4.22.x and the ignition spec therefore always matches, and it installs.
+##    But it inverts the supported direction: boot images are expected to lag
+##    and be reconciled forward, not lead and be rolled back. Pin if a run has
+##    to be reproducible, or if an install starts behaving oddly for no reason
+##    the diff explains.
+##  * The download is guarded on the local file already existing, so "latest"
+##    is resolved the first time a lab host fetches it and not on every run.
+##    Delete {{ download_dir }}/rhcos-qemu.x86_64.qcow2 to pick up a newer one.
+coreos_minor_version: "latest"
+
+## Derived, so the four hub roles carry no version arithmetic of their own.
+rhcos_qemu_image: >-
+  {{ 'rhcos-qemu.x86_64.qcow2'
+     if coreos_minor_version | string == 'latest'
+     else 'rhcos-' ~ ocp_major_version ~ '.' ~ coreos_minor_version ~ '-x86_64-qemu.x86_64.qcow2' }}
+rhcos_qemu_url: >-
+  https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/{{ ocp_major_version }}/{{
+    'latest' if coreos_minor_version | string == 'latest'
+    else ocp_major_version ~ '.' ~ coreos_minor_version }}/{{ rhcos_qemu_image }}.gz
+
+## --- VM sizing -------------------------------------------------------------
+
+## Shared by every hub - hub1, hub2, hubd and hub2d are all built to these
+## sizes. worker_memory / worker_cpu are the ones that matter most: the hosted
+## clusters' control planes run on the hub's workers.
+helper_memory: 8192
+helper_vcpus: 4
+## Sparse, so it costs nothing until used. See the fuller note further down for
+## what fills it and how to grow an existing helper.
+helper_disk_size: 100G
+master_memory: 16384
+master_cpu: 8
+worker_memory: 49152
+worker_cpu: 32
+hub_worker_replicas: 3
+
+## --- Install mode and hub storage ------------------------------------------
+
+## Connected (false) or disconnected (true) - the switch for the whole lab, and
+## the source of truth for it. Set it once here before you start rather than
+## per-command; see "Choose Connected or Disconnected" in README.md.
+disconnected_install: false
+
+## LVM Storage (true) or Ceph 9 via ODF external mode (false) for the hub's PVs.
+## Has to be decided before the hub is built. Pick Ceph for the backup/restore
+## demo: LVM Storage ships no VolumeSnapshotClass, so oadp_backup_method=csi -
+## the only trustworthy control-plane restore - is not available on it.
+use_lvm_storage: true
+
+## --- Hosted clusters -------------------------------------------------------
+
+## Which hosted clusters get rendered: the connected list when
+## disconnected_install is false, the '-d' list when it is true. An entry is a
+## bare name or a dict with 'name' plus per-cluster overrides. Every name needs
+## a matching entry in hosted_cluster_metallb_pools further down. Fuller notes
+## are with that map and with the hosted_cluster_* defaults.
+hosted_clusters:
+  - hcp-cluster1
+  - hcp-cluster2
+  - hcp-cluster3
+hosted_clusters_disconnected:
+  - hcp-cluster1-d
+  - hcp-cluster2-d
+  - hcp-cluster3-d
+
+## Which hub is currently authoritative - 'hub' normally, 'hub2' after a DR
+## cutover. Selects the kubeconfig the OADP playbooks use and the address
+## roles/setup-dns publishes as api/api-int. Usually passed per-run instead
+## (-e target_hub=hub2); fuller note further down.
+target_hub: hub
+
+## --- VNC desktop on the bare-metal host --------------------------------------
+##
+##   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags vnc
+##
+## For virt-manager and guest consoles. OFF by default: it starts a listening
+## remote-access service, which is not something to enable for everyone who
+## runs this repository - especially on a cloud metal instance that may be on
+## a public subnet.
+vnc_enabled: false
+vnc_user: vncuser
+vnc_display: 99
+vnc_geometry: 1920x1080
+vnc_session: gnome
+
+## The desktop environment the session runs. tigervnc starts an X server;
+## without a session manager there is nothing in it. Set to "" on a host that
+## already has a desktop - this group is a large install.
+vnc_desktop_group: Server with GUI
+
+## VNC AUTHENTICATION KEEPS ONLY THE FIRST 8 CHARACTERS. It is a DES
+## challenge-response with a 56-bit key, so vncpasswd truncates silently. A
+## longer generated secret would be an 8-character secret with extra
+## characters that authenticate nothing, so the automation generates exactly
+## 8 from a wide alphabet rather than pretending otherwise.
+##
+## Generated on first run and reused after - re-running the play does not
+## invalidate a password someone is already using. root-owned, 0600.
+vnc_password_file: /root/.vnc-credentials
+
+## To choose the password yourself instead, put vnc_password in vault.yaml
+## (never here). Still 8 characters, for the reason above.
+
+## Bind to loopback only, and reach it over an ssh tunnel:
+##
+##   ssh -L 5999:localhost:5999 ec2-user@<host>   # 5900 + vnc_display
+##
+## That gives the session the encryption and the authentication VNC does not
+## have - the protocol sends the screen and the keystrokes in clear under the
+## default security type. Setting this false also requires
+## vnc_expose_acknowledged: true, so exposing it is a decision rather than a
+## default left alone.
+vnc_localhost_only: true
+
+## Only used to print a tunnel command you can paste. NOT root on a cloud
+## image: Red Hat's AWS AMIs disable root ssh through cloud-init, so root@
+## answers 'Please login as the user "ec2-user"'. The tunnel does not need
+## root regardless - port forwarding is just a shell - so this is whichever
+## user you actually log in as. Set it to root on a host where root ssh works.
+vnc_tunnel_user: ec2-user
+
+
+## --- Backup target (OADP) --------------------------------------------------
+
+## AWS access key id/secret go in vault.yaml as oadp_aws_access_key_id /
+## oadp_aws_secret_access_key - never here.
+oadp_aws_region: ap-south-1
+oadp_bucket_name: adp-backup-bucket-xjt   # S3 bucket names are globally unique - change this before first use
+
+## How the control-plane (etcd) volumes are captured. fs = Kopia file copy,
+## works on any StorageClass. csi = CSI snapshot + Velero's data mover, needs
+## Ceph/ODF and is the only one to rely on for a control-plane restore. Full
+## comparison further down; override per run with -e oadp_backup_method=csi.
+oadp_backup_method: fs
+
+## --- RHCOS live ISOs offered to hosted clusters ----------------------------
+
+## The AgentServiceConfig's osImages catalogue - the versions ACM/MCE will
+## offer when installing a hosted cluster. One entry's openshiftVersion must
+## match bminfra_ocp_version, which follows ocp_major_version above.
+agent_service_os_images:
+  - openshiftVersion: "4.21"
+    version: "4.21.0"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.21/4.21.0/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+  ## RHCOS boot media, so 4.22.8 even though ocp_minor_version is 10 - there is
+  ## no RHCOS 4.22.10. See the note at coreos_minor_version.
+  - openshiftVersion: "4.22"
+    version: "4.22.8"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+  - openshiftVersion: "4.20"
+    version: "4.20.13"
+    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.20/4.20.13/rhcos-4.20.13-x86_64-live-iso.x86_64.iso"
+    cpuArchitecture: "x86_64"
+
+## --- Bare-metal inventory --------------------------------------------------
+
+## Free-text label stamped on the InfraEnv and on every Agent that registers
+## into it (the location annotation ACM shows in Host Inventory). Cosmetic, but
+## it is what identifies this lab's hosts in the UI.
+bminfra_location: singapore
+
+## --- Disconnected labs only (ignored when disconnected_install is false) ----
+
+## Size of the mirror registry VM's disk. Sparse, but oc-mirror pulls the whole
+## release payload plus every catalog below into it, so this is the number to
+## raise if the mirror runs out of room. See the mirror registry block further
+## down for the rest of its settings.
+mirror_registry_disk_size: 500G
+
+## What oc-mirror mirrors beyond the release payload. These already cover the
+## operators setup-hub-acm installs; add anything else your lab needs BEFORE
+## the mirror runs, since re-running it after the fact means another pass over
+## the catalogs.
+mirror_catalog_operator_packages:
+  - advanced-cluster-management
+  - multicluster-engine
+  - lvms-operator
+  - metallb-operator
+  - redhat-oadp-operator
+  - cincinnati-operator
+
+## Bucket OADP targets when backing up against the local MinIO instead of real
+## AWS S3 - deliberately distinct from oadp_bucket_name, so switching between
+## the two is a visible choice. Fuller note with the MinIO block further down.
+minio_bucket_name: adp-backup-disconnected
+
+## --- Ceph path only (ignored when use_lvm_storage is true) -----------------
+
+## Sizing for the 3 all-in-one Ceph nodes. The OSD disks are raw and per node,
+## so the raw capacity is disks_per_node x disk_size x 3. The rest of the Ceph
+## settings - node names, pools, the container image, the admin node - are in
+## the Ceph block further down.
+ceph_osd_disks_per_node: 3
+ceph_osd_disk_size: 100G
+ceph_storage_memory: 24576
+ceph_storage_vcpus: 16
+
+## ===========================================================================
+## END of the commonly-changed settings. Everything below is lab plumbing: IP
+## assignments, per-role defaults and values derived from the section above.
+## ===========================================================================
 
 # List of IP Addresses to be used on the KVM Lab.
 # Last octets below are combined with lab_network_prefix (e.g. .21 -> 192.168.122.21). Must be two digits (10-99) as last octet is used
@@ -26,6 +365,13 @@ ip_list:
   worker2: 35
   worker3: 36
   hublb: 39
+  ## The single-node cluster (setup-sno). Two constraints, both load-bearing:
+  ## clear of every hosted_cluster_metallb_pools band below (60-62, 67-69,
+  ## 90-95), because an address MetalLB may hand out is one the SNO would lose
+  ## an ARP fight for intermittently, long after the install looked fine; and
+  ## TWO DIGITS, because this lab's MAC scheme appends the octet verbatim
+  ## (52:54:00:e2:54:<octet>) and a three-digit octet is not a valid MAC.
+  sno: 20
   c1worker1: 41
   c1worker2: 42
   c1worker3: 43
@@ -51,7 +397,12 @@ ip_list:
   # is free, deliberately avoiding 60-69 and 90-99 where the hosted clusters'
   # MetalLB pool addresses live (hosted_cluster_metallb_pools) - .63 in
   # particular is left alone because it is already spoken for elsewhere.
-  # Remaining free octets after these: 40, 47, 50, 57, 64-66, 70, 87, 88.
+  # Remaining free octets after these: 64-66, 87, 88.
+  # (47, 50, 57 and 70 are now the UDN-over-BGP lab's clients, added below;
+  #  64-66 are left alone deliberately - they are legal, but they sit between
+  #  the hub MetalLB band at 60-62 and the hubd band at 67-69, so they are a
+  #  poor place to put anything that must never collide with a pool.)
+  # (40 is now taken by the containerlab VM, added below.)
   c1dworker1: 44
   c1dworker2: 45
   c1dworker3: 46
@@ -80,9 +431,9 @@ ip_list:
   hub2lb: 89
 
   # Hub-disconnected - a third, fully independent hub cluster installed
-  # entirely from the local mirror registry (see
-  # setup_hub_cluster_disconnected.yaml). Deliberately given its own IP
-  # block, its own subdomain (hub_disconnected_domain) and its own
+  # entirely from the local mirror registry (setup_hub_cluster.yaml with
+  # disconnected_install set). Deliberately given its own IP block, its own
+  # subdomain (hub_disconnected_domain) and its own
   # install/VM directories so it can be built and run *alongside* hub1
   # and hub2 rather than replacing either.
   # NOTE: same MAC scheme constraint as above - two digit values (10-99).
@@ -94,6 +445,26 @@ ip_list:
   hubd_worker2: 77
   hubd_worker3: 78
   hubdlb: 79
+
+  # Hub2-disconnected - the DR hub built from the local mirror registry
+  # (setup_hub_cluster2.yaml with disconnected_install set). Same relationship
+  # to hub2 that hubd has to hub1: its own IP block, its own subdomain
+  # (hub2_disconnected_domain) and its own install/VM directories, so it is a
+  # separate cluster rather than a differently-built hub2, and all four hubs
+  # can be up at once.
+  #
+  # .10-.19 rather than another slice of the 70s/80s: those are contiguous and
+  # free, and they sit below both DHCP pools (dhcpd .100-.200 on the helper,
+  # libvirt .201-.249), so nothing dynamic can ever be handed one of them.
+  # NOTE: same MAC scheme constraint as above - two digit values (10-99).
+  hub2d_bootstrap: 10
+  hub2d_master1: 11
+  hub2d_master2: 12
+  hub2d_master3: 13
+  hub2d_worker1: 14
+  hub2d_worker2: 15
+  hub2d_worker3: 16
+  hub2dlb: 19
 
   # Mirror registry - shared connected infrastructure for disconnected-install
   # simulation (see setup_mirror_registry.yaml). Stays reachable/connected
@@ -111,6 +482,29 @@ ip_list:
   ceph3: 26
   cephadmin: 27
 
+  # Containerlab host VM - the provider BGP/EVPN fabric for the UDN+BGP lab
+  # (see setup_udn_bgp_lab.yaml). This is its address on virbr0, used only
+  # for ssh/management; the fabric itself lives on virbr1 and this VM's
+  # second NIC gets clab_fabric_prefix.40 there, same last octet.
+  clab: 40
+  ## UDN-over-BGP lab clients. Kept OUT of 60-69 and 90-99 entirely: those are
+  ## the hosted clusters' MetalLB pool bands (hosted_cluster_metallb_pools),
+  ## and .60/.61/.62 in particular are the hcp-cluster1/2/3 API addresses on
+  ## hub1. MetalLB L2 mode ARPs for its pool addresses itself, so a VM holding
+  ## one does not fail cleanly - it fights the API VIP for the address and
+  ## whichever answers first wins, intermittently. An earlier version of this
+  ## file put udnclient on .60 and the tenant clients on .61-.63, straight
+  ## through hcp-cluster1, 2 and 3.
+  udnclient: 47
+  ## Phase 3 per-tenant client VMs (--tags clabtenantclients). One per
+  ## isolation domain: blue and red need separate machines because they carry
+  ## the same pod subnet, orange and green can share one because theirs differ.
+  udnclient-blue: 50
+  udnclient-red: 57
+  udnclient-og: 70
+  udnclient-purple: 87
+  udnnsclient: 88
+
 helper_name: helper
 helper_disk: helper_disk.qcow2
 ## The helper's disk is expanded from the 10G rhel9_kvm_image to this size when
@@ -119,23 +513,13 @@ helper_disk: helper_disk.qcow2
 ## roles/setup-hub-acm stages in /var/www/html/bootp for the AgentServiceConfig.
 ## An existing helper is not resized - delete its disk and re-run
 ## setup_bm_host.yaml to rebuild it at this size.
-helper_disk_size: 100G
+## (helper_disk_size itself is set in the START HERE block at the top.)
 ## Partition inside rhel9_kvm_image to expand into all the new space - verify
 ## against your actual base image with:
 ##   virt-filesystems --long --parts --blkdevs -h -a <image>
 ## if you ever change rhel9_kvm_image, since this is image-specific.
 helper_resize_partition: /dev/sda4
-helper_memory: 8192 
-helper_vcpus: 4
-master_memory: 16384
-master_cpu: 8
-worker_memory: 49152
-worker_cpu: 32
-hub_worker_replicas: 3
-
 ## Variables used by Setup BM Role 
-
-rhel9_kvm_image: "rhel-9.8-x86_64-kvm.qcow2"
 
 basic_packages: 
   - wget
@@ -158,6 +542,14 @@ basic_packages:
   - tigervnc-server
   - tigervnc
   - python3-pip
+  ## nmstatectl, which `openshift-install agent create image` runs ON THIS
+  ## HOST to validate each host's networkConfig before it will build the ISO.
+  ## Without it the SNO install dies at image creation with
+  ##   failed to validate network yaml for host 0, install nmstate package,
+  ##   exec: "nmstatectl": executable file not found in $PATH
+  ## Easy to miss on a long-lived lab host that picked it up as a dependency
+  ## years ago; a fresh machine has nothing.
+  - nmstate
 
 ##  Variables required by DNS Role 
 dns_packages:
@@ -166,16 +558,59 @@ dns_packages:
   - vim
   - net-tools
 
-hub_domain: hub.mylab.com
-hub2_domain: hub2.mylab.com
+## The other two helper roles used to hardcode their package lists inside the
+## task. They are variables now for the same reason dns_packages already was,
+## and for one more: the customized lab image installs the union of every
+## guest's list, so a hardcoded list is one the image cannot know about.
+lb_packages:
+  - haproxy
+tftp_packages:
+  - httpd
+  - tftp-server
+  - syslinux-tftpboot
+  - syslinux
+
+## Where the helper's named sends everything it is NOT authoritative for.
+##
+## Nothing to set: roles/setup-dns defaults to 'auto', which reads the lab
+## host's own resolvers from /etc/resolv.conf at run time (skipping loopback
+## and anything on the lab network, which would loop back to the helper) and
+## remembers the answer in /root/.lab-dns-forwarders for later re-runs.
+##
+## To name them yourself, SET THIS IN vault.yaml, not here - resolver
+## addresses are internal infrastructure and this file is committed:
+##
+##   dns_forwarders:
+##     - 10.x.x.x
+##     - 10.x.x.x
+##
+## It used to be hardcoded to 8.8.8.8, which does not resolve from this lab -
+## it times out, named answers SERVFAIL, and every external name fails from any
+## host using the helper as its resolver. That surfaced as an agent installer
+## refusing to start a connected single-node install (quay.io: SERVFAIL), but
+## nothing about it was specific to that.
+
+## Every domain in this file is <label>.<base_domain>, so base_domain (defined
+## further down, with the cluster names) is the single place the lab's DNS
+## suffix is written. Order does not matter - Ansible resolves these lazily.
+hub_domain: "hub.{{ base_domain }}"
+hub2_domain: "hub2.{{ base_domain }}"
 ## Subdomain for the disconnected hub. Must stay in sync with
 ## hub_disconnected_name below (OpenShift derives the cluster's DNS from
 ## <metadata.name>.<baseDomain>), and needs a matching zone in
 ## roles/setup-dns + a forwarder in roles/setup-bm-host's libvirt network.
-hub_disconnected_domain: hubd.mylab.com
-hosted_domain: hcp-cluster1.mylab.com
-hosted_domain2: hcp-cluster2.mylab.com
-hosted_domain3: hcp-cluster3.mylab.com
+hub_disconnected_domain: "hubd.{{ base_domain }}"
+## Subdomain for the disconnected DR hub, on the same terms as
+## hub_disconnected_domain above: it is <hub2_disconnected_name>.<base_domain>,
+## because OpenShift derives a cluster's DNS from <metadata.name>.<baseDomain>
+## and every cluster in this lab shares base_domain. So it is a sibling of
+## hub2_domain rather than a child of it - a zone under hub2_domain would
+## mean a different baseDomain for this cluster alone. Needs a matching zone in
+## roles/setup-dns and a forwarder in roles/setup-bm-host's libvirt network.
+hub2_disconnected_domain: "hub2d.{{ base_domain }}"
+hosted_domain: "hcp-cluster1.{{ base_domain }}"
+hosted_domain2: "hcp-cluster2.{{ base_domain }}"
+hosted_domain3: "hcp-cluster3.{{ base_domain }}"
 ## Subdomain for the disconnected hosted cluster. Its leading label is the
 ## HostedCluster name in hosted_clusters_disconnected below - that is what ties
 ## this zone to the cluster's hosted_cluster_metallb_pools entry, exactly as
@@ -187,31 +622,22 @@ hosted_domain3: hcp-cluster3.mylab.com
 ## hosted_clusters + hosted_clusters_disconnected, which is what lets all three
 ## '-d' clusters have zones without a template per cluster. Kept only for older
 ## playbooks that still reference it.
-hosted_domain_disconnected: hcp-cluster1-d.mylab.com
+hosted_domain_disconnected: "hcp-cluster1-d.{{ base_domain }}"
 
 
 
-##  Variables required by Setup-Hub-Cluster Role 
-## QUOTED deliberately. Unquoted, YAML parses 4.21 as a float - harmless for
-## .21, but 4.20 becomes 4.2, so every version string built from it
-## ("{{ ocp_major_version }}.{{ ocp_minor_version }}") would silently render
-## 4.2.33 instead of 4.20.33. Everything downstream (release pullspecs, the
-## RHCOS download urls, the operator index tag, the openshift-install path)
-## interpolates this into a string, so keep the quotes.
-ocp_major_version: "4.21"
-ocp_minor_version: 15 
-coreos_minor_version: 0  # Check https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/ for available rhcos versions for a specific ocp version.
-download_dir: /var/lib/libvirt/images/
-hub_vm_folder: /var/lib/libvirt/images/hub
-hub_install_folder: /var/lib/libvirt/images/hub_install
+##  Variables required by Setup-Hub-Cluster Role
+## (ocp_major_version / ocp_minor_version / coreos_minor_version are set in the
+## START HERE block at the top.)
+hub_vm_folder: "{{ download_dir }}/hub"
+hub_install_folder: "{{ download_dir }}/hub_install"
 hub_name: hub
 hub2_name: hub2
-base_domain: mylab.com
 
 ## Variables required by Setup-Hub-Cluster2 Role (the replacement hub
 ## built for DR/restore testing - new name, new VMs, same base domain)
-hub2_vm_folder: /var/lib/libvirt/images/hub2
-hub2_install_folder: /var/lib/libvirt/images/hub2_install
+hub2_vm_folder: "{{ download_dir }}/hub2"
+hub2_install_folder: "{{ download_dir }}/hub2_install"
 
 ## Variables required by Setup-Hub-Cluster-Disconnected Role - the hub
 ## installed purely from the local mirror registry. Separate name, VM
@@ -219,8 +645,60 @@ hub2_install_folder: /var/lib/libvirt/images/hub2_install
 ## nothing here is shared, and hub_disconnected_name doubles as the
 ## leading label of hub_disconnected_domain above.
 hub_disconnected_name: hubd
-hub_disconnected_vm_folder: /var/lib/libvirt/images/hubd
-hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
+hub_disconnected_vm_folder: "{{ download_dir }}/hubd"
+hub_disconnected_install_folder: "{{ download_dir }}/hubd_install"
+
+## Variables required by Setup-Hub-Cluster2-Disconnected Role - the DR hub
+## installed purely from the local mirror registry. Same treatment as the
+## hub_disconnected_* block above, one hub along: separate name, VM folder and
+## install folder from hub1/hub2/hubd so all four can co-exist, and
+## hub2_disconnected_name doubles as the leading label of
+## hub2_disconnected_domain above.
+hub2_disconnected_name: hub2d
+hub2_disconnected_vm_folder: "{{ download_dir }}/hub2d"
+hub2_disconnected_install_folder: "{{ download_dir }}/hub2d_install"
+
+## ---------------------------------------------------------------------------
+## Single-node OpenShift (setup_sno.yaml, --tags sno)
+## ---------------------------------------------------------------------------
+## A connected SNO built from an agent ISO: the node pulls its release payload
+## straight from quay.io with the pull secret in vault.yaml, so it needs no
+## mirror registry and no additionalTrustBundle.
+##
+## Its DNS zone is <sno_name>.<base_domain> - sno.mylab.com - rendered by
+## setup-dns from these same values, exactly as the hosted clusters' zones are.
+##
+## Only the knobs worth tuning are here. The rest (NIC name, installation disk,
+## gateway, timeouts, os-variant) live in roles/setup-sno/defaults/main.yml and
+## are correct for this lab as they stand.
+sno_name: sno
+
+## Where the installer's working directory lives - auth/kubeconfig under it is
+## what the UDN/BGP lab reads when clab_clusters.sno is targeted. Set here
+## rather than left to roles/setup-sno/defaults so that setup_udn_bgp_lab.yaml,
+## which does not import setup-sno, can still resolve it.
+sno_install_folder: "{{ download_dir }}/sno_install"
+
+## SNO minimums are 8 vCPU / 16GiB / 120GB. These are comfortable rather than
+## minimal - an SNO at exactly the minimum spends its life under memory
+## pressure, and the first symptom is operators flapping, which reads as a
+## broken install rather than a small one.
+sno_memory: 32768
+sno_vcpus: 12
+sno_disk_gb: 200
+
+## A second, unconfigured NIC on the containerlab fabric, added at build time.
+## Off by default: this builds a cluster and nothing about a cluster needs the
+## fabric.
+##
+## Leaving it false is the normal path even for a SNO destined for the EVPN
+## lab. setup_udn_bgp_lab.yaml --tags nodenics attaches the NIC to whatever is
+## in clab_fabric_clusters, hot-plugging it into the running VM with the same
+## deterministic MAC (52:54:00:e2:55:<octet>) this would have used - so the
+## NNCP's MAC capture finds it either way and no reboot is needed. Setting it
+## true only saves that one step, and only on a cluster built after the
+## decision to attach it.
+sno_fabric_nic: false
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
 ## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE
@@ -254,9 +732,16 @@ hub_disconnected_install_folder: /var/lib/libvirt/images/hubd_install
 ## value passed as metallb_hub / target_hub):
 ##   hub   - primary hub   (setup_hub_cluster.yaml)
 ##   hub2  - DR hub        (setup_hub_cluster2.yaml)
-##   hubd  - disconnected hub (setup_hub_cluster_disconnected.yaml)
+##   hubd  - disconnected hub (setup_hub_cluster.yaml -e disconnected_install=true)
 ## At DR cutover the hosted cluster comes back on the hub2 address and DNS is
 ## re-rendered to match - see the MetalLB section of the README.
+##
+## There is deliberately no 'hub2d' key. The disconnected DR hub
+## (setup_hub_cluster2.yaml with disconnected_install) is a separate cluster
+## from hub2, but it plays the same part in the topology, so it configures
+## MetalLB as metallb_hub=hub2 and a cluster restored onto it comes up on the
+## hub2 address DNS already publishes at cutover. Adding hub2d addresses here
+## would mean a second set of DR addresses that nothing resolves to.
 ##
 ## A cluster only carries an address for the hubs it can actually run on.
 ## The connected three have 'hub' and 'hub2' (primary and DR) but deliberately
@@ -349,7 +834,7 @@ hosted_cluster_metallb_network_prefixes: {}
 ## Variable for Hosted Cluster1
 hosted_cluster_cpu: 4
 hosted_cluster_memory: 8512
-hosted_cluster_vm_folder: /var/lib/libvirt/images/hosted_cluster
+hosted_cluster_vm_folder: "{{ download_dir }}/hosted_cluster"
 
 ## The worker VMs setup_hosted_cluster_vm.yaml creates for hcp-cluster1.
 ## 'name' is the libvirt domain name (and the qcow2 basename); 'ip_key' is
@@ -367,7 +852,7 @@ hosted_cluster_workers:
 ## Variables for Hosted Cluster1
 hosted_cluster2_cpu: 4
 hosted_cluster2_memory: 8512
-hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
+hosted_cluster2_vm_folder: "{{ download_dir }}/hosted_cluster2"
 
 ## ---------------------------------------------------------------------------
 ## Disconnected hosted cluster - the hosted cluster whose worker VMs have no
@@ -396,7 +881,7 @@ hosted_cluster2_vm_folder: /var/lib/libvirt/images/hosted_cluster2
 ## ---------------------------------------------------------------------------
 hosted_cluster_disconnected_cpu: 4
 hosted_cluster_disconnected_memory: 8512
-hosted_cluster_disconnected_vm_folder: /var/lib/libvirt/images/hosted_cluster_disconnected
+hosted_cluster_disconnected_vm_folder: "{{ download_dir }}/hosted_cluster_disconnected"
 
 ## Same shape as hosted_cluster_workers above. The names are what keeps these
 ## VMs distinct from hcp-cluster1's c1_worker* domains on the same hypervisor,
@@ -429,8 +914,7 @@ hosted_cluster_disconnected_block_node_nat: true
 ##
 ## AWS access key id/secret go in vault.yaml as
 ## oadp_aws_access_key_id / oadp_aws_secret_access_key - never here.
-oadp_aws_region: ap-south-1
-oadp_bucket_name: adp-backup-bucket-xjt   # S3 bucket names are globally unique - change this before first use
+## (oadp_aws_region / oadp_bucket_name are set in the START HERE block.)
 oadp_backup_prefix: hcp-backup
 oadp_backup_ttl: 999h0m0s
 oadp_bminfra_namespace: bminfra
@@ -462,7 +946,7 @@ oadp_storage_location: default
 ##         the reason the Ceph cluster exists in this lab.
 ##
 ## Override per run: -e oadp_backup_method=csi
-oadp_backup_method: fs
+## (oadp_backup_method itself is set in the START HERE block at the top.)
 
 ## The VolumeSnapshotClass Velero uses when oadp_backup_method=csi.
 ## setup-oadp labels it velero.io/csi-volumesnapshot-class="true" -
@@ -484,7 +968,7 @@ oadp_csi_driver: openshift-storage.rbd.csi.ceph.com
 ## you've cut over (see oadp/README.md), and re-run the dns tag of
 ## setup_bm_host.yaml with the same override so DNS follows the hosted
 ## clusters to the DR hub.
-target_hub: hub
+## (target_hub itself is set in the START HERE block at the top.)
 
 ## ---------------------------------------------------------------------------
 ## Role-default overrides (wired via vars_files in playbooks)
@@ -493,24 +977,13 @@ target_hub: hub
 ## Per-playbook role vars still win over vars.yaml when both set the same name.
 ## ---------------------------------------------------------------------------
 
-## setup-hub-acm: AgentServiceConfig storage and RHCOS live-ISO catalogue.
-## Shared by hub1 and hub2. Keep openshiftVersion in sync with bminfra_ocp_version.
+## setup-hub-acm: AgentServiceConfig storage. The RHCOS live-ISO catalogue that
+## goes with it, agent_service_os_images, is set in the START HERE block at the
+## top - one of its openshiftVersion entries must match bminfra_ocp_version
+## (which follows ocp_major_version).
 agent_service_database_storage: 10Gi
 agent_service_filesystem_storage: 100Gi
 agent_service_image_storage: 50Gi
-agent_service_os_images:
-  - openshiftVersion: "4.21"
-    version: "4.21.0"
-    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.21/4.21.0/rhcos-4.21.0-x86_64-live-iso.x86_64.iso"
-    cpuArchitecture: "x86_64"
-  - openshiftVersion: "4.22"
-    version: "4.22.8"
-    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.22/4.22.8/rhcos-4.22.8-x86_64-live-iso.x86_64.iso"
-    cpuArchitecture: "x86_64"
-  - openshiftVersion: "4.20"
-    version: "4.20.13"
-    url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.20/4.20.13/rhcos-4.20.13-x86_64-live-iso.x86_64.iso"
-    cpuArchitecture: "x86_64"
 
 ## setup-hub-acm, disconnected. With disconnected_install true (below, or
 ## -e disconnected_install=true) the role renders a different
@@ -555,9 +1028,13 @@ agent_service_os_images:
 # acm_disconnected_require_helper_space: false
 
 ## setup-bminfra: bare-metal infra namespace and InfraEnv OCP version.
-## osImageVersion must match an entry in agent_service_os_images above.
-bminfra_location: singapore
-bminfra_ocp_version: '4.21'
+## Follows ocp_major_version so the InfraEnv discovers hosts at the same
+## release the rest of the lab is built from - there is one number to bump.
+## It lands in InfraEnv.spec.osImageVersion, so agent_service_os_images above
+## must carry an entry whose openshiftVersion matches it (assisted-service
+## rejects a version it has no osImage for). Override here if you ever need
+## the InfraEnv on a different version than the hub.
+bminfra_ocp_version: "{{ ocp_major_version }}"
 discovery_iso_filename: "bminfra-discovery-{{ bminfra_ocp_version }}.iso"
 discovery_boot_kernel_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-vmlinuz"
 discovery_boot_initrd_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-initrd.img"
@@ -634,11 +1111,8 @@ bminfra_ignition_extra_files: []
 ## own single-address MetalLB pool and the metallb.io/address-pool annotation
 ## on its HostedCluster.
 ## CONNECTED hosted clusters. These names are reserved for connected runs -
-## a disconnected run never renders them.
-hosted_clusters:
-  - hcp-cluster1
-  - hcp-cluster2
-  - hcp-cluster3
+## a disconnected run never renders them. The list itself is in the START HERE
+## block at the top, with hosted_clusters_disconnected beside it.
 
 ## DISCONNECTED hosted clusters, rendered instead of the list above when
 ## disconnected_install is true. Same shape (a bare name, or a dict with 'name'
@@ -655,10 +1129,7 @@ hosted_clusters:
 ## hosted_domain/2/3 exist for the connected three), rendered with
 ## -e target_hub=hubd so api/api-int carry the hubd address. Without it the
 ## HostedCluster publishes a name nothing resolves.
-hosted_clusters_disconnected:
-  - hcp-cluster1-d
-  - hcp-cluster2-d
-  - hcp-cluster3-d
+## The list itself is in the START HERE block at the top.
 
 ## Defaults for every entry above that doesn't override them; they match
 ## hcp-cluster1. release image should correspond to an entry in
@@ -749,7 +1220,7 @@ hosted_cluster_addon_cert_policy_controller: true
 ## at hub1:
 # hosted_clusters:
 #   - name: hcp-cluster1
-#     api_hostname: api.hcp-cluster1-d.mylab.com
+#     api_hostname: "api.hcp-cluster1-d.{{ base_domain }}"
 
 ## ip_list keys for each hosted cluster's worker VMs and its *.apps VIP on the
 ## helper's haproxy. Keyed by HostedCluster name, so it lines up with
@@ -794,12 +1265,11 @@ hosted_cluster_node_keys:
 ## setup-mirror-registry-vm / setup-mirror-registry: the standalone VM
 ## used to simulate a disconnected install (see setup_mirror_registry.yaml).
 ## disconnected_install gates whether any of this is used at all - default
-## false so connected installs are completely unaffected.
-disconnected_install: false
+## false so connected installs are completely unaffected. It is set in the
+## START HERE block at the top.
 mirror_registry_name: registry
 mirror_registry_disk: registry_disk.qcow2
 mirror_registry_extra_disk: registry_extra_disk.qcow2
-mirror_registry_disk_size: 500G
 ## Partition inside rhel9_kvm_image to expand into all the new space -
 ## verify against your actual base image with:
 ##   virt-filesystems --long --parts --blkdevs -h -a <image>
@@ -822,6 +1292,8 @@ mirror_registry_quay_root: /registry
 mirror_ocp_channel: stable-{{ ocp_major_version }}
 mirror_ocp_version: "{{ ocp_major_version }}.{{ ocp_minor_version }}"
 mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v{{ ocp_major_version }}"
+## (mirror_catalog_operator_packages - what gets mirrored beyond the release
+## payload - is set in the START HERE block at the top.)
 ## Repository oc-mirror v2 publishes the release payload under, inside the
 ## mirror registry. roles/setup-hub-cluster-disconnected extracts
 ## openshift-install from "<registry>:<port>/<this>:<mirror_ocp_version>-x86_64",
@@ -829,13 +1301,6 @@ mirror_catalog_index: "registry.redhat.io/redhat/redhat-operator-index:v{{ ocp_m
 ## quay.io/openshift-release-dev/ocp-release onto - if you change oc-mirror's
 ## destination layout, change this to match or the extract will 404.
 mirror_release_repository: openshift/release-images
-mirror_catalog_operator_packages:
-  - advanced-cluster-management
-  - multicluster-engine
-  - lvms-operator
-  - metallb-operator
-  - redhat-oadp-operator
-  - cincinnati-operator
 
 ## setup-minio-vm / setup-minio: local S3-compatible OADP backup target
 ## for disconnected-install simulation (see setup_minio.yaml). Also
@@ -856,7 +1321,7 @@ minio_data_dir: /data/minio
 ## Bucket OADP will target when running against MinIO instead of real
 ## AWS S3 - kept distinct from oadp_bucket_name so switching between
 ## connected/disconnected DPA config is an explicit, visible choice.
-minio_bucket_name: adp-backup-disconnected
+## (minio_bucket_name itself is set in the START HERE block at the top.)
 
 # -----------------------------------------------------------------------
 # ADD to vars.yaml:
@@ -897,10 +1362,8 @@ ceph_os_disk_size: 60G
 ## verify with `virt-filesystems --long --parts --blkdevs -h -a <image>`
 ## if you ever change rhel9_kvm_image.
 ceph_os_resize_partition: /dev/sda4
-ceph_osd_disks_per_node: 3
-ceph_osd_disk_size: 100G
-ceph_storage_memory: 24576
-ceph_storage_vcpus: 16
+## (ceph_osd_disks_per_node, ceph_osd_disk_size, ceph_storage_memory and
+## ceph_storage_vcpus are set in the START HERE block at the top.)
 ceph_admin_memory: 8192
 ceph_admin_vcpus: 4
 
@@ -952,4 +1415,1443 @@ ceph_odf_exporter_local_path: "{{ playbook_dir }}/ceph-odf/ceph-external-cluster
 ## Where the exported JSON (contains cluster credentials!) lands
 ## locally - see .gitignore, never commit this.
 ceph_odf_export_dir: "{{ playbook_dir }}/ceph-odf"
-use_lvm_storage: true
+
+## ===========================================================================
+## UDN + BGP lab (VRF-Lite, EVPN) - containerlab provider fabric
+##
+## Everything below is used only by setup_udn_bgp_lab.yaml. Nothing in the
+## hub, hosted-cluster, OADP or Ceph flows reads any of it, so the existing
+## lab behaves identically whether or not this is ever run.
+##
+## The design in one paragraph: the OCP nodes keep their existing NIC on
+## virbr0 and their default route through it (image pulls, DNS, the API and
+## MetalLB all stay exactly as they are). A SECOND NIC is added to each node
+## on a new, isolated bridge (virbr1) that carries nothing but the provider
+## fabric. A containerlab topology - FRR routers - sits on that same bridge
+## and peers BGP with the nodes. Pod/UDN subnets are advertised out to the
+## fabric with RouteAdvertisements; fabric prefixes are learned back in. No
+## default gateway anywhere is moved.
+## ===========================================================================
+
+## Where containerlab itself runs.
+##   vm   - a dedicated RHEL9 VM (clab_vm_name) with two NICs: virbr0 for
+##          management/ssh and virbr1 for the fabric. Keeps Docker's iptables
+##          rules off the hypervisor entirely, which is the main reason to
+##          prefer it on a host that is also running the whole HCP lab.
+##   host - containerlab runs directly on the bare-metal host and attaches to
+##          virbr1 with containerlab's 'bridge' kind. One less hop and easier
+##          to tcpdump, at the cost of installing Docker on the hypervisor.
+## Both modes produce the identical fabric; only the placement differs.
+clab_deploy_mode: vm
+
+## The containerlab VM (clab_deploy_mode: vm only). Sized for FRR containers,
+## which are tiny - bump clab_vm_memory if you swap FRR for cEOS/SR Linux.
+clab_vm_name: clab
+clab_vm_disk: clab_disk.qcow2
+clab_vm_disk_size: 60G
+clab_vm_memory: 8192
+clab_vm_vcpus: 4
+## Partition inside rhel9_kvm_image to expand - same value the helper uses.
+clab_vm_resize_partition: /dev/sda4
+
+## The fabric L2 domain. A new libvirt network, deliberately <forward mode
+## 'none'> - no NAT, no DHCP, no DNS, no route to anywhere. It exists purely
+## as a broadcast domain shared by the OCP nodes' second NICs and the
+## containerlab routers, so it cannot perturb virbr0 or the lab's egress.
+##
+## MTU 9000 because the fabric has to carry Geneve (phases 1-3) and VXLAN
+## (phase 4) on top of already-encapsulated pod traffic. Leave it at 1500 and
+## the BGP sessions still come up while large flows silently black-hole.
+clab_fabric_network: fabric
+clab_fabric_bridge: virbr1
+clab_fabric_mtu: 9000
+
+## MTU for the CLIENT segments - the tenant VLANs the namespace client and the
+## per-tenant client VMs put their addresses on. Separate from the fabric MTU
+## above, and deliberately much smaller.
+##
+## The fabric wants 9000 because it carries encapsulated pod traffic. A client
+## segment carries none: it is the last hop to a POD, and the pod's own
+## interface is capped by the cluster network MTU - 1400 on this lab, which is
+## 1500 minus Geneve overhead. Read it off a running pod rather than assuming:
+##
+##   oc get network.operator cluster \
+##     -o jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig.mtu}{"\n"}'
+##   oc -n udn-blue rsh <web pod> ip link show ovn-udn1
+##
+## This was 9000 for every segment until it was measured. The clients then
+## advertised mss 8960 into a path that drops anything over ~1414 at the OVN
+## gateway's check_pkt_len, and the ICMP too-big did not make it back, so
+## path-MTU discovery could not correct it:
+##
+##   ping -M do -s 1372 <pod>   0% loss
+##   ping -M do -s 8972 <pod>   100% loss, and NO 'Frag needed' message
+##
+## TCP never noticed, because MSS clamping pins each direction to the other's
+## advertised MSS - so every web page in every test passed. Nothing else
+## survived: a UDP datagram or any DF-set packet above the path MTU vanished
+## silently. Matching the segment to the pod makes the failure local and
+## explicit instead - 'message too long, mtu=1400' from the client's own
+## kernel, before the packet is sent.
+##
+## Raise it only after raising the cluster MTU, which is the OpenShift MTU
+## migration and reboots every node twice, on both clusters.
+clab_client_mtu: 1400
+
+## Loose reverse-path filtering on the cluster nodes, applied through the
+## Tuned profile in roles/setup-udn-bgp/templates/tuned-forwarding.yaml.j2.
+##
+## The role defaults this to false, which is right for a cluster that is not
+## on a fabric. This lab always is, and phase 2 cannot work without it: its
+## client is off-segment by design, so the request reaches the pod over the
+## fabric and the pod's reply leaves by the node's default gateway. The paths
+## differ at every hop, and strict rp_filter rejects the request at INPUT -
+## before the kernel picks an output device, so forwarding, the ip rules, the
+## route in the UDN's table and the BGP advertisement are all correct and all
+## irrelevant.
+##
+## net.ipv4.conf.all.rp_filter=2 alone is enough: the effective value is
+## max(all, <iface>) and there is nothing above 2. Through Tuned rather than
+## sysctl -w because it covers every worker and survives a reboot.
+##
+## Left false, the symptom is per-node and looks like nothing: pods on nodes
+## that happen to have it answer, pods on nodes that do not are silent, and
+## every control-plane signal is identical either way.
+udn_bgp_loose_rp_filter: true
+
+## Fabric addressing. The last octet of every fabric address is the SAME
+## octet the node already has in ip_list on virbr0 - worker1 is .34 on both -
+## so there is one number per node to remember and no new collision surface.
+## The containerlab border leaf takes .1 on every fabric subnet.
+clab_fabric_prefix: "192.168.140"
+clab_fabric_netmask_bits: 24
+clab_fabric_router_octet: 1
+
+## BGP. eBGP between the cluster and the fabric: every node in ONE cluster
+## shares one ASN (that is how FRR-K8s and RouteAdvertisements model it) and
+## each fabric device gets its own, which is the ordinary datacentre design
+## and avoids the route-reflector/next-hop-self problems an iBGP lab runs
+## into as soon as a second fabric router appears.
+##
+## clab_cluster_asn is the DEFAULT for a cluster that does not name its own
+## in clab_clusters below. With more than one cluster on the fabric each
+## needs a distinct ASN, and it is not optional: leaf1 re-advertises hub's
+## EVPN routes to the SNO with AS_PATH "64513 64512", and if the SNO is also
+## 64512 it drops every one of them as a loop. What you see then is a healthy
+## session, the right routes on leaf1, and an empty table on the far side -
+## the single most time-consuming way for this to fail, because nothing
+## anywhere reports an error.
+clab_cluster_asn: 64512
+clab_leaf1_asn: 64513
+clab_leaf2_asn: 64514
+clab_spine_asn: 65000
+
+## Container images for the fabric. FRR is what OVN-Kubernetes itself is
+## built and tested against, and a node costs ~50MB of RAM. Swap in
+## ghcr.io/nokia/srlinux or ceos if you need vendor-accurate EVPN behaviour -
+## budget ~2GB per node if you do.
+clab_frr_image: "quay.io/frrouting/frr:10.2.1"
+clab_alpine_image: "alpine:3.20"
+
+## ---------------------------------------------------------------------------
+## Prebuilt lab image (optional) - udn-bgp-evpn/build-lab-image.yaml
+## ---------------------------------------------------------------------------
+##
+## Every guest this lab builds is a bare copy of rhel9_kvm_image with no
+## entitlement, so each one has to be registered with subscription-manager
+## before its first dnf. That is four registrations per build (the clab VM,
+## the phase-2 client, the per-tenant clients, the namespace client), each
+## one a network round trip to Red Hat that can and does fail independently.
+##
+## build-lab-image.yaml does it once instead: copy the base image, register
+## INSIDE the copy, install everything below, then unregister and clean so
+## the image carries no consumer identity. Build it and the lab uses it and
+## skips both the registration and the dnf; do not build it and nothing
+## changes. See udn-bgp-evpn/quick-build.md.
+##
+## The per-guest lists are the SOURCE for both halves - the image installs
+## their union, and each guest verifies its own list with rpm -q instead of
+## dnf. Add a package to a list here and the image build picks it up; forget
+## to rebuild the image and the verification says exactly which package is
+## missing rather than failing later inside whatever needed it.
+lab_pkgs_clab:
+  - iproute      # ip, bridge - creates and inspects the fabric bridge
+  - tcpdump      # proving what is actually on the wire
+  - iptables-nft # the FORWARD rules containerlab and this role insert
+  - git
+  - tar
+lab_pkgs_client: [iproute, tcpdump]
+lab_pkgs_nsclient: [iproute, tcpdump, curl]
+lab_pkgs_nsproxy: [haproxy, policycoreutils-python-utils]
+
+## The helper's three roles are in here unconditionally, even though the
+## helper only USES the image when customized_lab_image_for_helper is true.
+## One image that serves every guest is the point - especially for a workshop
+## built once and copied to many hosts - and it means turning the helper flag
+## on later needs no rebuild. The cost is bind/httpd/tftp-server sitting
+## installed and unstarted on the client VMs, which is disk and nothing else.
+customized_lab_image_packages: >-
+  {{ (lab_pkgs_clab + lab_pkgs_client + lab_pkgs_nsclient + lab_pkgs_nsproxy
+      + dns_packages + lb_packages + tftp_packages)
+     | unique | sort }}
+
+## Does the HELPER VM use the image too, and skip its subscription-manager
+## registration? Default false, deliberately.
+##
+## setup_bm_host.yaml is shared by every flow in this repository - hub,
+## hosted clusters, OADP, Ceph, the mirror registry - while the udn-bgp-evpn
+## lab is otherwise entirely additive to all of them. The helper is also the
+## one VM whose failure takes the rest down with it: it is DNS and the load
+## balancer for both clusters. Opting it in is a decision to make once you
+## trust the image, not one to inherit from a file appearing in a directory.
+##
+## Turning this on does NOT need an image rebuild - the helper's packages are
+## already in the union above.
+customized_lab_image_for_helper: false
+
+## Docker CE comes from download.docker.com, not from a Red Hat repository -
+## but containerd.io pulls container-selinux out of AppStream, so installing
+## it still needs an entitled guest. It therefore belongs in the image for
+## the same reason as everything above. Only the clab VM uses it; the client
+## VMs carry it and never start it, which costs disk and nothing else.
+## Set false to leave Docker to the normal clab-install.yml path.
+customized_lab_image_with_docker: true
+customized_lab_image_docker_packages: [docker-ce, docker-ce-cli, containerd.io]
+customized_lab_image_docker_repo: https://download.docker.com/linux/rhel/docker-ce.repo
+
+## The customized image, beside the base one in base_image_dir. Its PRESENCE
+## is what switches the lab over - there is no enable flag to forget.
+customized_lab_image: "{{ rhel9_kvm_image | regex_replace('\\.qcow2$', '') }}-customized.qcow2"
+
+## Does the image build register the copy with subscription-manager before
+## installing? Normally yes - a stock RHEL qcow2 has no repositories.
+##
+## Set false when the base image can already reach repositories on its own:
+## a local mirror, a Satellite, or an image derived from a cloud RHEL build
+## that carries RHUI. The register/unregister pair is then skipped entirely
+## and so is the org_id/activation_key assert, which is what makes a
+## credential-free build possible.
+##
+## Note this is about the IMAGE, not the host. On AWS metal the host itself
+## installs basic_packages from RHUI with no registration, but the KVM guests
+## inside it are ordinary RHEL qcow2s with no RHUI entitlement of their own -
+## so unless your base image is built for it, leave this true.
+customized_lab_image_register: true
+
+## ---------------------------------------------------------------------------
+## Distributing the image: build once, publish, pull on each lab host
+## ---------------------------------------------------------------------------
+##
+## The workshop shape. Building the image on every host means every host
+## needs subscription credentials and several minutes of virt-customize;
+## pulling a finished one needs neither.
+##
+##   on the build host:   ./build-lab.sh --only image
+##                        ./build-lab.sh --only image-publish
+##   on each lab host:    ./build-lab.sh --only image-fetch
+##
+## Either a bucket or a URL. The URL form takes a presigned S3 link, a public
+## object, or any ordinary web server, and needs nothing installed but the
+## ability to fetch it - which is the right property for the side that runs
+## on twenty hosts. The bucket form needs the aws CLI and uses its normal
+## credential chain, so on an AWS metal instance with an instance profile
+## there is nothing to configure at all.
+customized_lab_image_s3_bucket: ""
+customized_lab_image_s3_prefix: lab-images
+customized_lab_image_s3_region: "{{ oadp_aws_region }}"
+
+## Overrides the bucket for the FETCH side only. Presigned URLs expire, so
+## this is usually passed with -e rather than committed.
+customized_lab_image_url: ""
+
+## Credentials for the aws CLI, if it should not use its own chain. Leave
+## unset on an instance with a profile, or where ~/.aws/credentials is set
+## up. Put the values in vault.yaml, never here.
+##
+##   customized_lab_image_aws_access_key_id: ...
+##   customized_lab_image_aws_secret_access_key: ...
+
+## What the image build injects while preparing its copy - the same two
+## things setup_bm_host.yaml puts into the base image. Variables rather than
+## literals because a workshop handing out 20 hosts should not be stuck with
+## one hardcoded root password, and because the image build and the base-image
+## preparation have to agree on which key.
+##
+## lab_root_password is OPTIONAL and, being a credential, belongs in
+## vault.yaml rather than here - this file is committed to a public
+## repository. There is no toggle: defining it is the toggle.
+##
+##   ansible-vault edit vault.yaml     # lab_root_password: <password>
+##
+## Unset, the customized image is key-only. The lab never needs a password -
+## Ansible reaches every guest with the injected key. What a password buys is
+## console access (virsh console, VNC) into a guest whose networking is
+## broken, which in a lab about VLANs, VRFs and routing is a state you will
+## reach.
+##
+## Both images behave the same way: setup_bm_host.yaml's preparation of the
+## BASE image reads the same variable and also omits the password when it is
+## unset. It used to hardcode 'redhat'; that literal is gone.
+##
+## Root is UNLOCKED either way (passwd -u -f). A stock RHEL cloud image ships
+## it locked, and setting a password used to unlock it as a side effect - so
+## dropping the password without unlocking would have risked key-based root
+## login failing on an image-and-PAM detail.
+lab_ssh_pubkey_path: /root/.ssh/lab_rsa.pub
+
+## The ssh public key the HCP flows put on their nodes (create_hosted_cluster,
+## setup_bminfra). Defaults to the lab key above, which setup-bm-host
+## generates on its first run - so vault.yaml does not need one. Set ssh_key
+## in vault.yaml to use your own: vault.yaml is loaded after this file and wins.
+##
+## Read lazily: the lookup runs only when a play uses ssh_key, by which time
+## the key exists. The hub and the SNO do not use it at all - they read
+## lab_rsa.pub themselves (setup-hub-cluster, sno_ssh_public_key_file), so
+## `ssh -i ~/.ssh/lab_rsa core@<node>` is how you reach their nodes.
+ssh_key: "{{ lookup('ansible.builtin.file', lab_ssh_pubkey_path) }}"
+
+## Rebuild the image even if it is already there. Off by default because the
+## build takes several minutes and re-registers with Red Hat each time.
+customized_lab_image_force: false
+
+## Safe defaults for a lab with no prebuilt image. setup-clab-fabric stats
+## the file and set_facts both of these at the top of every run - set_fact
+## outranks vars_files, so the stat always wins and these two only matter to
+## a play that never reaches that role.
+customized_lab_image_ready: false
+customized_lab_base_image: "{{ rhel9_kvm_image }}"
+
+
+## ---------------------------------------------------------------------------
+## The clusters attached to this fabric.
+##
+## There used to be one flat clab_fabric_nodes list here, and it was serving
+## two different questions that only have the same answer while exactly one
+## cluster is attached:
+##
+##   FABRIC-WIDE  which VMs get a NIC on virbr1, which addresses leaf1 opens
+##                a BGP session to, and which VTEP /32s leaf1 carries. Every
+##                node of every cluster.
+##   PER-CLUSTER  which nodes get a NodeNetworkConfigurationPolicy, which
+##                node names the NNCPs select, which nodes are checked for a
+##                tenant VRF. Only the nodes of the cluster being targeted.
+##
+## Reading the second from the first is what breaks the moment a second
+## cluster appears: udn-bgp-evpn/roles/setup-udn-bgp/tasks/node-names.yml resolves every
+## entry against `oc get nodes` of the cluster it is pointed at, so a hub run
+## with the SNO in the list fails with "No cluster node has internal address
+## 192.168.122.20" - and a SNO run fails the same way on the three workers.
+##
+## So the per-cluster list is the source of truth and the fabric-wide one is
+## derived from it (udn-bgp-evpn/roles/setup-clab-fabric/tasks/main.yml). Each entry:
+##
+##   install_folder  where this cluster's auth/kubeconfig lives.
+##   asn             this cluster's BGP ASN. MUST be unique per cluster - see
+##                   the note at clab_cluster_asn above for what happens if
+##                   two clusters share one.
+##   nodes           domain = the libvirt domain name (what virsh calls the
+##                   VM); ip_key = its entry in ip_list, which gives both its
+##                   address and its fabric MAC.
+##
+## Deliberately NO Kubernetes node name in `nodes`. It used to carry one and
+## it was wrong - worker1.hub.mylab.com, the SSH/DNS name, where the cluster
+## had registered the node as plain 'worker1'. Every NNCP then selected a node
+## that did not exist and was silently Ignored. There is no value that is
+## right for every lab, because the node name is whatever the host sent as its
+## hostname at install time, so the role looks it up instead: it matches
+## ip_list's address against the nodes' InternalIP. See
+## udn-bgp-evpn/roles/setup-udn-bgp/tasks/node-names.yml.
+clab_clusters:
+  ## hub1 is a plain standalone cluster whose Network.operator.openshift.io CR
+  ## you can patch directly, which is what every phase needs. Hosted-cluster
+  ## workers are deliberately NOT here; see the README section on why to prove
+  ## this out on hub1 first.
+  hub:
+    install_folder: "{{ hub_install_folder }}"
+    asn: 64512
+    ## Explicit, and it has to be: a cluster with no tenants list builds
+    ## EVERY tenant in udn_bgp_tenants, which would put the SNO's tenant,
+    ## violet, on the hub in the phases where violet must be on one cluster
+    ## only - shared and VRF-Lite, which have no VNI or route target to keep
+    ## two clusters' copies of it apart.
+    tenants:
+      - blue
+      - red
+      - orange
+      - green
+      - purple
+
+    ## Phase 4 adds violet, the one ROUTED tenant that spans both clusters.
+    ## green and purple show a stretched broadcast domain (Layer2, type-2
+    ## routes); violet shows the Layer3 counterpart: one tenant, one L3VNI and
+    ## one route target, with each cluster holding its own slice of the
+    ## subnet (violet's evpn_udn_subnets) and routing to the other's over
+    ## type-5 routes. And blue beside it is the control - a different route
+    ## target on the same fabric, so violet on the SNO reaches violet on the
+    ## hub and not blue.
+    tenants_evpn:
+      - blue
+      - red
+      - orange
+      - green
+      - purple
+      - violet
+
+    ## The union, for the same reason as the SNO's tenants_web below: the web
+    ## phase runs after whichever transport phase was last applied and deploys
+    ## only the tenants whose namespace exists, so violet's web pod appears on
+    ## the hub after EVPN and is skipped with a note after the others.
+    tenants_web:
+      - blue
+      - red
+      - orange
+      - green
+      - purple
+      - violet
+
+    nodes:
+      - domain: hub_worker1
+        ip_key: worker1
+      - domain: hub_worker2
+        ip_key: worker2
+      - domain: hub_worker3
+        ip_key: worker3
+
+  ## The replacement hub from the OADP flow. Not in clab_fabric_clusters
+  ## below, so nothing is built for it - it is declared so that the old
+  ## `-e udn_bgp_target_hub=hub2` still resolves to a kubeconfig. Give it its
+  ## own ASN before putting it on the fabric alongside hub1.
+  hub2:
+    install_folder: "{{ hub2_install_folder }}"
+    asn: 64516
+    nodes:
+      - domain: hub2_worker1
+        ip_key: hub2_worker1
+      - domain: hub2_worker2
+        ip_key: hub2_worker2
+      - domain: hub2_worker3
+        ip_key: hub2_worker3
+
+  ## The single-node cluster from setup_sno.yaml. One node, which is both
+  ## master and worker, so it takes an NNCP and a VTEP exactly as a worker
+  ## does - single-node OpenShift labels its one node with both roles, which
+  ## is why the test workloads' `node-role.kubernetes.io/worker` selector
+  ## needs no special case here.
+  ##
+  ## advertise_default is false because this cluster's default pod network is
+  ## 10.128.0.0/14, the same as hub1's. Advertising both puts one prefix into
+  ## the fabric from two origins, and leaf1 picks a winner - so one cluster's
+  ## pods silently become unreachable. Phase 1 has already been proved on the
+  ## hub; there is nothing a second run of it here would establish.
+  sno:
+    install_folder: "{{ sno_install_folder }}"
+    asn: 64515
+    advertise_default: false
+    ## Not the hub's routed tenants, and that is not a simplification -
+    ## copying one here would break the hub.
+    ##
+    ## A tenant's identity in the fabric is its route target. blue is
+    ## RT 65000:101 carrying 10.200.0.0/16, and that belongs to the tenant,
+    ## not to the cluster. Build blue in both clusters and both originate
+    ## 10.200.0.0/16 into RT 65000:101 under different route distinguishers,
+    ## so leaf2 imports two equally good paths to one prefix pointing at two
+    ## different VTEPs - and traffic for a hub pod starts arriving at the SNO,
+    ## where nothing answers. Nothing reports this; it looks like packet loss.
+    ## setup-udn-bgp refuses it: a Layer3 tenant built on two clusters under
+    ## EVPN must give each cluster its own slice in evpn_udn_subnets.
+    ##
+    ## green and purple are the opposite case, and the reason this cluster is
+    ## on the fabric at all. A macVRF on one L2VNI is MEANT to exist in both
+    ## clusters - that is what makes it one stretched broadcast domain across
+    ## two clusters, which is the thing being tested. The addresses stay
+    ## unambiguous because evpn_l2_excludes gives each cluster its own half of
+    ## the prefix to allocate from.
+    ##
+    ## violet is the routed version of the same idea, and is only here under
+    ## EVPN (tenants_evpn below): one tenant on both clusters, made
+    ## unambiguous by giving each cluster its own half of the subnet rather
+    ## than by excluding addresses from a shared one.
+    tenants:
+      - green
+      - purple
+
+    ## Phase 4: the stretched Layer2 pair, plus violet as the routed tenant
+    ## that spans both clusters - see the hub's tenants_evpn for what the
+    ## pairing demonstrates.
+    tenants_evpn:
+      - green
+      - purple
+      - violet
+
+    ## Per-phase override. `tenants_<phase>` wins over `tenants` for that
+    ## phase; any phase without one falls back to the list above.
+    ##
+    ## Needed because this cluster's two jobs want different tenants. Under
+    ## EVPN it shares green and purple with the hub, which is the stretched
+    ## Layer2 test. Under VRF-Lite that same sharing is the problem: no VNI,
+    ## no route target, so both clusters advertise 10.204.0.0/16 into leaf1's
+    ## green VRF and one of them loses. violet is this cluster's own routed
+    ## tenant and is the whole of what it builds under VRF-Lite.
+    tenants_vrflite:
+      - violet
+
+    ## Phase 2 has the same problem as VRF-Lite and the same answer. It leaks
+    ## every UDN into the ONE default VRF, so green and purple built here
+    ## would originate the same udn_subnet_shared prefixes the hub already
+    ## originates, into the same table - two origins for one prefix and no
+    ## VNI or route target to tell them apart. violet's udn_subnet_shared
+    ## (10.225.0.0/16) is unique and built nowhere else, so it is the only
+    ## tenant this cluster can safely bring to phase 2.
+    ##
+    ## Without this list the phase would fall back to `tenants` above and
+    ## build green and purple, which is exactly the collision described.
+    tenants_shared:
+      - violet
+
+    ## The web phase is the union, on purpose. It runs after whichever
+    ## transport phase was last applied, and a static list cannot know which
+    ## that was. webload.yml deploys the tenants whose namespace exists right
+    ## now and skips the rest with a note, so this is correct after EVPN
+    ## (green, purple, violet) and after VRF-Lite (violet) without being
+    ## edited between runs.
+    tenants_web:
+      - green
+      - purple
+      - violet
+
+    nodes:
+      - domain: "{{ sno_name }}"
+        ip_key: sno
+
+## Which of the clusters above are actually wired into the fabric. This is
+## what builds clab_fabric_nodes, so it decides which VMs get a NIC on virbr1
+## and which neighbours leaf1 is configured with.
+##
+## Adding a cluster here and running --tags nodenics,clabdeploy is the whole
+## fabric-side change. Removing one and redeploying takes it back out; the
+## NIC stays attached to the VM, which is harmless.
+##
+## Order matters only for readability - leaf1's neighbour statements come out
+## in this order.
+clab_fabric_clusters:
+  - hub
+  - sno
+
+## The fabric NIC's MAC follows the lab's existing scheme with a bumped
+## fifth octet, so a fabric NIC is recognisable at a glance and can never
+## collide with a virbr0 reservation: 52:54:00:e2:55:<same last octet>.
+clab_fabric_mac_prefix: "52:54:00:e2:55"
+
+## In-guest name of the fabric NIC. These VMs are all single-NIC virtio
+## guests before this role runs, so the added NIC lands on the second PCI
+## slot and RHCOS names it enp2s0. The NNCPs match on MAC rather than on this
+## name, so it is only used for the pre-flight report - but if a node has
+## picked up an extra NIC from somewhere, check with:
+##   oc debug node/<node> -- chroot /host ip -br link
+clab_fabric_nic_name: enp2s0
+
+## ---------------------------------------------------------------------------
+## Tenants. Each one becomes: a ClusterUserDefinedNetwork, a VLAN on the
+## fabric NIC, a VRF on both the node and the border leaf, and (phase 4) a
+## pair of EVPN VNIs.
+##
+## blue and red deliberately OVERLAP on udn_subnet once VRF-Lite is on
+## (phase 3) - proving two UDNs can carry the same addresses in isolation is
+## most of the point of VRF-Lite, and it is the one test that cannot pass in
+## the shared-VRF phases.
+##
+## orange is the control: it overlaps with nothing, in any phase. Every
+## isolation result blue and red produce is then attributable to the VRF
+## rather than to the addresses, because orange is isolated from both while
+## sharing no address with either. It is also the tenant to reach for when a
+## prefix has to be unambiguous - a route to orange's subnet on the leaf or
+## in a node's table means exactly one thing, which blue's and red's do not.
+##
+## Phase 2 (targetVRF unset) uses udn_subnet_shared, which must be unique
+## across ALL tenants: that phase leaks every UDN into the one default VRF,
+## where a prefix cannot belong to two networks. OVN-Kubernetes does NOT
+## reject overlap there - its route advertisements controller carries a
+## literal `// TODO check overlaps?` - so the RouteAdvertisements is Accepted
+## and one tenant silently stops being reachable. The roles assert it instead.
+##
+## external_prefix is the network that lives BEHIND the border leaf for this
+## tenant - the thing a UDN pod should be able to reach, and that pods in the
+## other tenant should not.
+## ---------------------------------------------------------------------------
+udn_bgp_tenants:
+  - name: blue
+    topology: Layer3
+    vlan: 110
+    ## Point-to-point subnet for this tenant's VRF-Lite BGP session. Node
+    ## takes its ip_list octet here too, leaf takes .1.
+    vrf_prefix: "192.168.141"
+    ## Phase 3 (VRF-Lite) UDN subnet - identical to red's on purpose.
+    udn_subnet: "10.200.0.0/16"
+    ## Phase 2 (shared default VRF) UDN subnet - must not overlap anything.
+    udn_subnet_shared: "10.220.0.0/16"
+    udn_host_subnet: 24
+    ## The "customer" network behind the leaf, and the address of a test
+    ## endpoint on it that the verification steps ping.
+    external_prefix: "10.210.10.0/24"
+    external_prefix_bits: 24
+    ## Address of the border leaf on that network, and of the test endpoint
+    ## behind it. Spelled out rather than derived from external_prefix so
+    ## nothing here depends on the ansible.utils/netaddr collection.
+    external_gw: "10.210.10.1"
+    external_host: "10.210.10.10"
+    ## Phase 4 only. VNIs must be unique across every tenant.
+    evpn_mac_vni: 100
+    evpn_ip_vni: 101
+  - name: red
+    topology: Layer3
+    vlan: 120
+    vrf_prefix: "192.168.142"
+    udn_subnet: "10.200.0.0/16"
+    udn_subnet_shared: "10.221.0.0/16"
+    udn_host_subnet: 24
+    external_prefix: "10.211.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.211.10.1"
+    external_host: "10.211.10.10"
+    evpn_mac_vni: 200
+    evpn_ip_vni: 201
+
+  ## The control tenant. Overlaps with nothing in any phase, so it isolates
+  ## the variable: blue-cannot-reach-red could in principle be about the
+  ## identical subnets, blue-cannot-reach-orange cannot be about anything but
+  ## the VRF. Its subnet is also the only tenant prefix that is unambiguous
+  ## everywhere, which makes it the one to look for when reading a routing
+  ## table on the leaf or a node.
+  - name: orange
+    topology: Layer3
+    vlan: 130
+    vrf_prefix: "192.168.143"
+    udn_subnet: "10.202.0.0/16"
+    udn_subnet_shared: "10.222.0.0/16"
+    udn_host_subnet: 24
+    external_prefix: "10.212.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.212.10.1"
+    external_host: "10.212.10.10"
+    evpn_mac_vni: 300
+    evpn_ip_vni: 301
+
+  ## The Layer2 tenant, and the only one a VM should live on.
+  ##
+  ## Layer3 slices its subnet per node, so a workload that moves between
+  ## nodes necessarily changes address. Layer2 is one flat broadcast domain
+  ## across every node: the whole prefix exists everywhere, and an address
+  ## stays valid wherever the workload runs. With ipam.lifecycle Persistent -
+  ## set by the template for this topology - the allocation is tied to the VM
+  ## rather than to the pod backing it, so it survives live migration, which
+  ## replaces that pod with a new one on the target node.
+  ##
+  ## It also changes what the fabric sees: every node advertises this same
+  ## prefix, so the leaf gets one prefix with three paths instead of a
+  ## distinct per-node prefix from each. Under EVPN it takes a macVRF rather
+  ## than an ipVRF - the L2VNI carrying MAC reachability is the point, and
+  ## that is what evpn_mac_vni has been reserved for all along.
+  ##
+  ## Overlaps with nothing, like orange: a live migration that keeps its
+  ## address is only convincing if the address was unambiguous to begin with.
+  - name: green
+    topology: Layer2
+    vlan: 140
+    vrf_prefix: "192.168.144"
+    udn_subnet: "10.204.0.0/16"
+    udn_subnet_shared: "10.223.0.0/16"
+    ## Ignored for Layer2 - there is no per-node slice to size. Kept so every
+    ## tenant has the same shape.
+    udn_host_subnet: 24
+    external_prefix: "10.213.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.213.10.1"
+    external_host: "10.213.10.10"
+    evpn_mac_vni: 400
+    ## Phase 4 only. A macVRF carries MACs, not prefixes, so this tenant's
+    ## external endpoint is not a routed neighbour on external_prefix - it is a
+    ## HOST INSIDE udn_subnet, sharing the pods' broadcast domain across the
+    ## VXLAN tunnel. That is what a stretched L2 domain means, and it is why
+    ## external_gw / external_prefix go unused for this tenant on leaf2.
+    ##
+    ## Must sit inside udn_subnet and outside anything OVN might allocate,
+    ## which evpn_l2_exclude below reserves.
+    evpn_l2_external_host: "10.204.255.10"
+    ## The client segment's address on this tenant, phase 4 only. Same logic as
+    ## evpn_l2_external_host: a macVRF carries MACs, not prefixes, so a client
+    ## cannot sit on a routed segment behind a gateway the way it does for a
+    ## Layer3 tenant. It joins the stretched L2 domain instead and reaches the
+    ## pods on-link. Distinct from purple's for the same reason the ext hosts
+    ## are distinct - see the note there.
+    evpn_l2_client_host: "10.204.255.30"
+    evpn_l2_exclude: "10.204.255.0/24"
+    ## The IPAM split, per cluster, and the reason it is not optional once a
+    ## second cluster joins this L2VNI. A stretched Layer2 network is ONE
+    ## broadcast domain, but each cluster's OVN-Kubernetes allocates from the
+    ## subnet with no knowledge of the other - so both would hand out
+    ## 10.204.0.3 and put two pods on one address. There is no cross-cluster
+    ## IPAM in OVN-K and no plan for one; carving the prefix in half here is
+    ## how it is actually done.
+    ##
+    ## hub gets the low half, sno the high half. The .255.0/24 reservation for
+    ## the external endpoint and the client is inside the high half, so hub's
+    ## single /17 already covers it and sno has to name it a second time.
+    ##
+    ## Spelled out rather than computed: this repo deliberately does not
+    ## depend on ansible.utils/netaddr, and a subnet split that is a literal
+    ## can be checked against a routing table by eye.
+    ##
+    ## A cluster with no entry here falls back to evpn_l2_exclude alone, which
+    ## is correct for a single-cluster fabric.
+    evpn_l2_excludes:
+      hub:
+        - "10.204.128.0/17"
+      ## The low /17 with .0, .1 and .2 carved out, then the endpoint
+      ## reservation. The shape is not decoration, and the size of the hole is
+      ## the whole game.
+      ##
+      ## TOO SMALL AND THE NODE CRASHES. .1 is the Layer2 switch's gateway and
+      ## .2 is the node's management port; ovn-kubernetes must be able to
+      ## allocate both. A multi-node cluster takes one management address per
+      ## node, so this hole is correct for a SINGLE-node cluster and would need
+      ## widening by one address per extra node.
+      ##
+      ## TOO BIG AND THE SPLIT DOES NOTHING. Anything left unreserved is
+      ## allocatable, and IPAM hands out the lowest free address - so a 16-wide
+      ## hole put this cluster's pods on 10.204.0.3 and 10.204.0.5, back inside
+      ## the half the reservation exists to keep them out of. The hole is
+      ## exactly what ovn-kubernetes needs and not one address more.
+      ## Reserving it does not warn or degrade - ovn-kubernetes exits fatally
+      ##
+      ##   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
+      ##     failed to reserve IP 10.204.0.1: provided IP is already allocated
+      ##   F failed to run ovnkube
+      ##
+      ## and, once the gateway was freed and the management port was not:
+      ##
+      ##   failed to exclude subnet 10.204.0.2/32 ... IP is already allocated
+      ##
+      ## which CrashLoopBackOffs ovnkube-node and takes out ALL pod networking
+      ## on that node, not just this UDN. An assert in setup-udn-bgp refuses to
+      ## render a reservation covering the gateway for that reason.
+      ##
+      ## That both clusters keep 10.204.0.1 is the point AND the remaining
+      ## problem: two OVN gateway routers on one address in one stretched
+      ## broadcast domain. No reservation scheme fixes that one.
+      sno:
+        - "10.204.0.3/32"
+        - "10.204.0.4/30"
+        - "10.204.0.8/29"
+        - "10.204.0.16/28"
+        - "10.204.0.32/27"
+        - "10.204.0.64/26"
+        - "10.204.0.128/25"
+        - "10.204.1.0/24"
+        - "10.204.2.0/23"
+        - "10.204.4.0/22"
+        - "10.204.8.0/21"
+        - "10.204.16.0/20"
+        - "10.204.32.0/19"
+        - "10.204.64.0/18"
+        - "10.204.255.0/24"
+    evpn_ip_vni: 401
+
+  ## The collision tenant. Layer2, and deliberately carrying the SAME
+  ## udn_subnet as green.
+  ##
+  ## blue and red also share a subnet, but on Layer3 that never produced two
+  ## pods on one address: Layer3 slices the prefix per node, and with 256
+  ## slices to spread across, two networks rarely put a pod on the same one. So
+  ## the identity check stayed dead and "same address, different pod" stayed
+  ## unproven.
+  ##
+  ## Layer2 removes the slicing. The whole prefix exists on every node, and
+  ## IPAM allocates from the base of it, so green's first pod and purple's
+  ## first pod should both land on the same low address. Then one URL returns
+  ## two different pages depending only on which VRF the request entered.
+  ##
+  ## CONFIRMED: they collide. green and purple both came up on 10.204.0.12,
+  ## and curling that one URL from two clients returns "I am green" and
+  ## "I am purple". So OVN-Kubernetes does NOT coordinate allocation across
+  ## networks sharing a CIDR - the Layer3 tenants only looked coordinated
+  ## because 256 node slices are a lot of room to miss in.
+  - name: purple
+    topology: Layer2
+    vlan: 150
+    vrf_prefix: "192.168.145"
+    ## Identical to green's, on purpose. This is the whole point of the tenant.
+    udn_subnet: "10.204.0.0/16"
+    ## Phase 2 has no VRFs to keep them apart, so this one must be unique like
+    ## every other - the assert in setup-udn-bgp/tasks/main.yml enforces it.
+    udn_subnet_shared: "10.224.0.0/16"
+    ## Ignored for Layer2. Kept so every tenant has the same shape.
+    udn_host_subnet: 24
+    external_prefix: "10.214.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.214.10.1"
+    external_host: "10.214.10.10"
+    ## Layer2, so this takes a macVRF on the L2VNI like green does.
+    evpn_mac_vni: 500
+    ## Deliberately NOT the same address as green's, though the two subnets are
+    ## identical and it would work. Two ext containers on one address would make
+    ## matrix 1 (pod -> external endpoint) ambiguous for exactly the same reason
+    ## the pod collision does, and udn-vrf-isolation.sh keys EXTHOST by tenant
+    ## with no AMBIG handling on that axis. The pod-side collision already makes
+    ## the overlap point; this would cost a second round of script work to say
+    ## it again. Set them equal once EXTHOST is address-keyed like ADDR_OWNERS.
+    evpn_l2_external_host: "10.204.255.20"
+    evpn_l2_client_host: "10.204.255.40"
+    evpn_l2_exclude: "10.204.255.0/24"
+    ## Same split as green's, and the same values because purple carries the
+    ## same prefix. The green/purple collision this tenant exists to prove is
+    ## unaffected: both still allocate from the low half on the hub, so they
+    ## still land on the same address as each other.
+    evpn_l2_excludes:
+      hub:
+        - "10.204.128.0/17"
+      ## The low /17 with .0, .1 and .2 carved out, then the endpoint
+      ## reservation. The shape is not decoration, and the size of the hole is
+      ## the whole game.
+      ##
+      ## TOO SMALL AND THE NODE CRASHES. .1 is the Layer2 switch's gateway and
+      ## .2 is the node's management port; ovn-kubernetes must be able to
+      ## allocate both. A multi-node cluster takes one management address per
+      ## node, so this hole is correct for a SINGLE-node cluster and would need
+      ## widening by one address per extra node.
+      ##
+      ## TOO BIG AND THE SPLIT DOES NOTHING. Anything left unreserved is
+      ## allocatable, and IPAM hands out the lowest free address - so a 16-wide
+      ## hole put this cluster's pods on 10.204.0.3 and 10.204.0.5, back inside
+      ## the half the reservation exists to keep them out of. The hole is
+      ## exactly what ovn-kubernetes needs and not one address more.
+      ## Reserving it does not warn or degrade - ovn-kubernetes exits fatally
+      ##
+      ##   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
+      ##     failed to reserve IP 10.204.0.1: provided IP is already allocated
+      ##   F failed to run ovnkube
+      ##
+      ## and, once the gateway was freed and the management port was not:
+      ##
+      ##   failed to exclude subnet 10.204.0.2/32 ... IP is already allocated
+      ##
+      ## which CrashLoopBackOffs ovnkube-node and takes out ALL pod networking
+      ## on that node, not just this UDN. An assert in setup-udn-bgp refuses to
+      ## render a reservation covering the gateway for that reason.
+      ##
+      ## That both clusters keep 10.204.0.1 is the point AND the remaining
+      ## problem: two OVN gateway routers on one address in one stretched
+      ## broadcast domain. No reservation scheme fixes that one.
+      sno:
+        - "10.204.0.3/32"
+        - "10.204.0.4/30"
+        - "10.204.0.8/29"
+        - "10.204.0.16/28"
+        - "10.204.0.32/27"
+        - "10.204.0.64/26"
+        - "10.204.0.128/25"
+        - "10.204.1.0/24"
+        - "10.204.2.0/23"
+        - "10.204.4.0/22"
+        - "10.204.8.0/21"
+        - "10.204.16.0/20"
+        - "10.204.32.0/19"
+        - "10.204.64.0/18"
+        - "10.204.255.0/24"
+    evpn_ip_vni: 501
+
+  ## violet - the SNO's own tenant. The only one that is not on the hub,
+  ## except under EVPN, where it is on both (see evpn_udn_subnets below).
+  ##
+  ## Added for cross-cluster VRF-Lite. green and purple cannot serve that
+  ## purpose: they are Layer2 and deliberately share 10.204.0.0/16 across both
+  ## clusters, which is what makes them a stretched broadcast domain under
+  ## EVPN and what makes them unusable under VRF-Lite, where there is no VNI
+  ## to keep two clusters' identical prefixes apart. Both clusters would
+  ## advertise 10.204.0.0/16 into leaf1's green VRF from different next hops
+  ## and leaf1 would pick a winner.
+  ##
+  ## violet is Layer3 with a subnet of its own, so the fabric holds one
+  ## unambiguous route to it, and the hub's tenants can be leaked into it and
+  ## it into them - see udn_vrf_leaks.
+  ##
+  ## Every number here is outside every existing band: VLAN 160 (tenant
+  ## handoffs are 110-150, client segments 210-250), vrf_prefix .146 (tenants
+  ## are .141-.145), subnet 10.206 (10.200, 10.202 and 10.204 taken), shared
+  ## 10.225 (10.220-10.224 taken), VNIs 600/601. external_prefix is
+  ## 10.226.10.0/24 rather than continuing the 10.210-10.214 band, because
+  ## 10.215-10.219 immediately above it is already the client segments.
+  - name: violet
+    topology: Layer3
+    vlan: 160
+    vrf_prefix: "192.168.146"
+    udn_subnet: "10.206.0.0/16"
+    udn_subnet_shared: "10.225.0.0/16"
+    udn_host_subnet: 24
+    external_prefix: "10.226.10.0/24"
+    external_prefix_bits: 24
+    external_gw: "10.226.10.1"
+    external_host: "10.226.10.10"
+    evpn_mac_vni: 600
+    evpn_ip_vni: 601
+    ## Phase 4 only: the slice of udn_subnet each cluster allocates from.
+    ##
+    ## violet is built on BOTH clusters under EVPN - one tenant, one L3VNI,
+    ## one route target - and each cluster's OVN-Kubernetes allocates node
+    ## subnets knowing nothing of the other's. Given the whole /16 each, both
+    ## would hand out 10.206.0.0/24 first, and the fabric would hold two
+    ## origins for one prefix under one route target: traffic for a hub pod
+    ## arriving at the SNO. Two disjoint halves make every type-5 route
+    ## unambiguous, and the per-node gateways (.1 of each node's /24) never
+    ## collide either - which is the limit green and purple cannot escape,
+    ## since a stretched Layer2 subnet has ONE gateway address for everyone.
+    ##
+    ## Replaces udn_subnet for the named cluster in the evpn phase only.
+    ## Shared and VRF-Lite build violet on the SNO alone and keep the /16.
+    ## Both halves are inside udn_subnet, so a fabric client's route to
+    ## 10.206.0.0/16 still covers them.
+    evpn_udn_subnets:
+      hub: "10.206.0.0/17"
+      sno: "10.206.128.0/17"
+    ## Phase 4 only: leaf2 is this tenant's internet border.
+    ##
+    ## A UDN reaches a network through the fabric only if a router in the
+    ## tenant's VRF advertises it - VXLAN never goes looking for a next hop, it
+    ## encapsulates towards whatever VTEP the route names. Nothing advertised
+    ## a default, so a pod's egress to the internet ended in its node's VRF
+    ## with "Destination Host Unreachable" from the management port (.2).
+    ##
+    ## With this set, leaf2 originates 0.0.0.0/0 into the tenant's VRF as a
+    ## type-5 route (default-originate ipv4), so every node's copy of the VRF
+    ## gets "default via 10.0.0.2, VNI <evpn_ip_vni>". leaf2 hands the traffic
+    ## to its management NIC, and the host running containerlab NATs it -
+    ## "no NAT" is true inside the cluster; the internet still needs it, so it
+    ## moves to the border. leaf2 itself cannot NAT: the FRR image has no
+    ## iptables.
+    ##
+    ## PUBLIC destinations only. leaf2 keeps 10/8, 172.16/12 and 192.168/16
+    ## unreachable in the tenant's VRF, so the default is not a way round
+    ## tenant isolation: violet still cannot reach blue, or the lab's
+    ## management network.
+    ##
+    ## violet because nothing overlaps it. A tenant sharing its subnet with
+    ## another (blue and red, green and purple) would need per-VRF NAT at the
+    ## border - one NAT cannot tell their return traffic apart.
+    evpn_internet: true
+
+## Where the rendered containerlab topology and FRR configs are staged, on
+## whichever host clab_deploy_mode selected.
+clab_lab_dir: /root/udn-bgp-fabric
+clab_lab_name: udnbgp
+
+## Where the cluster-side manifests this role renders are written locally,
+## so they can be read, diffed and re-applied by hand. Nothing secret.
+##
+## Per cluster, because they are not interchangeable: the NNCPs name that
+## cluster's nodes, the FRRConfigurations carry its ASN, and the Layer2 CUDNs
+## carry its half of the IPAM split. One shared directory meant a SNO run
+## silently overwrote the hub's manifests, so `oc apply -f udn-bgp/` after the
+## fact applied the wrong cluster's objects to whichever cluster KUBECONFIG
+## happened to point at.
+udn_bgp_manifest_dir: "{{ playbook_dir }}/udn-bgp/{{ udn_bgp_cluster }}"
+
+## Which cluster the cluster-side phases target - a key of clab_clusters
+## above. It selects the kubeconfig, the BGP ASN, and which nodes get an NNCP.
+##
+##   ansible-playbook ... setup_udn_bgp_lab.yaml --tags evpn -e udn_bgp_cluster=sno
+##
+## udn_bgp_target_hub is the old name, kept working because it is what every
+## existing note and command line says. Setting either works; udn_bgp_cluster
+## wins if both are given.
+udn_bgp_target_hub: hub
+udn_bgp_cluster: "{{ udn_bgp_target_hub | default('hub') }}"
+
+## VRF-Lite and EVPN both require OVN-Kubernetes LOCAL gateway mode
+## (routingViaHost: true). Switching gateway mode restarts every ovnkube-node
+## pod and briefly disrupts pod egress, so it is a deliberate opt-in rather
+## than something the phase-3 tasks do silently.
+udn_bgp_set_local_gateway: true
+
+## Host IP forwarding, via OVN-Kubernetes rather than a sysctl.
+##
+## gatewayConfig.ipForwarding defaults to 'Restricted', and under Restricted
+## ovnkube-node holds net.ipv4.ip_forward at 0 - forwarding only what it
+## manages itself (br-ex, ovn-k8s-mpN). The fabric NIC is not one of those, so
+## the return path from the fabric to a pod is dropped in the routing decision
+## with every control-plane signal green.
+##
+## Writing the sysctl instead does not hold. ip_forward and
+## conf.all.forwarding are the same value, and a write to it propagates to
+## EVERY interface, so each ovnkube-node restart re-zeroes the fabric NIC. The
+## Tuned profile that also sets it cannot win either: the Node Tuning Operator
+## runs tuned in no_daemon mode - it applies the profile once and exits, with
+## nothing left to re-assert it - so whoever writes last keeps the value
+## forever. That is why three identically configured workers were observed
+## disagreeing, and why re-running the role 'fixed' it each time.
+##
+## 'Global' makes OVN-Kubernetes itself set ip_forward=1 and stop reverting
+## it, which removes the race rather than out-running it. The cost is that the
+## node forwards IP traffic generally rather than only Kubernetes traffic -
+## which is exactly what the Tuned profile was already asking for, stated
+## honestly. Set this false on a cluster where that is not acceptable; the
+## direct sysctl write in the role still runs, and will still be undone by the
+## next ovnkube-node restart.
+##
+## Patched in the same task block as the gateway mode above, so a first run
+## costs one ovnkube-node rollout rather than two.
+udn_bgp_set_ip_forwarding: true
+
+## Minimum cluster version for BGP route advertisements. Checked against the
+## cluster's VERSION, not against whether routeadvertisements.k8s.ovn.org
+## exists: that CRD is installed by the Cluster Network Operator when the
+## feature is enabled, so on a capable but not-yet-enabled cluster it is
+## legitimately absent.
+udn_bgp_bgp_min_version: "4.19"
+
+## Phase 4. EVPN for cluster user-defined networks is GA in OpenShift 4.22 -
+## on 4.21 the VTEP CRD and the CUDN network.transport/network.evpn fields do
+## not exist, so the cluster-side phase-4 tasks refuse to run and only the
+## EVPN fabric is built. See the README section for what that still buys you.
+## ocp_major_version is 4.22, so the full path is available.
+udn_bgp_evpn_min_version: "4.22"
+
+## And a SECOND floor, for the Layer3 half of phase 4 specifically. The API
+## above is the question "do the VTEP CRD and the CUDN evpn fields exist"; this
+## is the question "does a Layer3 tenant's traffic actually get forwarded".
+##
+## On 4.22.8 it does not, and the failure is entirely one-sided: Layer2 tenants
+## work perfectly, in both clusters and across the fabric, while every Layer3
+## tenant is silently black-holed. The cause is not EVPN at all - the node's
+## iptables FORWARD chain has policy DROP, with ACCEPTs for ovn-k8s-mp0, the
+## cluster network and the service network, and none for the per-tenant VRF
+## devices a Layer3 EVPN tenant forwards through:
+##
+##   # 4.22.8
+##   Chain FORWARD (policy DROP 10521 packets, 632K bytes)
+##    ACCEPT  all  --  ovn-k8s-mp0 *   0.0.0.0/0   0.0.0.0/0
+##    ACCEPT  all  --  *  *  0.0.0.0/0  10.128.0.0/14
+##    ...
+##
+##   # 4.22.10
+##   Chain FORWARD (policy ACCEPT 462K packets, 592M bytes)
+##    REJECT  tcp  --  ...  dpt:22624
+##    REJECT  tcp  --  ...  dpt:22623
+##
+## A Layer2 tenant is bridged and never traverses FORWARD, which is exactly why
+## it is unaffected - and why the symptom reads as "EVPN Layer3 is broken"
+## rather than as a firewall default.
+##
+## Below this version the preflight warns and names the workaround. It is NOT
+## applied automatically: see the note in that task for why.
+udn_bgp_evpn_l3_min_version: "4.22.10"
+
+## VTEP (VXLAN tunnel endpoint) addressing for phase 4.
+##
+## The VTEP CR runs in Unmanaged mode and these addresses are assigned by
+## NMState, one per node, at <prefix>.<the node's usual ip_list octet> - so
+## worker1 is .34 here exactly as it is on virbr0 and on the fabric.
+## Unmanaged is the only mode that works: Managed, where OVN-Kubernetes would
+## allocate them itself, is not implemented as of OpenShift 4.22 and 4.23
+## (source lines in udn-bgp-evpn/real-fabric.md section 6). Assigning them
+## here also means the border leaf can carry static /32s written at render
+## time.
+##
+## Deliberately a block that appears nowhere else in this lab - not
+## lab_network_prefix, not clab_fabric_prefix, not any tenant prefix. A VTEP
+## address that collides with a real one builds tunnels to the wrong place.
+##
+## In Unmanaged mode the VTEP CR's cidrs can be changed freely, so this lab
+## can be re-addressed. (The append-only rule belongs to Managed.)
+udn_bgp_vtep_prefix: "100.64.0"
+## Dummy interface the VTEP address is put on. A dummy rather than an address
+## on the fabric NIC because the VTEP address is the node's identity in the
+## overlay and has to stay up independently of any one link - the same shape
+## as a router loopback.
+udn_bgp_vtep_iface: vtep0
+
+## ---------------------------------------------------------------------------
+## Optional external client VM for phase 2 reachability testing
+## (udn-bgp-evpn/roles/setup-clab-fabric, --tags clabclient).
+##
+## One NIC on the management network and deliberately no fabric presence: a
+## client on the fabric segment shares a broadcast domain with leaf1 and every
+## worker, so leaf1 answers with an ICMP redirect and the traffic goes direct,
+## proving nothing about routing. Off-segment it is genuinely routed - by the
+## clab VM, then by leaf1 on what BGP told it.
+## ---------------------------------------------------------------------------
+udn_client_vm_name: udnclient
+udn_client_vm_disk: udnclient_disk.qcow2
+udn_client_vm_memory: 2048
+udn_client_vm_vcpus: 2
+udn_client_os_variant: rhel9.5
+
+## A plain copy of this image, not a virt-resize expansion - the VM runs ping
+## and tcpdump and has no use for a grown root filesystem. Point it at whatever
+## base image you have; rhel8 works as well as rhel9, adjust os_variant to match.
+##
+## Defaults to customized_lab_base_image, which is the prebuilt customized_lab_image when one
+## exists and plain rhel9_kvm_image when it does not. Naming an image here
+## overrides both.
+udn_client_base_image: "{{ customized_lab_base_image }}"
+
+
+## ---------------------------------------------------------------------------
+## Phase 3 per-tenant client VMs (--tags clabtenantclients)
+## ---------------------------------------------------------------------------
+## Real machines behind leaf1, one per isolation domain, for demonstrating
+## VRF-Lite with something you can ssh into rather than `docker exec` into.
+##
+## Each client segment is a VLAN on the SAME fabric bridge the nodes use, with
+## leaf1 holding the gateway inside that tenant's VRF. That placement is the
+## whole design:
+##
+##   * NOT on the tenant's handoff VLAN (110-140). A client there shares a
+##     broadcast domain with all three workers, so leaf1 answers with an ICMP
+##     redirect and the traffic goes direct - and worse, blue-cannot-reach-red
+##     would be proven by 802.1Q rather than by the VRF. Nobody doubts that two
+##     VLANs do not mix; the claim worth proving is that leaf1 keeps two
+##     ROUTING TABLES apart.
+##
+##   * NOT on the tenant's existing external_prefix either. That subnet is
+##     already connected on leaf1 through the <tenant>-ext veth, and a second
+##     interface carrying it would give the VRF two ambiguous paths to the same
+##     network. A separate segment per tenant is unambiguous, and it models a
+##     tenant VRF with two attached customer sites, which is realistic.
+##
+## So: off-segment from the nodes, routed by leaf1 inside the tenant VRF,
+## reachable only from the VLAN that lands in that VRF. leaf1 originates each
+## of these into its VRF so the cluster learns the return path over BGP.
+udn_client_segments:
+  ## vlan: the client segment's 802.1Q id, distinct from the handoff VLANs.
+  ## prefix: first three octets; leaf1 takes .1 and the VM takes .20.
+  blue:   {vlan: 210, prefix: "10.215.10"}
+  red:    {vlan: 220, prefix: "10.216.10"}
+  orange: {vlan: 230, prefix: "10.217.10"}
+  green:  {vlan: 240, prefix: "10.218.10"}
+  purple: {vlan: 250, prefix: "10.219.10"}
+  ## violet lives on the SNO, but its client segment is on leaf1 like every
+  ## other one: the netns reaches violet's pods through leaf1's violet VRF and
+  ## the BGP session to the SNO, exactly as the hub's tenants are reached
+  ## through theirs. Nothing about this is cluster-specific.
+  ##
+  ## 10.227.10 because everything nearer is taken: externals 10.210-10.214,
+  ## client segments 10.215-10.219, udn_subnet_shared 10.220-10.225, violet's
+  ## own external network 10.226.10.0/24.
+  violet: {vlan: 260, prefix: "10.227.10"}
+
+udn_client_segment_gw_octet: 1
+udn_client_segment_host_octet: 20
+
+## Which VM serves which tenants. The grouping is forced by the addressing, not
+## chosen for convenience: blue and red both use 10.200.0.0/16 in phase 3, so a
+## single host cannot hold a route to each - one routing table, one entry, one
+## winner. orange (10.202.0.0/16) and green (10.204.0.0/16) do not collide, so
+## one VM with two VLAN subinterfaces and two routes serves both, and needs no
+## VRFs of its own to do it.
+##
+## Keeping the clients dumb is deliberate. A client-side VRF fault would be
+## indistinguishable from the leaf-side VRF fault under test, and leaf1 is the
+## thing being tested.
+udn_tenant_clients:
+  - name: udnclient-blue
+    tenants: [blue]
+  - name: udnclient-red
+    tenants: [red]
+  - name: udnclient-og
+    tenants: [orange, green]
+  ## purple carries green's subnet, so it cannot share green's machine - one
+  ## routing table holds one route to 10.204.0.0/16. That is the same rule that
+  ## forces blue and red apart, and tenant-client-vms.yml asserts it rather
+  ## than trusting it.
+  - name: udnclient-purple
+    tenants: [purple]
+
+udn_tenant_client_memory: 2048
+udn_tenant_client_vcpus: 2
+udn_tenant_client_os_variant: rhel9.5
+udn_tenant_client_base_image: "{{ customized_lab_base_image }}"
+
+
+## ---------------------------------------------------------------------------
+## The namespace client (--tags clabnsclient)
+## ---------------------------------------------------------------------------
+## One VM holding one network namespace per tenant, as an alternative to the
+## per-tenant client VMs above. Built alongside them, not instead of them, so
+## the two approaches can be compared on the same fabric before either is
+## dropped.
+##
+## A netns is a stronger client-side isolation than a VRF and closer to a
+## separate machine: it has no visibility of another namespace's interfaces or
+## routes at all, so there is no shared rule table to mis-order. That matters,
+## because the objection to putting every tenant on ONE host was that a
+## client-side fault would be indistinguishable from the leaf-side fault under
+## test - true of VRFs, not true of namespaces.
+##
+## It is also cleaner than the *-ext containers, which each carry an eth0 on
+## the containerlab management network - a path between them outside the
+## fabric. A namespace here holds its VLAN subinterface and lo, and nothing
+## else.
+##
+## And it removes the grouping arithmetic entirely. The per-VM design needs
+## blue and red on separate hosts because one routing table holds one route to
+## 10.200.0.0/16; with one namespace per tenant that constraint does not exist,
+## so every tenant gets its own namespace unconditionally.
+udn_nsclient_vm_name: udnnsclient
+udn_nsclient_memory: 2048
+udn_nsclient_vcpus: 2
+udn_nsclient_os_variant: rhel9.5
+udn_nsclient_base_image: "{{ customized_lab_base_image }}"
+
+## MUST differ from udn_client_segment_host_octet. The per-tenant client VMs
+## hold .20 on these same VLANs on this same bridge, so reusing it would put
+## two machines on one address in one broadcast domain - an ARP fight that
+## would look like an intermittent isolation failure and would be miserable to
+## attribute. This is the single thing that lets both designs run at once.
+udn_nsclient_segment_host_octet: 21
+
+
+## ---------------------------------------------------------------------------
+## Per-tenant web workload (--tags web)
+## ---------------------------------------------------------------------------
+## One pod per tenant serving a page that names its own tenant, pod, node and
+## UDN address. The point is that an HTTP response identifies the responder and
+## an ICMP echo reply does not - so once blue and red carry the same subnet,
+## curling two addresses in that subnet from two client VMs returns two
+## different documents and there is nothing left to infer.
+##
+## Every tenant, including the ones that overlap with nothing. The overlapping
+## pairs - blue/red and green/purple - are why the demo exists, but a tenant
+## with no pod produces a row of blanks, and a row of blanks is exactly what a
+## dead client produces too. Orange was left out on the reasoning that a page
+## proves nothing a ping cannot for a subnet nobody shares; that confuses what
+## the POSITIVE cell proves with what the row as a whole proves. Orange's one
+## answer is what licenses reading its four blanks as isolation rather than as
+## breakage - and with orange/worker1 among the sessions currently stuck in
+## Active, the blank row was hiding a real failure, not demonstrating one.
+udn_web_tenants: [blue, red, orange, green, purple, violet]
+
+## Tenants to leave out everywhere a cluster's tenant list is read - the
+## build, the web pods, the check - without restating any tenant. The
+## workshop sets [orange] (udn-bgp-evpn/workshop/vars-workshop.yaml): orange
+## is a third non-overlapping Layer3 tenant and teaches nothing blue and
+## violet do not. The fabric still carries its VRF, unused.
+udn_tenants_skip: []
+
+## UBI, not registry.redhat.io: this needs no entitlement, and unlike the ping
+## DaemonSet it needs no privileged SCC either - httpd-24 listens on 8080 as a
+## non-root user, which restricted-v2 allows. The init container is the same
+## support-tools image the ping workload uses, for `ip` only.
+udn_web_image: "registry.access.redhat.com/ubi9/httpd-24:latest"
+udn_web_init_image: "registry.redhat.io/rhel9/support-tools:latest"
+udn_web_port: 8080
+
+
+## ---------------------------------------------------------------------------
+## Tenant ingress on the namespace client (--tags clabnsproxy)
+## ---------------------------------------------------------------------------
+## The question this answers is the one the isolation matrix provokes: if two
+## tenants genuinely hold the same address, how does an end user reach either?
+##
+## The answer is a proxy that is itself multi-homed into every tenant, and on
+## this VM that is possible because HAProxy can open a backend connection
+## INSIDE a named network namespace ('namespace <name>' on a server line). Two
+## backends can then name the identical address and port and reach different
+## pods, because each connect() happens in a different namespace and therefore
+## against a different routing table:
+##
+##     backend be_green    server g1 10.204.0.12:8080 namespace green
+##     backend be_purple   server p1 10.204.0.12:8080 namespace purple
+##
+## No other single-process arrangement gets that. A proxy in the root namespace
+## has no fabric presence at all here - udn-netns-client.sh deliberately leaves
+## root holding the NIC and no address - and even given one, root has a single
+## routing table and so a single route to 10.204.0.12.
+##
+## WHAT THIS COSTS, stated plainly: this machine can now reach every tenant.
+## That is a deliberate hole in the property the rest of phase 3 demonstrates.
+## Everywhere else a misconfiguration CANNOT cross-connect tenants because no
+## path exists; here the Host-to-namespace mapping is the only thing keeping
+## them apart, and a wrong 'namespace' keyword would serve purple's page on
+## green's hostname with nothing in the fabric objecting. That is exactly what
+## a real tenant-facing ingress is, which is why it is worth building on
+## purpose rather than meeting by accident. It changes nothing for the other
+## tests: those run inside the namespaces, which this does not touch.
+udn_proxy_tenants: "{{ udn_web_tenants | reject('in', udn_tenants_skip) | list }}"
+
+## Which phase's tenant lists the ingress should mirror.
+##
+## A cluster can build different tenants in different phases - see
+## clab_clusters.sno.tenants_vrflite - and the ingress has to front what is
+## actually deployed, not what the default list says. This role has no
+## udn_phase of its own (it is the fabric role, run with --tags clabnsproxy),
+## so it derives one from the topology it built: the evpn topology serves the
+## evpn phase, and the bgp topology serves VRF-Lite.
+##
+## The one case that derivation gets wrong is the SHARED phase, which also
+## runs on the bgp topology. Override it there:
+##   -e udn_proxy_phase=shared
+## Getting it wrong is not silent - the ingress fails on the first tenant it
+## cannot find a web pod for, naming the cluster.
+udn_proxy_phase: "{{ 'evpn' if clab_topology | default('bgp') == 'evpn' else 'vrflite' }}"
+
+## Which clusters the ingress fronts. One hostname per tenant per cluster, all
+## on one address, with haproxy picking the backend from the Host header.
+##
+## The FIRST entry keeps the bare hostname and the rest are suffixed, so
+## green.{{ udn_proxy_domain }} stays hub's and sno's becomes
+## green-sno.{{ udn_proxy_domain }}. That keeps every existing URL working and
+## makes the addition read as an addition.
+##
+## A cluster only contributes the tenants it actually builds - clab_clusters
+## limits the SNO to green and purple - so this produces five hub hostnames and
+## two sno ones rather than ten.
+##
+## The network namespace is chosen by TENANT, not by cluster, and that is the
+## whole reason this works with no new plumbing: green and green-sno are one
+## stretched L2VNI, so the green namespace reaches both clusters' pods on-link.
+## Only the backend address differs.
+##
+## Set to [hub] to go back to a single-cluster ingress.
+udn_proxy_clusters:
+  - hub
+  - sno
+
+## Every hostname the ingress answers to, as a space-separated string.
+##
+## Defined here rather than in either consumer because there are two: the
+## haproxy config in setup-clab-fabric and the DNS zone in setup-dns. Those run
+## from different playbooks, and a zone generated from the TENANT list while
+## haproxy was generated from the ROUTE list is a drift that presents as one
+## hostname resolving and 404ing - which reads as a proxy fault and is not one.
+##
+## Space-separated rather than a list because it is built by a Jinja loop, and
+## a joined string needs no type conversion to survive templating. Consumers
+## call .split() on it.
+##
+## The rule: bare name for the first cluster in udn_proxy_clusters, suffixed
+## for the rest, and a cluster only contributes the tenants it actually builds.
+udn_proxy_names: >-
+  {% for c in udn_proxy_clusters %}{% for t in udn_proxy_tenants %}{% if t in (clab_clusters[c]['tenants_' ~ udn_proxy_phase] | default(clab_clusters[c].tenants | default(udn_proxy_tenants), true)) %}{{ t if c == udn_proxy_clusters[0] else t ~ '-' ~ c }} {% endif %}{% endfor %}{% endfor %}
+
+## Hostnames are <tenant>.<domain>, pointed at the namespace client's
+## management address in whatever resolver the lab uses. No DNS? The proxy also
+## routes on path, so http://<vm>/green/ works with no name resolution at all,
+## and a Host header works without either.
+udn_proxy_domain: "hub.mylab.com"
+udn_proxy_port: 80
+udn_proxy_stats_port: 8404
+
+## HAProxy must be built with USE_NS=1 for the namespace keyword to exist. The
+## role checks and fails with the verification command rather than rendering a
+## config the binary cannot parse.
+##
+## SELinux: haproxy opens each namespace file (/run/netns/<name>, labelled
+## nsfs_t) while PARSING its config, and haproxy_t has no read rule for nsfs_t.
+## The denial therefore surfaces as "Fatal errors found in configuration" and
+## the service refuses to start - not as a connect-time EPERM. Note that
+## `haproxy -c` run from Ansible does NOT reproduce it, because that process
+## never transitions into haproxy_t; only systemd's execution of the unit does,
+## so a config that validates cleanly can still fail to start.
+##
+## The role reaches for this only if the service fails to start AND an AVC is
+## actually present, and it makes ONE domain permissive rather than the system
+## - this is a disposable lab client VM. Set false to have it fail and leave
+## the policy alone; the task comments name two narrower alternatives (a
+## targeted audit2allow module, or SELinuxContext= on the unit).
+udn_proxy_selinux_permissive_fallback: true
+
+
+## ---------------------------------------------------------------------------
+## Deliberate inter-tenant routing (--tags clabdeploy, leaf1)
+## ---------------------------------------------------------------------------
+## VRF-Lite separates tenants by giving each its own routing table. Route
+## LEAKING is the controlled exception: `import vrf <other>` copies one VRF's
+## BGP routes into another's table, which is how a shared service is reached
+## without making the tenants mutually reachable in general.
+##
+## The constraint is arithmetic, not policy. A table holds one route per
+## destination, so a VRF can only import tenants whose subnets are disjoint
+## from its own AND from each other. That makes blue<->red and green<->purple
+## impossible - they are the pairs built to collide - and everything else
+## legal. An assert in setup-clab-fabric enforces it rather than leaving a
+## silent winner-takes-all in the table.
+##
+## These two pairs are chosen to say something the lab has not said yet:
+##
+##   blue imports green   ->  blue's table:  10.204.0.0/16 = green
+##   red  imports purple  ->  red's table:   10.204.0.0/16 = purple
+##
+## The same prefix, in two tables, meaning two different tenants. Phase 3 has
+## been proving that two tenants can hold one address and stay apart; this
+## proves the same tables can be opened between chosen pairs without the
+## ambiguity ever arising, because no single table is asked to hold both.
+##
+## Each pair is leaked BOTH ways. A one-way import gives a path out and none
+## back, which presents as a fabric fault rather than a configuration choice -
+## the same trap as leaving out the client segment's `network` statement.
+##
+## WHAT THIS CANNOT DO WITHIN ONE CLUSTER, established on the running lab: a
+## pod cannot reach another tenant's POD on the SAME cluster. OVN-Kubernetes
+## installs an ACL named advertised-network-subnets that drops traffic whose
+## source AND destination are both advertised UDN subnets - so BGP
+## advertisement cannot be used to defeat UDN isolation between two tenants of
+## one cluster. The leak is real for everything else: a pod reaches the other
+## tenant's external network, and is reachable from its clients, because those
+## addresses are not advertised UDN subnets. See doc section 3i.
+##
+## ACROSS CLUSTERS IT IS A DIFFERENT ANSWER, and the wording above used to
+## miss it. A violet pod on the SNO curls a green pod on the hub and gets
+## green's page:
+##
+##   sh-5.1# curl http://10.204.0.7:8080
+##   I am green on hub
+##
+## That is 10.206.0.5 -> 10.204.0.7, two DIFFERENT advertised subnets, so it
+## is not the same-subnet case README.md and udn-bgp-evpn-steps.md already
+## describe for EVPN. Each cluster's ACL is built from THAT CLUSTER'S
+## advertised subnets: the SNO's holds 10.206.0.0/16 and knows nothing of
+## 10.204.0.0/16, the hub's is the mirror image, so neither end sees a pair
+## where both sides are locally advertised and neither drops it. Confirm by
+## listing the address set the ACL matches on each cluster:
+##
+##   OVN=$(oc -n openshift-ovn-kubernetes get pod -l app=ovnkube-node -o name | head -1)
+##   oc -n openshift-ovn-kubernetes rsh -c ovnkube-controller $OVN \
+##     ovn-nbctl --bare --columns=match find ACL \
+##       'external_ids{>=}{"k8s.ovn.org/name"=advertised-network-subnets}'
+##
+## So the isolation this list opens is per-VRF AND per-cluster. Within a
+## cluster the ACL is the backstop whatever the leaks say; across clusters the
+## leaks are the only thing deciding, which is why the pairs below are chosen
+## rather than convenient.
+##
+## Set to [] to have the tenants fully isolated again.
+udn_vrf_leaks:
+  - [blue, green]
+  - [red, purple]
+
+  ## violet (SNO) <-> the hub. One partner per DISTINCT subnet, which is the
+  ## condition `import vrf` needs: violet's table must hold exactly one route
+  ## per destination. blue and red both carry 10.200.0.0/16 and green and
+  ## purple both carry 10.204.0.0/16, so importing both halves of either pair
+  ## would put two routes for one prefix into violet's table and FRR would
+  ## install whichever won - reachability that changes on a session flap.
+  ##
+  ## So: orange for 10.202.0.0/16, blue for 10.200.0.0/16, green for
+  ## 10.204.0.0/16. red and purple stay isolated from violet on purpose, and
+  ## are the control - they prove the opening is per-VRF rather than a
+  ## general one, which is the thing a leak test has to distinguish.
+  - [violet, orange]
+  - [violet, blue]
+  - [violet, green]
+
+  ## ONE THING TO CHECK ON THE FIRST RUN, because blue and green already leak
+  ## to each other above. If FRR re-exports a leaked route - imports into
+  ## violet the routes blue itself imported from green - then violet receives
+  ## 10.204.0.0/16 twice, once directly from green and once through blue, and
+  ## the ambiguity this list was built to avoid comes back by the side door.
+  ## If it does not, [violet, green] is doing the work it looks like it is.
+  ##
+  ##   docker exec clab-udnbgp-leaf1 vtysh \
+  ##     -c 'show bgp vrf violet ipv4 unicast 10.204.0.0/16'
+  ##
+  ## One path: as intended, leave this alone. Two paths: drop [violet, green]
+  ## - green arrives through blue regardless - and re-run --tags fabric.

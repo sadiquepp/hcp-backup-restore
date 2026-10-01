@@ -1,0 +1,70 @@
+---
+# The VM itself: a disk, a DHCP reservation, and a domain booting the ISO.
+
+- name: Remove a stale domain if rebuilding
+  ansible.builtin.shell:
+    cmd: |
+      virsh destroy {{ sno_name }} >/dev/null 2>&1 || true
+      virsh undefine {{ sno_name }} --remove-all-storage >/dev/null 2>&1 || \
+        virsh undefine {{ sno_name }} >/dev/null 2>&1 || true
+  when: sno_vm_state.stdout != ''
+  changed_when: true
+
+- name: Create the SNO's disk
+  ansible.builtin.command:
+    cmd: >-
+      qemu-img create -f qcow2
+      {{ sno_vm_folder }}/{{ sno_name }}_disk.qcow2 {{ sno_disk_gb }}G
+    creates: "{{ sno_vm_folder }}/{{ sno_name }}_disk.qcow2"
+
+- name: Read the default network's current definition
+  ansible.builtin.command:
+    cmd: "virsh net-dumpxml default"
+  register: sno_net_xml
+  changed_when: false
+
+# The node addresses itself statically from agent-config.yaml, so this
+# reservation is not what gives it its address - it is what stops libvirt
+# handing the same address to something else later.
+- name: Reserve the SNO's address on the default network
+  ansible.builtin.command:
+    cmd: >-
+      virsh net-update default add ip-dhcp-host
+      "<host mac='{{ sno_mgmt_mac }}'
+             name='{{ sno_name }}'
+             ip='{{ sno_ip }}'/>"
+      --live --config
+  when: sno_mgmt_mac not in (sno_net_xml.stdout | lower)
+
+# --import with a cdrom and an explicit boot order, rather than --cdrom.
+# --cdrom starts a libvirt "install" session that boots the ISO first every
+# time, so the node reboots back into the agent after writing RHCOS to disk.
+# 'hd,cdrom' falls through to the ISO while the disk is empty and prefers the
+# disk the moment it is bootable, which is exactly the lifecycle wanted here.
+- name: Define and start the SNO
+  ansible.builtin.shell:
+    cmd: |
+      virt-install \
+      --import \
+      --name "{{ sno_name }}" \
+      --memory "{{ sno_memory }}" \
+      --vcpus "{{ sno_vcpus }}" \
+      --cpu host-passthrough \
+      --os-variant={{ sno_os_variant }} \
+      --disk "{{ sno_vm_folder }}/{{ sno_name }}_disk.qcow2",format=qcow2,cache=none,bus=virtio \
+      --disk "{{ sno_install_folder }}/agent.x86_64.iso",device=cdrom,bus=sata \
+      --boot hd,cdrom \
+      --network network:default,mac={{ sno_mgmt_mac }},model=virtio \
+      {% if sno_fabric_nic | bool %}--network network:{{ clab_fabric_network }},mac={{ clab_fabric_mac_prefix }}:{{ ip_list[sno_name] }},model=virtio \
+      {% endif %}--memballoon model=virtio,freePageReporting=on \
+      --noautoconsole
+  register: sno_virt_install
+  changed_when: true
+
+- name: Report how to watch the install
+  ansible.builtin.debug:
+    msg:
+      - "{{ sno_name }} is booting the agent ISO at {{ sno_ip }}."
+      - "Console:   virsh console {{ sno_name }}"
+      - "Agent UI:  http://{{ sno_ip }}:8080  (once the agent is up)"
+      - "Progress:  {{ sno_install_folder }}/openshift-install --dir {{ sno_install_folder }} agent wait-for install-complete"

@@ -1,10 +1,21 @@
 ---
 # Start with Installing the required packages on the Host
 
+# tags: [baseimage] because guestfs-tools - which provides the virt-customize
+# that prepares the base image below - is in basic_packages. Without this a
+# standalone --tags baseimage run fails on a host that has never been set up.
+#
+# tags: [labprereq] is the SMALLER subset that udn-bgp-evpn's image build
+# needs: virt-customize and the lab ssh key, WITHOUT the in-place
+# preparation below. That build prepares its own copy, so it must not depend
+# on this image having been touched.
 - name: Install Basic Required Packages.
   yum:
     name: "{{ basic_packages }}"
     state: installed
+  tags:
+    - baseimage
+    - labprereq
 
 # Once Packages are installed, lets start the Libvirt Service
 - name: Start Libvirtd Service
@@ -14,6 +25,99 @@
     enabled: yes
 
 
+# download_dir is /var/lib/libvirt/images by default, which the libvirt RPM
+# creates - so by the time this runs, after the package task above, it is a
+# no-op. It stops being one the moment that path is moved onto a separate
+# volume, which on a cloud metal instance with a small root disk is normal.
+#
+# base_image_dir (/opt/lab-images) is a different case: nothing creates it,
+# and it is only ever read from, so it needs no libvirt context. Creating it
+# here means relocating it is one variable rather than a variable plus a
+# mkdir - but note the ordering. THE IMAGE HAS TO BE STAGED BEFORE THIS ROLE
+# RUNS, and this task is what creates the directory, so on a genuinely fresh
+# host you mkdir it yourself to put the qcow2 there. That is the whole point
+# of the default no longer being /var/lib/libvirt/images: making a directory
+# nobody owns is fine, pre-creating one an RPM owns is not.
+#
+# NO mode: on purpose. /var/lib/libvirt/images ships 0711 and is owned by the
+# libvirt RPM; naming a mode here would quietly relax it to 0755 on every run.
+# Without one, an existing directory keeps whatever it has and only a
+# directory this task actually creates gets the default.
+- name: Ensure the image directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+  loop: "{{ [download_dir, base_image_dir] | unique }}"
+  tags:
+    - baseimage
+    - labprereq
+
+# Fails HERE, naming the path, rather than several tasks later inside
+# virt-customize with "could not open disk image". On a host that has never
+# run this lab the base image is the one thing the automation cannot produce
+# for itself, so it is worth one explicit check.
+- name: Check the base image has been staged
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
+  register: bm_base_image
+  tags:
+    - baseimage
+    - labprereq
+
+- name: Fail if the base image is missing
+  ansible.builtin.assert:
+    that: bm_base_image.stat.exists
+    fail_msg: >-
+      No base image at {{ base_image_dir }}/{{ rhel9_kvm_image }}. Download
+      the RHEL KVM guest image and put it there - the automation cannot
+      fetch it, it needs your Red Hat login.
+
+      The directory itself has just been created by this role, so an empty
+      {{ base_image_dir }} means the copy step, not the path.
+
+      IF THIS LAB RAN BEFORE base_image_dir DEFAULTED TO /opt/lab-images, the
+      image is probably still in /var/lib/libvirt/images. Move it
+      (mv /var/lib/libvirt/images/{{ rhel9_kvm_image }} {{ base_image_dir }}/)
+      or set base_image_dir back to "{{ '{{ download_dir }}' }}" in vars.yaml.
+      Either is fine: it is only ever read from, so it can live anywhere - and
+      on a cloud metal instance it probably should be on a larger volume than
+      the root disk.
+    success_msg: "Base image found at {{ base_image_dir }}/{{ rhel9_kvm_image }}."
+  tags:
+    - baseimage
+    - labprereq
+
+# Deliberately early and dependency-free: it is pure vars -> file, so it is in
+# place before the helper is built, before any cluster exists, and it keeps
+# answering if the helper is later down. That is the whole reason for using
+# files rather than a resolver.
+#
+# blockinfile with a named marker, re-rendered on every run, so the block
+# cannot drift from ip_list - the one real hazard of /etc/hosts is an entry
+# that is stale and silently outranks correct DNS. Anything a user puts
+# outside the markers is left alone.
+- name: Publish the lab's cluster names in /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} hcp-lab cluster names (managed by setup-bm-host)"
+    block: "{{ lookup('template', 'etc-hosts-lab.j2') }}"
+    create: false
+    mode: '0644'
+  when: lab_etc_hosts_manage | bool
+  tags:
+    - etchosts
+    - dns
+
+# Optional, off by default, and tagged so it can be run on its own:
+#   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags vnc
+- name: Set up a VNC desktop on this host
+  ansible.builtin.include_tasks:
+    file: vnc.yml
+    apply:
+      tags: [vnc]
+  when: vnc_enabled | default(false) | bool
+  tags: [vnc]
+
 # Once Check if Key Exists
 - name: Check the SSH KeyPair Existence
   stat:
@@ -21,6 +125,8 @@
   register: ssh_key_status
   tags:
     - ssh
+    - baseimage
+    - labprereq
 
 # Create Key if not existing
 - name: Create SSH Key if not existing
@@ -29,9 +135,11 @@
     type: rsa
     size: 2048
     mode: '0600'
-  when: ssh_key_status.stat.exists == false 
+  when: ssh_key_status.stat.exists == false
   tags:
     - ssh
+    - baseimage
+    - labprereq
 
 # Enable Nested KVM
 - name: Enable Nested KVM
@@ -40,11 +148,80 @@
     content: |
       options kvm-intel nested=1
 
-# Prepare the KVM Image 
-- name: Remove Cloud-Init & Add Password  
-  shell: | 
-    export LIBGUESTFS_BACKEND=direct && virt-customize -a "{{ role_path }}/files/{{ rhel9_kvm_image }}" --root-password password:redhat --ssh-inject "root:file:/root/.ssh/lab_rsa.pub" --selinux-relabel --run-command 'yum remove cloud-init* -y' --run-command 'echo "PermitRootLogin yes" >>/etc/ssh/sshd_config'
-    
+# Prepare the KVM Image
+#
+# This edits base_image_dir/rhel9_kvm_image IN PLACE - it is the one place in
+# this repository that does. Every guest of every flow is a copy or a
+# virt-resize of the result, so it has to happen before any of them, and
+# before udn-bgp-evpn/build-lab-image.yaml copies it to build the customized
+# lab image.
+#
+# This is for the guests built DIRECTLY from this image - the helper, and
+# every VM of the hub, hosted-cluster, Ceph, MinIO and mirror-registry flows.
+# udn-bgp-evpn's customized lab image does NOT depend on it: that build
+# applies the same preparation to its own copy, so it can run on a pristine
+# base image and in any order relative to this play.
+- name: Check whether the base image has already been prepared
+  ansible.builtin.command:
+    cmd: "virt-cat -a {{ base_image_dir }}/{{ rhel9_kvm_image }} /root/.ssh/authorized_keys"
+  register: base_image_authkeys
+  changed_when: false
+  failed_when: false
+  tags:
+    - baseimage
+
+- name: Read the lab public key
+  ansible.builtin.slurp:
+    src: "{{ lab_ssh_pubkey_path | default('/root/.ssh/lab_rsa.pub') }}"
+  register: lab_pubkey
+  tags:
+    - baseimage
+
+# Re-run only when the image does not already carry THIS key. Two reasons to
+# compare the content rather than just test for the file: the step is no
+# longer run exactly once (the image build runs it too), and rotating
+# lab_rsa has to still take effect.
+# The root password is OPTIONAL, and unset is now the default - it used to be
+# the literal 'redhat' here. Nothing in this repository logs into a guest
+# with a password: every play reaches them with the key injected below. What
+# a password buys is console access (virsh console, VNC) to a guest whose
+# networking is broken. Set lab_root_password in vault.yaml to keep it.
+#
+# passwd -u -f unlocks root unconditionally. A stock RHEL cloud image ships
+# root locked, and --root-password used to unlock it as a side effect of
+# setting one; without that side effect the lock would remain, and whether
+# key-based root login still works past it is an image-and-PAM detail rather
+# than something to leave to chance on twenty hosts. -f because passwd
+# refuses to unlock an account that has no password at all.
+#
+# no_log: the command line carries lab_root_password when one is set.
+#
+# DO NOT wrap the lines below. This is a YAML folded scalar (>-), which joins
+# lines with spaces EXCEPT where a continuation is indented further - those
+# keep their newline. A newline lands in the middle of the shell command and
+# splits it in two, so `virt-customize -a IMAGE` runs with no options at all
+# and the rest becomes a second command that does not exist. Caught exactly
+# that way when the optional-password conditional was first written across
+# two lines.
+- name: Remove Cloud-Init, inject the lab key, optionally set a root password
+  ansible.builtin.shell:
+    cmd: >-
+      export LIBGUESTFS_BACKEND=direct &&
+      virt-customize -a "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
+      {{ '--root-password "password:' + lab_root_password + '"' if lab_root_password is defined else '' }}
+      --ssh-inject "root:file:{{ lab_ssh_pubkey_path | default('/root/.ssh/lab_rsa.pub') }}"
+      --selinux-relabel
+      --run-command 'yum remove cloud-init* -y'
+      --run-command 'passwd -u -f root || true'
+      --run-command 'grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config || echo "PermitRootLogin yes" >>/etc/ssh/sshd_config'
+  no_log: "{{ lab_root_password is defined }}"
+  when: >-
+    base_image_authkeys.rc != 0 or
+    (lab_pubkey.content | b64decode | trim) not in
+    (base_image_authkeys.stdout | default(''))
+  tags:
+    - baseimage
+
 
 # Once Check if Key Exists
 - name: Check the Helper Disk Existence
@@ -79,7 +256,7 @@
   ansible.builtin.command:
     cmd: >
       virt-resize --expand {{ helper_resize_partition }}
-      {{ role_path }}/files/{{ rhel9_kvm_image }}
+      {{ base_image_dir }}/{{ customized_lab_helper_image | default(rhel9_kvm_image) }}
       /var/lib/libvirt/images/{{ helper_disk }}
   when: helper_disk_status.stat.exists == false
   tags:

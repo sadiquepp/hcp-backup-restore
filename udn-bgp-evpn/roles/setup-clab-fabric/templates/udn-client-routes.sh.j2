@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Routes and sysctls for the UDN client VM. Rendered by setup-clab-fabric.
+#
+# The client has ONE NIC, on the management network, and deliberately no
+# presence on the fabric. That is the point: a client on the fabric segment
+# shares a broadcast domain with leaf1 and all three workers, so leaf1 answers
+# with an ICMP redirect and the traffic goes direct - proving nothing about
+# routing. Off-segment, every packet really is routed by leaf1 using what BGP
+# told it, and the reply TTL says so.
+#
+# Reverse-path filtering has to be loose here. The request goes out via the
+# clab VM and the fabric; the reply comes back via the node's default gateway
+# and the management network. The paths differ, which is what a strict rp_filter
+# exists to reject. Note the effective value is max(all, <iface>), so setting
+# only 'all' changes nothing - the per-interface value has to be set too.
+set -euo pipefail
+trap 'echo "udn-client-routes.sh: failed at line $LINENO with status $?" >&2' ERR
+
+GW="{{ lab_network_prefix }}.{{ ip_list.clab }}"
+
+sysctl -qw net.ipv4.conf.all.rp_filter=2
+for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 2 > "$i"; done
+
+{% for t in udn_bgp_tenants %}
+# {{ t.name }}
+ip route replace {{ t.udn_subnet_shared }} via "$GW"
+{% endfor %}
+
+echo "udn-client-routes.sh: {{ udn_bgp_tenants | length }} tenant routes via $GW"

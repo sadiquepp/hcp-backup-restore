@@ -14,7 +14,8 @@ ansible-galaxy collection install community.crypto
 
 git clone https://github.com/sadiquepp/hcp-backup-restore.git
 cd hcp-backup-restore
-cp rhel-9.8-x86_64-kvm.qcow2 roles/setup-bm-host/files/
+mkdir -p /opt/lab-images
+cp rhel-9.8-x86_64-kvm.qcow2 /opt/lab-images/   # base_image_dir in vars.yaml
 ```
 
 ## 2. S3 bucket and IAM user (once per lab, not per hub)
@@ -195,6 +196,9 @@ oc get secret hcp-cluster1-import -n hcp-cluster1 --show-labels
 A **label**, not an annotation. Must be set before step 13, on this hub.
 Re-check it on every run - MCE reconciles this secret. Skipping it leaves
 the restored cluster stuck in `Importing`.
+
+Workaround for [OCPBUGS-121709](https://redhat.atlassian.net/browse/OCPBUGS-121709) -
+check that JIRA for the current status.
 
 ## 13. Backup
 

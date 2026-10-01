@@ -24,3 +24,40 @@
 # Set target_hub (vars.yaml, or -e) rather than these.
 setup_dns_hub_connected: "{{ target_hub | default('hub') }}"
 setup_dns_hub_disconnected: hubd
+
+# Upstream resolvers for everything the helper is not authoritative for.
+#
+# 'auto' reads them from the lab host's own resolver configuration at run time
+# (/etc/resolv.conf, and systemd-resolved's upstream list when resolv.conf only
+# names its 127.0.0.53 stub) - the same resolvers the host itself uses, and
+# nothing written into a committed file. Set a list in vault.yaml to name
+# them yourself instead.
+#
+# What 'auto' drops, and why: loopback addresses (they would mean the helper
+# itself) and anything on the lab network. The lab network matters because
+# the workshop later points the host's resolver at the helper, and libvirt's
+# dnsmasq at <prefix>.1 forwards to whatever the host uses - either one kept
+# here would have the helper forwarding to itself, which shows up as every
+# external name timing out.
+#
+# Whatever this ends up as must actually answer: named returns SERVFAIL for
+# every external name when its forwarder does not, and the lab zones keep
+# working meanwhile, so the failure is invisible until something needs an
+# outside name.
+dns_forwarders: auto
+
+# Where 'auto' keeps its last usable answer, on the lab host. Delete it to
+# make the next run read the host afresh with nothing to fall back on.
+setup_dns_forwarders_file: /root/.lab-dns-forwarders
+
+# Whether named validates DNSSEC on what its forwarders return.
+#
+# 'no', because this lab's upstream resolvers do not return usable DNSSEC data:
+# named then answers SERVFAIL for every external name while the zones it is
+# authoritative for keep working, which looks exactly like an unreachable
+# forwarder from the client side.
+#
+# The distinguishing test is `dig +cd` (checking disabled) against the helper -
+# NOERROR there with SERVFAIL on the plain query means validation, not
+# reachability. Set to 'yes' where the resolvers serve DNSSEC properly.
+dns_dnssec_validation: "no"

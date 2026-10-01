@@ -1,0 +1,260 @@
+{#
+  containerlab topology for phase 4: a small EVPN fabric.
+
+    leaf1  - border leaf, and with node VTEPs its role is narrower than in
+             phases 1-3: underlay reachability to each node's VTEP, plus
+             EVPN transit between the nodes and the spine. It holds no
+             tenant VRFs and terminates no tunnels - VXLAN flows node <->
+             leaf2 directly.
+    spine  - route reflector for the l2vpn evpn address family. No VTEP, no
+             tenant VRFs; it never sees tenant traffic in the data plane,
+             only carries EVPN routes between the leaves and forwards VXLAN.
+    leaf2  - the far-end leaf. The tenant external endpoints move behind it,
+             so a pod reaching {{ udn_bgp_tenants[0].external_host }} now
+             genuinely crosses the fabric: VXLAN-encapsulated on the NODE
+             (the node is the VTEP, not leaf1), carried through leaf1 and the
+             spine as an opaque outer packet, decapsulated here, and landed in
+             the right VRF.
+
+  That last point is the reason for a three-node fabric rather than two: with
+  the endpoints hanging off leaf1, EVPN would be configured and never
+  actually carry anything, and every test would pass whether or not the
+  overlay worked.
+
+  Underlay: point-to-point /30s between each leaf and the spine, eBGP for
+  IPv4 unicast (so loopbacks are reachable). The l2vpn evpn sessions are eBGP
+  too - loopback-sourced, multihop - with the spine reflecting between the
+  leaves. Being eBGP, the spine would normally rewrite the next hop to itself
+  and drag every tunnel through it; 'set ip next-hop unchanged' on both
+  neighbours is what keeps the next hops intact, so it stays a control-plane
+  reflector rather than a data-plane gateway.
+
+    leaf1 lo0 10.0.0.1   leaf1:eth10 <-> spine:eth1   10.1.0.0/30
+    leaf2 lo0 10.0.0.2   leaf2:eth10 <-> spine:eth2   10.1.0.4/30
+    spine lo0 10.0.0.254
+
+  This topology assumes the OCP nodes are themselves VTEPs, which needs
+  OpenShift {{ udn_bgp_evpn_min_version }}+ and the cluster-side phase-4
+  manifests. They peer l2vpn evpn with leaf1 over the same fabric link they
+  already use, so no new adjacency is needed - only a second address family
+  on an existing session.
+
+  On an older cluster, use clab_topology 'bgp' with --tags vrflite instead:
+  there leaf1 terminates the tenants on VLANs and would map VRF to VNI
+  itself. That variant is described in the README; it is not this file.
+#}
+name: {{ clab_lab_name }}
+
+mgmt:
+  network: {{ clab_lab_name }}-mgmt
+  ipv4-subnet: 172.30.30.0/24
+
+topology:
+  kinds:
+    linux:
+      image: {{ clab_frr_image }}
+
+  nodes:
+    {{ clab_bridge_for_topology }}:
+      kind: bridge
+
+    leaf1:
+      kind: linux
+      image: {{ clab_frr_image }}
+      binds:
+        - leaf1/frr.conf:/etc/frr/frr.conf
+        - leaf1/daemons:/etc/frr/daemons
+        - leaf1/vtysh.conf:/etc/frr/vtysh.conf
+      exec:
+        - ip link add lo0 type dummy
+        - ip addr add 10.0.0.1/32 dev lo0
+        - ip link set lo0 up
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+        - ip addr add {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}/{{ clab_fabric_netmask_bits }} dev eth1
+        - ip link set eth10 mtu {{ clab_fabric_mtu }} up
+        - ip addr add 10.1.0.1/30 dev eth10
+        ## Underlay reachability to each node's VTEP. The nodes are directly
+        ## adjacent on the fabric, but their VTEP addresses live on dummy
+        ## interfaces, so leaf1 has to be told the way in. Written from the
+        ## same ip_list octets as everything else, which is only possible
+        ## because the VTEP CR runs in Unmanaged mode - see
+        ## roles/setup-udn-bgp/templates/vtep.yaml.j2.
+{% for n in clab_fabric_nodes %}
+        - ip route replace {{ udn_bgp_vtep_prefix }}.{{ ip_list[n.ip_key] }}/32 via {{ clab_fabric_prefix }}.{{ ip_list[n.ip_key] }} dev eth1
+{% endfor %}
+        ## A blackhole for the aggregate so FRR's 'network {{ udn_bgp_vtep_prefix }}.0/24'
+        ## has a matching route to originate. Forwarding is done by the /32s
+        ## above, which are longer matches, so this never black-holes real
+        ## traffic - it only makes the aggregate advertisable.
+        - ip route replace blackhole {{ udn_bgp_vtep_prefix }}.0/24
+        ## Re-read the config now that every VRF and subinterface exists.
+        ##
+        ## NOT `frrinit.sh restart`. FRR is this container's PID 1 (via
+        ## docker-start), so stopping it stops the container - Docker then
+        ## restarts it, and a restart destroys the network namespace along
+        ## with every veth containerlab put in it. The node comes back
+        ## running, healthy-looking, with lo and eth0 and nothing else,
+        ## permanently disconnected from the fabric. The exec: block does not
+        ## re-run on a restart, so it never repairs itself either.
+        ##
+        ## `vtysh -b` applies /etc/frr/frr.conf to the running daemons, which
+        ## is all that was ever wanted here.
+        - vtysh -b
+
+    spine:
+      kind: linux
+      image: {{ clab_frr_image }}
+      binds:
+        - spine/frr.conf:/etc/frr/frr.conf
+        - spine/daemons:/etc/frr/daemons
+        - spine/vtysh.conf:/etc/frr/vtysh.conf
+      exec:
+        - ip link add lo0 type dummy
+        - ip addr add 10.0.0.254/32 dev lo0
+        - ip link set lo0 up
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+        - ip addr add 10.1.0.2/30 dev eth1
+        - ip link set eth2 mtu {{ clab_fabric_mtu }} up
+        - ip addr add 10.1.0.5/30 dev eth2
+        ## vtysh -b, never frrinit.sh restart - see leaf1 above.
+        - vtysh -b
+
+    leaf2:
+      kind: linux
+      image: {{ clab_frr_image }}
+      binds:
+        - leaf2/frr.conf:/etc/frr/frr.conf
+        - leaf2/daemons:/etc/frr/daemons
+        - leaf2/vtysh.conf:/etc/frr/vtysh.conf
+        - leaf2/lab-egress.sh:/usr/local/bin/lab-egress.sh
+      exec:
+        - ip link add lo0 type dummy
+        - ip addr add 10.0.0.2/32 dev lo0
+        - ip link set lo0 up
+        - ip link set eth10 mtu {{ clab_fabric_mtu }} up
+        - ip addr add 10.1.0.6/30 dev eth10
+{% if udn_client_segments | default({}) %}
+        ## Trunk onto the fabric bridge, for the client segments below. No
+        ## address: leaf2 is not on the nodes' untagged fabric network and must
+        ## not be - the only thing it does with this link is terminate the
+        ## per-tenant client VLANs. leaf1 is on the same bridge, which is
+        ## harmless because neither leaf bridges eth1 to anything the other can
+        ## reach: the client VLANs exist on leaf2 alone.
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+{% endif %}
+{% for t in udn_bgp_tenants %}
+{% if t.topology | default('Layer3') == 'Layer2' %}
+        ## macVRF / L2VNI. The cluster declares this tenant with
+        ##   evpn: macVRF: { vni: {{ t.evpn_mac_vni }} }
+        ## so the VNI instantiated here MUST be {{ t.evpn_mac_vni }}, not {{ t.evpn_ip_vni }}. Building
+        ## every tenant from evpn_ip_vni was the original bug: the two ends
+        ## instantiated different numbers and no tunnel ever formed, with the
+        ## EVPN sessions up and nothing to show for them.
+        ##
+        ## No VRF and no SVI. A macVRF carries MAC reachability, not prefixes,
+        ## so there is nothing to route: the external endpoint is a host INSIDE
+        ## {{ t.udn_subnet }}, in the same broadcast domain as the pods, and it
+        ## reaches them by ARP resolved from type-2 routes. external_gw and
+        ## external_prefix are unused for this tenant here.
+        - ip link add vni{{ t.evpn_mac_vni }} type vxlan id {{ t.evpn_mac_vni }} local 10.0.0.2 dstport 4789 nolearning
+        - ip link add br{{ t.evpn_mac_vni }} type bridge
+        - ip link set vni{{ t.evpn_mac_vni }} master br{{ t.evpn_mac_vni }}
+        - ip link set vni{{ t.evpn_mac_vni }} type bridge_slave neigh_suppress on learning off
+        ## The access port joins the stretched L2 domain - a bridge port, not a
+        ## VRF slave, and with no address of its own on this side.
+        - ip link set {{ t.name }}-ext master br{{ t.evpn_mac_vni }}
+        - ip link set vni{{ t.evpn_mac_vni }} mtu {{ clab_fabric_mtu }} up
+        - ip link set br{{ t.evpn_mac_vni }} mtu {{ clab_fabric_mtu }} up
+        - ip link set {{ t.name }}-ext up
+{% else %}
+        ## ipVRF / L3VNI, symmetric IRB: the bridge is enslaved to the VRF and
+        ## carries no access port. Type-5 prefix routes arrive, are decapsulated
+        ## into this VNI and routed in the VRF.
+        - ip link add {{ t.name }} type vrf table {{ 1000 + t.vlan }}
+        - ip link set {{ t.name }} up
+        - ip link add vni{{ t.evpn_ip_vni }} type vxlan id {{ t.evpn_ip_vni }} local 10.0.0.2 dstport 4789 nolearning
+        - ip link add br{{ t.evpn_ip_vni }} type bridge
+        - ip link set br{{ t.evpn_ip_vni }} master {{ t.name }}
+        - ip link set vni{{ t.evpn_ip_vni }} master br{{ t.evpn_ip_vni }}
+        - ip link set vni{{ t.evpn_ip_vni }} type bridge_slave neigh_suppress on learning off
+        - ip link set vni{{ t.evpn_ip_vni }} mtu {{ clab_fabric_mtu }} up
+        - ip link set br{{ t.evpn_ip_vni }} mtu {{ clab_fabric_mtu }} up
+        ## The tenant's external network now lives here, behind the far leaf.
+        - ip link set {{ t.name }}-ext master {{ t.name }}
+        - ip addr add {{ t.external_gw }}/{{ t.external_prefix_bits }} dev {{ t.name }}-ext
+        - ip link set {{ t.name }}-ext up
+{% endif %}
+{% endfor %}
+{% for t in udn_bgp_tenants if t.name in (udn_client_segments | default({})) %}
+{% set seg = udn_client_segments[t.name] %}
+{% if t.topology | default('Layer3') == 'Layer2' %}
+        ## Client segment for {{ t.name }}: VLAN {{ seg.vlan }}, an access port on the
+        ## L2VNI rather than a routed subinterface. This tenant's transport is a
+        ## macVRF - MAC reachability, no prefixes - so there is no VRF to put a
+        ## gateway in and nothing to route. The client joins the same stretched
+        ## broadcast domain as the pods and {{ t.name }}-ext, and reaches them
+        ## on-link by ARP answered out of type-2 routes.
+        ##
+        ## So this port carries NO address, and the client addresses itself
+        ## inside {{ t.udn_subnet }} from evpn_l2_client_host.
+        - ip link add link eth1 name eth1.{{ seg.vlan }} type vlan id {{ seg.vlan }}
+        - ip link set eth1.{{ seg.vlan }} master br{{ t.evpn_mac_vni }}
+        - ip link set eth1.{{ seg.vlan }} mtu {{ clab_fabric_mtu }} up
+{% else %}
+        ## Client segment for {{ t.name }}: VLAN {{ seg.vlan }}, enslaved to the {{ t.name }} VRF
+        ## on THIS leaf. In phase 3 the same segment hangs off leaf1; under EVPN
+        ## leaf1 holds no tenant VRFs at all - the nodes are VTEPs and the VRFs
+        ## live here - so the client attaches behind the far leaf, exactly as
+        ## {{ t.name }}-ext does.
+        ##
+        ## A frame tagged {{ seg.vlan }} therefore enters the {{ t.name }} VRF and no other, and
+        ## reaching a pod from here means crossing the EVPN fabric: VRF ->
+        ## L3VNI {{ t.evpn_ip_vni }} -> VXLAN -> the node holding the pod. That is a longer
+        ## and more honest path than phase 3's, where leaf1 was directly
+        ## adjacent to the nodes.
+        - ip link add link eth1 name eth1.{{ seg.vlan }} type vlan id {{ seg.vlan }}
+        - ip link set eth1.{{ seg.vlan }} master {{ t.name }}
+        - ip link set eth1.{{ seg.vlan }} mtu {{ clab_fabric_mtu }} up
+        - ip addr add {{ seg.prefix }}.{{ udn_client_segment_gw_octet }}/{{ clab_fabric_netmask_bits }} dev eth1.{{ seg.vlan }}
+{% endif %}
+{% endfor %}
+{% if udn_bgp_tenants | selectattr('evpn_internet', 'defined') | selectattr('evpn_internet') | list %}
+        ## Internet egress for {{ udn_bgp_tenants | selectattr('evpn_internet', 'defined') | selectattr('evpn_internet') | map(attribute='name') | join(', ') }} - after the VRFs above exist, before FRR
+        ## applies default-originate. What it does and why it is a script:
+        ## leaf2/lab-egress.sh. The NAT is on the containerlab host.
+        - sh /usr/local/bin/lab-egress.sh
+{% endif %}
+        ## vtysh -b, never frrinit.sh restart - see leaf1 above.
+        - vtysh -b
+
+{% for t in udn_bgp_tenants %}
+    {{ t.name }}-ext:
+      kind: linux
+      image: {{ clab_alpine_image }}
+      exec:
+{% if t.topology | default('Layer3') == 'Layer2' %}
+        ## In the pods' own subnet, because this tenant's EVPN transport is a
+        ## macVRF: one broadcast domain stretched across the fabric. No gateway
+        ## and no default route - every pod is on-link from here, reached by
+        ## ARP answered out of type-2 routes rather than by any routing at all.
+        - ip addr add {{ t.evpn_l2_external_host }}/{{ t.udn_subnet.split('/')[1] }} dev eth1
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+{% else %}
+        - ip addr add {{ t.external_host }}/{{ t.external_prefix_bits }} dev eth1
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+        - ip route replace default via {{ t.external_gw }} dev eth1
+{% endif %}
+{% endfor %}
+
+  links:
+    - endpoints: ["leaf1:eth1", "{{ clab_bridge_for_topology }}:leaf1-fab"]
+    - endpoints: ["leaf1:eth10", "spine:eth1"]
+    - endpoints: ["leaf2:eth10", "spine:eth2"]
+{% if udn_client_segments | default({}) %}
+    ## leaf2 onto the fabric bridge, so the client VMs' tagged frames reach the
+    ## tenant VRFs and L2VNIs that live on this leaf under EVPN.
+    - endpoints: ["leaf2:eth1", "{{ clab_bridge_for_topology }}:leaf2-fab"]
+{% endif %}
+{% for t in udn_bgp_tenants %}
+    - endpoints: ["leaf2:{{ t.name }}-ext", "{{ t.name }}-ext:eth1"]
+{% endfor %}

@@ -1,0 +1,135 @@
+---
+# In-guest configuration for the namespace client. Delegated to it.
+
+- name: Install test tooling on the namespace client
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
+  vars:
+    lab_pkg_list: "{{ lab_pkgs_nsclient }}"
+    lab_pkg_what: namespace client
+
+# Phase 2 reaches the pods a different way, and this VM has to be able to do
+# both. VRF-Lite and EVPN put each tenant behind its own VLAN into leaf1's
+# tenant VRF, which is what the namespaces below are for. The shared phase has
+# no tenant VRFs to enter: every UDN is leaked into the one default VRF, and a
+# client gets there off-segment, routed by the clab VM and then by leaf1 on
+# what BGP told it - exactly as the separate udnclient VM does.
+#
+# So the ROOT namespace carries the phase-2 routes and the namespaces carry
+# the per-tenant ones. They do not interact: different tables, different
+# interfaces. Installed unconditionally because a route to a prefix no phase
+# has advertised is inert - the clab VM simply has nothing to forward it to -
+# and making it conditional would mean knowing here which phase runs next,
+# which this role cannot know.
+- name: Install the shared-phase routing script in the root namespace
+  ansible.builtin.template:
+    src: udn-client-routes.sh.j2
+    dest: /usr/local/sbin/udn-client-routes.sh
+    mode: "0755"
+  register: udn_nsclient_routes_script
+
+- name: Install the shared-phase routing unit
+  ansible.builtin.template:
+    src: udn-client-routes.service.j2
+    dest: /etc/systemd/system/udn-client-routes.service
+    mode: "0644"
+  register: udn_nsclient_routes_unit
+
+- name: Enable and run the shared-phase routing unit
+  ansible.builtin.systemd:
+    name: udn-client-routes.service
+    enabled: true
+    state: >-
+      {{ 'restarted'
+         if (udn_nsclient_routes_script is changed or udn_nsclient_routes_unit is changed)
+         else 'started' }}
+    daemon_reload: true
+
+- name: Install the namespace script
+  ansible.builtin.template:
+    src: udn-netns-client.sh.j2
+    dest: /usr/local/sbin/udn-netns-client.sh
+    mode: "0755"
+  register: udn_ns_script
+
+- name: Install the namespace unit
+  ansible.builtin.template:
+    src: udn-netns-client.service.j2
+    dest: /etc/systemd/system/udn-netns-client.service
+    mode: "0644"
+  register: udn_ns_unit
+
+- name: Enable and run the namespace unit
+  ansible.builtin.systemd:
+    name: udn-netns-client.service
+    enabled: true
+    state: "{{ 'restarted' if (udn_ns_script is changed or udn_ns_unit is changed) else 'started' }}"
+    daemon_reload: true
+
+- name: Show the namespaces that exist
+  ansible.builtin.command:
+    cmd: "ip netns list"
+  register: udn_ns_list
+  changed_when: false
+
+- name: Report the namespaces
+  ansible.builtin.debug:
+    var: udn_ns_list.stdout_lines
+
+# Each namespace must reach leaf1 inside its own tenant VRF. A namespace that
+# cannot is indistinguishable, later, from a genuine isolation result - so it
+# is worth failing here, where the cause is unambiguous.
+# Retried, because this runs moments after the unit above rebuilt the VLAN
+# subinterfaces. ARP into that gap fails, Linux caches the FAILED neighbour
+# entry, and two probes two seconds apart both land inside the cached window -
+# so the check reports an unreachable gateway that is reachable seconds later.
+# The first run after any change to the routes script is exactly when the
+# script changes, so this is the common case, not the rare one.
+#
+# A routed segment has a gateway on the leaf; a macVRF segment has none, being
+# one stretched broadcast domain, so the nearest end to probe is the tenant's
+# external endpoint, on-link in the same domain.
+- name: Confirm each namespace reaches its tenant's segment
+  vars:
+    ns_t: "{{ udn_bgp_tenants | selectattr('name', 'equalto', tenant_name) | first }}"
+    ns_l2: "{{ (clab_topology | default('bgp') == 'evpn') and ((ns_t.topology | default('Layer3')) == 'Layer2') }}"
+    ns_target: "{{ ns_t.evpn_l2_external_host if (ns_l2 | bool) else (udn_client_segments[tenant_name].prefix ~ '.' ~ udn_client_segment_gw_octet) }}"
+  ansible.builtin.command:
+    cmd: "ip netns exec {{ tenant_name }} ping -c2 -W2 {{ ns_target }}"
+  loop: "{{ udn_bgp_tenants | map(attribute='name') | select('in', udn_client_segments.keys() | list) | list }}"
+  loop_control:
+    loop_var: tenant_name
+  register: udn_ns_gw_ping
+  changed_when: false
+  failed_when: false
+  retries: 10
+  delay: 3
+  until: udn_ns_gw_ping.rc == 0
+
+- name: Fail if a namespace cannot reach its segment
+  vars:
+    ns_t: "{{ udn_bgp_tenants | selectattr('name', 'equalto', item.tenant_name) | first }}"
+    ns_l2: "{{ (clab_topology | default('bgp') == 'evpn') and ((ns_t.topology | default('Layer3')) == 'Layer2') }}"
+    ns_leaf: "{{ 'leaf2' if (clab_topology | default('bgp') == 'evpn') else 'leaf1' }}"
+    ns_target: "{{ ns_t.evpn_l2_external_host if (ns_l2 | bool) else (udn_client_segments[item.tenant_name].prefix ~ '.' ~ udn_client_segment_gw_octet) }}"
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      Namespace {{ item.tenant_name }} cannot reach {{ ns_target }} on VLAN
+      {{ udn_client_segments[item.tenant_name].vlan }}.
+      {% if ns_l2 | bool %}That is {{ item.tenant_name }}-ext, on-link in
+      {{ ns_t.udn_subnet }} across the L2VNI - check {{ ns_leaf }} has
+      eth1.{{ udn_client_segments[item.tenant_name].vlan }} as a port on
+      br{{ ns_t.evpn_mac_vni }}.
+      {% else %}Check {{ ns_leaf }} has
+      eth1.{{ udn_client_segments[item.tenant_name].vlan }} in the
+      {{ item.tenant_name }} VRF.
+      {% endif %}The topology has to be redeployed
+      (--tags clabdeploy) after a tenant or a client segment is added.
+    success_msg: >-
+      Namespace {{ item.tenant_name }} reaches {{ ns_target }} on VLAN
+      {{ udn_client_segments[item.tenant_name].vlan }}.
+  loop: "{{ udn_ns_gw_ping.results }}"
+  loop_control:
+    label: "{{ item.tenant_name }}"

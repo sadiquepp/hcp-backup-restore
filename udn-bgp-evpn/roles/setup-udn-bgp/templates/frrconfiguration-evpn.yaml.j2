@@ -1,0 +1,76 @@
+{#
+  BGP peering for EVPN - the session only.
+
+  What it carries is the VTEP block: the node takes leaf1's route for
+  {{ udn_bgp_vtep_prefix }}.0/24 (toReceive), which is how its VXLAN packets
+  reach the other VTEPs - leaf1 holds a static /32 per node VTEP behind that
+  aggregate. Without it the EVPN routes appear on both sides and no tunnel
+  ever forms, because neither end can reach the other's tunnel endpoint. That
+  looks exactly like a data-plane problem and is not one.
+
+  It does NOT activate l2vpn evpn, and cannot: the FRRConfiguration neighbor
+  has no address-family field (`oc explain
+  frrconfiguration.spec.bgp.routers.neighbors` - dualStackAddressFamily is
+  IPv4+IPv6 unicast). An earlier version of this file carried
+  `addressFamilies: [unicast, evpn]` and `allowAsIn: origin`; the API server
+  pruned both without a word, and they were only ever visible in the
+  last-applied-configuration annotation. OVN-Kubernetes activates the EVPN
+  family itself, in the ovnk-generated-* FRRConfigurations it writes once a
+  RouteAdvertisements selects an EVPN network and names this configuration
+  (by the label below): `neighbor <leaf1> activate`, `allowas-in origin` and
+  `advertise-all-vni` under `address-family l2vpn evpn`, and `allowas-in
+  origin` under ipv4 unicast too - which is what the pruned allowAsIn was for
+  (every node of a cluster shares its ASN). Until then leaf1 shows this neighbor as NoNeg in
+  `show bgp l2vpn evpn summary`, which is correct. See troubleshooting.md,
+  "NoNeg after the EVPN peering".
+
+  Those generated configurations also carry the VNIs, route distinguishers
+  and route targets, from each CUDN's network.evpn block. Do not hand-write
+  those here; two sources for the same VNI is how you get a tunnel that forms
+  and carries nothing.
+#}
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: fabric-peering-evpn
+  namespace: {{ udn_bgp_frrk8s_namespace }}
+  labels:
+    {{ udn_bgp_frr_label_key }}: fabric-evpn
+spec:
+  bgp:
+    routers:
+      - asn: {{ udn_bgp_cluster_asn }}
+        neighbors:
+          - address: {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }}
+            asn: {{ clab_leaf1_asn }}
+{% if udn_bgp_password | default('') | length > 0 %}
+            # TCP-MD5 on this session. Emitted only when udn_bgp_password is
+            # set in vault.yaml; with it unset this block is absent entirely
+            # and the manifest is byte-identical to an unauthenticated lab.
+            #
+            # passwordSecret, not password: the plain field would put the key
+            # into this rendered file under udn-bgp/, which is on disk in the
+            # clear. The CRD makes them mutually exclusive, so it is one or
+            # the other and this is the one worth having.
+            passwordSecret:
+              name: {{ udn_bgp_password_secret }}
+              namespace: {{ udn_bgp_frrk8s_namespace }}
+{% endif %}
+            holdTime: 9s
+            keepaliveTime: 3s
+            port: 179
+            toReceive:
+              allowed:
+                mode: all
+            toAdvertise:
+              allowed:
+                # The VTEP block is what the far end needs in order to build
+                # a tunnel back to this node. It is advertised explicitly
+                # rather than with mode 'all', which would also put
+                # {{ lab_network_prefix }}.0/24 - the lab's management
+                # network - into the fabric.
+                prefixes:
+                  - {{ udn_bgp_vtep_prefix }}.0/24
+        prefixes:
+          - {{ udn_bgp_vtep_prefix }}.0/24
+  nodeSelector: {}

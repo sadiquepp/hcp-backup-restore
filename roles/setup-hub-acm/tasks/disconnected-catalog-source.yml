@@ -3,8 +3,8 @@
 #
 # Disconnected, acm_catalog_source is not openshift-marketplace's built-in
 # redhat-operators - that one is disabled on this hub - but the CatalogSource
-# oc-mirror generated for the mirrored index and
-# setup_hub_cluster_disconnected.yaml applied on day 2. Its name is derived from
+# oc-mirror generated for the mirrored index and setup_hub_cluster.yaml's
+# disconnected run applied on day 2. Its name is derived from
 # mirror_catalog_index, which is a good guess and not a guarantee, and a
 # Subscription pointing at a CatalogSource that is not there sits in
 # ResolutionFailed indefinitely without saying why. Cheaper to find out here.
@@ -40,8 +40,8 @@
       role applies would fail to resolve. What is there:
       {{ acm_catalog_sources_present.stdout_lines | default([]) | join(', ') | default('nothing', true) }}.
       Set acm_catalog_source in vars.yaml to the right name, or apply the
-      CatalogSource oc-mirror generated first (setup_hub_cluster_disconnected.yaml
-      does that in its day-2 step).
+      CatalogSource oc-mirror generated first (setup_hub_cluster.yaml does
+      that in its day-2 step when disconnected_install is set).
 
 # Not fatal: OLM retries the connection, so a catalog that is still starting
 # resolves on its own. Worth saying out loud though, because it is the other

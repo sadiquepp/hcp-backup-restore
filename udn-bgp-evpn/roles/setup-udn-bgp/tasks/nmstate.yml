@@ -1,0 +1,102 @@
+---
+# Install the Kubernetes NMState Operator, if it is not already there.
+#
+# Every NodeNetworkConfigurationPolicy this role applies - the fabric NIC
+# addresses, the VRF-Lite VLANs, the EVPN VTEP addresses - depends on this.
+# Without it `oc apply` fails outright with
+#
+#   no matches for kind "NodeNetworkConfigurationPolicy" in version
+#   "nmstate.io/v1" - ensure CRDs are installed first
+#
+# It is installed here rather than in roles/setup-hub-acm alongside ACM,
+# MetalLB and the rest, for one practical reason: this role is self-contained
+# and additive, and adding to that role would edit files other feature
+# branches are also changing. If NMState becomes generally useful to the lab
+# it belongs there instead.
+
+- name: Check whether the NodeNetworkConfigurationPolicy API is already present
+  ansible.builtin.command:
+    cmd: oc get crd nodenetworkconfigurationpolicies.nmstate.io
+  register: udn_bgp_nncp_crd
+  failed_when: false
+  changed_when: false
+
+- name: Report NMState status
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'NMState is already installed - nothing to do.'
+         if udn_bgp_nncp_crd.rc == 0
+         else 'NMState is not installed; installing the operator from catalog '
+              ~ udn_bgp_catalog_source ~ '.' }}
+
+- name: Install and start NMState
+  when: udn_bgp_nncp_crd.rc != 0
+  block:
+    - name: Render the NMState operator manifests
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "{{ udn_bgp_manifest_dir }}/{{ item }}"
+        mode: '0644'
+      loop:
+        - nmstate-operator.yaml
+        - nmstate-instance.yaml
+      delegate_to: localhost
+
+    - name: Create the namespace, OperatorGroup and Subscription
+      ansible.builtin.command:
+        cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nmstate-operator.yaml"
+
+    # The CSV has to reach Succeeded before the NMState kind exists, so this
+    # waits on the CRD rather than on the CSV name - which carries a version
+    # that would have to be tracked here every time the operator is updated.
+    - name: Wait for the operator to install its CRDs
+      ansible.builtin.command:
+        cmd: oc get crd nmstates.nmstate.io
+      register: udn_bgp_nmstate_crd
+      retries: 60
+      delay: 10
+      until: udn_bgp_nmstate_crd.rc == 0
+      failed_when: false
+      changed_when: false
+
+    - name: Fail with something actionable if the operator never installed
+      ansible.builtin.assert:
+        that: udn_bgp_nmstate_crd.rc == 0
+        fail_msg: >-
+          The NMState operator did not install within 10 minutes. The usual
+          cause is the subscription failing to resolve against catalog
+          '{{ udn_bgp_catalog_source }}' - on a disconnected hub that catalog
+          must be the mirrored one, set udn_bgp_catalog_source accordingly.
+          Check with:
+            oc -n {{ udn_bgp_nmstate_namespace }} get subscription,csv,installplan
+            oc -n {{ udn_bgp_nmstate_namespace }} get subscription kubernetes-nmstate-operator -o jsonpath='{.status.conditions}'
+
+    - name: Create the NMState instance (this is what deploys the handlers)
+      ansible.builtin.command:
+        cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nmstate-instance.yaml"
+
+    - name: Wait for the NodeNetworkConfigurationPolicy API to appear
+      ansible.builtin.command:
+        cmd: oc get crd nodenetworkconfigurationpolicies.nmstate.io
+      register: udn_bgp_nncp_crd_after
+      retries: 30
+      delay: 10
+      until: udn_bgp_nncp_crd_after.rc == 0
+      failed_when: false
+      changed_when: false
+
+    - name: Wait for the nmstate handler to be running on every node
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ udn_bgp_nmstate_namespace }}
+          rollout status daemonset/nmstate-handler --timeout=600s
+      register: udn_bgp_nmstate_handler
+      retries: 5
+      delay: 20
+      until: udn_bgp_nmstate_handler.rc == 0
+      changed_when: false
+
+- name: Confirm the NodeNetworkConfigurationPolicy API is usable
+  ansible.builtin.command:
+    cmd: oc get nncp
+  changed_when: false

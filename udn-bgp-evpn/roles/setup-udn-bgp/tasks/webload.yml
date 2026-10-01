@@ -1,0 +1,143 @@
+---
+# Deploy a one-pod web server per tenant, so the isolation result can be read
+# instead of inferred.
+#
+# Separate phase from the ping workload: it is additive, it is opt-in, and it
+# is the only part of this lab that produces a demo rather than a measurement.
+# The namespaces must already exist with their primary-UDN label, so run it
+# after --tags shared or --tags vrflite.
+
+- name: Ask which of this cluster's web tenants have a namespace
+  ansible.builtin.command:
+    cmd: "oc get ns udn-{{ item }} -o jsonpath={.metadata.name}"
+  # The full list, deliberately: this is the probe that BUILDS the narrowed
+  # one below, so it cannot read it.
+  loop: "{{ udn_web_tenants }}"
+  register: udn_web_ns
+  changed_when: false
+  failed_when: false
+
+# DEPLOY WHAT IS THERE, and fail only when nothing is.
+#
+# This used to fail on the first missing namespace, which was right while a
+# cluster built the same tenants in every phase. Neither does now: the SNO
+# builds green, purple and violet under EVPN and violet alone under VRF-Lite,
+# because a stretched Layer2 tenant has no way to work without a VNI to keep
+# two clusters' identical prefixes apart; the hub adds violet under EVPN only.
+# Each web list is the union, so in any given phase some of it is
+# legitimately absent, and failing on that would make --tags web impossible
+# on that cluster in either phase.
+#
+# Nothing is lost by skipping. The namespace is what carries the primary-UDN
+# label, so a tenant without one has no UDN here in this phase - there is
+# nothing for a web pod to attach to, and creating one would put it on the
+# cluster network instead. The empty case still fails, because that means the
+# transport phase was never run and silently doing nothing would be worse
+# than saying so.
+- name: Narrow the web tenants to the ones this cluster has right now
+  ansible.builtin.set_fact:
+    udn_web_tenants_present: >-
+      {{ udn_web_ns.results | selectattr('rc', 'equalto', 0)
+         | map(attribute='item') | list }}
+
+- name: Note any web tenant this cluster is not building in this phase
+  ansible.builtin.debug:
+    msg: >-
+      Skipping {{ udn_web_tenants | difference(udn_web_tenants_present) }}
+      on cluster '{{ udn_bgp_cluster }}': no udn-<tenant> namespace, so no
+      primary UDN to attach a web pod to in this phase. Deploying
+      {{ udn_web_tenants_present }}.
+  when: udn_web_tenants | difference(udn_web_tenants_present) | length > 0
+
+- name: Fail if this cluster has no web tenant at all
+  ansible.builtin.assert:
+    that: udn_web_tenants_present | length > 0
+    fail_msg: >-
+      None of {{ udn_web_tenants }} has a namespace on cluster
+      '{{ udn_bgp_cluster }}', so there is nothing to attach a web pod to.
+      The web workload attaches to a tenant's existing primary UDN; it does
+      not create one. Run --tags shared or --tags vrflite (or --tags evpn)
+      against this cluster first. Note the namespace must carry
+      k8s.ovn.org/primary-user-defined-network from creation - a namespace
+      made by hand here will take the pod onto the cluster network instead,
+      silently, and the demo will show two pages that are both reachable from
+      everywhere.
+    success_msg: >-
+      Web tenants present on '{{ udn_bgp_cluster }}':
+      {{ udn_web_tenants_present | join(', ') }}.
+
+# The subnet the page prints is read off the live CUDN, not vars.yaml. This
+# phase does not know which transport phase built the network it attaches to,
+# and the declared value is right for only one of them: the shared phase
+# builds from udn_subnet_shared, and under EVPN a tenant on two clusters
+# allocates from its per-cluster slice (evpn_udn_subnets). One of the two
+# jsonpath halves is always empty - a CUDN is either layer3 or layer2.
+- name: Read the subnet each web tenant's network was actually built with
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusteruserdefinednetwork {{ item }}
+      -o jsonpath={.spec.network.layer3.subnets[0].cidr}{.spec.network.layer2.subnets[0]}
+  loop: "{{ udn_web_tenants_present }}"
+  register: udn_web_live_subnet
+  changed_when: false
+  failed_when: false
+
+- name: Render the web workload for each tenant
+  ansible.builtin.template:
+    src: webload.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/webload-{{ tenant.name }}.yaml"
+    mode: '0644'
+  vars:
+    tenant: "{{ udn_bgp_tenants | selectattr('name', 'equalto', item) | first }}"
+    tenant_live_subnet: >-
+      {{ udn_web_live_subnet.results | selectattr('item', 'equalto', item)
+         | map(attribute='stdout') | first | default('', true) | trim }}
+  loop: "{{ udn_web_tenants_present }}"
+  delegate_to: localhost
+
+- name: Apply the web workload
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/webload-{{ item }}.yaml"
+  loop: "{{ udn_web_tenants_present }}"
+
+- name: Wait for each web pod to be ready
+  ansible.builtin.command:
+    cmd: >-
+      oc -n udn-{{ item }} rollout status deployment/udn-web --timeout=180s
+  loop: "{{ udn_web_tenants_present }}"
+  changed_when: false
+
+# Read the address off the interface rather than out of the annotation - it is
+# what the interface actually has, and it is what has to be curled.
+- name: Read each web pod's UDN address
+  ansible.builtin.shell:
+    # Literal block, not folded. A folded scalar keeps the newline before any
+    # line that is MORE INDENTED than its first line, so the continuations here
+    # survived into the shell and '-o jsonpath=...' ran as its own command
+    # ("-o: command not found"), leaving stdout empty and rc 0.
+    cmd: |
+      pod=$(oc -n udn-{{ item }} get pods -l app=udn-web -o jsonpath='{.items[0].metadata.name}')
+      [ -n "$pod" ] || { echo "no udn-web pod in udn-{{ item }}" >&2; exit 1; }
+      oc -n udn-{{ item }} exec "$pod" -c httpd -- cat /var/www/html/index.html 2>/dev/null |
+        awk '/^udn:/ {split($2, a, "/"); print a[1]}'
+  loop: "{{ udn_web_tenants_present }}"
+  register: udn_web_addrs
+  changed_when: false
+
+- name: Say what to curl
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['Web workload up. Each page names its own tenant, pod, node and'
+          ' address, so the answer identifies the responder - which a ping'
+          ' cannot.',
+          ''] +
+         (udn_web_addrs.results | map(attribute='item') | zip(
+          udn_web_addrs.results | map(attribute='stdout'))
+          | map('join', '  ->  ') | list) +
+         ['',
+          'From the per-tenant client VMs (--tags clabtenantclients), curl'
+          ' BOTH addresses from EACH VM. Every address below is inside'
+          ' ' ~ (udn_bgp_tenants | selectattr('name', 'equalto', udn_web_tenants_present | first)
+                 | map(attribute='udn_subnet') | first) ~ ', and each VM'
+          ' should reach exactly one of them:',
+          '  scripts/udn-web-demo.sh'] }}

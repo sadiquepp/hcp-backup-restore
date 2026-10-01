@@ -1,0 +1,196 @@
+---
+# defaults file for roles/setup-udn-bgp
+#
+# Deployer-facing values live in vars.yaml under "UDN + BGP lab".
+
+## Namespace FRR-K8s is deployed into when the Cluster Network Operator
+## brings it up via additionalRoutingCapabilities. This is NOT metallb-system
+## - the upstream OKEP examples use that namespace because upstream installs
+## FRR-K8s through MetalLB, but on OpenShift the CNO owns the deployment and
+## puts it here. Applying an FRRConfiguration to the wrong namespace is
+## silently inert: the CR is accepted and nothing ever reads it.
+udn_bgp_frrk8s_namespace: openshift-frr-k8s
+
+## Optional TCP-MD5 on every BGP session, cluster<->leaf1 and leaf<->spine.
+##
+## OFF unless udn_bgp_password is set, and it is deliberately NOT given a
+## default here: `| default('')` in the templates covers it being absent, and
+## every place that consumes it is wrapped in a conditional, so an unset key
+## renders manifests and frr.conf byte-identical to an unauthenticated lab.
+## No Secret is created either - an EMPTY password is not the same as none.
+## FRR still adds the MD5 option to the TCP segments, so a session with an
+## empty key fails against a peer with no key, and nothing logs why.
+##
+## The key belongs in vault.yaml. vars.yaml is committed to a public repo.
+##
+## The CRD requires this Secret to be type kubernetes.io/basic-auth with the
+## key 'password', in the frr-k8s namespace - one Secret serves every node.
+##
+## The guards around it are plain `{% if %}` / `{% endif %}` and MUST STAY
+## that way. Ansible's template module sets trim_blocks=True, which already
+## eats the newline after a block tag, so a plain tag on its own line emits
+## nothing at all when false. Adding `{%- ` on top of that also eats the
+## newline BEFORE the tag, which splices the previous line onto the next:
+##
+##   neighbor .34 description worker1 [hub] neighbor .34 password x neighbor .35 remote-as 64512
+##
+## FRR then never sees worker2's remote-as, and every later line for it
+## fails with 'Specify remote-as or peer-group commands first'. Plain jinja
+## defaults trim_blocks to False, so this does NOT reproduce in a bare
+## render - it has to be checked with trim_blocks=True.
+udn_bgp_password_secret: udn-bgp-fabric-key
+
+## Label that marks the FRRConfiguration objects RouteAdvertisements is
+## allowed to build on. RouteAdvertisements refuses to act if its
+## frrConfigurationSelector matches more than one FRRConfiguration, so this
+## has to select exactly the base peering CR for the phase in play.
+udn_bgp_frr_label_key: routeAdvertisements
+
+## Label put on the ClusterUserDefinedNetworks so a RouteAdvertisements CR
+## can select them as a set.
+udn_bgp_cudn_label_key: bgp
+
+## How long to wait for the cluster network operator to finish rolling out a
+## change to the Network CR. Enabling FRR or flipping gateway mode restarts
+## every ovnkube-node pod, which on this lab's three workers takes a few
+## minutes.
+udn_bgp_rollout_timeout: 900
+
+## How long to wait for a RouteAdvertisements CR to reach Accepted. Applying
+## one always succeeds - acceptance is decided afterwards - so every phase
+## that applies one waits here before claiming the phase worked. Acceptance
+## normally takes seconds; the wait is generous because it also covers the
+## node and subnet annotations OVN-Kubernetes reads while deciding.
+udn_bgp_ra_accept_retries: 30
+udn_bgp_ra_accept_delay: 10
+
+## IP forwarding on the fabric nodes, set through the Node Tuning Operator.
+## OVN-Kubernetes enables forwarding only on the interfaces it manages, so
+## the fabric NIC - which carries the return path for every advertised pod
+## network - does not forward without this. See templates/tuned-forwarding
+## .yaml.j2 for why it is Tuned and why it is the global knob.
+udn_bgp_tuned_name: udn-bgp-fabric-forwarding
+udn_bgp_tuned_namespace: openshift-cluster-node-tuning-operator
+
+## Loose reverse-path filtering (rp_filter=2) on the fabric nodes. Off,
+## because the untagged session is symmetric and strict filtering passes.
+## Turn it on if a later phase shows traffic arriving on one interface while
+## the route back points at another - strict RPF drops that silently.
+udn_bgp_loose_rp_filter: false
+
+## Whether phase 1 advertises the CLUSTER DEFAULT pod network.
+##
+## READ THIS BEFORE LEAVING IT ON. Advertising a network removes OVN's SNAT
+## for it - that is the point of phase 1, and it is not scoped to the BGP
+## fabric. It applies to ALL egress from that network. For the default pod
+## network that means every pod in the cluster, OpenShift's own included,
+## starts talking to the lab's management network with its pod IP.
+##
+## Nothing on {{ lab_network_prefix }}.0/24 has a route back to pod space, so
+## that traffic is one-way. The first casualty is DNS: CoreDNS forwards
+## *.apps and external names to the lab's resolver, gets no answer, and
+## returns SERVFAIL - which surfaces as the authentication, console and
+## ingress operators going Degraded with "server misbehaving" from
+## 172.30.0.10. The cluster is not broken; it just cannot be answered.
+##
+## Two ways to have phase 1 and a healthy cluster:
+##   - leave this true and add return routes on the lab host, one per node:
+##       ip route add <node pod subnet> via {{ lab_network_prefix }}.<node octet>
+##     (read the subnets from k8s.ovn.org/node-subnets on each node)
+##   - set this false and start at the 'shared' phase, where only the tenant
+##     UDNs are advertised and OpenShift's own pods keep their SNAT.
+##
+## Either way the later phases remove this CR - see main.yml.
+##
+## Also false for any cluster that sets advertise_default: false in
+## clab_clusters (vars.yaml). The SNO does, because its default pod network is
+## 10.128.0.0/14 - identical to the hub's. Two clusters advertising one prefix
+## into the fabric is not a tie the fabric reports; leaf1 picks a winner and
+## the other cluster's pods quietly stop being reachable.
+udn_bgp_advertise_default: >-
+  {{ (clab_clusters | default({})).get(udn_bgp_cluster | default('hub'), {})
+     .get('advertise_default', true) }}
+
+## Kubernetes NMState Operator - the source of the
+## NodeNetworkConfigurationPolicy API. Every NNCP this role applies (fabric
+## NIC addresses, VRF-Lite VLANs, EVPN VTEP addresses) needs it, so the role
+## installs it if it is absent.
+udn_bgp_nmstate_namespace: openshift-nmstate
+udn_bgp_nmstate_channel: stable
+
+## Catalog the NMState subscription resolves against. Follows
+## acm_catalog_source when vars.yaml sets one - which is how a disconnected
+## hub points every operator at its mirrored catalog - and otherwise uses the
+## Red Hat operator catalog. A subscription pointed at a catalog that is not
+## there does not fail; it sits in ResolutionFailed indefinitely.
+udn_bgp_catalog_source: "{{ acm_catalog_source | default('redhat-operators', true) }}"
+udn_bgp_catalog_source_namespace: "{{ acm_catalog_source_namespace | default('openshift-marketplace', true) }}"
+
+# How long to wait for a ClusterUserDefinedNetwork to be realised before
+# giving up. The CUDN has to exist as a network, not just as an object,
+# before a namespace can be bound to it or a RouteAdvertisements can select
+# it - see tasks/wait-cudn.yml.
+udn_bgp_cudn_ready_retries: 30
+udn_bgp_cudn_ready_delay: 5
+
+# Where ovnkube-node lives. It is the component that notices a node's VTEP
+# address and writes the k8s.ovn.org/vteps annotation the VTEP CR checks for,
+# and it does not always notice an interface that appeared under it - see
+# tasks/evpn-vtep.yml.
+udn_bgp_ovnkube_namespace: openshift-ovn-kubernetes
+
+# Two waits for the VTEP annotation, not one. The first is short: if every
+# node is going to be annotated on its own, it happens quickly. What follows
+# it is a targeted restart of the agents that did not, and the second wait is
+# the generous one that covers the restart.
+## The fabric NIC forwarding check in verify.yml. main.yml repairs the sysctl
+## directly, but something on the node can still put it back to 0 afterwards -
+## the cluster is converging at that point (Tuned rolling out its profile, the
+## NNCP settling) and the repair lands in the middle of it. Observed on two
+## workers in one run, with the very next run clean.
+##
+## So the check waits rather than sampling once. These bound that wait; when it
+## expires the assert below it still fires with the full diagnostic, so a real
+## fault is reported exactly as before - just not a transient one.
+## `oc debug` has to schedule a pod on the node, and that fails transiently
+## - most often while the node is still rolling out after the Network CR
+## patch. The failure is `unable to create the debug pod`, and it leaves
+## stdout empty, which looks exactly like the thing being checked for being
+## absent. These bound the retry on the POD; whether the NIC is there is a
+## separate assert that only runs once the command actually executed.
+udn_bgp_nic_check_retries: 6
+udn_bgp_nic_check_delay: 10
+
+udn_bgp_fwd_check_retries: 12
+udn_bgp_fwd_check_delay: 10
+
+# How long to wait for each of this cluster's BGP sessions to the border leaf
+# to reach Established. Three minutes. Once TCP works the session comes up in
+# seconds - holdTime is 9s and keepaliveTime 3s - so this is not waiting for
+# BGP, it is waiting for whatever is still converging around it: an
+# ovnkube-node rollout, frr-k8s reloading, an NNCP landing the fabric address.
+udn_bgp_session_check_retries: 18
+udn_bgp_session_check_delay: 10
+
+udn_bgp_vtep_annotation_retries: 12
+udn_bgp_vtep_annotation_delay: 10
+udn_bgp_vtep_annotation_retries_after_restart: 30
+
+## What a tenant with evpn_internet probes, from one of its own pods, at the
+## end of the evpn phase. An IP rather than a name, so it tests the route and
+## the NAT and nothing about DNS; HTTP rather than ICMP, because some networks
+## drop outbound ping. Any HTTP status means the path works - 1.1.1.1 answers
+## plain HTTP with a redirect. Set to "" where the lab host has no internet.
+udn_bgp_internet_probe: "http://1.1.1.1/"
+
+## Workshop (udn_phase: prep, and -e udn_bgp_check_only=true).
+##
+## Which clusters get OpenShift Virtualization on day 0. The live-migration
+## lab runs its VM on the hub and pings it from the SNO, so the SNO does not
+## need it - and it is the cluster with the least memory to spare.
+udn_workshop_cnv_clusters: [hub]
+## Where the attendee's environment file is written. `source` it.
+udn_workshop_env_file: /root/workshop.env
+## Where workshop.md has attendees write each manifest before applying it
+## ($M, one subdirectory per cluster, created by the `lab` helper).
+udn_workshop_manifest_dir: /root/workshop-manifests

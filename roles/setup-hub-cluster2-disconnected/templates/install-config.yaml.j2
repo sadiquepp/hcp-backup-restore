@@ -1,0 +1,85 @@
+apiVersion: v1
+baseDomain: "{{base_domain}}"
+compute:
+- hyperthreading: Enabled
+  name: worker
+  replicas: 3
+controlPlane:
+  hyperthreading: Enabled
+  name: master
+  replicas: 3
+metadata:
+  name: "{{hub2_disconnected_name}}"
+networking:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - 172.30.0.0/16
+platform:
+  none: {}
+fips: false
+# Derived from the ImageDigestMirrorSet oc-mirror generated, so the two can never
+# drift apart. Same shape a connected-infrastructure disconnected install writes
+# by hand:
+#
+#   imageDigestSources:
+#   - mirrors:
+#     - <registry>/openshift/release-images
+#     source: quay.io/openshift-release-dev/ocp-release
+#   - mirrors:
+#     - <registry>/openshift/release
+#     source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+#
+# This is the only place the mirror is configured for the install. oc-mirror's own
+# ImageDigestMirrorSet is deliberately NOT copied into manifests/ - two renderers
+# describing the same mirrors have to agree byte for byte or the MCD rejects
+# every node on first boot, and an ImageTagMirrorSet cannot be expressed here at
+# all, so they cannot. oc-mirror's copies are applied on day 2 instead; see
+# tasks/apply-day2-mirror-resources.yml.
+#
+# This key covers both hosts that matter during the install. The installer builds
+# the bootstrap node's /etc/containers/registries.conf from it - the bootstrap
+# node is not a cluster member and never sees manifests/, and without this
+# bootkube resolves the payload's component images to quay.io and fails - and it
+# also generates the cluster's own ImageDigestMirrorSet, which the MCO renders
+# onto masters and workers.
+#
+# Every mapping oc-mirror emitted is listed, not just the release ones, so the
+# bootstrap node resolves operator images through the mirror too. Only .source
+# and .mirrors are read; IDMS-only fields like mirrorSourcePolicy are not part of
+# the installer's ImageDigestSource type.
+imageDigestSources:
+{% for m in disconnected_image_digest_mirrors %}
+- mirrors:
+{% for mirror in m.mirrors %}
+  - {{ mirror }}
+{% endfor %}
+  source: {{ m.source }}
+{% endfor %}
+# Only the mirror registry's own credentials, not the whole host authfile:
+# tasks/main.yml reduces mirror_registry_authfile down to that single auths
+# entry. The imageDigestSources above redirect every release and operator image
+# pull to the mirror registry, so the cluster never needs a quay.io or
+# registry.redhat.io
+# credential - and giving it one would hand every node a working route back to
+# the real registries, quietly undoing the disconnection.
+#
+# to_json twice, deliberately. The inner call serialises the auths dict to the
+# JSON string that pullSecret has to contain. The outer one wraps that string in
+# a YAML double-quoted scalar with everything inside it escaped, so no character
+# in the credential can break the document. The obvious-looking
+# '{{ '{{' }} ... {{ '}}' }}' spelling cannot do this: a single apostrophe in the
+# authfile (console.redhat.com pull secrets carry one in their "email" fields
+# often enough) closes the scalar early and the rest of the JSON is then parsed
+# as YAML structure, which is what produced
+# "yaml: line 25: did not find expected key" from openshift-install.
+pullSecret: {{ disconnected_pull_secret | to_json | to_json }}
+sshKey: '{{ ssh_key }}'
+# Two literal spaces below indent the certificate's first line; indent(2) does
+# the rest. Two is correct here, not four - additionalTrustBundle is a top-level
+# key, so its block scalar only has to out-indent column 0. trim drops the PEM's
+# trailing newline, which would otherwise render as a stray blank line.
+additionalTrustBundle: |
+  {{ mirror_registry_ca_cert | trim | indent(2) }}

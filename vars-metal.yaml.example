@@ -1,0 +1,91 @@
+## vars-metal.yaml.example - this host's overrides, for a lab host that is NOT
+## built by terraform/lab-up.sh (a bare-metal server in a lab, a big
+## workstation, a metal instance on another cloud).
+##
+##   cp vars-metal.yaml.example vars-metal.yaml     # at the repository root
+##   vi vars-metal.yaml
+##
+## On AWS you do not need this: the terraform bootstrap writes vars-metal.yaml
+## for you. Either way, udn-bgp-evpn/build-lab.sh passes the file to every
+## playbook it runs whenever it exists, so it applies without a flag. Running a
+## playbook by hand, add `-e @vars-metal.yaml` yourself - it is an extra-vars
+## file, so everything in it beats vars.yaml.
+##
+## vars-metal.yaml is in .gitignore: it describes one host, and keeping it out
+## of vars.yaml keeps `git pull` free of conflicts.
+##
+## What the host needs, whatever it is:
+##   - RHEL 9, root access, and nested virtualisation (the cluster nodes are KVM
+##     guests, and the live-migration lab runs a VM inside them):
+##       grep -cE 'vmx|svm' /proc/cpuinfo                  # > 0
+##       cat /sys/module/kvm_intel/parameters/nested       # Y (or kvm_amd: 1)
+##   - memory: see the sizing table below; 192 GiB is the minimum
+##   - about 1 TB free where libvirt keeps its disks (/var/lib/libvirt/images)
+##   - outbound internet: the clusters pull from quay.io and registry.redhat.io
+##   - 192.168.122.0/24 and 192.168.140.0/24 free: the lab's own networks
+
+## ---------------------------------------------------------------------------
+## The base image
+## ---------------------------------------------------------------------------
+## Where rhel-9.8-x86_64-kvm.qcow2 is (the RHEL 9 KVM guest image, from
+## access.redhat.com/downloads). Only ever read, so it can be anywhere you
+## control - but not /var/lib/libvirt/images on a host without libvirt yet,
+## because that directory only appears when this lab installs libvirt.
+base_image_dir: /opt/lab-images
+
+## ---------------------------------------------------------------------------
+## Sizing
+## ---------------------------------------------------------------------------
+## What the workshop lab configures, in GiB, before the workers:
+##
+##   hub masters   3 x 16   48      master_memory
+##   SNO                    32      sno_memory
+##   helper                  8      helper_memory
+##   containerlab VM         8      clab_vm_memory
+##   namespace client        2      udn_nsclient_memory
+##                         ---
+##                          98  +  3 x worker_memory
+##
+## Size to the CONFIGURED total, not to what the guests use today. Guest page
+## cache is host memory that is touched and never handed back, so guests
+## ratchet toward their ceiling: measured on this lab, 43% of configured right
+## after install and 79% once the clusters were busy. Leave the host 10-15%.
+##
+##   host RAM   worker_memory    configured total
+##   192 GiB    24576 (24 GiB)   170 GiB            <- the AWS c5.metal setting
+##   256 GiB    40960 (40 GiB)   218 GiB
+##   384 GiB+   49152 (48 GiB)   242 GiB            <- vars.yaml's default; drop the line
+##
+## Below 192 GiB, OpenShift Virtualization (live migration) and the workers do
+## not fit together. The workers carry the tenant pods, the web pods and, in
+## the last lab, a 1 GiB VM on top of OpenShift Virtualization's own pods.
+worker_memory: 24576
+
+## vCPUs per worker. Overcommitting CPU is fine here - the lab is idle most of
+## the time - so this is about hardware threads, not a hard budget. 16 suits
+## 64-96 threads; use 8 on a 32-48 thread host.
+worker_cpu: 16
+
+## The rest of the sizing stays at vars.yaml's values unless you have reason:
+# master_memory: 16384
+# master_cpu: 8
+# sno_memory: 32768
+# sno_vcpus: 12
+
+## ---------------------------------------------------------------------------
+## VNC - a desktop on the host for virt-manager and the guests' consoles
+## ---------------------------------------------------------------------------
+## Optional. Loopback only; reach it through an ssh tunnel, which supplies the
+## encryption and authentication VNC lacks (its password is truncated to 8
+## characters):
+##
+##   ssh -L 5999:localhost:5999 <vnc_tunnel_user>@<this host>    # 5900 + display 99
+##
+## vnc_tunnel_user is only used to print that command - set it to the account
+## you ssh in as. The password is generated into /root/.vnc-credentials.
+vnc_enabled: true
+vnc_localhost_only: true
+vnc_tunnel_user: root
+## "" on a host that already has a desktop installed; the default group is a
+## large install.
+# vnc_desktop_group: ""

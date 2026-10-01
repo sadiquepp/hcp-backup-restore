@@ -1,0 +1,73 @@
+{#
+  Per-VRF BGP peering for VRF-Lite.
+
+  One router stanza per tenant, each bound to that tenant's VRF and peering
+  with the border leaf over that tenant's VLAN. This is the CR the admin
+  writes; OVN-Kubernetes generates the additive one carrying the actual
+  prefixes once the RouteAdvertisements CR with targetVRF 'auto' selects it.
+
+  The VRF names here come from vrflite-discover.yml, which derives them from
+  the tenant names and then confirms each one against the node's own link
+  table. FRR-K8s passes the value straight through to FRR's
+  'router bgp <asn> vrf <name>', so it has to match the kernel device
+  exactly. There is no status field publishing the name to read instead -
+  status carries conditions and nothing else - so it is a derivation, and
+  the confirmation step is what makes it safe to render from.
+
+  Note there is no router stanza for the default VRF in this file. Phase 3
+  peering is entirely inside the tenant VRFs; the untagged default-VRF
+  session from phase 1 keeps running alongside it, from its own
+  FRRConfiguration, and carries the cluster default pod network only.
+#}
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: fabric-peering-vrflite
+  namespace: {{ udn_bgp_frrk8s_namespace }}
+  labels:
+    {{ udn_bgp_frr_label_key }}: fabric-vrflite
+spec:
+  bgp:
+    routers:
+{% for t in udn_bgp_tenants %}
+      - asn: {{ udn_bgp_cluster_asn }}
+        vrf: {{ udn_bgp_vrf_names[t.name] }}
+        neighbors:
+          - address: {{ t.vrf_prefix }}.{{ clab_fabric_router_octet }}
+            asn: {{ clab_leaf1_asn }}
+{% if udn_bgp_password | default('') | length > 0 %}
+            # TCP-MD5 on this session. Emitted only when udn_bgp_password is
+            # set in vault.yaml; with it unset this block is absent entirely
+            # and the manifest is byte-identical to an unauthenticated lab.
+            #
+            # passwordSecret, not password: the plain field would put the key
+            # into this rendered file under udn-bgp/, which is on disk in the
+            # clear. The CRD makes them mutually exclusive, so it is one or
+            # the other and this is the one worth having.
+            passwordSecret:
+              name: {{ udn_bgp_password_secret }}
+              namespace: {{ udn_bgp_frrk8s_namespace }}
+{% endif %}
+            holdTime: 9s
+            keepaliveTime: 3s
+            port: 179
+            toReceive:
+              allowed:
+                # Accept what the leaf sends in this tenant's VRF. 'all' is
+                # safe inside a tenant VRF in a way it would not be in the
+                # default VRF: the only thing that can inject here is the
+                # leaf's {{ t.name }} VRF.
+                #
+                # That used to mean exactly {{ t.external_prefix }}. With
+                # udn_vrf_leaks it also means whatever {{ t.name }} imports -
+                # leaf1's `import vrf <other>` puts another tenant's prefixes
+                # into this VRF's table, and they arrive here over this same
+                # session. 'all' is what lets that work without a second
+                # change; a prefix list here would have to be kept in step
+                # with the leaks, which is a coupling worth not having.
+                mode: all
+            toAdvertise:
+              allowed:
+                mode: filtered
+{% endfor %}
+  nodeSelector: {}

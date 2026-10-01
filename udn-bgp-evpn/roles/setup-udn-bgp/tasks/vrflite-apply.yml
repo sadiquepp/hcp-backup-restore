@@ -1,0 +1,408 @@
+---
+# Phase 3b - render and apply the VRF-Lite plumbing.
+#
+# Split from the discovery step so the rendered NNCPs can be read before they
+# are applied. These are the objects that edit a VRF OVN-Kubernetes owns; the
+# rendered file shows the full port list that will be written, which is the
+# thing worth checking with your own eyes at least once.
+
+# Fail here rather than fifteen minutes later, on the thing this phase cannot
+# work without: the border leaf holding each tenant's gateway address.
+#
+# VRF-Lite peers every node to <vrf_prefix>.1 on leaf1, one session per tenant
+# over a VLAN sub-interface. Only the 'bgp' containerlab topology puts those
+# addresses on leaf1. The 'evpn' topology does not - there the tenant VRFs and
+# their external networks live on leaf2, leaf1 holds no tenant VRF at all, and
+# `vrf_prefix` appears nowhere in its topology file.
+#
+# So running this phase against an EVPN fabric peers every node at an address
+# that does not exist. Every session sits in Active/Connect forever, and the
+# rebind logic below dutifully restarts frr-k8s and re-checks, because from
+# the cluster's side that is indistinguishable from bgpd having failed to bind
+# to the kernel VRF. It is not a cluster fault and no restart can fix it.
+#
+# build-lab.sh builds the evpn topology, so this is the state anyone lands in
+# who builds the lab with it and then tries VRF-Lite.
+- name: Ask the border leaf for its addresses
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-leaf1 ip -o addr show"
+  delegate_to: "{{ clab_exec_host }}"
+  register: udn_bgp_leaf_addrs
+  changed_when: false
+  failed_when: false
+
+- name: Fail if the fabric is not the VRF-Lite topology
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_leaf_addrs.rc == 0
+      - udn_bgp_missing_gateways | length == 0
+    fail_msg: >-
+      {{ 'The border leaf could not be reached at all: `docker exec
+      clab-' ~ clab_lab_name ~ '-leaf1 ip -o addr show` failed on
+      ' ~ clab_exec_host ~ '. Check the fabric is deployed
+      (`--tags fabric`) before this phase.'
+      if udn_bgp_leaf_addrs.rc != 0 else
+      'leaf1 does not hold the tenant gateway address for:
+      ' ~ (udn_bgp_missing_gateways | join(", ")) ~ '.
+      VRF-Lite peers every node to <vrf_prefix>.1 on leaf1, one session per
+      tenant over a VLAN sub-interface, and only the bgp topology puts those
+      addresses there. The evpn topology keeps the tenant VRFs on leaf2 and
+      gives leaf1 none, so every tenant session would sit in Active or
+      Connect forever and no amount of restarting frr-k8s would change it -
+      the peer does not exist.
+      Rebuild the fabric for this phase and run it again:
+        ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml
+          --tags fabric -e clab_topology=bgp
+        ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml
+          --tags vrflite -e udn_bgp_cluster=' ~ udn_bgp_cluster ~ '
+      Note build-lab.sh builds the evpn topology, so a lab built with it is
+      in exactly this state. Going back to EVPN afterwards is the same move
+      with -e clab_topology=evpn.' }}
+    success_msg: >-
+      leaf1 holds a gateway for every tenant
+      ({{ udn_bgp_tenants | map(attribute='name') | join(', ') }}).
+  vars:
+    udn_bgp_missing_gateways: >-
+      {{ udn_bgp_tenants
+         | rejectattr('vrf_prefix', 'in',
+                      udn_bgp_leaf_addrs.stdout | default('')
+                      | regex_findall('inet (\d+\.\d+\.\d+)\.'
+                                      ~ clab_fabric_router_octet ~ '/'))
+         | map(attribute='name') | list }}
+
+- name: Render a VRF-Lite policy per node and tenant
+  ansible.builtin.template:
+    src: nncp-vrflite.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/nncp-vrflite-{{ vrf_fact.tenant }}-{{ vrf_fact.ip_key }}.yaml"
+    mode: '0644'
+  loop: "{{ udn_bgp_vrf_facts }}"
+  loop_control:
+    loop_var: vrf_fact
+    label: "{{ vrf_fact.node }}/{{ vrf_fact.tenant }}"
+  delegate_to: localhost
+
+- name: Render the per-VRF BGP peering
+  ansible.builtin.template:
+    src: frrconfiguration-vrflite.yaml.j2
+    dest: "{{ udn_bgp_manifest_dir }}/frrconfiguration-vrflite.yaml"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: Apply the VRF-Lite policies
+  ansible.builtin.command:
+    cmd: >-
+      oc apply -f
+      {{ udn_bgp_manifest_dir }}/nncp-vrflite-{{ item.tenant }}-{{ item.ip_key }}.yaml
+  loop: "{{ udn_bgp_vrf_facts }}"
+  loop_control:
+    label: "{{ item.node }}/{{ item.tenant }}"
+
+- name: Wait for the VRF-Lite policies to be applied
+  ansible.builtin.command:
+    cmd: >-
+      oc wait nncp/vrflite-{{ item.tenant }}-{{ item.ip_key }}
+      --for=condition=Available --timeout=300s
+  loop: "{{ udn_bgp_vrf_facts }}"
+  loop_control:
+    label: "{{ item.node }}/{{ item.tenant }}"
+  changed_when: false
+
+- name: Create the per-VRF BGP peering
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/frrconfiguration-vrflite.yaml"
+
+- name: Advertise each UDN inside its own VRF (targetVRF auto)
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-udn.yaml"
+
+# The shared-VRF advertisement from phase 2, if it is still there, selects the
+# same CUDNs. Two RouteAdvertisements CRs may not select the same network -
+# OVN-Kubernetes reports an error and applies neither - so the phase-2 object
+# has to go before the phase-3 one can work. Removed after applying rather
+# than before so a half-finished run leaves at least one in place.
+- name: Remove the shared-VRF advertisement so it cannot contend for the same networks
+  ansible.builtin.command:
+    cmd: "oc delete routeadvertisements udn-shared-vrf --ignore-not-found"
+
+# After the delete, not before it: while both CRs select the same networks
+# neither is accepted, so waiting earlier would time out on a state the next
+# task was about to fix.
+- name: Confirm the VRF-Lite advertisement was accepted
+  ansible.builtin.include_tasks: wait-ra.yml
+  vars:
+    udn_bgp_ra_name: udn-vrflite
+
+# ---------------------------------------------------------------------------
+# Phase 3c - make bgpd bind to the tenant VRFs
+# ---------------------------------------------------------------------------
+# FRR's bgpd resolves 'router bgp <asn> vrf <name>' to a kernel VRF device when
+# it parses that stanza. If the device is replaced afterwards the instance is
+# left holding VRF_UNKNOWN and goes inert - and phase 3 replaces every one of
+# them, because recreating the CUDNs on the new subnets makes OVN-Kubernetes
+# tear down each tenant VRF and build a new one with a new table id.
+#
+# Nothing reports this. frr.conf is correct and contains all four routers, the
+# FRRConfigurations are accepted, the RouteAdvertisements CR is Accepted,
+# OVN-Kubernetes generates its additive configs, NMState is Available on every
+# policy, and 'show vrf' lists every VRF with the right table. The only trace
+# is in 'show bgp vrf all summary':
+#
+#     BGP router identifier 0.0.0.0 ... VRF blue vrf-id -1
+#     192.168.141.1 ... 0  0  never  Idle
+#
+# router-id 0.0.0.0 because bgpd cannot see into the VRF to find an address,
+# and zero messages in either direction because it never attempts the
+# connection. The leaf shows its side as Active/never and looks like a
+# connectivity fault, which is what sent the first three hours of diagnosis
+# down the wrong layer. Connectivity is fine: the leaf can ping the node's
+# VLAN address through the VRF the whole time.
+#
+# 'show bgp summary' does NOT show this - it is scoped to the default VRF,
+# which keeps working throughout. Only 'vrf all' reveals it.
+#
+# There is a second, separate way for FRR state to go stale, and it does NOT
+# show up as vrf-id -1. Any NNCP re-apply - adding a tenant, for instance -
+# replaces the VLAN subinterfaces, and bgpd can come out of that flap holding
+# the right vrf-id and a permanently invalid nexthop cache entry for its peer:
+#
+#     vtysh -c 'show bgp vrf green neighbors 192.168.144.1'
+#       BGP state = Active
+#       Connections established 5; dropped 5
+#       Last reset ...,  No path to specified Neighbor
+#
+# "No path to specified Neighbor" while the kernel path is perfectly good:
+#
+#     ip route show vrf green | grep 192.168.144
+#       192.168.144.0/24 dev enp8s0.140 proto kernel scope link src ...
+#     ip neigh show vrf green
+#       192.168.144.1 dev enp8s0.140 lladdr aa:c1:ab:ad:13:49 REACHABLE
+#
+# It is worth being exact about which daemon is wrong, because the obvious
+# guess - that zebra lost the route - is not it. zebra has the route and calls
+# it best. bgpd is the one holding a stale cache:
+#
+#     vtysh -c 'show ip route vrf green 192.168.144.1'
+#       Known via "kernel", ... vrf green, best
+#       * directly connected, enp8s0.140, weight 1
+#
+#     vtysh -c 'show bgp vrf green nexthop'
+#       192.168.144.1 invalid, #paths 0, peer 192.168.144.1
+#         Must be Connected
+#         Last update: Mon Sep 14 14:02:19 2026
+#
+#     vtysh -c 'show interface enp8s0.140 vrf green'
+#       Link ups:   3   last: 2026/09/14 14:02:19.66
+#       Link downs: 2   last: 2026/09/14 14:02:19.66
+#
+# The cache entry's Last update is frozen at the instant of the flap. bgpd
+# invalidated it on the link down and never re-validated it on the way back up,
+# so "Must be Connected" can never be satisfied from an entry nobody refreshes.
+# The network is fine; one daemon's cache is not.
+#
+# Checking only for vrf-id -1 passes a cluster in this state, which is how four
+# sessions stayed down across a green run - the isolation matrix showed 2/3 on
+# the diagonal and nothing named the cause. Worse, the tenant whose pods happen
+# to land on a healthy node still serves pages, so the web demo can read clean
+# while a third of the fabric is down.
+#
+# Restarting frr-k8s fixes both: bgpd starts with the VRFs and their addresses
+# already present and binds normally. Done conditionally so a re-run against a
+# healthy cluster changes nothing - a restart drops each node's default-VRF
+# session for a few seconds, which is harmless but not worth doing for free.
+#
+# The check is scoped to the tenant peer addresses rather than to every line of
+# 'show bgp vrf all summary', so an unrelated default-VRF session that happens
+# to be down cannot trigger a restart that would not help it.
+- name: Name the tenant BGP peers and what an unhealthy one looks like
+  ansible.builtin.set_fact:
+    udn_bgp_peer_addrs: >-
+      {{ udn_bgp_tenants | map(attribute='vrf_prefix')
+         | map('regex_replace', '$', '.1') | list }}
+
+- name: Build the patterns that decide whether a rebind is needed
+  ansible.builtin.set_fact:
+    # bgpd never attached to the kernel VRF at all.
+    udn_bgp_unbound_re: 'vrf-id -1'
+    # Attached, but this tenant's session is in any state short of Established.
+    # In 'show bgp vrf all summary' an Established peer prints a prefix COUNT in
+    # the State/PfxRcd column; anything else prints the state name.
+    udn_bgp_notpeering_re: >-
+      (?m)^({{ udn_bgp_peer_addrs | map('regex_escape') | join('|') }})\s+4\s+.*\b(Idle|Active|Connect|OpenSent|OpenConfirm)\b
+
+# FABRIC NODES ONLY, and that is the whole point of this task.
+#
+# It used to list every frr-k8s pod in the namespace. frr-k8s runs on the
+# masters too, and the FRRConfiguration this phase applies has
+# `nodeSelector: {}`, so a master is told to peer with the border leaf in
+# every tenant VRF. A master has no fabric NIC. It cannot reach
+# <vrf_prefix>.1 in any VRF - or 192.168.x.1 in the default one - and leaf1
+# is not configured to peer with it either; its neighbour list is the fabric
+# nodes and nothing else.
+#
+# So a master sits at `never / Active` in every VRF, permanently and
+# correctly, and the check read that as a broken tenant session: it
+# restarted frr-k8s cluster-wide, waited, saw the same thing, and failed the
+# phase with a message about stale nexthop caches - while every fabric node
+# was Established with prefixes flowing both ways.
+#
+# The VRFs themselves DO exist on a master (real vrf-ids, not -1) because
+# OVN-Kubernetes creates them cluster-wide, so neither of the two faults this
+# check names was present. It was reporting on nodes that were never in scope.
+- name: Resolve this cluster's fabric node names
+  ansible.builtin.set_fact:
+    udn_bgp_fabric_node_names: >-
+      {{ udn_bgp_cluster_nodes | map(attribute='ip_key')
+         | map('extract', udn_bgp_node_names) | list }}
+
+- name: List the frr-k8s pod on each fabric node
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} get pods -l component=frr-k8s
+      --field-selector spec.nodeName={{ item }} -o name
+  loop: "{{ udn_bgp_fabric_node_names }}"
+  register: udn_bgp_frrk8s_pods_raw
+  changed_when: false
+
+- name: Keep the fabric nodes' pods
+  ansible.builtin.set_fact:
+    udn_bgp_frrk8s_pod_names: >-
+      {{ udn_bgp_frrk8s_pods_raw.results | map(attribute='stdout_lines')
+         | flatten | select | list }}
+
+# Give the sessions a chance to come up before concluding anything. Timers are
+# 3s/9s, so a minute is generous; restarting a daemonset because a peer had not
+# finished converging would be a self-inflicted outage.
+- name: Read each node's per-VRF BGP instances
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} exec {{ item }} -c frr --
+      vtysh -c "show bgp vrf all summary"
+  loop: "{{ udn_bgp_frrk8s_pod_names }}"
+  register: udn_bgp_vrf_bgp
+  changed_when: false
+  failed_when: false
+  retries: 12
+  delay: 5
+  until: >-
+    udn_bgp_vrf_bgp.stdout is defined
+    and udn_bgp_vrf_bgp.stdout is not search(udn_bgp_unbound_re)
+    and udn_bgp_vrf_bgp.stdout is not search(udn_bgp_notpeering_re)
+
+- name: Note whether any tenant VRF is unbound or not peering
+  ansible.builtin.set_fact:
+    udn_bgp_unbound: >-
+      {{ udn_bgp_vrf_bgp.results | map(attribute='stdout', default='')
+         | select('search', udn_bgp_unbound_re) | list | length > 0 }}
+    udn_bgp_notpeering: >-
+      {{ udn_bgp_vrf_bgp.results | map(attribute='stdout', default='')
+         | select('search', udn_bgp_notpeering_re) | list | length > 0 }}
+
+- name: Decide whether frr-k8s needs a restart
+  ansible.builtin.set_fact:
+    udn_bgp_needs_rebind: "{{ udn_bgp_unbound | bool or udn_bgp_notpeering | bool }}"
+
+- name: Report the binding state
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'At least one bgpd VRF instance is unbound (vrf-id -1).'
+         if udn_bgp_unbound | bool else '' }}
+      {{ 'At least one tenant peer is not Established after a minute - most
+      likely a stale bgpd nexthop cache entry left over from the VLAN being
+      replaced.' if udn_bgp_notpeering | bool else '' }}
+      {{ 'Restarting frr-k8s.' if udn_bgp_needs_rebind | bool else
+      'Every tenant VRF is bound and every tenant peer is Established. No
+      restart needed.' }}
+
+- name: Restart frr-k8s so bgpd binds to the tenant VRFs
+  ansible.builtin.command:
+    cmd: "oc -n {{ udn_bgp_frrk8s_namespace }} rollout restart daemonset/frr-k8s"
+  when: udn_bgp_needs_rebind | bool
+
+- name: Wait for frr-k8s to come back
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} rollout status daemonset/frr-k8s
+      --timeout=300s
+  when: udn_bgp_needs_rebind | bool
+  changed_when: false
+
+# The pod names change on a restart, so this cannot reuse the list above.
+- name: List the frr-k8s pod on each fabric node again
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} get pods -l component=frr-k8s
+      --field-selector spec.nodeName={{ item }} -o name
+  loop: "{{ udn_bgp_fabric_node_names }}"
+  register: udn_bgp_frrk8s_pods_raw_after
+  when: udn_bgp_needs_rebind | bool
+  changed_when: false
+
+- name: Keep the fabric nodes' pods again
+  ansible.builtin.set_fact:
+    udn_bgp_frrk8s_pod_names_after: >-
+      {{ udn_bgp_frrk8s_pods_raw_after.results | default([])
+         | rejectattr('skipped', 'defined')
+         | map(attribute='stdout_lines') | flatten | select | list }}
+  when: udn_bgp_needs_rebind | bool
+
+- name: Confirm every tenant VRF is bound and peering
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ udn_bgp_frrk8s_namespace }} exec {{ item }} -c frr --
+      vtysh -c "show bgp vrf all summary"
+  loop: "{{ udn_bgp_frrk8s_pod_names_after | default([], true) }}"
+  register: udn_bgp_vrf_bgp_after
+  when: udn_bgp_needs_rebind | bool
+  changed_when: false
+  failed_when: false
+  retries: 12
+  delay: 5
+  until: >-
+    udn_bgp_vrf_bgp_after.stdout is defined
+    and udn_bgp_vrf_bgp_after.stdout is not search(udn_bgp_unbound_re)
+    and udn_bgp_vrf_bgp_after.stdout is not search(udn_bgp_notpeering_re)
+
+- name: Fail if a tenant VRF is still unbound or still not peering
+  vars:
+    udn_bgp_final: >-
+      {{ (udn_bgp_vrf_bgp_after if udn_bgp_needs_rebind | bool
+          else udn_bgp_vrf_bgp).results | default([], true) }}
+    udn_bgp_final_out: "{{ udn_bgp_final | map(attribute='stdout', default='') | list }}"
+    # Name the pods, so the next failure does not start with "which one?".
+    # Both patterns carry (?m), which Python requires at the start of a
+    # pattern, so they cannot be combined by alternation - two passes.
+    udn_bgp_bad_pods: >-
+      {{ ((udn_bgp_final | selectattr('stdout', 'defined')
+           | selectattr('stdout', 'search', udn_bgp_unbound_re)
+           | map(attribute='item') | list)
+        + (udn_bgp_final | selectattr('stdout', 'defined')
+           | selectattr('stdout', 'search', udn_bgp_notpeering_re)
+           | map(attribute='item') | list)) | unique | list }}
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_final_out | select('search', udn_bgp_unbound_re) | list | length == 0
+      - udn_bgp_final_out | select('search', udn_bgp_notpeering_re) | list | length == 0
+    fail_msg: >-
+      A tenant BGP session is still not up after restarting frr-k8s, on:
+      {{ udn_bgp_bad_pods | join(', ') }}.
+      These are pods on this cluster's FABRIC nodes only - a master has no
+      fabric NIC and sits in Active in every VRF by design, which is not a
+      fault and is not counted here. Read it with:
+        oc -n {{ udn_bgp_frrk8s_namespace }} exec {{ udn_bgp_bad_pods | first | default('<frr-k8s pod>', true) }} -c frr --
+          vtysh -c 'show bgp vrf all summary'
+      Two different faults print here. 'vrf-id -1' means bgpd never attached to
+      the kernel VRF - compare the VRF names against 'show vrf'. A real vrf-id
+      with the peer in Active/Idle means the session itself is down; get the
+      reason from
+        vtysh -c 'show bgp vrf <tenant> neighbors <peer> '
+      and if it says 'No path to specified Neighbor' while
+      'ip route show vrf <tenant>' and 'ip neigh show vrf <tenant>' both have
+      the peer, check 'show bgp vrf <tenant> nexthop': an entry reading
+      'invalid ... Must be Connected' whose Last update matches a link flap in
+      'show interface <dev> vrf <tenant>' is a stale bgpd cache, not a broken
+      network, and only a restart clears it.
+      Note 'show bgp summary' without 'vrf all' shows only the default VRF and
+      will look healthy regardless.
+    success_msg: >-
+      Every tenant VRF has a bound bgpd instance on every node
+      ({{ udn_bgp_tenants | map(attribute='name') | join(', ') }}).

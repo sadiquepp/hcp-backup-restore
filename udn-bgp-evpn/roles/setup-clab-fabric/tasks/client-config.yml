@@ -1,0 +1,35 @@
+---
+# In-guest configuration for the client VM. Delegated to it.
+
+# Only what the client actually uses: ip for the routes, tcpdump for watching
+# the asymmetry. bind-utils was in this list and is not - nothing here resolves
+# a name, and it was the one package the base image did not already have, so it
+# was also the only reason this task ever failed.
+- name: Install test tooling on the client VM
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
+  vars:
+    lab_pkg_list: "{{ lab_pkgs_client }}"
+    lab_pkg_what: client VM
+
+- name: Install the client routing script
+  ansible.builtin.template:
+    src: udn-client-routes.sh.j2
+    dest: /usr/local/sbin/udn-client-routes.sh
+    mode: "0755"
+  register: udn_client_script
+
+- name: Install the client routing unit
+  ansible.builtin.template:
+    src: udn-client-routes.service.j2
+    dest: /etc/systemd/system/udn-client-routes.service
+    mode: "0644"
+  register: udn_client_unit
+
+- name: Enable and run the client routing unit
+  ansible.builtin.systemd:
+    name: udn-client-routes.service
+    enabled: true
+    state: "{{ 'restarted' if (udn_client_script is changed or udn_client_unit is changed) else 'started' }}"
+    daemon_reload: true

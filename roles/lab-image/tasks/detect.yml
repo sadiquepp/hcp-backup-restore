@@ -1,0 +1,65 @@
+---
+# Is there a prebuilt customized lab image, and which guests should use it?
+#
+# Shared by the udn-bgp-evpn lab (setup-clab-fabric) and the helper VM
+# (setup_bm_host.yaml), which is why it lives at the repository root rather
+# than inside either.
+#
+# The image's PRESENCE is the switch. There is no enable flag for the lab's
+# own guests, on purpose: an enable flag can be true while the image is
+# missing, and then every VM is built from an image that is not there.
+# Statting the file cannot lie.
+#
+# The HELPER is the one exception and does have a flag, defaulting false.
+# setup_bm_host.yaml is shared by every flow in this repository - hub, hosted
+# clusters, OADP, Ceph, the mirror registry - and the helper is the one VM
+# whose failure takes all of them down with it. Opting it in is a decision to
+# make deliberately, not one to inherit from a file appearing in a directory.
+#
+# Built by udn-bgp-evpn/build-lab-image.yaml. Delete the image and everything
+# goes back to registering each guest with subscription-manager and running
+# dnf, with nothing else to change.
+
+- name: Look for the prebuilt customized lab image
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ customized_lab_image }}"
+  register: customized_lab_image_stat
+  delegate_to: localhost
+
+- name: Decide which guests are built from it
+  ansible.builtin.set_fact:
+    customized_lab_image_ready: "{{ customized_lab_image_stat.stat.exists }}"
+    customized_lab_base_image: >-
+      {{ customized_lab_image if customized_lab_image_stat.stat.exists
+         else rhel9_kvm_image }}
+    # The helper needs BOTH the image and the opt-in. Computed once here so
+    # no call site has to remember to write the conjunction, and get it
+    # wrong in one of the four places it is needed.
+    customized_lab_helper_ready: >-
+      {{ customized_lab_image_stat.stat.exists
+         and (customized_lab_image_for_helper | default(false) | bool) }}
+    customized_lab_helper_image: >-
+      {{ customized_lab_image
+         if (customized_lab_image_stat.stat.exists
+             and (customized_lab_image_for_helper | default(false) | bool))
+         else rhel9_kvm_image }}
+
+# Said out loud every run. Which image a guest came from decides whether a
+# missing package is a dnf away or an image rebuild away, and finding that
+# out from a failure three tasks later is exactly the kind of "everything I
+# inspected agreed with everything else" hunt this lab has had enough of.
+- name: Say which image the guests will be built from
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Prebuilt image ' + customized_lab_image + ' found - lab guests are
+      built from it, subscription-manager and dnf are skipped, and packages
+      are verified with rpm -q instead. Helper: '
+      + ('YES, it uses the image too.'
+         if customized_lab_helper_ready | bool
+         else 'no - customized_lab_image_for_helper is false, so the helper
+               still registers and installs its own packages.')
+      if customized_lab_image_ready | bool else
+      'No prebuilt image at ' + base_image_dir + '/' + customized_lab_image
+      + ' - every guest registers with subscription-manager and installs its
+      own packages. Build it with udn-bgp-evpn/build-lab-image.yaml to skip
+      that.' }}

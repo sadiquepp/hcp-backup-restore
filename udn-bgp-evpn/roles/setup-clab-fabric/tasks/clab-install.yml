@@ -1,0 +1,183 @@
+---
+# Phase 0d - Docker, containerlab, and the in-guest fabric bridge.
+#
+# Runs wherever clab_deploy_mode put the fabric: delegated to the clab VM in
+# 'vm' mode, on the bare-metal host in 'host' mode. Everything below is
+# written to be correct in both, which is why it never assumes the fabric
+# bridge is libvirt's.
+#
+# In 'vm' mode the guest needs its own bridge, because containerlab's
+# 'bridge' kind attaches veths to an EXISTING Linux bridge and the guest has
+# a NIC, not a bridge. Enslaving the fabric NIC to a plain (vlan_filtering=0)
+# in-guest bridge extends virbr1 into the VM: FRR containers hang off the
+# guest bridge, their frames - 802.1Q tags and all - go out the virtio NIC,
+# across virbr1, and into the OCP nodes' taps. A plain Linux bridge forwards
+# tagged frames transparently, which is exactly what VRF-Lite needs, and the
+# virtio tap on the host passes frames with the containers' own source MACs
+# because libvirt applies no nwfilter by default.
+#
+# In 'host' mode there is nothing to do here - virbr1 IS the bridge
+# containerlab attaches to.
+
+# Deliberately no bridge-utils: it was dropped in RHEL 9, and nothing here
+# wants it anyway. Its brctl has been obsolete for years - every bridge
+# operation below uses `ip link ... type bridge` and the `bridge` command,
+# both from iproute. Listing it only made dnf fail with "No match for
+# argument: bridge-utils" before any of the real work started.
+- name: Install container and networking tooling
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
+  vars:
+    lab_pkg_list: "{{ lab_pkgs_clab }}"
+    lab_pkg_what: containerlab VM
+
+# Docker CE comes from download.docker.com rather than a Red Hat repository,
+# but containerd.io pulls container-selinux out of AppStream, so it still
+# needs an entitled guest - which is why the prebuilt image carries it too
+# (customized_lab_image_with_docker). When the image already has it, the repo file
+# and the dnf are skipped and only the service start is left to do.
+- name: Install Docker CE from the upstream repository
+  block:
+    - name: Add the Docker CE repository
+      ansible.builtin.get_url:
+        url: "{{ customized_lab_image_docker_repo }}"
+        dest: /etc/yum.repos.d/docker-ce.repo
+        mode: '0644'
+      when: not (customized_lab_image_docker_ready | bool)
+
+    - name: Install Docker CE
+      ansible.builtin.dnf:
+        name: "{{ customized_lab_image_docker_packages }}"
+        state: present
+      when: not (customized_lab_image_docker_ready | bool)
+
+    - name: Check the prebuilt image carries Docker CE
+      ansible.builtin.command:
+        cmd: "rpm -q --whatprovides {{ customized_lab_image_docker_packages | join(' ') }}"
+      register: lab_clab_docker_check
+      changed_when: false
+      failed_when: false
+      when: customized_lab_image_docker_ready | bool
+
+    - name: Fail if the prebuilt image is missing Docker CE
+      ansible.builtin.assert:
+        that: lab_clab_docker_check.rc == 0
+        fail_msg: >-
+          The containerlab VM was built from {{ customized_lab_image }}, which was
+          built with customized_lab_image_with_docker true but does not have Docker:
+
+          {{ lab_clab_docker_check.stdout | default('') }}
+
+          Rebuild the image (-e customized_lab_image_force=true), or set
+          customized_lab_image_with_docker false and rebuild it so this step
+          installs Docker itself.
+      when: customized_lab_image_docker_ready | bool
+
+    # Always. Installed-but-not-running is the state a rebuilt guest is in,
+    # and it is the one containerlab actually cares about.
+    - name: Start and enable Docker
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+  vars:
+    customized_lab_image_docker_ready: >-
+      {{ (customized_lab_image_ready | default(false) | bool)
+         and (customized_lab_image_with_docker | default(false) | bool) }}
+  rescue:
+    - name: Report that Docker could not be installed
+      ansible.builtin.fail:
+        msg: >-
+          Docker CE could not be installed. On a subscription-attached RHEL9
+          this usually means the container-tools module is masking it, or the
+          host has no route to download.docker.com. containerlab also runs on
+          podman - set the CLAB_RUNTIME=podman environment variable and
+          install podman instead - but the bridge-kind wiring this lab relies
+          on is far better tested on Docker, so fix the repo rather than
+          switching runtime if you can.
+
+- name: Check whether containerlab is already installed
+  ansible.builtin.command:
+    cmd: containerlab version
+  register: clab_version
+  failed_when: false
+  changed_when: false
+
+- name: Install containerlab
+  ansible.builtin.shell:
+    cmd: "curl -sL https://get.containerlab.dev | bash -s -- -v {{ clab_version_pin }}"
+  when: clab_version.rc != 0
+
+- name: Report the containerlab version in use
+  ansible.builtin.command:
+    cmd: containerlab version
+  register: clab_version_after
+  changed_when: false
+
+- name: Show containerlab version
+  ansible.builtin.debug:
+    msg: "{{ clab_version_after.stdout_lines }}"
+
+# ---------------------------------------------------------------------------
+# vm mode only: extend virbr1 into the guest.
+# ---------------------------------------------------------------------------
+# One script, run from here and from the unit below, so the boot path and
+# the Ansible path cannot drift apart. It finds the NIC by MAC, waits for it
+# to appear, and - importantly - verifies the enslavement rather than
+# assuming it, so a bridge with no uplink fails loudly here instead of
+# surfacing days later as "every BGP session is stuck in Active".
+- name: Install the fabric bridge script
+  ansible.builtin.template:
+    src: clab-fabric-bridge.sh.j2
+    dest: /usr/local/sbin/clab-fabric-bridge.sh
+    mode: '0755'
+  when: clab_deploy_mode == 'vm'
+
+- name: Create the in-guest fabric bridge and enslave the fabric NIC
+  ansible.builtin.command:
+    cmd: /usr/local/sbin/clab-fabric-bridge.sh
+  register: clab_bridge_setup
+  changed_when: true
+  when: clab_deploy_mode == 'vm'
+
+- name: Report the in-guest fabric bridge
+  ansible.builtin.debug:
+    msg: "{{ clab_bridge_setup.stdout_lines }}"
+  when: clab_deploy_mode == 'vm'
+
+# ip link is not persistent. A reboot of the clab VM would otherwise leave
+# containerlab attached to a bridge with no uplink - which is far worse than
+# no bridge at all, because everything looks healthy from inside the VM.
+#
+# The previous version of this unit listed each ip command as its own
+# ExecStart with SuccessExitStatus=0 1 2 to make it idempotent. That made the
+# one failure that matters - the enslave - indistinguishable from success,
+# and it hard-coded a NIC name that is not stable across reboots. The script
+# handles both.
+- name: Make the in-guest fabric bridge survive a reboot
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/clab-fabric-bridge.service
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Fabric bridge for the containerlab UDN/BGP lab
+      After=network-pre.target
+      Before=docker.service
+      Wants=network-pre.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/clab-fabric-bridge.sh
+
+      [Install]
+      WantedBy=multi-user.target
+  when: clab_deploy_mode == 'vm'
+
+- name: Enable the fabric bridge unit
+  ansible.builtin.systemd:
+    name: clab-fabric-bridge
+    enabled: true
+    daemon_reload: true
+  when: clab_deploy_mode == 'vm'

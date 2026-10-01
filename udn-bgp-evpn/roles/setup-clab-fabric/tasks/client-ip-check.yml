@@ -1,0 +1,42 @@
+---
+# Refuse to build a client VM on an address MetalLB owns.
+#
+# Included by both the phase-2 client (--tags clabclient) and the phase-3
+# per-tenant clients (--tags clabtenantclients). `udn_client_names` is the list
+# of ip_list keys to check.
+#
+# This exists because it already happened: udnclient was put on .60 and the
+# three tenant clients on .61-.63, which is straight through hcp-cluster1,
+# hcp-cluster2 and hcp-cluster3's API addresses on hub1. The ip_list comment
+# said to avoid 60-69 and the entry was added directly beneath it.
+#
+# The failure mode is what makes it worth a gate rather than a comment.
+# MetalLB L2 mode ARPs for its own pool addresses, so a VM holding one does not
+# fail cleanly and does not fail consistently: the VM and the API VIP both
+# answer, whichever replies first wins, and the hosted cluster's API becomes
+# intermittently unreachable from somewhere else entirely. Nothing in this
+# playbook would report it.
+- name: Collect the octets MetalLB owns
+  ansible.builtin.set_fact:
+    udn_metallb_octets: >-
+      {{ (hosted_cluster_metallb_pools | default({})).values()
+         | map(attribute='ip') | map('dict2items') | flatten
+         | map(attribute='value') | map('int') | unique | sort | list }}
+
+- name: Fail if a client VM would sit on a MetalLB pool address
+  vars:
+    udn_client_octet: "{{ ip_list[udn_check_name] | int }}"
+  ansible.builtin.assert:
+    that: udn_client_octet | int not in udn_metallb_octets
+    fail_msg: >-
+      ip_list['{{ udn_check_name }}'] is {{ udn_client_octet }}, which is a
+      MetalLB pool address ({{ udn_metallb_octets | join(', ') }} are all
+      spoken for by hosted_cluster_metallb_pools). MetalLB L2 mode ARPs for
+      these itself, so the VM and the hosted cluster's API VIP would fight for
+      the address and answer intermittently - it would not fail here, it would
+      break a hosted cluster's API later. Pick a free octet in vars.yaml.
+    success_msg: >-
+      {{ udn_check_name }} is on .{{ udn_client_octet }}, clear of MetalLB.
+  loop: "{{ udn_client_names }}"
+  loop_control:
+    loop_var: udn_check_name

@@ -1,0 +1,12 @@
+# The NMState CR is what actually deploys the handler DaemonSet.
+#
+# Installing the operator alone is not enough and fails in the least helpful
+# way possible: the CRDs exist, so `oc apply` of a NodeNetworkConfiguration
+# Policy succeeds, and then nothing ever reconciles it. The policy simply sits
+# there with no status while you wonder why the interface never appeared.
+#
+# One cluster-scoped instance, conventionally named "nmstate".
+apiVersion: nmstate.io/v1
+kind: NMState
+metadata:
+  name: nmstate

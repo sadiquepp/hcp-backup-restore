@@ -1,41 +1,139 @@
+## Installs hub2 - the replacement management cluster the OADP backup is
+## restored onto - and chains into setup-hub-acm for the day-2 operators once
+## it is up.
+##
+## One playbook, two install modes, selected by disconnected_install
+## (vars.yaml, default false) - the same flag setup_hub_cluster.yaml and the
+## rest of the disconnected flow hang off:
+##
+## Connected (default):
+##   ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass
+## installs roles/setup-hub-cluster2 into hub2_install_folder and pulls from
+## quay.io + registry.redhat.io.
+##
+## Disconnected:
+##   ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass \
+##     -e disconnected_install=true      # or set it in vars.yaml
+## installs roles/setup-hub-cluster2-disconnected into
+## hub2_disconnected_install_folder instead: a separate cluster (hub2d) with its
+## own IP block (ip_list.hub2d_*), its own subdomain (hub2_disconnected_domain)
+## and its own VM/install directories, wired to pull every release and operator
+## image solely from the local mirror registry, with its nodes cut off from the
+## real internet before anything boots. It stands in the same relation to hub2
+## that hubd does to hub1, and all four hubs can be up at once.
+##
+## A disconnected run requires setup_mirror_registry.yaml to have run first
+## (mirror registry CA trusted here, oc-mirror output present on the
+## mirror-registry VM); the preflight below fails fast if it has not.
+##
+## Either mode ends in the same setup-hub-acm import, so --tags acm re-runs just
+## the day-2 part against whichever hub2 the flag selects.
+##
+## The MetalLB address set is NOT part of what the flag switches here: both
+## modes pass metallb_hub=hub2, because a disconnected hub2 is still the DR hub
+## and a hosted cluster restored onto it comes up on hub2's addresses. What
+## disconnected_install changes is *which clusters* get pools - see the note on
+## the setup-hub-acm import below.
+
 - name: Setting Up Hub2 Cluster (replacement management cluster)
   hosts: localhost
   become: true
   vars_files:
     - vars.yaml
     - vault.yaml
+  vars:
+    ## Every difference between the two modes is derived from this one flag, so
+    ## the connected and disconnected runs differ in their inputs rather than in
+    ## their steps. Play vars rather than a set_fact, so a --tags acm run
+    ## resolves them too; '| bool' at each use because a play var reaches a task
+    ## as the rendered template.
+    hub2_disconnected: "{{ disconnected_install | default(false) | bool }}"
+    hub2_install_folder_selected: >-
+      {{ hub2_disconnected_install_folder
+         if (disconnected_install | default(false) | bool)
+         else hub2_install_folder }}
+    hub2_kubeconfig: "{{ hub2_install_folder_selected }}/auth/kubeconfig"
   tasks:
+  - name: Report which hub2 is being installed
+    ansible.builtin.debug:
+      msg: >-
+        {{ (hub2_disconnected | bool) | ternary('Disconnected (hub2d)', 'Connected (hub2)') }}
+        install into {{ hub2_install_folder_selected }}
+
+  # Only the disconnected install has a prerequisite outside this playbook:
+  # setup_mirror_registry.yaml has to have stood the registry up and run
+  # setup-mirror-registry-trust here, or the install cannot pull anything.
+  - name: Fail fast if the mirror registry CA has not been trusted locally yet
+    ansible.builtin.stat:
+      path: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+    register: mirror_ca_status
+    when: hub2_disconnected | bool
+
+  - ansible.builtin.assert:
+      that:
+        - mirror_ca_status.stat.exists
+      fail_msg: >-
+        Mirror registry CA not found locally - run setup_mirror_registry.yaml
+        first (it stands up the mirror registry and runs
+        setup-mirror-registry-trust to trust its CA here).
+    when: hub2_disconnected | bool
+
   - ansible.builtin.import_role:
       name: setup-hub-cluster2
+    when: not (hub2_disconnected | bool)
 
+  - ansible.builtin.import_role:
+      name: setup-hub-cluster2-disconnected
+    when: hub2_disconnected | bool
+
+  # Every hub role ships a byte-identical copy of this; hub2 has always included
+  # hub1's, so keep to that one file rather than branching on the mode here.
   - name: Wait for ClusterOperators to be healthy before day-2 install
     ansible.builtin.include_tasks: roles/setup-hub-cluster/tasks/wait-for-cluster-operators.yml
     vars:
-      kubeconfig_path: "{{ hub2_install_folder }}/auth/kubeconfig"
+      kubeconfig_path: "{{ hub2_kubeconfig }}"
+
+  # The ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource oc-mirror generated
+  # are applied here rather than dropped into the install manifests directory.
+  # In manifests/ they are rendered into a MachineConfig by the in-cluster MCO,
+  # which then has to match what the bootstrap MCO rendered from
+  # install-config.yaml's imageDigestSources - and an ImageTagMirrorSet has no
+  # imageDigestSources equivalent, so the two can never agree. Applied on day 2
+  # they are an ordinary MachineConfig update instead. The install itself does
+  # not need them: the installer generates its own ImageDigestMirrorSet from
+  # imageDigestSources.
+  - name: Apply the mirror registry's day-2 resources (IDMS/ITMS/CatalogSource)
+    ansible.builtin.include_tasks: roles/setup-hub-cluster2-disconnected/tasks/apply-day2-mirror-resources.yml
+    vars:
+      kubeconfig_path: "{{ hub2_kubeconfig }}"
+    when: hub2_disconnected | bool
 
   # Same pool names as hub1, different addresses: this hub is on its own
   # network segment where hub1's MetalLB addresses are not routable, so
   # metallb_hub=hub2 selects the hub2 address for each hosted cluster
-  # (.90/.91/.92 by default). Keeping the pool names identical is what lets a
-  # HostedCluster's metallb.io/address-pool annotation survive the OADP
-  # restore onto this hub unchanged. After restoring the hosted clusters,
-  # re-render DNS so api/api-int follow them here:
+  # (.90/.91/.92 connected, .93/.94/.95 for the '-d' clusters). Keeping the pool
+  # names identical is what lets a HostedCluster's metallb.io/address-pool
+  # annotation survive the OADP restore onto this hub unchanged. After restoring
+  # the hosted clusters, re-render DNS so api/api-int follow them here:
   #   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
   #     --ask-vault-pass -e target_hub=hub2
   #
-  # hub2 is the DR target for the disconnected '-d' clusters too, and they
-  # carry hub2 addresses (.93/.94/.95) for that. Those are NOT rendered here:
-  # the role renders the clusters of this run's install mode, so this playbook
-  # as written creates the three connected pools only. Before restoring a '-d'
-  # cluster onto this hub, create its pool by re-running just the acm tag in
-  # disconnected mode:
+  # The role renders the clusters of this run's install mode, so a connected run
+  # creates the three connected pools and a disconnected run the three '-d'
+  # pools - never all six. Before restoring a '-d' cluster onto a hub2 built
+  # connected, create its pool by re-running just this part in disconnected
+  # mode:
   #   ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass --tags acm \
   #     -e disconnected_install=true
+  #
+  # On a disconnected run the role also renders the disconnected
+  # AgentServiceConfig and puts its prerequisites in place first - see
+  # roles/setup-hub-acm/defaults/main.yml.
   - ansible.builtin.import_role:
       name: setup-hub-acm
     vars:
       metallb_hub: hub2
     environment:
-      KUBECONFIG: "{{ hub2_install_folder }}/auth/kubeconfig"
+      KUBECONFIG: "{{ hub2_kubeconfig }}"
     tags:
       - acm

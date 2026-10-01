@@ -1,0 +1,37 @@
+---
+# Single-node OpenShift from an agent ISO, connected.
+#
+# Modelled on the procedure in sadiquepp/openshift coco/README.md and the
+# manifests in its sno/ directory, with the disconnected parts removed: no
+# mirror registry, no imageContentSources, no additionalTrustBundle, and the
+# installer taken from mirror.openshift.com rather than extracted from a
+# mirrored release image.
+#
+# Four stages, each runnable on its own by tag, because they fail for different
+# reasons and the expensive one is in the middle:
+#
+#   snopreflight   everything knowable before anything is built
+#   snoimage       fetch the installer, render the manifests, build the ISO
+#   snovm          the libvirt domain, booting that ISO
+#   snowait        block until the cluster is up
+#
+# The ISO and the VM are separate on purpose. Rebuilding a VM from an ISO that
+# is already correct is cheap; rebuilding the ISO is not, and doing both when
+# only one was wrong is how a five-minute fix becomes half an hour.
+
+- name: Pre-flight
+  ansible.builtin.include_tasks: preflight.yml
+  tags: [sno, snopreflight, snoimage, snovm, snowait]
+
+- name: Build the agent ISO
+  ansible.builtin.include_tasks: image.yml
+  tags: [sno, snoimage]
+
+- name: Build the SNO VM
+  ansible.builtin.include_tasks: vm.yml
+  tags: [sno, snovm]
+
+- name: Wait for the cluster
+  ansible.builtin.include_tasks: wait.yml
+  when: sno_wait_for_install | bool
+  tags: [sno, snowait]

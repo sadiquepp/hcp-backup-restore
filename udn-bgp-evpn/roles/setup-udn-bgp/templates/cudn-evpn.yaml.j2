@@ -1,0 +1,124 @@
+{#
+  The tenant CUDN with EVPN as its transport.
+
+  Two things change relative to the phase-3 CUDN, and both live INSIDE
+  spec.network - not at the top of spec:
+
+    network.transport: EVPN   - east/west pod traffic for this network stops
+                                using Geneve and uses VXLAN instead, with the
+                                EVPN control plane distributing reachability.
+                                The UDN's addressing, isolation and role are
+                                unchanged. The field is immutable, which is
+                                why the apply tasks recreate the CUDN rather
+                                than patching it when moving between phases.
+
+    network.evpn              - which VTEP to use, and the VNI/route-target
+                                per VRF type.
+
+  Layer3 topology takes ipVRF and the API *forbids* macVRF here; Layer2 takes
+  macVRF (required) and may add ipVRF. Layer3 is the right shape for routed
+  tenant segmentation, which is what this lab's tenants are, and it is the
+  direct continuation of the VRF-Lite phase - the same tenant, the same
+  subnet, carried over EVPN instead of a VLAN handoff. See the README for
+  what a Layer2/macVRF tenant would additionally need on the fabric side.
+
+  routeTarget is set explicitly rather than left to default to <ASN>:<VNI>,
+  because the fabric side has to match and an explicit value on both ends is
+  one less thing to derive when a route is not appearing where it should. Two
+  UDNs sharing a route target of the same VRF type would leak routes between
+  tenants - exactly what this lab is trying to prove does not happen - so the
+  values are distinct per tenant. The API requires the form
+  <global>:<local> where global is an ASN or an IPv4 address; {{ clab_spine_asn }}
+  is a 2-byte ASN so the local part may be up to 4294967295.
+#}
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: {{ tenant.name }}
+  labels:
+    {{ udn_bgp_cudn_label_key }}: "enabled"
+    udn-lab-phase: evpn
+spec:
+  namespaceSelector:
+    matchLabels:
+      udn-tenant: {{ tenant.name }}
+{% if tenant.topology | default('Layer3') == 'Layer2' %}
+  network:
+    topology: Layer2
+    layer2:
+      role: Primary
+      subnets:
+        - {{ tenant.udn_subnet }}
+{#
+   What this cluster must NOT allocate from, which is two separate things
+   that happen to be expressed the same way.
+
+   1. The fabric side. This tenant's EVPN transport is a macVRF, so its
+      external endpoint sits INSIDE this subnet, on leaf2's side of the VXLAN
+      tunnel - {{ tenant.evpn_l2_external_host }}. OVN knows nothing about it
+      and would happily allocate the same address to a pod, putting two
+      machines on one address in one broadcast domain. That is a
+      duplicate-address bug, not the deliberate cross-network overlap this lab
+      is about.
+
+   2. The other clusters' half of the prefix. A stretched Layer2 network is
+      one broadcast domain spanning every cluster on the L2VNI, but each
+      cluster's OVN-Kubernetes allocates from the subnet knowing nothing about
+      the others - so without a split they both hand out the low addresses and
+      two pods in different clusters end up on one address. There is no
+      cross-cluster IPAM to lean on; carving the prefix per cluster is how it
+      is done.
+
+   evpn_l2_excludes[<cluster>] carries the answer for both, per cluster.
+   evpn_l2_exclude is the single-cluster form and is the fallback when this
+   cluster has no entry - which is correct for a fabric with one cluster on
+   it, where only reason 1 applies.
+#}
+{% set l2_excludes = (tenant.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
+                     or ([tenant.evpn_l2_exclude] if tenant.evpn_l2_exclude is defined else []) %}
+{% if l2_excludes and udn_bgp_l2_reserve_field | default('') %}
+      # Reserved: see the note above. Cluster '{{ udn_bgp_cluster }}' allocates
+      # from {{ tenant.udn_subnet }} minus these.
+      #
+      # The field name comes from the cluster, not from here. It is
+      # excludeSubnets on localnet and something else on layer2, and getting it
+      # wrong is silent - Kubernetes prunes a field the CRD does not declare
+      # with no error, no warning and no event, so the manifest and the live
+      # object disagree and nothing says so.
+      {{ udn_bgp_l2_reserve_field }}:
+{% for x in l2_excludes %}
+        - {{ x }}
+{% endfor %}
+{% endif %}
+      ipam:
+        lifecycle: Persistent
+    transport: EVPN
+    evpn:
+      vtep: evpn-vtep
+      # macVRF, not ipVRF: a Layer2 network is a broadcast domain, so what
+      # EVPN carries for it is MAC reachability - type-2 routes on an L2VNI -
+      # rather than the type-5 prefix routes a Layer3 network needs. The API
+      # enforces the split: macVRF is required for Layer2 and rejected for
+      # Layer3, and ipVRF the other way round.
+      #
+      # This is the combination that stretches the broadcast domain across
+      # the fabric rather than just across the cluster's own overlay, which
+      # is what makes a live migration invisible to anything outside.
+      macVRF:
+        vni: {{ tenant.evpn_mac_vni }}
+        routeTarget: "{{ clab_spine_asn }}:{{ tenant.evpn_mac_vni }}"
+{% else %}
+  network:
+    topology: Layer3
+    layer3:
+      role: Primary
+      subnets:
+        - cidr: {{ tenant.udn_subnet }}
+          hostSubnet: {{ tenant.udn_host_subnet }}
+    transport: EVPN
+    evpn:
+      vtep: evpn-vtep
+      ipVRF:
+        vni: {{ tenant.evpn_ip_vni }}
+        routeTarget: "{{ clab_spine_asn }}:{{ tenant.evpn_ip_vni }}"
+{% endif %}

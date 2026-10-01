@@ -1,0 +1,129 @@
+---
+# The workshop's day-0 extras for one cluster, on top of the plumbing main.yml
+# has already done by the time this runs (NMState, forwarding, the fabric NIC
+# addressing). See "Phase: prep" in main.yml.
+#
+# 1. OpenShift Virtualization, for the live-migration lab. Installing an
+#    operator teaches nothing about BGP or EVPN and takes a quarter of an hour
+#    of waiting, which is exactly what day 0 is for.
+# 2. The attendee's environment file: ASNs, the peer address, the VTEP block
+#    and a few shell helpers, so every manifest in workshop.md can be pasted
+#    as it stands.
+
+- name: Install OpenShift Virtualization
+  when: udn_bgp_cluster in udn_workshop_cnv_clusters
+  block:
+    - name: Check whether the HyperConverged API is already present
+      ansible.builtin.command:
+        cmd: oc get crd hyperconvergeds.hco.kubevirt.io
+      register: udn_ws_hco_crd
+      changed_when: false
+      failed_when: false
+
+    - name: Create the namespace, OperatorGroup and Subscription
+      ansible.builtin.shell:
+        cmd: |
+          oc apply -f - <<'EOF'
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: openshift-cnv
+          ---
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: kubevirt-hyperconverged-group
+            namespace: openshift-cnv
+          spec:
+            targetNamespaces:
+              - openshift-cnv
+          ---
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: hco-operatorhub
+            namespace: openshift-cnv
+          spec:
+            channel: stable
+            name: kubevirt-hyperconverged
+            installPlanApproval: Automatic
+            source: {{ udn_bgp_catalog_source }}
+            sourceNamespace: {{ udn_bgp_catalog_source_namespace }}
+          EOF
+      when: udn_ws_hco_crd.rc != 0
+
+    # The HyperConverged CRD does not exist until the CSV has installed, and
+    # applying the CR before that fails with "no matches for kind".
+    - name: Wait for the operator to install its CRD
+      ansible.builtin.command:
+        cmd: oc get crd hyperconvergeds.hco.kubevirt.io
+      register: udn_ws_hco_crd_after
+      retries: 90
+      delay: 10
+      until: udn_ws_hco_crd_after.rc == 0
+      changed_when: false
+      when: udn_ws_hco_crd.rc != 0
+
+    # spec: {} - the defaults are what the lab wants, live migration included.
+    - name: Create the HyperConverged instance
+      ansible.builtin.shell:
+        cmd: |
+          oc apply -f - <<'EOF'
+          apiVersion: hco.kubevirt.io/v1beta1
+          kind: HyperConverged
+          metadata:
+            name: kubevirt-hyperconverged
+            namespace: openshift-cnv
+          spec: {}
+          EOF
+      register: udn_ws_hco_apply
+      changed_when: "'unchanged' not in udn_ws_hco_apply.stdout"
+
+    - name: Wait for OpenShift Virtualization to report Available
+      ansible.builtin.command:
+        cmd: >-
+          oc -n openshift-cnv wait hyperconverged/kubevirt-hyperconverged
+          --for=condition=Available --timeout=1200s
+      changed_when: false
+
+    # These nodes are KVM guests, so a VM on them is nested. virt-install
+    # passes the host CPU through, which is what exposes VMX; a node without
+    # it is not schedulable for VMs and the live-migration lab stalls with a
+    # Pending virt-launcher and no obvious reason.
+    - name: Count the nodes KubeVirt can schedule a VM on
+      ansible.builtin.command:
+        cmd: oc get nodes -l kubevirt.io/schedulable=true -o name
+      register: udn_ws_kv_nodes
+      retries: 30
+      delay: 10
+      until: udn_ws_kv_nodes.stdout_lines | length >= 2
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if fewer than two nodes can run a VM
+      ansible.builtin.assert:
+        that: udn_ws_kv_nodes.stdout_lines | length >= 2
+        fail_msg: >-
+          Only {{ udn_ws_kv_nodes.stdout_lines | length }} node(s) are labelled
+          kubevirt.io/schedulable=true, and a live migration needs a source and
+          a target. The usual cause is nested virtualisation being unavailable
+          to the node VMs: check `grep -c vmx /proc/cpuinfo` on the lab host
+          and on a worker (`oc debug node/<worker> -- grep -c vmx /proc/cpuinfo`).
+        success_msg: >-
+          {{ udn_ws_kv_nodes.stdout_lines | length }} nodes can run a VM.
+
+- name: Write the attendee's environment file
+  ansible.builtin.template:
+    src: workshop.env.j2
+    dest: "{{ udn_workshop_env_file }}"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: Say what is ready and what comes next
+  ansible.builtin.debug:
+    msg: >-
+      Cluster '{{ udn_bgp_cluster }}' is ready for the workshop: NMState is
+      installed, the fabric NICs are addressed and forwarding
+      {{ '- and OpenShift Virtualization is Available' if udn_bgp_cluster in udn_workshop_cnv_clusters else '' }}.
+      BGP is NOT enabled yet - that is Lab 1. `source {{ udn_workshop_env_file }}`
+      and continue in udn-bgp-evpn/workshop.md.

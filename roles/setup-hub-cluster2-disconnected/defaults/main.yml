@@ -1,0 +1,72 @@
+---
+# defaults file for setup-hub-cluster2-disconnected
+
+# Whether to cut this cluster's nodes off from the real internet: an ACCEPT in
+# our own LAB_NO_NAT chain (nat) so their traffic is never MASQUERADEd, plus a
+# REJECT in our own LAB_NO_EGRESS chain (filter) so it does not leave the
+# hypervisor un-NATed either.
+#
+# Both chains are ours, hooked into POSTROUTING and FORWARD ahead of libvirt's
+# own jumps. That is what makes them survive a `virsh net-destroy`/`net-start`
+# of the default network, which roles/setup-bm-host does under its `virtnet` tag
+# whenever ip_list changes: libvirt re-inserts its own rules at the head of
+# LIBVIRT_PRT, which used to push rules placed *inside* that chain below the
+# MASQUERADE and silently switch the internet back on. See
+# tasks/block-node-nat.yml, which is where those rules live (shared with the
+# disconnected hosted cluster in setup_hosted_cluster_vm.yaml) and which now
+# asserts at the end that the blocking is really in force.
+# Set to false to install from the mirror registry while leaving the nodes able
+# to reach the internet - useful when debugging whether a failure is genuinely
+# caused by the disconnection.
+hub2_disconnected_block_node_nat: true
+
+# ip_list keys whose addresses get cut off. Bootstrap + masters + workers only:
+# the mirror registry, MinIO, the helper services and the load balancer are
+# deliberately left connected (that is what makes them "the disconnected
+# environment's infrastructure" rather than part of the cluster).
+hub2_disconnected_node_ip_keys:
+  - hub2d_bootstrap
+  - hub2d_master1
+  - hub2d_master2
+  - hub2d_master3
+  - hub2d_worker1
+  - hub2d_worker2
+  - hub2d_worker3
+
+# Where oc-mirror's cluster-resources manifests (ImageDigestMirrorSet /
+# ImageTagMirrorSet / CatalogSource) are staged on the hypervisor after being
+# pulled off the mirror-registry VM. They are needed at two different points in
+# this role, which is why they get staged outside the install directory rather
+# than fetched straight into it:
+#   1. before the install starts at all, so `oc adm release extract` can be
+#      handed the release mirror map via --idms-file
+#   2. as manifests copied into the install directory, so the cluster itself
+#      keeps the same redirection at runtime
+# The staging directory is rebuilt from the archive on every run, so stale
+# manifests from a previous oc-mirror run are never reused.
+hub2_disconnected_cluster_resources_archive: /tmp/hub2d-cluster-resources.tar.gz
+hub2_disconnected_cluster_resources_dir: /tmp/hub2d-cluster-resources
+
+# oc-mirror's cluster-resources are split into two sets after being staged.
+#
+# Everything the cluster needs in order to *install* (the mirrored release
+# signature ConfigMap) goes into the install directory's manifests/. The
+# ImageDigestMirrorSet, ImageTagMirrorSet and CatalogSource are day-2: they are
+# applied with `oc apply` once the cluster is up, which is the flow oc-mirror's
+# own documentation describes.
+#
+# The split matters because an IDMS or ITMS sitting in manifests/ is rendered
+# into a MachineConfig by the in-cluster MCO, while install-config.yaml's
+# imageDigestSources is what the *bootstrap* MCO renders from. Feeding the same
+# mirrors through both paths means two renderers have to agree byte for byte,
+# and an ImageTagMirrorSet has no imageDigestSources equivalent at all, so they
+# cannot. Applied on day 2 instead, they produce an ordinary MachineConfig
+# update with one rolling reboot.
+hub2_disconnected_cluster_resources_install_dir: "{{ hub2_disconnected_cluster_resources_dir }}/install"
+hub2_disconnected_cluster_resources_day2_dir: "{{ hub2_disconnected_cluster_resources_dir }}/day2"
+
+# Kinds held back for day 2. Anything else is treated as install-time.
+hub2_disconnected_day2_kinds:
+  - ImageDigestMirrorSet
+  - ImageTagMirrorSet
+  - CatalogSource

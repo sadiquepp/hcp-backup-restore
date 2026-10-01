@@ -7,10 +7,70 @@
   register: result
   until: result.rc == 0
 
+# dns_forwarders: auto (the default) - use the lab host's own resolvers. See
+# defaults/main.yml for what is filtered out and why. Read on the lab host,
+# not the helper this role is delegated to: the helper's resolver is the
+# thing being configured.
+#
+# The last usable answer is kept in setup_dns_forwarders_file and used when
+# the host has none left to offer. That is the state after the workshop's A5
+# on a host with a STATIC resolver: `nmcli con mod ... ipv4.dns <helper>`
+# replaces it, the host then lists only the helper, and a re-run of this role
+# would otherwise have nothing to forward to. (With DHCP, the leased resolver
+# stays listed after the helper and is found again.)
+- name: Read the lab host's resolvers
+  ansible.builtin.shell:
+    cmd: |
+      found=$(for f in /etc/resolv.conf /run/systemd/resolve/resolv.conf; do
+                [ -r "$f" ] && awk '$1 == "nameserver" {print $2}' "$f"
+              done | grep -Ev '^(127[.]|::1$|{{ lab_network_prefix | regex_escape }}[.])' | awk '!seen[$0]++')
+      if [ -n "$found" ]; then
+        printf '%s\n' "$found" > {{ setup_dns_forwarders_file }}
+        printf '%s\n' "$found"
+      elif [ -s {{ setup_dns_forwarders_file }} ]; then
+        cat {{ setup_dns_forwarders_file }}
+      fi
+      true
+  register: setup_dns_host_resolvers
+  changed_when: false
+  delegate_to: localhost
+  when: dns_forwarders == 'auto'
+
+- name: Work out the forwarders
+  ansible.builtin.set_fact:
+    setup_dns_forwarders: >-
+      {{ setup_dns_host_resolvers.stdout_lines
+         if dns_forwarders == 'auto' else dns_forwarders }}
+
+# An empty list renders `forwarders { };` and named then SERVFAILs every
+# external name, while the zones it is authoritative for keep answering - so
+# nothing looks wrong until something needs an outside name. That exact failure
+# (8.8.8.8, unreachable from this lab) went unnoticed until an agent installer
+# refused to start. Cheap to check here, expensive to find later.
+- name: Fail if no upstream resolver is configured
+  ansible.builtin.assert:
+    that: setup_dns_forwarders | length > 0
+    fail_msg: >-
+      No upstream resolver for the helper.
+      {{ ('The lab host resolver configuration names none that can be used'
+          ~ ' (loopback and ' ~ lab_network_prefix ~ '.x addresses would have the helper'
+          ~ ' forwarding to itself), and ' ~ setup_dns_forwarders_file ~ ' has no earlier answer.')
+         if dns_forwarders == 'auto' else 'dns_forwarders is an empty list.' }}
+      Set dns_forwarders in vault.yaml to the resolvers the lab host should use.
+    success_msg: >-
+      Forwarding to {{ setup_dns_forwarders | join(', ') }}{{
+      ' (read from the lab host resolver configuration)' if dns_forwarders == 'auto' else '' }}.
+
+# Installed, or - when the helper was built from the customized lab image -
+# verified present with rpm -q. See roles/lab-image/tasks/packages.yml.
 - name: Install DNS Packages
-  dnf:
-    name: "{{ dns_packages }}"
-    state: installed
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: packages
+  vars:
+    lab_pkg_list: "{{ dns_packages }}"
+    lab_pkg_what: helper DNS
+    lab_pkg_use_image: "{{ customized_lab_helper_ready | default(false) }}"
 
 - name: Deploy named.conf
   template:
@@ -69,6 +129,36 @@
     owner: root
     group: named
     mode: u=rw,g=r,o=r
+  notify:
+    -  Restart_Named
+
+- name: Deploy "{{ hub2_disconnected_domain }}" - Forward zonefile
+  template:
+    src: hub2_disconnected_domain.j2
+    dest: "/var/named/{{ hub2_disconnected_domain }}.db"
+    owner: root
+    group: named
+    mode: u=rw,g=r,o=r
+  notify:
+    -  Restart_Named
+
+# The single-node cluster (setup_sno.yaml), when vars.yaml carries one.
+#
+# Rendered whether or not the cluster has been built: the agent installer needs
+# api.<zone> to resolve before it can watch its own install, so the zone has to
+# exist first. Guarded on the SAME condition as the stanza in
+# named.rfc1912.zones.j2 - a stanza without its file stops named from starting,
+# which would take every other zone down with it.
+- name: Deploy "{{ sno_name | default('') }}.{{ base_domain }}" - Forward zonefile
+  template:
+    src: sno_domain.j2
+    dest: "/var/named/{{ sno_name }}.{{ base_domain }}.db"
+    owner: root
+    group: named
+    mode: u=rw,g=r,o=r
+  when:
+    - (sno_name | default('')) | length > 0
+    - ip_list[sno_name] is defined
   notify:
     -  Restart_Named
 

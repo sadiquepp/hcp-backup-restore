@@ -1,0 +1,25 @@
+[Unit]
+Description=Tenant ingress for overlapping UDN segments on {{ udn_nsclient_vm_name }}
+Documentation=file:///etc/haproxy/udn-tenants.cfg
+# The namespaces must exist before the first backend connection is attempted.
+# They do not survive a reboot, so this is a hard ordering, not a nicety.
+After=udn-netns-client.service network-online.target
+Requires=udn-netns-client.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+# Root for setns(): a 'namespace' backend enters the tenant namespace to make
+# its connection, which needs CAP_SYS_ADMIN.
+User=root
+Group=root
+ExecStartPre=/usr/sbin/haproxy -c -f /etc/haproxy/udn-tenants.cfg
+ExecStart=/usr/sbin/haproxy -Ws -f /etc/haproxy/udn-tenants.cfg -p /run/udn-tenant-proxy.pid
+ExecReload=/usr/sbin/haproxy -c -f /etc/haproxy/udn-tenants.cfg
+ExecReload=/bin/kill -USR2 $MAINPID
+KillMode=mixed
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

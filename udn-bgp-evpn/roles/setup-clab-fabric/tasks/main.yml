@@ -1,0 +1,683 @@
+---
+# Tasks file for setup-clab-fabric
+#
+# Builds the provider network the UDN/BGP lab peers with: an isolated L2
+# fabric (virbr1), a second NIC on each OCP node attached to it, and a
+# containerlab topology of FRR routers on the same bridge.
+#
+# Nothing here touches virbr0, the hub, the hosted clusters, MetalLB or any
+# node's default route. The single point of contact with the existing lab is
+# that the node VMs gain one extra, initially unconfigured NIC.
+#
+# Task ordering matters in one place only: the fabric network has to exist
+# before either a node NIC or the containerlab VM can be attached to it.
+
+# Answers "prebuilt image or not" before anything reads it. tags: [always]
+# because every guest-building subset of this role depends on the answer.
+- name: Detect the prebuilt lab image
+  ansible.builtin.include_role:
+    name: lab-image
+    tasks_from: detect
+    apply:
+      tags: [always]
+  tags: [always]
+
+- name: Validate clab_deploy_mode
+  ansible.builtin.assert:
+    that: clab_deploy_mode in ['vm', 'host']
+    fail_msg: "clab_deploy_mode must be 'vm' or 'host', got '{{ clab_deploy_mode }}'"
+  tags: [always]
+
+- name: Validate clab_topology
+  ansible.builtin.assert:
+    that: clab_topology in ['bgp', 'evpn']
+    fail_msg: "clab_topology must be 'bgp' or 'evpn', got '{{ clab_topology }}'"
+  tags: [always]
+
+# This role's output directory, on the CONTROLLER, created once here because
+# four different task files write into it - .fabric-topology, vrf-leaks.env,
+# tenant-clients.env, netns-client.env, tenant-proxy.env - and only one of them
+# ever created it. That went unnoticed for as long as nothing removed the
+# directory: setup-udn-bgp creates it too, and every tree had already had a
+# cluster-half run. cleanup.yaml removes it now, and the first fabric run
+# against a cleaned tree failed on
+#
+#   Destination directory .../udn-bgp does not exist
+#
+# tags: [always] so it is there whichever subset of this role is being run -
+# --tags clabnsproxy writes here and does not go near clab-deploy.yml.
+- name: Create this role's output directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/udn-bgp"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  tags: [always]
+
+# clab_topology decides the SHAPE of almost everything this role renders, it
+# defaults to 'bgp', and it is deliberately not in vars.yaml - so it has to be
+# passed on every command line that touches the fabric. Forget it against an
+# EVPN fabric and nothing fails: the role renders phase-3 shapes instead. A
+# Layer2 tenant's client namespace gets a routed segment and a gateway on
+# leaf2 that is a bridge port under EVPN and answers nothing; the VRF leak
+# routes come back; fabric-verify asks a macVRF tenant for a Layer3 address.
+# The first sign is a ping to a gateway that was never built, three steps
+# later and in a file that looks unrelated.
+#
+# clab-deploy.yml writes the deployed topology to udn-bgp/.fabric-topology, so
+# the answer is on disk. Absent (nothing deployed from this checkout yet) this
+# says nothing and moves on - it is a guard, not a gate.
+- name: Read the topology the fabric was last deployed with
+  ansible.builtin.slurp:
+    src: "{{ playbook_dir }}/udn-bgp/.fabric-topology"
+  register: clab_deployed_topology
+  delegate_to: localhost
+  failed_when: false
+  changed_when: false
+  tags: [always]
+
+- name: Work out whether this run renders anything that depends on the topology
+  ansible.builtin.set_fact:
+    clab_deployed_as: >-
+      {{ (clab_deployed_topology.content | default('') | b64decode | trim)
+         if (clab_deployed_topology.content is defined) else '' }}
+    # Only the fabric half branches on clab_topology. The cluster half
+    # (preflight/default/shared/vrflite/evpn/web) never reads it, so a run
+    # that only touches the cluster must not be blocked for omitting a flag it
+    # has no use for - that would be the same trap in the other direction.
+    # 'all' is what ansible_run_tags holds when no --tags was given.
+    clab_renders_fabric: >-
+      {{ (ansible_run_tags | default(['all']))
+         | intersect(['all', 'fabric', 'network', 'nodenics', 'clabvm',
+                      'clabinstall', 'clabdeploy', 'clabverify', 'clabclient',
+                      'clabtenantclients', 'clabnsclient', 'clabnsproxy'])
+         | length > 0 }}
+  tags: [always]
+
+- name: Fail if clab_topology disagrees with the fabric that is actually deployed
+  ansible.builtin.assert:
+    that: >-
+      clab_deployed_as == '' or clab_deployed_as == clab_topology
+      or (clab_topology_switch | default(false) | bool)
+    fail_msg: >-
+      The fabric on this host was deployed as '{{ clab_deployed_as }}', but
+      this run has clab_topology='{{ clab_topology }}'. Everything the fabric
+      half renders branches on that, so continuing would build
+      phase-'{{ clab_topology }}' shapes against a '{{ clab_deployed_as }}'
+      fabric: a routed client segment for a tenant that is now a macVRF, VRF
+      leak routes that no longer exist, verification that asks a Layer2 tenant
+      for a Layer3 address. None of it errors. The first symptom is traffic to
+      a gateway that was never built, several steps later.
+
+      Add the flag:
+        -e clab_topology={{ clab_deployed_as }}
+
+      To rebuild the fabric in the other topology on purpose, say so:
+        --tags fabric -e clab_topology={{ clab_topology }} -e clab_topology_switch=true
+      (build-lab.sh: --switch-topology). The redeploy rewrites this marker,
+      so every later run is checked against the new shape.
+    success_msg: >-
+      {{ ('SWITCHING the fabric from ' ~ clab_deployed_as ~ ' to ' ~ clab_topology
+          ~ ' (clab_topology_switch=true).')
+         if (clab_deployed_as and clab_deployed_as != clab_topology) else
+         'Topology matches the deployed fabric: ' ~ clab_topology
+         if clab_deployed_as else
+         'No fabric deployed from this checkout yet; building '
+         ~ clab_topology ~ '.' }}
+  when: clab_renders_fabric | bool
+  tags: [always]
+
+# Not fatal here: this run does not render any of it. Still worth saying,
+# because the mismatch means the NEXT fabric command will be wrong too.
+- name: Note a topology mismatch on a cluster-only run
+  ansible.builtin.debug:
+    msg: >-
+      NOTE: the fabric was deployed as '{{ clab_deployed_as }}' and this run
+      has clab_topology='{{ clab_topology }}'. Nothing in the cluster half
+      reads it, so this run is unaffected - but add
+      -e clab_topology={{ clab_deployed_as }} to any --tags fabric,
+      clabdeploy, clabnsclient or clabtenantclients command, or it will render
+      the wrong shapes.
+  when:
+    - not (clab_renders_fabric | bool)
+    - clab_deployed_as | length > 0
+    - clab_deployed_as != clab_topology
+  tags: [always]
+
+# ---------------------------------------------------------------------------
+# The fabric-wide node list, built from the per-cluster lists.
+#
+# vars.yaml declares clab_clusters (who is in each cluster) and
+# clab_fabric_clusters (which of them are wired into this fabric). Everything
+# on the FABRIC side - the NIC attach, leaf1's neighbour statements, the VTEP
+# static routes - wants the union of those, with each node carrying the ASN of
+# the cluster it belongs to so leaf1 can write the right remote-as per
+# neighbour.
+#
+# The cluster side wants the opposite: one cluster's nodes only. That list is
+# built separately, in roles/setup-udn-bgp/tasks/main.yml, from the same
+# source. See the long note in vars.yaml for why reading one from the other
+# does not work.
+- name: Validate that every fabric cluster is declared
+  ansible.builtin.assert:
+    that: item in (clab_clusters | default({}))
+    fail_msg: >-
+      clab_fabric_clusters names '{{ item }}', which is not a key of
+      clab_clusters. Both live in vars.yaml; the declared clusters are
+      {{ clab_clusters | default({}) | list }}.
+  loop: "{{ clab_fabric_clusters }}"
+  tags: [always]
+
+- name: Build the fabric-wide node list from the clusters on this fabric
+  ansible.builtin.set_fact:
+    clab_fabric_nodes: >-
+      {{ (clab_fabric_nodes | default([]))
+         + (clab_clusters[item].nodes
+            | map('combine', {'cluster': item,
+                              'asn': clab_clusters[item].asn | default(clab_cluster_asn)})
+            | list) }}
+  loop: "{{ clab_fabric_clusters }}"
+  tags: [always]
+
+# Two clusters whose nodes share an ip_list octet would collide on the fabric
+# subnet, on the fabric MAC and on the VTEP address all at once, and the first
+# symptom would be a tunnel built to the wrong node. ip_list is one flat
+# namespace across the whole lab, so this cannot happen by accident - but it
+# costs one task to make sure.
+- name: Fail if two fabric nodes share an ip_list octet
+  ansible.builtin.assert:
+    that:
+      - (clab_fabric_nodes | map(attribute='ip_key') | unique | length)
+        == (clab_fabric_nodes | length)
+    fail_msg: >-
+      Two nodes on this fabric have the same ip_list key:
+      {{ clab_fabric_nodes | map(attribute='ip_key') | list }}. Each node's
+      fabric address ({{ clab_fabric_prefix }}.<octet>), its fabric MAC
+      ({{ clab_fabric_mac_prefix }}:<octet>) and its VTEP address
+      ({{ udn_bgp_vtep_prefix }}.<octet>) are all derived from that octet.
+    success_msg: >-
+      {{ clab_fabric_nodes | length }} node(s) on this fabric across
+      {{ clab_fabric_clusters | length }} cluster(s):
+      {% for c in clab_fabric_clusters %}
+      {{ c }} (AS {{ clab_clusters[c].asn | default(clab_cluster_asn) }}):
+      {{ clab_clusters[c].nodes | map(attribute='ip_key') | join(', ') }}
+      {% endfor %}
+  tags: [always]
+
+# Two clusters on one fabric sharing an ASN is the failure described at
+# clab_cluster_asn in vars.yaml: leaf1 re-advertises one cluster's routes to
+# the other with the receiver's own ASN already in the path, and the receiver
+# drops them as a loop. Sessions Established, routes present on leaf1, table
+# empty on the far side, nothing logged anywhere.
+- name: Fail if two clusters on this fabric share an ASN
+  ansible.builtin.assert:
+    that:
+      - (clab_fabric_nodes | map(attribute='asn') | unique | length)
+        == (clab_fabric_clusters | length)
+    fail_msg: >-
+      Two of the clusters on this fabric have the same BGP ASN
+      ({% for c in clab_fabric_clusters %}{{ c }}={{ clab_clusters[c].asn | default(clab_cluster_asn) }}{% if not loop.last %}, {% endif %}{% endfor %}).
+      eBGP loop prevention then makes each one silently discard the other's
+      routes: leaf1 re-advertises them with the receiver's own ASN already in
+      the AS_PATH. Give each cluster its own asn in clab_clusters (vars.yaml).
+    success_msg: >-
+      Each cluster on this fabric has its own ASN.
+  tags: [always]
+
+# Two tenants sharing a VLAN, a VRF prefix or a VNI would produce a fabric
+# that looks built and behaves incoherently. Caught here rather than in FRR's
+# logs an hour later.
+- name: Validate that tenant VLANs, VRF prefixes and VNIs are unique
+  ansible.builtin.assert:
+    that:
+      - (udn_bgp_tenants | map(attribute='name') | list | unique | length) == (udn_bgp_tenants | length)
+      - (udn_bgp_tenants | map(attribute='vlan') | list | unique | length) == (udn_bgp_tenants | length)
+      - (udn_bgp_tenants | map(attribute='vrf_prefix') | list | unique | length) == (udn_bgp_tenants | length)
+      - (udn_bgp_tenants | map(attribute='udn_subnet_shared') | list | unique | length) == (udn_bgp_tenants | length)
+      - ((udn_bgp_tenants | map(attribute='evpn_mac_vni') | list) + (udn_bgp_tenants | map(attribute='evpn_ip_vni') | list)) | unique | length == (udn_bgp_tenants | length) * 2
+    fail_msg: >-
+      udn_bgp_tenants must have unique name, vlan, vrf_prefix,
+      udn_subnet_shared and EVPN VNI values. Note udn_subnet is deliberately
+      allowed to overlap between tenants - that is the VRF-Lite isolation
+      test - but udn_subnet_shared is leaked into one VRF in phase 2 and
+      must not.
+  tags: [always]
+
+# Route leaking (udn_vrf_leaks) is the controlled exception to VRF-Lite, and
+# the constraint on it is arithmetic: a table holds one route per destination,
+# so a VRF may only import tenants whose subnets are disjoint from its own and
+# from each other. Import two tenants that share a subnet and one of them
+# becomes silently unreachable - a winner-takes-all with no error anywhere,
+# which is exactly the phase-2 failure VRF-Lite exists to remove. Refused here
+# rather than discovered later as an unexplained FAIL in a matrix.
+- name: Work out which tenants each VRF would import
+  ansible.builtin.set_fact:
+    udn_vrf_leak_partners: >-
+      {{ (udn_vrf_leak_partners | default({})) | combine({
+           item: (udn_vrf_leaks | default([]) | selectattr('0', 'equalto', item) | map(attribute='1') | list)
+               + (udn_vrf_leaks | default([]) | selectattr('1', 'equalto', item) | map(attribute='0') | list) }) }}
+  loop: "{{ udn_bgp_tenants | map(attribute='name') | list }}"
+  tags: [always]
+
+- name: Note any VRF that would end up holding two routes for one subnet
+  ansible.builtin.set_fact:
+    udn_vrf_leak_clashes: >-
+      {{ (udn_vrf_leak_clashes | default([]))
+         + ([ item ~ ' would import ' ~ (udn_vrf_leak_partners[item] | join(', '))
+              ~ ', and the subnets in its table (' ~ (leak_tables | join(', '))
+              ~ ') are not all distinct' ]
+            if (leak_tables | unique | length) != (leak_tables | length) else []) }}
+  vars:
+    subnet_of: >-
+      {{ dict(udn_bgp_tenants | map(attribute='name')
+              | zip(udn_bgp_tenants | map(attribute='udn_subnet'))) }}
+    leak_tables: >-
+      {{ [subnet_of[item]] + (udn_vrf_leak_partners[item] | map('extract', subnet_of) | list) }}
+  loop: "{{ udn_bgp_tenants | map(attribute='name') | list }}"
+  tags: [always]
+
+- name: Validate that every VRF leak is between disjoint subnets
+  ansible.builtin.assert:
+    that:
+      - ((udn_vrf_leaks | default([]) | map('first') | list)
+         + (udn_vrf_leaks | default([]) | map('last') | list))
+        | difference(udn_bgp_tenants | map(attribute='name') | list) | length == 0
+      - (udn_vrf_leak_clashes | default([]) | length) == 0
+    fail_msg: >-
+      udn_vrf_leaks is not satisfiable.
+      {{ (udn_vrf_leak_clashes | default([])) | join('; ') }}
+      A VRF's routing table holds one route per destination, so a tenant can
+      only import others whose subnets are disjoint from its own and from each
+      other. blue/red and green/purple share a subnet by design, so neither
+      pair can ever be leaked - and no single VRF can import both members of
+      either pair. Any name used must also be a real tenant in udn_bgp_tenants.
+    success_msg: >-
+      {{ (udn_vrf_leaks | default([]) | length) }} VRF leak pair(s), all
+      between disjoint subnets.
+  tags: [always]
+
+# Layer2 and Layer3 take different CUDN fields, different EVPN VRF types and
+# behave differently on the wire, so an unrecognised value here renders a
+# manifest the API rejects - late, and with a message about a missing field
+# rather than about the typo that caused it.
+- name: Validate tenant topologies
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_tenants | rejectattr('topology', 'defined') | list | length == 0
+      - udn_bgp_tenants | rejectattr('topology', 'in', ['Layer2', 'Layer3']) | list | length == 0
+    fail_msg: >-
+      Every tenant needs topology: Layer2 or Layer3. Got
+      {{ udn_bgp_tenants | map(attribute='topology', default='(unset)') | list }}.
+      Layer3 slices its subnet per node; Layer2 is one flat domain across all
+      of them, which is what a VM needs to keep its address when it moves.
+  tags: [always]
+
+# Where the containerlab half of this role runs. In 'vm' mode every task
+# that installs Docker, creates the in-guest bridge or drives containerlab is
+# delegated to the containerlab VM over ssh; in 'host' mode it all stays on
+# the bare-metal host. The fabric bridge and the node NICs are libvirt
+# operations and always run on the host either way.
+- name: Decide where containerlab itself runs
+  ansible.builtin.set_fact:
+    clab_exec_host: >-
+      {{ (lab_network_prefix ~ '.' ~ ip_list.clab) if clab_deploy_mode == 'vm' else 'localhost' }}
+  tags: [always]
+
+# These three run on the lab host itself - libvirt operations, no delegation -
+# so apply carries nothing but tags. It is still required. A tag on an
+# include_tasks tags the INCLUDE, not the tasks inside it; without apply the
+# included tasks carry only the play's own 'fabric' tag. So --tags fabric has
+# always worked here and --tags network/nodenics/clabvm never did: the include
+# matched, printed "included: ...", and then every task inside was filtered
+# out. Nothing failed and nothing was skipped, so the run reported
+# ok=N changed=0 skipped=0 and looked like a successful no-op.
+- name: Build the fabric bridge
+  ansible.builtin.include_tasks:
+    file: fabric-network.yml
+    apply:
+      tags: [fabric, network]
+  tags: [fabric, network]
+
+- name: Attach a fabric NIC to each OCP node VM
+  ansible.builtin.include_tasks:
+    file: node-nics.yml
+    apply:
+      tags: [fabric, nodenics]
+  tags: [fabric, nodenics]
+
+- name: Build the containerlab VM
+  ansible.builtin.include_tasks:
+    file: clab-vm.yml
+    apply:
+      tags: [fabric, clabvm]
+  when: clab_deploy_mode == 'vm'
+  tags: [fabric, clabvm]
+
+# Registration has to sit HERE - after the VM exists, before anything runs
+# dnf on it. The containerlab VM is a bare rhel9_kvm_image with no
+# entitlement, so the very first task in clab-install.yml ("Install container
+# and networking tooling") fails with "no repositories available through
+# subscriptions" on a guest that was created seconds ago.
+#
+# This is the same shape setup_bm_host.yaml uses for the helper: create the
+# VM, register it, then use it, all in one ordered sequence with the
+# connection delegated. Doing it as a separate play later in the playbook
+# looks equivalent and is not - plays run in file order, so the registration
+# would land after the dnf that needed it.
+#
+# host mode skips this: containerlab runs on the bare-metal host, which is
+# already registered (it is the machine running this playbook).
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml (ansible-vault edit
+      vault.yaml) - needed to register the containerlab VM with
+      subscription-manager, same as the helper.
+  when:
+    - clab_deploy_mode == 'vm'
+    - not (customized_lab_image_ready | default(false) | bool)
+  tags: [fabric, clabvm, rhsm, clabinstall]
+
+# setup-rhsm lives at the REPOSITORY ROOT, not in udn-bgp-evpn/roles/. It is
+# shared with the helper, the mirror registry, MinIO and the Ceph VMs, so it
+# is not duplicated here. It resolves through roles_path in
+# udn-bgp-evpn/ansible.cfg, which is why this lab has to be run from its own
+# directory - `cd udn-bgp-evpn` first. Running it from the repository root
+# reads ../ansible.cfg instead and fails here with "the role 'setup-rhsm' was
+# not found".
+- name: Register the containerlab VM with subscription-manager
+  ansible.builtin.include_role:
+    name: setup-rhsm
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, rhsm, clabinstall]
+  when:
+    - clab_deploy_mode == 'vm'
+    - not (customized_lab_image_ready | default(false) | bool)
+  tags: [fabric, rhsm, clabinstall]
+
+# 'apply' propagates delegate_to onto every task in the included file, which
+# is what lets one role body serve both deployment modes without a when: on
+# each task. delegate_facts is deliberately not set: these tasks read lab
+# variables (ip_list, the tenant list) that belong to the controller's view,
+# and only the connection should move.
+#
+# The tags MUST be repeated inside apply, and apply is required even when
+# there is nothing to delegate. Ansible does not give dynamic includes tag
+# inheritance: a tag on an include_tasks tags the include statement alone, and
+# the tasks inside inherit only what the play and any enclosing block give
+# them. apply is the documented way to push tags through. Get this wrong and
+# the include still matches --tags, still prints "included: ...", and then
+# executes nothing - ok=N changed=0 skipped=0, which reads as a successful
+# no-op rather than as an error. Filtered tasks are not skipped tasks, so
+# even skipped=0 does not give it away.
+- name: Install Docker and containerlab
+  ansible.builtin.include_tasks:
+    file: clab-install.yml
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, clabinstall]
+  tags: [fabric, clabinstall]
+
+- name: Render the topology and deploy the fabric
+  ansible.builtin.include_tasks:
+    file: clab-deploy.yml
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, clabdeploy]
+  tags: [fabric, clabdeploy]
+
+# EVPN only: the tenants with evpn_internet set get a default route from
+# leaf2, and the NAT that makes it work lives on this host. After the deploy
+# because the deploy recreates leaf2, whose management address it routes to.
+- name: Give the internet-border tenants their NAT on the containerlab host
+  ansible.builtin.include_tasks:
+    file: egress-nat.yml
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, clabdeploy, clabegress]
+  when: clab_topology == 'evpn'
+  tags: [fabric, clabdeploy, clabegress]
+
+# Separate from clab-deploy.yml so it can be re-run on its own against a
+# fabric that is already up, which is what you want when the cluster side
+# says the session is down and you need to know which end to look at.
+- name: Verify the fabric is wired, not just deployed
+  ansible.builtin.include_tasks:
+    file: fabric-verify.yml
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+      tags: [fabric, clabdeploy, clabverify]
+  tags: [fabric, clabdeploy, clabverify]
+
+# ---------------------------------------------------------------------------
+# Optional: an external client VM for phase 2 reachability testing.
+#
+# Not part of the 'fabric' tag - this builds a VM and edits the lab host's
+# sysctls, neither of which belongs in a routine fabric run. Ask for it:
+#
+#   --tags clabclient
+#
+# Only meaningful in phase 2 (--tags shared), where every tenant is advertised
+# into leaf1's DEFAULT VRF and so one client with one address reaches all of
+# them. In phase 3 each tenant has its own VRF on leaf1 and this client reaches
+# none of them, which is the isolation working as intended.
+# ---------------------------------------------------------------------------
+- name: Build the external client VM
+  ansible.builtin.include_tasks:
+    file: client-vm.yml
+    apply:
+      tags: [clabclient]
+  tags: [clabclient]
+
+# Also under clabnsclient, and that is not a convenience.
+#
+# The phase-2 client path has two halves: routes on the CLIENT (a route per
+# udn_subnet_shared via the clab VM) and routing on the CLAB VM (its fabric
+# address, forwarding, and a route to each tenant prefix via leaf1). Tagging
+# this clabclient-only meant the second half existed only when the separate
+# udnclient VM was built. Running --tags clabnsclient then produced a client
+# with correct routes pointing at a VM that would not forward, and every curl
+# timed out with nothing to show which half was missing.
+- name: Make the clab VM route the client onto the fabric
+  ansible.builtin.include_tasks:
+    file: client-router.yml
+    apply:
+      delegate_to: "{{ clab_exec_host }}"
+      tags: [clabclient, clabnsclient]
+  tags: [clabclient, clabnsclient]
+
+# Same ordering rule as the containerlab VM above, and for the same reason: the
+# client is a bare copy of rhel9_kvm_image with no entitlement, so the first
+# dnf on it fails with "No package ... available" on a guest created seconds
+# ago. Register between creating it and using it, in one ordered sequence.
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml (ansible-vault edit
+      vault.yaml) - needed to register the client VM with
+      subscription-manager, same as the containerlab VM and the helper.
+  when: not (customized_lab_image_ready | default(false) | bool)
+  tags: [clabclient]
+
+- name: Register the client VM with subscription-manager
+  ansible.builtin.include_role:
+    name: setup-rhsm
+    apply:
+      delegate_to: "{{ udn_client_vm_name }}"
+      tags: [clabclient]
+  when: not (customized_lab_image_ready | default(false) | bool)
+  tags: [clabclient]
+
+- name: Configure the client VM
+  ansible.builtin.include_tasks:
+    file: client-config.yml
+    apply:
+      delegate_to: "{{ udn_client_vm_name }}"
+      tags: [clabclient]
+  tags: [clabclient]
+
+# ---------------------------------------------------------------------------
+# Optional: per-tenant client VMs for phase 3 (VRF-Lite) isolation testing.
+#
+#   --tags clabtenantclients
+#
+# Separate from --tags clabclient, which builds the single phase-2 client. Both
+# can coexist: the phase-2 client keeps working as the phase-2 baseline, and
+# these are useless until --tags vrflite has run.
+#
+# REQUIRES the topology to have been redeployed after udn_client_segments was
+# added, because the client VLAN subinterfaces are built in a leaf's exec block
+# at container start (--tags clabdeploy). Which leaf depends on the phase:
+# leaf1 under VRF-Lite, leaf2 under EVPN, where leaf1 holds no tenant VRFs at
+# all and the client attaches behind the far leaf instead.
+# ---------------------------------------------------------------------------
+- name: Build the per-tenant client VMs
+  ansible.builtin.include_tasks:
+    file: tenant-client-vms.yml
+    apply:
+      tags: [clabtenantclients]
+  tags: [clabtenantclients]
+
+# Same ordering rule as the containerlab VM and the phase-2 client: a bare copy
+# of the base image has no entitlement, so the first dnf on a guest created
+# seconds ago fails with "No package ... available". Register between creating
+# and using, in one ordered sequence.
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml (ansible-vault edit
+      vault.yaml) - needed to register the per-tenant client VMs with
+      subscription-manager, same as every other guest in this lab.
+  when: not (customized_lab_image_ready | default(false) | bool)
+  tags: [clabtenantclients]
+
+- name: Register each per-tenant client with subscription-manager
+  ansible.builtin.include_role:
+    name: setup-rhsm
+    apply:
+      delegate_to: "{{ client.name }}"
+      tags: [clabtenantclients]
+  when: not (customized_lab_image_ready | default(false) | bool)
+  loop: "{{ udn_tenant_clients }}"
+  loop_control:
+    loop_var: client
+    label: "{{ client.name }}"
+  tags: [clabtenantclients]
+
+- name: Configure each per-tenant client
+  ansible.builtin.include_tasks:
+    file: tenant-client-config.yml
+    apply:
+      delegate_to: "{{ client.name }}"
+      tags: [clabtenantclients]
+  loop: "{{ udn_tenant_clients }}"
+  loop_control:
+    loop_var: client
+    label: "{{ client.name }} ({{ client.tenants | join('+') }})"
+  tags: [clabtenantclients]
+
+# ---------------------------------------------------------------------------
+# Alternative: one VM, one network namespace per tenant.
+#
+#   --tags clabnsclient
+#
+# Built alongside --tags clabtenantclients rather than replacing it, so both
+# designs can be exercised on the same fabric. They coexist only because the
+# namespaces take .21 on each client segment and the VMs take .20; an assert in
+# nsclient-vm.yml enforces that.
+#
+# Same prerequisite as the per-tenant VMs: the topology must have been
+# redeployed (--tags clabdeploy) after udn_client_segments changed, because the
+# client VLAN subinterfaces are built in a leaf's exec block at start - leaf1
+# under VRF-Lite, leaf2 under EVPN.
+# ---------------------------------------------------------------------------
+- name: Build the namespace client VM
+  ansible.builtin.include_tasks:
+    file: nsclient-vm.yml
+    apply:
+      tags: [clabnsclient]
+  tags: [clabnsclient]
+
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml - needed to register the
+      namespace client with subscription-manager, same as every other guest.
+  when: not (customized_lab_image_ready | default(false) | bool)
+  tags: [clabnsclient]
+
+- name: Register the namespace client with subscription-manager
+  ansible.builtin.include_role:
+    name: setup-rhsm
+    apply:
+      delegate_to: "{{ udn_nsclient_vm_name }}"
+      tags: [clabnsclient]
+  when: not (customized_lab_image_ready | default(false) | bool)
+  tags: [clabnsclient]
+
+- name: Configure the namespace client
+  ansible.builtin.include_tasks:
+    file: nsclient-config.yml
+    apply:
+      delegate_to: "{{ udn_nsclient_vm_name }}"
+      tags: [clabnsclient]
+  tags: [clabnsclient]
+
+# ---------------------------------------------------------------------------
+# Tenant ingress on that same VM.
+#
+#   --tags clabnsproxy
+#
+# Separate tag from clabnsclient on purpose. The namespaces are the isolation
+# demonstration; the proxy is a deliberate hole through it, and one that has to
+# be re-run whenever the web pods are replaced, because it proxies to pod
+# addresses that change. Needs --tags clabnsclient for the namespaces and
+# --tags web for something to proxy to.
+#
+# Backend discovery runs on localhost (it needs oc); the rest is delegated to
+# the VM by nsproxy.yml's own tasks, so this include is not blanket-delegated.
+# ---------------------------------------------------------------------------
+# add_host lives in nsclient-vm.yml, which only runs under clabnsclient. Run
+# clabnsproxy on its own and the name is never registered, so Ansible resolves
+# the bare "udnnsclient" through NSS - 127.0.0.1 here - and tries the default
+# credentials against the KVM host itself. Registering is cheap and idempotent,
+# so it is repeated rather than made a prerequisite of the tag.
+- name: Register the namespace client as an Ansible host
+  ansible.builtin.add_host:
+    name: "{{ udn_nsclient_vm_name }}"
+    ansible_host: "{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}"
+    ansible_user: "{{ udn_client_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ udn_client_ssh_key }}"
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    groups: udn_nsclient
+  changed_when: false
+  tags: [clabnsproxy]
+
+- name: Fail early if the namespace client is not up
+  ansible.builtin.wait_for:
+    host: "{{ lab_network_prefix }}.{{ ip_list[udn_nsclient_vm_name] }}"
+    port: 22
+    timeout: 60
+  tags: [clabnsproxy]
+
+- name: Build the tenant ingress on the namespace client
+  ansible.builtin.include_tasks:
+    file: nsproxy.yml
+    apply:
+      delegate_to: "{{ udn_nsclient_vm_name }}"
+      tags: [clabnsproxy]
+  tags: [clabnsproxy]

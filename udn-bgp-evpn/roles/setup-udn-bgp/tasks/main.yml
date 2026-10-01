@@ -1,0 +1,1128 @@
+---
+# Tasks file for setup-udn-bgp
+#
+# The cluster half of the UDN/BGP lab. Runs against one OpenShift cluster
+# with KUBECONFIG already set by the playbook.
+#
+# Driven by udn_phase, which the playbook sets from a tag. The phases are
+# cumulative and are meant to be run in order, because each one removes an
+# entire class of explanation for a failure in the next:
+#
+#   preflight - what this cluster can and cannot do
+#   enable    - FRR-K8s + route advertisements on, optionally local gateway
+#   default   - advertise the cluster default pod network. No UDN involved.
+#               If this does not work, nothing about UDN is the problem.
+#   shared    - primary UDNs advertised into the default VRF (targetVRF
+#               unset). Adds UDN, still no VLANs or VRF plumbing.
+#   vrflite   - per-tenant VRFs and VLANs (targetVRF: auto). Adds the
+#               plumbing, and the isolation guarantee that goes with it.
+#   evpn      - VXLAN/EVPN transport. 4.22+ only.
+
+- name: Validate udn_phase
+  ansible.builtin.assert:
+    that: udn_phase in ['preflight', 'enable', 'default', 'shared', 'vrflite', 'evpn', 'web', 'prep']
+    fail_msg: >-
+      udn_phase must be one of preflight, enable, default, shared, vrflite,
+      evpn, web, prep - got '{{ udn_phase | default("(unset)") }}'.
+
+# ---------------------------------------------------------------------------
+# Which cluster this run is targeting, and therefore which nodes it owns.
+#
+# udn_bgp_cluster is a key of clab_clusters in vars.yaml. Everything below
+# that touches a node - the NNCPs, the node-name lookup, the VRF discovery,
+# the forwarding check - must loop THIS CLUSTER'S nodes, not the fabric-wide
+# clab_fabric_nodes, which spans every cluster on the fabric. Pointing a hub
+# run at the SNO's node fails node-names.yml with
+#
+#   No cluster node has internal address 192.168.122.20
+#
+# which is correct and unhelpful: the address belongs to a different cluster
+# entirely. See the long note at clab_clusters in vars.yaml.
+- name: Fail if udn_bgp_cluster does not name a declared cluster
+  ansible.builtin.assert:
+    that: udn_bgp_cluster in (clab_clusters | default({}))
+    fail_msg: >-
+      udn_bgp_cluster is '{{ udn_bgp_cluster | default("(unset)") }}', which
+      is not a key of clab_clusters in vars.yaml. Declared clusters:
+      {{ clab_clusters | default({}) | list }}. Pass one with
+      -e udn_bgp_cluster=<name>.
+
+- name: Resolve this cluster's nodes and ASN
+  ansible.builtin.set_fact:
+    udn_bgp_cluster_nodes: "{{ clab_clusters[udn_bgp_cluster].nodes }}"
+    udn_bgp_cluster_asn: >-
+      {{ clab_clusters[udn_bgp_cluster].asn | default(clab_cluster_asn) }}
+
+# Every tenant the lab declares, captured before the narrowing below
+# overwrites udn_bgp_tenants. Two readers need the whole list rather than
+# this cluster's slice of it: the teardown (see "Remove test namespaces left
+# over from a previous phase") and the EVPN check that a routed tenant built
+# on two clusters has a subnet slice on each.
+- name: Record every declared tenant, before narrowing to this cluster's
+  ansible.builtin.set_fact:
+    udn_bgp_all_tenant_names: "{{ udn_bgp_tenants | map(attribute='name') | list }}"
+
+# Which tenants THIS cluster builds. Defaults to all of them, which is right
+# for a fabric with one cluster on it.
+#
+# It stops being right the moment a second cluster joins, and the reason is
+# worth stating because nothing reports it. A tenant's identity in the fabric
+# is its route target - blue is RT 65000:101 carrying 10.200.0.0/16 - and that
+# is a property of the TENANT, not of the cluster. Build blue in two clusters
+# and both originate 10.200.0.0/16 into RT 65000:101 with different route
+# distinguishers, so leaf2 imports both into one VRF and ends up with two
+# equally good paths to one prefix pointing at two different VTEPs. Half the
+# traffic for a hub pod then goes to the SNO, where nothing answers.
+#
+# Layer2 is the exception, and it is the exception this lab is for: a macVRF
+# on one L2VNI is SUPPOSED to be present in both clusters. That is what makes
+# it one stretched broadcast domain, and the addresses stay unambiguous
+# because evpn_l2_excludes splits the IPAM. See clab_clusters in vars.yaml.
+#
+# Overwriting udn_bgp_tenants rather than introducing a second name is safe
+# because of play ordering: setup-clab-fabric runs in the first play of
+# setup_udn_bgp_lab.yaml and always sees the full list, and nothing imports it
+# after this role.
+# Per-phase tenant lists. `tenants_<phase>` wins over `tenants` for that
+# phase, and a cluster with neither builds every tenant.
+#
+# The SNO is why it exists. Under EVPN it shares green and purple with the
+# hub, which is the stretched-Layer2 test, and violet, the routed one (each
+# cluster on its own slice - see "EVPN: one routed tenant on more than one
+# cluster" below). Under VRF-Lite that same sharing is the fault: no VNI and
+# no route target, so both clusters would advertise 10.204.0.0/16 into
+# leaf1's green VRF from different next hops and one of them would lose. It
+# builds violet alone there - its own routed tenant, with a subnet the fabric
+# can hold one unambiguous route to. The hub builds violet under EVPN only.
+#
+# udn_tenants_skip then takes tenants out of whatever list that produced -
+# the workshop drops orange this way, without restating any tenant. With no
+# list and no skip the result is every tenant, exactly as before.
+- name: Resolve which tenants this cluster builds in this phase
+  ansible.builtin.set_fact:
+    udn_bgp_cluster_tenant_names: >-
+      {{ (clab_clusters[udn_bgp_cluster]['tenants_' ~ udn_phase]
+          | default(clab_clusters[udn_bgp_cluster].tenants | default([]), true)
+          or udn_bgp_all_tenant_names)
+         | reject('in', udn_tenants_skip | default([]))
+         | list }}
+
+- name: Report the tenant list when the phase overrides it
+  ansible.builtin.debug:
+    msg: >-
+      Cluster '{{ udn_bgp_cluster }}' builds
+      {{ udn_bgp_cluster_tenant_names }} in the '{{ udn_phase }}' phase, from
+      clab_clusters.{{ udn_bgp_cluster }}.tenants_{{ udn_phase }} - not the
+      default list
+      {{ clab_clusters[udn_bgp_cluster].tenants | default([]) }}.
+  when: clab_clusters[udn_bgp_cluster]['tenants_' ~ udn_phase] is defined
+
+- name: Fail if this cluster's tenant list names a tenant that does not exist
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_cluster_tenant_names
+        | difference(udn_bgp_tenants | map(attribute='name') | list)
+        | length == 0
+    fail_msg: >-
+      The tenant list for cluster '{{ udn_bgp_cluster }}' in phase
+      '{{ udn_phase }}' names
+      {{ udn_bgp_cluster_tenant_names
+         | difference(udn_bgp_tenants | map(attribute='name') | list) }},
+      which are not tenants. The tenants declared in vars.yaml are
+      {{ udn_bgp_tenants | map(attribute='name') | list }}. A typo here would
+      otherwise just build fewer tenants than asked for, silently.
+  when: udn_bgp_cluster_tenant_names | length > 0
+
+#
+# udn_web_tenants is narrowed alongside it, and it is a separate list on
+# purpose: it is the demo's own subset knob (a tenant can be left out of the
+# web demo while still existing), so it is intersected rather than replaced.
+# Missing it meant --tags web on the SNO went looking for udn-blue - a
+# namespace only the hub has - and failed on a tenant this cluster is
+# deliberately not building. Both keys read clab_clusters directly, not each
+# other, so they are safe in one set_fact.
+- name: Narrow the tenant lists to the ones this cluster builds
+  ansible.builtin.set_fact:
+    udn_bgp_tenants: >-
+      {{ udn_bgp_tenants
+         | selectattr('name', 'in', udn_bgp_cluster_tenant_names)
+         | list }}
+    udn_web_tenants: >-
+      {{ udn_web_tenants | intersect(udn_bgp_cluster_tenant_names) }}
+  when: udn_bgp_cluster_tenant_names | length > 0
+
+# ---------------------------------------------------------------------------
+# EVPN: one routed tenant on more than one cluster.
+#
+# A tenant's identity in the fabric is its route target, so a Layer3 tenant
+# built on two clusters is ONE network with two origins - legitimate, and
+# what violet is for, but only if the two clusters never originate the same
+# prefix. Each cluster's OVN-Kubernetes allocates node subnets from the CUDN's
+# cidr knowing nothing of the other's, so given one shared /16 both hand out
+# the same /24s first: two origins for one prefix under one route target, and
+# traffic for a hub pod arriving at the SNO. Nothing in OVN-Kubernetes or FRR
+# reports it; it looks like packet loss.
+#
+# evpn_udn_subnets gives each cluster its own slice, and the tasks below make
+# it impossible to forget: a Layer3 tenant that another fabric cluster also
+# builds under EVPN must name a slice for THIS cluster, and the slices must be
+# distinct. Layer2 tenants are exempt - a stretched broadcast domain is one
+# subnet on purpose, split instead by evpn_l2_excludes inside the CUDN.
+# ---------------------------------------------------------------------------
+- name: Start the list of tenants other fabric clusters build under EVPN
+  ansible.builtin.set_fact:
+    udn_bgp_evpn_elsewhere: []
+  when: udn_phase == 'evpn'
+
+# Same resolution rule as this cluster's own list above: tenants_evpn, else
+# tenants, else every tenant.
+- name: Collect the tenants other fabric clusters build under EVPN
+  ansible.builtin.set_fact:
+    udn_bgp_evpn_elsewhere: >-
+      {{ udn_bgp_evpn_elsewhere
+         + (clab_clusters[item]['tenants_evpn']
+            | default(clab_clusters[item].tenants | default(udn_bgp_all_tenant_names), true)
+            | reject('in', udn_tenants_skip | default([])) | list) }}
+  loop: "{{ clab_fabric_clusters | default(clab_clusters | list) }}"
+  when:
+    - udn_phase == 'evpn'
+    - item != udn_bgp_cluster
+    - item in clab_clusters
+
+- name: Fail if a routed tenant spans clusters without its own slice here
+  ansible.builtin.assert:
+    that:
+      - (item.evpn_udn_subnets | default({}))[udn_bgp_cluster] is defined
+      - >-
+        (item.evpn_udn_subnets | default({})).values() | list | unique | length
+        == (item.evpn_udn_subnets | default({})) | length
+    fail_msg: >-
+      {{ item.name }} is a Layer3 tenant that another fabric cluster also
+      builds under EVPN, so both clusters originate it under one route target
+      ({{ clab_spine_asn }}:{{ item.evpn_ip_vni }}). Each needs its own slice
+      of {{ item.udn_subnet }} or they allocate the same node subnets and the
+      fabric holds two origins for one prefix - traffic for one cluster's pods
+      arriving at the other. Give the tenant evpn_udn_subnets in vars.yaml,
+      one DISTINCT entry per cluster, like violet's. Currently:
+      {{ item.evpn_udn_subnets | default('(none)') }}.
+    # .get(), not [ ]: this ansible-core templates success_msg even when the
+    # assert fails, so indexing the missing key would replace the fail_msg
+    # above with "object of type 'dict' has no attribute ...".
+    success_msg: >-
+      {{ item.name }} spans clusters; '{{ udn_bgp_cluster }}' allocates from
+      its own slice
+      {{ (item.evpn_udn_subnets | default({})).get(udn_bgp_cluster, '(none)') }}.
+  loop: >-
+    {{ udn_bgp_tenants
+       | rejectattr('topology', 'equalto', 'Layer2')
+       | selectattr('name', 'in', udn_bgp_evpn_elsewhere | default([]))
+       | list }}
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase == 'evpn'
+
+# One substitution, here, so every template and message downstream that reads
+# tenant.udn_subnet - the CUDN above all - gets this cluster's slice without
+# knowing slices exist. EVPN only: shared and VRF-Lite build such a tenant on
+# one cluster and keep the whole subnet.
+- name: Start the list of tenants with this cluster's EVPN subnet applied
+  ansible.builtin.set_fact:
+    udn_bgp_evpn_sliced: []
+  when: udn_phase == 'evpn'
+
+- name: Give each tenant this cluster's own slice of its subnet under EVPN
+  ansible.builtin.set_fact:
+    udn_bgp_evpn_sliced: >-
+      {{ udn_bgp_evpn_sliced
+         + [item | combine({'udn_subnet': item.evpn_udn_subnets[udn_bgp_cluster]})
+            if (item.evpn_udn_subnets | default({}))[udn_bgp_cluster] is defined
+            else item] }}
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase == 'evpn'
+
+- name: Use the sliced tenant list for the rest of this run
+  ansible.builtin.set_fact:
+    udn_bgp_tenants: "{{ udn_bgp_evpn_sliced }}"
+  when: udn_phase == 'evpn'
+
+- name: Report the tenants that allocate from a per-cluster slice here
+  ansible.builtin.debug:
+    msg: >-
+      {{ udn_bgp_tenants | selectattr('evpn_udn_subnets', 'defined')
+         | map(attribute='name') | zip(udn_bgp_tenants
+         | selectattr('evpn_udn_subnets', 'defined') | map(attribute='udn_subnet'))
+         | map('join', ' -> ') | list }}
+  when:
+    - udn_phase == 'evpn'
+    - udn_bgp_tenants | selectattr('evpn_udn_subnets', 'defined') | list | length > 0
+
+# What this cluster's API calls the Layer2 address reservation.
+#
+# The template used to hardcode excludeSubnets, which is the name on localnet.
+# On layer2 it is something else, and the difference is invisible: Kubernetes
+# prunes a field a CRD's structural schema does not declare without an error,
+# a warning or an event. `oc apply` reports configured, the
+# last-applied-configuration annotation shows the field was sent, and the live
+# spec simply does not have it.
+#
+# Asked rather than assumed, because the name has changed once already and a
+# hardcoded guess fails the same silent way. If neither name is present the
+# manifest omits the block and the read-back check after the CUDNs are created
+# says what was lost.
+# `|`, not `>-`. A folded scalar joins these lines with spaces, which turns
+# the first two into `out=$(...) for f in ...; do` - a shell syntax error that
+# failed_when: false then swallows, leaving stdout empty and the field name
+# unset. The manifest silently loses its reservation block, which is the exact
+# failure this task exists to prevent.
+- name: Ask the API what it calls the Layer2 address reservation
+  ansible.builtin.shell:
+    cmd: |
+      out=$(oc explain clusteruserdefinednetwork.spec.network.layer2 2>&1) || exit 0
+      for f in reservedSubnets excludeSubnets; do
+        if printf '%s' "$out" | grep -qE "(^|[[:space:]])${f}([[:space:]]|$)"; then
+          printf '%s' "$f"
+          exit 0
+        fi
+      done
+  register: udn_bgp_l2_reserve_raw
+  changed_when: false
+  failed_when: false
+  when: udn_phase not in ['preflight', 'web']
+
+- name: Record the field name the manifests should use
+  ansible.builtin.set_fact:
+    udn_bgp_l2_reserve_field: "{{ udn_bgp_l2_reserve_raw.stdout | default('') | trim }}"
+  when: udn_phase not in ['preflight', 'web']
+
+# The bottom of a Layer2 UDN's subnet belongs to ovn-kubernetes: .1 is the
+# switch's gateway and .2 is the node's management port, one per node the
+# network runs on. How many addresses a per-cluster reservation leaves free
+# down there has to be exactly right, and it is wrong in both directions.
+#
+# TOO FEW and ovn-kubernetes cannot allocate what it needs:
+#
+#   failed to exclude subnet 10.204.0.1/32 for cluster_udn_green_ovn_layer2_switch:
+#     failed to reserve IP 10.204.0.1: provided IP is already allocated
+#
+# At start-up that is fatal - "F failed to run ovnkube" - and ovnkube-node
+# CrashLoopBackOffs, taking out ALL pod networking on the node rather than just
+# this UDN. Reached later it retries forever. Either way it surfaces as pods
+# stuck in ContainerCreating with a CNI annotation timeout, while the CUDN
+# still reports NetworkAllocationSucceeded: True.
+#
+# TOO MANY and the reservation achieves nothing. Anything unreserved is
+# allocatable and IPAM hands out the lowest free address, so a hole of 16 put
+# this cluster's pods on .3 and .5 - back inside the half the reservation
+# exists to keep them out of, with no error at all. That one is worse, because
+# it looks like it worked.
+#
+# So: check the lowest reserved offset is exactly 2 + one per node. Arithmetic
+# rather than CIDR-aware, so it still needs no netaddr - the octets come
+# straight out of the strings, and only reservations inside the subnet's first
+# /24 can bear on this.
+- name: Work out where each Layer2 reservation starts
+  ansible.builtin.set_fact:
+    udn_bgp_l2_floor: >-
+      {{ (udn_bgp_l2_floor | default({})) | combine({ item.name: {
+           'want': 2 + (udn_bgp_cluster_nodes | length),
+           'octets': ((item.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
+                      or ([item.evpn_l2_exclude] if item.evpn_l2_exclude is defined else []))
+                     | select('match', '^' ~ (item.udn_subnet.split('/')[0].rsplit('.', 1)[0] | replace('.', '\\.')) ~ '\\.')
+                     | map('regex_replace', '^.*\\.([0-9]+)/.*$', '\\1')
+                     | map('int') | list } }) }}
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - udn_phase == 'evpn'
+    - (item.topology | default('Layer3')) == 'Layer2'
+    - (item.evpn_l2_excludes is defined) or (item.evpn_l2_exclude is defined)
+
+- name: Fail if a Layer2 reservation leaves the wrong number of addresses free
+  vars:
+    l2_prefix24: "{{ item.udn_subnet.split('/')[0].rsplit('.', 1)[0] }}"
+    l2_floor: "{{ udn_bgp_l2_floor[item.name].octets | min }}"
+    l2_want: "{{ udn_bgp_l2_floor[item.name].want }}"
+  ansible.builtin.assert:
+    that: (l2_floor | int) == (l2_want | int)
+    fail_msg: >-
+      Tenant '{{ item.name }}' on cluster '{{ udn_bgp_cluster }}' starts its
+      reservation at {{ l2_prefix24 }}.{{ l2_floor }}, and it must start at
+      {{ l2_prefix24 }}.{{ l2_want }} - leaving .0, .1 and one management
+      address for each of this cluster's
+      {{ udn_bgp_cluster_nodes | length }} node(s) free, and nothing else.
+
+      {{ 'Starting too LOW means ovn-kubernetes cannot allocate its own gateway or management port. That failure is fatal at start-up and CrashLoopBackOffs ovnkube-node, taking out all pod networking on the node.'
+         if (l2_floor | int) < (l2_want | int)
+         else 'Starting too HIGH leaves addresses this cluster will allocate pods from - IPAM takes the lowest free one - so the pods land in the other cluster you are splitting away from. Nothing reports this; it looks like it worked until two pods share an address.' }}
+
+      green and purple in vars.yaml show the shape.
+    success_msg: >-
+      {{ item.name }}: reservation starts at {{ l2_prefix24 }}.{{ l2_floor }},
+      leaving exactly the {{ l2_want }} addresses ovn-kubernetes needs.
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - udn_phase == 'evpn'
+    - (item.topology | default('Layer3')) == 'Layer2'
+    - udn_bgp_l2_floor is defined
+    - (udn_bgp_l2_floor[item.name].octets | default([]) | length) > 0
+
+- name: Report what the reservation field is called here
+  ansible.builtin.debug:
+    msg: >-
+      {{ ("Layer2 address reservations go in '" ~ udn_bgp_l2_reserve_field ~ "' on this cluster.")
+         if udn_bgp_l2_reserve_field
+         else ("WARNING: could not determine what this cluster's Layer2 API calls"
+               " the address reservation, so the CUDNs will be rendered WITHOUT"
+               " one. Nothing will then reserve the external endpoint, and two"
+               " clusters on one L2VNI will both allocate from the same range."
+               "\n  rc was " ~ (udn_bgp_l2_reserve_raw.rc | default('?') | string) ~
+               " and stderr was: " ~ (udn_bgp_l2_reserve_raw.stderr | default('') | trim or '(empty)') ~
+               "\n  Check by hand with:"
+               "\n    oc explain clusteruserdefinednetwork.spec.network.layer2"
+               "\n  An empty result here means either the field genuinely does not"
+               " exist on this API version, or the probe above failed - they are"
+               " not the same thing and the rc tells you which.") }}
+  when: udn_phase not in ['preflight', 'web']
+
+- name: Report which cluster this run is targeting
+  ansible.builtin.debug:
+    msg: >-
+      Targeting cluster '{{ udn_bgp_cluster }}' (AS {{ udn_bgp_cluster_asn }})
+      with node(s)
+      {{ udn_bgp_cluster_nodes | map(attribute='ip_key') | join(', ') }},
+      tenant(s) {{ udn_bgp_tenants | map(attribute='name') | join(', ') }}
+      and web tenant(s) {{ udn_web_tenants | join(', ') }}.
+      Manifests for this cluster are written to {{ udn_bgp_manifest_dir }}.
+
+# The fabric side is built once and shared, so a cluster-side run must not
+# find leaf1 unaware of its nodes. Checked here because the symptom otherwise
+# arrives twenty minutes later as a BGP session stuck in Active, which reads
+# as a cluster problem.
+- name: Warn if this cluster is not in the fabric's cluster list
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: '{{ udn_bgp_cluster }}' is not in clab_fabric_clusters
+      ({{ clab_fabric_clusters | default([]) | join(', ') }}), so leaf1 has no
+      BGP neighbour for its nodes and no static route to their VTEPs. The
+      sessions below will sit in Active forever. Add it to
+      clab_fabric_clusters in vars.yaml and re-run:
+        ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml \
+          --ask-vault-pass --tags nodenics,clabdeploy -e clab_topology=evpn
+  when: udn_bgp_cluster not in (clab_fabric_clusters | default([]))
+
+- name: Resolve where the containerlab fabric can be reached
+  ansible.builtin.set_fact:
+    clab_exec_host: >-
+      {{ (lab_network_prefix ~ '.' ~ ip_list.clab) if clab_deploy_mode == 'vm' else 'localhost' }}
+
+- name: Pre-flight checks
+  ansible.builtin.include_tasks: preflight.yml
+
+# ---------------------------------------------------------------------------
+# Check only (-e udn_bgp_check_only=true, with the phase tag of what was
+# built): read what is on the cluster and verify it, changing nothing the
+# phase would apply. The workshop runs this after an attendee has applied
+# the phase by hand. verify.yml still makes its three REPAIRS - forwarding on
+# the fabric NIC, a session stuck on a stale zebra nexthop, and a missing SNAT
+# exclusion - because those are platform faults the attendee did not cause
+# and has not been taught to fix; every one of them is reported as it is made.
+# ---------------------------------------------------------------------------
+- name: Check what was built by hand, and stop
+  when: udn_bgp_check_only | default(false) | bool
+  block:
+    - name: Resolve the node names the checks address
+      ansible.builtin.include_tasks: node-names.yml
+
+    # Check what IS built, not what vars.yaml declares: an attendee checks
+    # after each lab, when only some tenants exist yet. A declared tenant
+    # with no CUDN is reported and left out rather than failed.
+    - name: List the tenant CUDNs that exist on this cluster
+      ansible.builtin.command:
+        cmd: oc get clusteruserdefinednetwork -o jsonpath={.items[*].metadata.name}
+      register: udn_bgp_check_cudns
+      changed_when: false
+      failed_when: false
+
+    - name: Report which declared tenants are built and which are not yet
+      ansible.builtin.debug:
+        msg: >-
+          Checking {{ udn_bgp_tenants | map(attribute='name')
+                      | select('in', udn_bgp_check_cudns.stdout.split()) | list }}.
+          Not built yet on '{{ udn_bgp_cluster }}', so not checked:
+          {{ udn_bgp_tenants | map(attribute='name')
+             | reject('in', udn_bgp_check_cudns.stdout.split()) | list or 'none' }}.
+
+    - name: Narrow the checks to the tenants that exist
+      ansible.builtin.set_fact:
+        udn_bgp_tenants: >-
+          {{ udn_bgp_tenants
+             | selectattr('name', 'in', udn_bgp_check_cudns.stdout.split()) | list }}
+        udn_web_tenants: >-
+          {{ udn_web_tenants | intersect(udn_bgp_check_cudns.stdout.split()) }}
+
+    - name: Verify
+      ansible.builtin.include_tasks: verify.yml
+
+    - name: End here - a check applies nothing
+      ansible.builtin.meta: end_host
+      when: udn_bgp_check_only | default(false) | bool
+
+# Not in 'prep': the workshop leaves this to the attendee (Lab 1), because
+# the three switches it flips are the first thing there is to learn.
+- name: Enable FRR and route advertisements
+  ansible.builtin.include_tasks: enable.yml
+  when: udn_phase not in ['preflight', 'web', 'prep']
+
+# Must precede apply.yml: the NNCP templates select nodes by name, and the
+# only name that works is the one the cluster actually registered.
+- name: Resolve the fabric nodes' Kubernetes node names
+  ansible.builtin.include_tasks: node-names.yml
+  when: udn_phase not in ['preflight', 'web']
+
+- name: Render the manifests for this phase
+  ansible.builtin.include_tasks: apply.yml
+  when: udn_phase not in ['preflight', 'web']
+
+# Must precede the first NodeNetworkConfigurationPolicy below. Without the
+# NMState operator, `oc apply` of an NNCP fails with "no matches for kind
+# NodeNetworkConfigurationPolicy" - and if only the operator were installed
+# without its NMState instance, the apply would succeed and nothing would
+# ever reconcile it.
+- name: Make sure the NodeNetworkConfigurationPolicy API exists
+  ansible.builtin.include_tasks: nmstate.yml
+  when: udn_phase not in ['preflight', 'web']
+
+# ---------------------------------------------------------------------------
+# Fabric NIC addressing + base peering. Needed by every phase from 'default'
+# on, because every phase rides on the untagged session or is compared
+# against it.
+# ---------------------------------------------------------------------------
+# Before the NICs exist, not after. Forwarding is what makes the fabric NIC
+# useful rather than decorative: without it the node accepts replies from the
+# fabric and drops them in the routing decision, with every other signal
+# green. Tuned needs a moment to land, which the NNCP apply and rollout below
+# provides for free.
+- name: Enable IP forwarding on the fabric nodes
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/tuned-forwarding.yaml"
+  when: udn_phase not in ['preflight', 'web']
+
+# The NNCP below captures its interface by MAC. When the NIC is not on the
+# node, nmstate fails the policy with
+#
+#   PolicyError: interface with 'mac-address=52:54:00:E2:55:20' not found
+#
+# and that condition never becomes Available - so the wait after it burns its
+# full five minutes before saying only that it timed out. The cause is not on
+# the cluster at all: the NIC is a libvirt device that --tags nodenics
+# attaches, and this role has no way to add one. Ask the node directly first,
+# which takes seconds and names the actual next command.
+- name: Check each node actually has its fabric NIC
+  ansible.builtin.command:
+    argv:
+      - oc
+      - debug
+      - "node/{{ udn_bgp_node_names[item.ip_key] }}"
+      - --quiet
+      - --
+      - chroot
+      - /host
+      - bash
+      - -c
+      - >-
+        ip -o link show | grep -i -c '{{ clab_fabric_mac_prefix }}:{{ ip_list[item.ip_key] }}' || true
+  loop: "{{ udn_bgp_cluster_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  register: udn_bgp_fabric_nic_present
+  changed_when: false
+  failed_when: false
+  # Retry the DEBUG POD, not the MAC. `oc debug` has to schedule a pod on the
+  # node, and that fails transiently - the node may still be rolling out after
+  # the Network CR patch, or the API may simply be busy:
+  #
+  #   error: unable to create the debug pod "worker3-debug-vxp7t"
+  #
+  # When it fails, stdout is EMPTY, and an empty stdout is indistinguishable
+  # from "the MAC is not there" unless rc is looked at. That sent a reader to
+  # `virsh domiflist` for a NIC that was present and correct.
+  until: udn_bgp_fabric_nic_present.rc == 0
+  retries: "{{ udn_bgp_nic_check_retries }}"
+  delay: "{{ udn_bgp_nic_check_delay }}"
+  # Same guard as the node-names.yml include above, and for the same reason:
+  # that include is what SETS udn_bgp_node_names, so any task referencing it
+  # has to be gated identically. Without this the task runs under --tags web,
+  # where node-names.yml never ran, and dies on an undefined variable.
+  when: udn_phase not in ['preflight', 'web']
+
+# Two different failures, reported separately, because they have nothing to do
+# with each other and only one of them is about the NIC.
+- name: Fail if a node could not be inspected at all
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      Could not inspect node {{ udn_bgp_node_names[item.item.ip_key] }} -
+      `oc debug` never ran the command, so this says NOTHING about its fabric
+      NIC. It reported: {{ item.stderr | default('') | trim }}
+      -- "unable to create the debug pod" means the pod could not be
+      scheduled, usually because the node is still rolling out after the
+      Network CR patch, or the API server is busy. This already retried
+      {{ udn_bgp_nic_check_retries }} times at
+      {{ udn_bgp_nic_check_delay }}s. Check `oc get node
+      {{ udn_bgp_node_names[item.item.ip_key] }}` is Ready and re-run; do not
+      go looking at libvirt for this one.
+    success_msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] }}: inspected.
+  loop: "{{ udn_bgp_fabric_nic_present.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.ip_key | default('?') }}"
+  when: item.skipped is not defined
+
+- name: Fail with the command that fixes it if a fabric NIC is missing
+  ansible.builtin.assert:
+    that: item.stdout | default('0') | trim | int > 0
+    fail_msg: >-
+      Node {{ udn_bgp_node_names[item.item.ip_key] }} ({{ item.item.ip_key }},
+      cluster '{{ udn_bgp_cluster }}') has no interface with MAC
+      {{ clab_fabric_mac_prefix }}:{{ ip_list[item.item.ip_key] }}, so the
+      NodeNetworkConfigurationPolicy that captures on that MAC cannot match
+      anything. nmstate reports this as
+      "PolicyError: interface with 'mac-address=...' not found" and the policy
+      never goes Available.
+
+      The NIC is a libvirt device and this role cannot add one. On the LAB
+      HOST:
+
+        virsh domiflist {{ item.item.domain }}
+
+      If the MAC is absent there, attach it:
+
+        ansible-playbook -i ../inventory/hosts setup_udn_bgp_lab.yaml \
+          --ask-vault-pass --tags nodenics
+
+      If the MAC IS listed on the domain but the node still does not see it,
+      the guest has not surfaced the hot-plugged device. Check from the node
+      with `oc debug node/{{ udn_bgp_node_names[item.item.ip_key] }} --
+      chroot /host ip -br link`, and reboot the VM if it is genuinely absent -
+      a hot-plug that libvirt accepted but the guest ignored is the one case
+      that needs one.
+    success_msg: >-
+      {{ udn_bgp_node_names[item.item.ip_key] }} has its fabric NIC.
+  loop: "{{ udn_bgp_fabric_nic_present.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.ip_key | default('?') }}"
+  when: udn_phase not in ['preflight', 'web']
+
+# A NodeNetworkConfigurationEnactment that has failed does not retry. It is
+# keyed on the policy's metadata.generation, so nmstate re-enacts only when the
+# SPEC changes - and `oc apply` of an identical policy changes nothing, leaves
+# the generation alone, and reports "unchanged". The enactment therefore sits
+# at Failing indefinitely:
+#
+#   NAME                      STATUS    STATUS AGE   REASON
+#   sno.fabric-untagged-sno   Failing   39m          FailedToConfigure
+#
+# and the wait below times out again on a policy that is now perfectly
+# correct. That is exactly what happens after the usual cause is fixed: the
+# policy captured on a MAC that was not there, the fabric NIC got attached,
+# and nothing told nmstate to look again.
+#
+# Deleting the policy is the re-trigger. It is safe: removing an NNCP does not
+# revert configuration nmstate applied, and a Failing enactment applied none
+# in the first place. Only Failing ones are touched - an Available policy is
+# left alone so a re-run does not churn a working node's networking.
+- name: Look for enactments left Failing by an earlier run
+  ansible.builtin.shell:
+    cmd: |
+      oc get nnce {{ udn_bgp_node_names[item.ip_key] }}.fabric-untagged-{{ item.ip_key }} \
+        -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}' 2>/dev/null || true
+  loop: "{{ udn_bgp_cluster_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  register: udn_bgp_nnce_state
+  changed_when: false
+  failed_when: false
+  when: udn_phase not in ['preflight', 'web']
+
+- name: Delete a failed policy so nmstate enacts it again
+  ansible.builtin.command:
+    cmd: "oc delete nncp fabric-untagged-{{ item.item.ip_key }} --ignore-not-found"
+  loop: "{{ udn_bgp_nnce_state.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.ip_key | default('?') }}"
+  when:
+    - udn_phase not in ['preflight', 'web']
+    - item.stdout | default('') is search('Failing=True')
+
+- name: Address the fabric NICs
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/nncp-fabric-untagged-{{ item.ip_key }}.yaml"
+  loop: "{{ udn_bgp_cluster_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  when: udn_phase not in ['preflight', 'web']
+
+- name: Wait for the fabric NIC policies to be applied
+  ansible.builtin.command:
+    cmd: >-
+      oc wait nncp/fabric-untagged-{{ item.ip_key }}
+      --for=condition=Available --timeout=300s
+  loop: "{{ udn_bgp_cluster_nodes }}"
+  loop_control:
+    label: "{{ item.ip_key }}"
+  when: udn_phase not in ['preflight', 'web']
+  changed_when: false
+
+# Forwarding on the fabric NIC. See tasks/fabric-forwarding.yml for why this
+# is repaired here AND again in verify.yml rather than once: the EVPN phase
+# that runs between the two puts it back to 0, and the check in verify.yml
+# only reads.
+- name: Repair forwarding on the fabric NICs
+  ansible.builtin.include_tasks: fabric-forwarding.yml
+  when: udn_phase not in ['preflight', 'web']
+
+# Before the first FRRConfiguration that may reference it. A neighbor whose
+# passwordSecret names a Secret that does not exist yet does not come up, and
+# frr-k8s does not retry it on a schedule you would want to wait for.
+#
+# Skipped entirely when udn_bgp_password is unset, which is the default. An
+# empty Secret would be worse than none: FRR still adds the MD5 option to the
+# TCP segments, so the session would fail against a leaf with no key and
+# nothing would log why.
+#
+# --dry-run=client | oc apply rather than `oc create`, so re-running with a
+# changed key updates it instead of failing on AlreadyExists.
+- name: Create the BGP authentication secret
+  ansible.builtin.shell:
+    cmd: >-
+      oc create secret generic {{ udn_bgp_password_secret }}
+      -n {{ udn_bgp_frrk8s_namespace }}
+      --type=kubernetes.io/basic-auth
+      --from-literal=password='{{ udn_bgp_password }}'
+      --dry-run=client -o yaml | oc apply -f -
+  no_log: true
+  when:
+    - udn_phase not in ['preflight', 'web', 'prep']
+    - udn_bgp_password | default('') | length > 0
+
+- name: Report whether BGP sessions are authenticated
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'BGP TCP-MD5 is ON - secret ' ~ udn_bgp_password_secret ~ ' in '
+         ~ udn_bgp_frrk8s_namespace ~ '. The FABRIC half must carry the same
+         key: re-run --tags fabric after changing it, or every session drops
+         with nothing logged on either end.'
+         if (udn_bgp_password | default('') | length > 0)
+         else 'BGP sessions are unauthenticated (udn_bgp_password unset in
+               vault.yaml). This is the default.' }}
+  when: udn_phase not in ['preflight', 'web', 'prep']
+
+# Not in 'prep' either: the FRRConfiguration API does not exist until Lab 1
+# enables FRR, and the peering itself is Lab 2.
+- name: Create the base BGP peering in the default VRF
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/frrconfiguration-default.yaml"
+  when: udn_phase not in ['preflight', 'web', 'prep']
+
+# ---------------------------------------------------------------------------
+# Phase: default - advertise the cluster default pod network
+# ---------------------------------------------------------------------------
+- name: Advertise the cluster default pod network
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-default.yaml"
+  when:
+    - udn_phase == 'default'
+    - udn_bgp_advertise_default | bool
+
+- name: Confirm the default pod network advertisement was accepted
+  ansible.builtin.include_tasks: wait-ra.yml
+  vars:
+    udn_bgp_ra_name: default-podnetwork
+  when:
+    - udn_phase == 'default'
+    - udn_bgp_advertise_default | bool
+
+# A second cluster on the fabric carries the same 10.128.0.0/14 as the
+# first, so only one of them may advertise it. Said out loud rather than
+# skipped silently, because a phase that does nothing and reports success is
+# how someone spends an afternoon looking for a route that was never asked
+# for.
+- name: Explain why this cluster is not advertising its default pod network
+  ansible.builtin.debug:
+    msg: >-
+      Phase 'default' is a no-op for cluster '{{ udn_bgp_cluster }}':
+      clab_clusters sets advertise_default false for it. Its default pod
+      network is the same 10.128.0.0/14 every other cluster in this lab has,
+      and a prefix advertised into the fabric from two origins leaves leaf1
+      with two paths and one winner - so the losing cluster's pods become
+      unreachable with nothing reporting an error. Phase 1 is proved once, on
+      the cluster that does advertise it. Go straight to --tags shared,
+      vrflite or evpn here.
+  when:
+    - udn_phase == 'default'
+    - not (udn_bgp_advertise_default | bool)
+
+- name: Warn about what advertising the default pod network costs
+  ansible.builtin.debug:
+    msg: >-
+      The cluster default pod network is now advertised, which means OVN has
+      stopped SNATing it - for ALL destinations, not only the fabric. Every
+      pod in this cluster, OpenShift's own included, now reaches
+      {{ lab_network_prefix }}.0/24 with its pod IP, and nothing there has a
+      route back. Expect the authentication, console and ingress operators to
+      go Degraded within minutes with DNS errors from 172.30.0.10; CoreDNS
+      can no longer be answered by the lab's resolver. That is this phase
+      working as designed, not a fault. Remove it with `oc delete ra
+      default-podnetwork` when you are done looking, or move on to --tags
+      shared, which removes it for you. See udn_bgp_advertise_default in
+      defaults/main.yml for how to keep both.
+  when:
+    - udn_phase == 'default'
+    - udn_bgp_advertise_default | bool
+
+# The default pod network carries OpenShift's own workloads, so advertising
+# it is a phase-1 proof rather than a state to stay in - see the warning
+# above and udn_bgp_advertise_default. From phase 2 on the tenant UDNs are
+# what is being advertised, and they hold nothing but test pods, so the
+# default network goes back to being SNATed and the cluster goes back to
+# being able to resolve names.
+- name: Stop advertising the cluster default pod network
+  ansible.builtin.command:
+    cmd: "oc delete routeadvertisements default-podnetwork --ignore-not-found"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+# ---------------------------------------------------------------------------
+# Phases: shared / vrflite / evpn - the tenant UDNs and their workloads
+# ---------------------------------------------------------------------------
+#
+# A namespace's primary network is bound when the namespace is created, so a
+# namespace that already exists from an earlier phase is on the OLD network
+# and cannot be moved by relabelling. Recreating it is the only way to switch
+# a tenant between the shared-VRF and VRF-Lite subnets, and it is why these
+# are test namespaces holding nothing of value.
+# The cluster will not catch this. Leaking two UDNs into the default VRF with
+# the same subnet is Accepted by OVN-Kubernetes - its route advertisements
+# controller has a literal `// TODO check overlaps?` where the validation
+# would be - and the result is one winner and one tenant silently
+# unreachable. The vrflite and evpn phases deliberately DO overlap, because
+# targetVRF 'auto' gives each tenant its own VRF, so this only applies here.
+- name: Fail if two tenants share a subnet in the shared-VRF phase
+  ansible.builtin.assert:
+    that:
+      - (udn_bgp_tenants | map(attribute='udn_subnet_shared') | unique | length)
+        == (udn_bgp_tenants | length)
+    fail_msg: >-
+      Two tenants have the same udn_subnet_shared
+      ({{ udn_bgp_tenants | map(attribute='udn_subnet_shared') | list }}).
+      The shared phase leaks every selected UDN into the ONE default VRF,
+      where a prefix cannot belong to two networks. OVN-Kubernetes does not
+      reject this - the RouteAdvertisements is Accepted and one tenant simply
+      stops being reachable - so it is checked here instead. Give each tenant
+      its own udn_subnet_shared in vars.yaml. The overlapping udn_subnet
+      values are for the vrflite and evpn phases, where each tenant has its
+      own VRF and overlap is the point.
+    success_msg: >-
+      Each tenant has its own shared-VRF subnet.
+  when: udn_phase == 'shared'
+
+# EVERY declared tenant, not just the ones this cluster builds now. A cluster
+# whose tenant list differs by phase - the SNO (green, purple and violet
+# under EVPN, violet alone under VRF-Lite) and the hub (violet under EVPN
+# only) - would
+# otherwise keep the previous phase's tenants on their old transport: an EVPN
+# violet left on the hub after a switch to VRF-Lite makes violet look present
+# in both clusters, which udn-xcluster-curl.sh reads as EVPN and scores
+# against the wrong expectations. Deleting a namespace that is not there is a
+# no-op, and everything in these is a test workload.
+- name: Remove test namespaces left over from a previous phase
+  ansible.builtin.command:
+    cmd: "oc delete namespace udn-{{ item }} --ignore-not-found --wait=true --timeout=300s"
+  loop: "{{ udn_bgp_all_tenant_names }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+# Two reasons this is a delete rather than an apply: the phases use different
+# subnets (unique in shared, deliberately overlapping in vrflite), and
+# network.transport is immutable, so a CUDN created without it can never be
+# moved to transport: EVPN in place.
+- name: Remove CUDNs from a previous phase (subnets differ, and transport is immutable)
+  ansible.builtin.command:
+    cmd: "oc delete clusteruserdefinednetwork {{ item }} --ignore-not-found --wait=true --timeout=300s"
+  loop: "{{ udn_bgp_all_tenant_names }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+# Before the CUDNs, not with the rest of phase 4. A phase-4 CUDN names a VTEP
+# in network.evpn.vtep, and OVN-Kubernetes will not create the network until
+# that VTEP exists - it reports VTEPNotFound and stays there, so the wait for
+# the NADs below burns every retry on a network that is never coming.
+- name: Create the VTEP the tenant CUDNs will reference
+  ansible.builtin.include_tasks: evpn-vtep.yml
+  when: udn_phase == 'evpn'
+
+- name: Create the tenant CUDNs
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/cudn-{{ item.name }}.yaml"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+- name: Create the tenant namespaces and test workloads
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/workload-{{ item.name }}.yaml"
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+# After the namespaces, not before: a CUDN creates its NAD in the namespaces
+# its selector matches, so with no namespaces it succeeds over an empty set.
+- name: Confirm the tenant CUDNs were realised into NetworkAttachmentDefinitions
+  ansible.builtin.include_tasks: wait-cudn.yml
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+# Did the exclusions the manifest asked for actually survive the apply?
+#
+# Kubernetes prunes fields a CRD's structural schema does not declare, and it
+# does so SILENTLY - no error, no warning, no event. `oc apply` reports
+# configured, the manifest on disk says one thing and the live object says
+# another, and nothing connects the two. What that costs here is specific: the
+# exclusions are what keep two clusters on one stretched Layer2 network from
+# handing out the same address, so a pruned field does not fail, it produces a
+# duplicate address in one broadcast domain days later and presents as
+# intermittent loss.
+#
+# Reported rather than enforced. If the field turns out not to exist on
+# Layer2, that is a real finding about stretched L2 across clusters and the
+# lab should surface it, not refuse to run.
+- name: Read back the exclusions the cluster actually kept
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusteruserdefinednetwork {{ item.name }}
+      -o jsonpath={.spec.network.layer2.{{ udn_bgp_l2_reserve_field | default('excludeSubnets', true) }}}
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: udn_bgp_cudn_excludes
+  changed_when: false
+  failed_when: false
+  when:
+    - udn_phase == 'evpn'
+    - (item.topology | default('Layer3')) == 'Layer2'
+
+- name: Warn if an exclusion was asked for and not kept
+  vars:
+    want: >-
+      {{ (item.item.evpn_l2_excludes | default({})).get(udn_bgp_cluster)
+         or ([item.item.evpn_l2_exclude] if item.item.evpn_l2_exclude is defined else []) }}
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ item.item.name }} asked for excludeSubnets {{ want }} and the
+      cluster kept '{{ item.stdout | default('') | trim or '(nothing)' }}'.
+      The API pruned the field rather than rejecting it, which means nothing is
+      reserving those addresses. Two consequences, both silent: the external
+      endpoint {{ item.item.evpn_l2_external_host | default('') }} can be
+      handed to a pod, and on a fabric with more than one cluster on this
+      L2VNI both clusters allocate from the same range and will eventually
+      collide. Confirm with:
+        oc explain clusteruserdefinednetwork.spec.network.layer2 | grep -i exclude
+        oc apply -f {{ udn_bgp_manifest_dir }}/cudn-{{ item.item.name }}.yaml --dry-run=server -o yaml
+  loop: "{{ udn_bgp_cudn_excludes.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name | default('?') }}"
+  when:
+    - item.skipped is not defined
+    - (item.stdout | default('') | trim | length) == 0
+    - (item.item.evpn_l2_excludes is defined) or (item.item.evpn_l2_exclude is defined)
+
+# `rollout status` on its own times out after ten minutes saying only that
+# it timed out, which is the least useful form of every failure this can hit.
+# The two common ones look nothing alike and are not visible in the DaemonSet
+# spec: pods refused at admission (SCC), where no pod object exists at all and
+# only the DS events say so; and pods created but stuck in ContainerCreating
+# because the CUDN is not ready yet, where the pod events say so. Pull both
+# out on failure rather than making the next person go looking.
+- name: Wait for a test pod on every node of each tenant
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+  block:
+    - name: Wait for the tenant DaemonSets to roll out
+      ansible.builtin.command:
+        cmd: >-
+          oc -n udn-{{ item.name }} rollout status daemonset/udn-test --timeout=600s
+      loop: "{{ udn_bgp_tenants }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+  rescue:
+    - name: Collect why the test pods did not start
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          for t in {{ udn_bgp_tenants | map(attribute='name') | join(' ') }}; do
+              echo "=== udn-$t ==="
+              oc -n "udn-$t" get daemonset udn-test \
+                  -o jsonpath='desired={.status.desiredNumberScheduled} scheduled={.status.currentNumberScheduled} ready={.status.numberReady}{"\n"}' 2>&1
+              echo "--- daemonset events (admission refusals show up here) ---"
+              oc -n "udn-$t" get events --field-selector involvedObject.name=udn-test \
+                  -o custom-columns=REASON:.reason,MESSAGE:.message --no-headers 2>&1 | tail -5
+              echo "--- pods ---"
+              oc -n "udn-$t" get pods -o wide 2>&1 | tail -5
+              echo "--- CUDN ---"
+              oc get clusteruserdefinednetwork "$t" \
+                  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1
+          done
+      register: udn_bgp_workload_debug
+      changed_when: false
+      failed_when: false
+
+    - name: Report why the test pods did not start, then fail
+      ansible.builtin.fail:
+        msg: >-
+          {{ ['The tenant test DaemonSets never started a pod.',
+              'desired=N with scheduled=0 means no pod object was ever created -'
+              ' that is an admission refusal, almost always the SCC: the pods ask'
+              ' for NET_RAW/NET_ADMIN and the ServiceAccount must be bound to the'
+              ' privileged SCC. The namespace PSA labels do not cover this.',
+              'scheduled=N with ready=0 means the pods exist but cannot start -'
+              ' look at the pod events for the CUDN not being ready, or for an'
+              ' image pull against registry.redhat.io.',
+              ''] + udn_bgp_workload_debug.stdout_lines | default([]) }}
+
+# The check every other one in this section is standing in for. A pod that
+# schedules, passes its rollout and answers `oc exec` has proved only that it
+# is running - not that it is running on the network this lab is about. When
+# the primary UDN fails to attach, the pod comes up on the default cluster
+# network and every signal above stays green. The pod's own annotation is the
+# only place the truth is written down.
+- name: Read which networks the test pods actually attached to
+  ansible.builtin.command:
+    argv:
+      - oc
+      - -n
+      - "udn-{{ item.name }}"
+      - get
+      - pod
+      - -o
+      - jsonpath={.items[0].metadata.annotations.k8s\.ovn\.org/pod-networks}
+  loop: "{{ udn_bgp_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: udn_bgp_pod_networks
+  changed_when: false
+  failed_when: false
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+# Parsed, not pattern-matched. The annotation keys each network by its NAD
+# reference, so a tenant's key is "<namespace>/<cudn name>" - "udn-green/green",
+# not "green". A substring test for the tenant name fails on every correctly
+# attached pod, which is how the first version of this check read a healthy
+# green tenant as broken.
+#
+# Two independent signals, because either alone can mislead. The tenant's own
+# entry must be present with role primary; and the default network's role must
+# have become "infrastructure-locked", which is how OVN-Kubernetes marks the
+# cluster network of a pod whose primary network is a UDN. A pod that never
+# got its UDN keeps role "primary" on default - that is exactly what the
+# unlabelled namespaces produced.
+- name: Fail if a test pod is on the default network instead of its UDN
+  vars:
+    udn_bgp_pod_nets: "{{ item.stdout | default('{}', true) | from_json }}"
+    udn_bgp_udn_key: "udn-{{ item.item.name }}/{{ item.item.name }}"
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_udn_key in udn_bgp_pod_nets
+      # Guarded rather than relying on assert short-circuiting at the first
+      # false condition: a missing key would otherwise raise an undefined
+      # error and lose fail_msg, which is where the whole diagnosis lives.
+      - (udn_bgp_pod_nets[udn_bgp_udn_key] | default({}, true))['role'] | default('') == 'primary'
+      - (udn_bgp_pod_nets['default'] | default({}, true))['role'] | default('') != 'primary'
+    fail_msg: >-
+      A pod in udn-{{ item.item.name }} is not on the {{ item.item.name }}
+      network. Expected a '{{ udn_bgp_udn_key }}' entry with role primary, and
+      the default network demoted to role infrastructure-locked. The primary
+      UDN never bound, which is usually the namespace missing the
+      k8s.ovn.org/primary-user-defined-network label - OVN-Kubernetes binds a
+      primary network at namespace creation and will not retrofit it, so the
+      namespace has to be recreated, not labelled.
+      Nothing downstream reports this: the pod is healthy, the DaemonSet is
+      rolled out, and the RouteAdvertisements will simply sit at "no networks
+      selected". Its annotation reads:
+      {{ item.stdout | default('(none)', true) }}
+    success_msg: >-
+      udn-{{ item.item.name }} pods are on {{ udn_bgp_udn_key }}
+      ({{ udn_bgp_pod_nets[udn_bgp_udn_key]['ip_address'] | default('?') }}),
+      with the cluster network demoted to
+      {{ udn_bgp_pod_nets['default']['role'] | default('?') }}.
+  loop: "{{ udn_bgp_pod_networks.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: udn_phase in ['shared', 'vrflite', 'evpn']
+
+# ---------------------------------------------------------------------------
+# Phase: shared
+# ---------------------------------------------------------------------------
+- name: Advertise the UDNs into the default VRF
+  ansible.builtin.command:
+    cmd: "oc apply -f {{ udn_bgp_manifest_dir }}/routeadvertisements-udn.yaml"
+  when: udn_phase == 'shared'
+
+- name: Confirm the UDN advertisement was accepted
+  ansible.builtin.include_tasks: wait-ra.yml
+  vars:
+    udn_bgp_ra_name: udn-shared-vrf
+  when: udn_phase == 'shared'
+
+# ---------------------------------------------------------------------------
+# Phase: vrflite
+# ---------------------------------------------------------------------------
+# vrflite only. Under EVPN the tenant VRFs still exist on each node, but
+# nothing hands them off over a VLAN - the data plane is VXLAN between node
+# VTEPs. Building the VLAN plumbing anyway would give every tenant a second
+# path to the same destinations with nothing choosing between them, so the
+# evpn phase skips this and removes it if a previous phase left it behind.
+- name: Discover the per-tenant VRFs OVN-Kubernetes created
+  ansible.builtin.include_tasks: vrflite-discover.yml
+  when: udn_phase == 'vrflite'
+
+- name: Render and apply the VRF-Lite plumbing
+  ansible.builtin.include_tasks: vrflite-apply.yml
+  when: udn_phase == 'vrflite'
+
+# ---------------------------------------------------------------------------
+# Phase: evpn
+# ---------------------------------------------------------------------------
+- name: Configure EVPN transport for the tenant UDNs
+  ansible.builtin.include_tasks: evpn.yml
+  when: udn_phase == 'evpn'
+
+# ---------------------------------------------------------------------------
+# Phase: web
+# ---------------------------------------------------------------------------
+# Additive and opt-in. Attaches a one-pod web server to tenants that already
+# have a primary UDN, so `curl` from two client VMs to two addresses in the
+# same /16 returns two documents that name themselves. It creates no network
+# objects and changes no routing, which is why it skips everything above.
+- name: Deploy the per-tenant web workload
+  ansible.builtin.include_tasks: webload.yml
+  when: udn_phase == 'web'
+
+# ---------------------------------------------------------------------------
+# Phase: prep - the workshop's day-0 plumbing on a cluster. Everything above
+# that is not BGP/EVPN learning material has already run (NMState, forwarding,
+# the fabric NIC addressing); this adds OpenShift Virtualization for the live
+# migration lab and writes the attendee's environment file. Nothing here is
+# something the workshop asks an attendee to type.
+# ---------------------------------------------------------------------------
+- name: Workshop day-0 extras
+  ansible.builtin.include_tasks: prep.yml
+  when: udn_phase == 'prep'
+
+- name: Verify
+  ansible.builtin.include_tasks: verify.yml
+  when:
+    - udn_phase not in ['preflight', 'web', 'prep']
+    - not (udn_bgp_check_only | default(false) | bool)

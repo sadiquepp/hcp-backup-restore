@@ -1,0 +1,23 @@
+{#- The lab's fixed cluster names, for the HYPERVISOR's own resolver.
+
+    One line per cluster, so a zone that is not configured simply produces
+    nothing. Every address is an ip_list octet on the helper's haproxy, and
+    api, api-int and every *.apps route share it - the router picks the route
+    from the Host header, not from where the name points.
+
+    A cluster whose lb key is missing from ip_list is skipped rather than
+    rendering 'None': trimming vars.yaml to a single hub is a normal thing to
+    do and must not produce a broken hosts file. -#}
+{% for c in lab_etc_hosts_clusters %}
+{% if ip_list[c.lb] is defined %}
+{% set addr = lab_network_prefix ~ '.' ~ ip_list[c.lb] %}
+{{ '%-16s' | format(addr) }}api.{{ c.zone }} api-int.{{ c.zone }}
+{% for r in lab_apps_routes %}
+{{ '%-16s' | format(addr) }}{{ r }}.apps.{{ c.zone }}
+{% endfor %}
+
+{% endif %}
+{% endfor %}
+{% if ip_list.helper_server is defined %}
+{{ '%-16s' | format(lab_network_prefix ~ '.' ~ ip_list.helper_server) }}helper.{{ hub_domain }} helper
+{% endif %}

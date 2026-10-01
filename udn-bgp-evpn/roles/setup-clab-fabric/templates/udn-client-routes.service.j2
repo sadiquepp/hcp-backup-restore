@@ -1,0 +1,12 @@
+[Unit]
+Description=UDN client routes and reverse-path settings
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/udn-client-routes.sh
+
+[Install]
+WantedBy=multi-user.target

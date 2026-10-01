@@ -1,0 +1,113 @@
+---
+# Internet egress for the tenants with evpn_internet set - the host half.
+#
+# leaf2 originates a default route into the tenant's VRF and sends matching
+# traffic out its containerlab management NIC (templates/leaf2-egress.sh.j2).
+# That traffic still carries the pod's own address - UDN over BGP does not
+# SNAT - and the internet cannot route back to 10.206.x. So it is NATed HERE,
+# on the host running containerlab, because leaf2 cannot: the FRR image ships
+# no iptables.
+#
+# Two pieces per tenant, both needed:
+#
+#   MASQUERADE  -s <tenant subnet> -o <this host's uplink>. Docker's own rule
+#               only covers the management subnet, so without this the pod's
+#               address leaves unchanged and nothing answers.
+#   a route     <tenant subnet> via <leaf2's management address>. For the
+#               replies: once conntrack has un-NATted them they are addressed
+#               to the pod, and this is the only thing that knows the pod is
+#               behind leaf2. It also keeps strict rp_filter on the docker
+#               bridge from dropping the OUTBOUND packets, whose source would
+#               otherwise have no reverse path via that bridge.
+#
+# Re-run on every deploy: 'containerlab deploy --reconfigure' recreates leaf2,
+# and its management address can change with it.
+
+- name: Work out which tenants get internet egress
+  ansible.builtin.set_fact:
+    clab_egress_tenants: >-
+      {{ udn_bgp_tenants
+         | rejectattr('topology', 'equalto', 'Layer2')
+         | selectattr('evpn_internet', 'defined')
+         | selectattr('evpn_internet')
+         | list }}
+
+- name: Read leaf2's containerlab management address
+  ansible.builtin.command:
+    cmd: "docker exec clab-{{ clab_lab_name }}-leaf2 ip -4 -o addr show dev eth0"
+  register: clab_leaf2_mgmt
+  changed_when: false
+  when: clab_egress_tenants | length > 0
+
+- name: Read this host's uplink - where the default route leaves
+  ansible.builtin.command:
+    cmd: ip -4 route show default
+  register: clab_host_default
+  changed_when: false
+  when: clab_egress_tenants | length > 0
+
+- name: Record leaf2's address and the uplink
+  ansible.builtin.set_fact:
+    clab_leaf2_mgmt_ip: >-
+      {{ clab_leaf2_mgmt.stdout | regex_search('inet (\S+)/', '\1') | first }}
+    clab_host_uplink: >-
+      {{ clab_host_default.stdout | regex_search('dev (\S+)', '\1') | first }}
+  when: clab_egress_tenants | length > 0
+
+- name: Route each tenant's replies back to leaf2
+  ansible.builtin.command:
+    cmd: "ip route replace {{ item.udn_subnet }} via {{ clab_leaf2_mgmt_ip }}"
+  loop: "{{ clab_egress_tenants }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.udn_subnet }} via {{ clab_leaf2_mgmt_ip | default('?') }}"
+
+# -C first, so a re-run does not stack duplicate rules.
+#
+# Literal block, not folded. A folded scalar keeps the newline before any line
+# indented deeper than the first, and this command was first written with its
+# '&& echo added' continuation indented: sh got it as a line of its own and
+# failed with 'Syntax error'. The same trap is noted in setup-udn-bgp's
+# webload.yml; an if/fi reads plainly and has nothing to fold.
+- name: NAT each tenant's traffic out of this host's uplink
+  ansible.builtin.shell:
+    cmd: |
+      if ! iptables -t nat -C POSTROUTING -s {{ item.udn_subnet }} -o {{ clab_host_uplink }} -j MASQUERADE 2>/dev/null; then
+          iptables -t nat -A POSTROUTING -s {{ item.udn_subnet }} -o {{ clab_host_uplink }} -j MASQUERADE
+          echo added
+      fi
+  loop: "{{ clab_egress_tenants }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.udn_subnet }} -> {{ clab_host_uplink | default('?') }}"
+  register: clab_egress_nat
+  changed_when: "'added' in clab_egress_nat.stdout"
+
+# The leaf2 half, read back rather than assumed. The script runs from the
+# containerlab exec block, whose failures are easy to miss in deploy output.
+- name: Read each egress tenant's default route inside leaf2
+  ansible.builtin.command:
+    cmd: >-
+      docker exec clab-{{ clab_lab_name }}-leaf2
+      ip route show table {{ 1000 + item.vlan }} default
+  loop: "{{ clab_egress_tenants }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: clab_leaf2_vrf_default
+  changed_when: false
+
+- name: Fail if leaf2 has no egress default in a tenant's VRF
+  ansible.builtin.assert:
+    that: "'dev eth0' in item.stdout"
+    fail_msg: >-
+      leaf2's {{ item.item.name }} VRF (table {{ 1000 + item.item.vlan }}) has no
+      default route out of eth0 - got '{{ item.stdout }}'. The exec block's
+      lab-egress.sh did not run or failed. Run it by hand to see why:
+        docker exec clab-{{ clab_lab_name }}-leaf2 sh /usr/local/bin/lab-egress.sh
+      Until it works, leaf2 still advertises the default into EVPN
+      (default-originate does not depend on it), so {{ item.item.name }}'s pods
+      will send internet traffic to leaf2 and have it dropped there.
+    success_msg: >-
+      {{ item.item.name }}: leaf2 egress '{{ item.stdout }}', NAT via
+      {{ clab_host_uplink }}, replies via {{ clab_leaf2_mgmt_ip }}.
+  loop: "{{ clab_leaf2_vrf_default.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"

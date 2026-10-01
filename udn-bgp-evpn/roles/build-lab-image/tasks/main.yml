@@ -1,0 +1,345 @@
+---
+# Build the prebuilt lab image.
+#
+# One copy of rhel9_kvm_image with every package the lab's guests need
+# already in it, so the build does not register four VMs with
+# subscription-manager and run four rounds of dnf against Red Hat's CDN.
+#
+# WHY A SEPARATE PLAYBOOK AND NOT A STEP INSIDE build-lab.sh. This changes a
+# file in base_image_dir that every other lab on this host may also be using,
+# it takes several minutes, and it needs credentials the rest of a --from
+# fabric run does not. Making it opt-in and explicit means a normal build
+# never surprises anyone by rewriting a shared base image.
+#
+# THE IMAGE CARRIES NO ENTITLEMENT. Registration happens inside the copy,
+# only for as long as the installs take, and is undone before the image is
+# finished. Guests cloned from it therefore cannot dnf anything - which is
+# the point, and is why the lab verifies packages with rpm -q rather than
+# assuming. If you need a package later, add it to the list in vars.yaml and
+# rebuild, or delete the image and let the lab fall back to registering.
+
+- name: Fail fast if org_id/activation_key are missing from vault.yaml
+  ansible.builtin.assert:
+    that:
+      - org_id is defined
+      - activation_key is defined
+    fail_msg: >-
+      Add org_id / activation_key to vault.yaml (ansible-vault edit
+      vault.yaml). The image is registered with subscription-manager while
+      the packages are installed, then unregistered again. If your base
+      image can already reach repositories on its own - a local mirror, a
+      Satellite, a cloud image with RHUI - set customized_lab_image_register
+      false and no credentials are needed.
+  when: customized_lab_image_register | bool
+
+# virt-customize ships in guestfs-tools, the same package that provides the
+# virt-resize this lab already uses to build the clab VM disk. Checked
+# explicitly because the failure otherwise arrives as a bare "command not
+# found" several minutes into a task that has already copied 10G.
+# A root password is NOT needed for the lab to work - Ansible reaches every
+# guest with the injected key and never uses a password. It buys one thing:
+# console access (virsh console, VNC) when a guest's networking is broken,
+# which in a lab about VLANs, VRFs and routing is a real rather than a
+# theoretical state to be in. An ssh key is no help there.
+#
+# So it is optional. Set lab_root_password in vault.yaml and it is applied;
+# leave it unset and the image is key-only.
+- name: Say whether a root password is being set
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Root password from vault.yaml will be set on the image.'
+         if lab_root_password is defined else
+         'No lab_root_password set - the image will be key-only. Ansible does
+          not need one. What you give up is console access: virsh console or
+          VNC into a guest whose networking you have just broken will have no
+          way in. Set lab_root_password in vault.yaml if you want that.' }}
+
+- name: Check that virt-customize is available
+  ansible.builtin.command:
+    cmd: which virt-customize
+  register: customized_lab_image_virtcustomize
+  changed_when: false
+  failed_when: false
+
+- name: Fail if virt-customize is missing
+  ansible.builtin.assert:
+    that: customized_lab_image_virtcustomize.rc == 0
+    fail_msg: >-
+      virt-customize not found. dnf install guestfs-tools - it is the same
+      package that provides virt-resize, which this lab already uses.
+
+- name: Check that the base image is there
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
+  register: customized_lab_image_base
+
+- name: Fail if the base image is missing
+  ansible.builtin.assert:
+    that: customized_lab_image_base.stat.exists
+    fail_msg: >-
+      No base image at {{ base_image_dir }}/{{ rhel9_kvm_image }}. Put the
+      RHEL9 KVM qcow2 there first - this role copies it, it does not
+      download it.
+
+# The image prepares its own copy (root password, ssh key, cloud-init
+# removed, root login permitted) exactly as setup_bm_host.yaml prepares the
+# base image for every other guest. That is why this build has NO ordering
+# dependency on that play: it works from a pristine base image and can run
+# before, after or instead of it.
+#
+# The one thing it does need from the host is the lab keypair, because that
+# is what it injects. setup_bm_host.yaml creates it (--tags labprereq is the
+# smallest slice that does, and build-lab.sh --only image runs it first).
+- name: Check the lab ssh public key exists
+  ansible.builtin.stat:
+    path: "{{ lab_ssh_pubkey_path }}"
+  register: customized_lab_image_pubkey
+
+- name: Fail if the lab ssh public key is missing
+  ansible.builtin.assert:
+    that: customized_lab_image_pubkey.stat.exists
+    fail_msg: >-
+      No ssh public key at {{ lab_ssh_pubkey_path }}. It is injected into the
+      image, and without it every guest built from the image would be
+      unreachable. Create it with:
+
+        ./build-lab.sh --only image
+
+      which runs setup_bm_host.yaml --tags labprereq first, or directly:
+
+        ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags labprereq
+    success_msg: "Injecting {{ lab_ssh_pubkey_path }} into the image."
+
+# The one way this role could ever destroy the base image. customized_lab_image is
+# derived from rhel9_kvm_image by a regex, and both an override (-e
+# customized_lab_image=...) and a base image whose name the regex does not match
+# can collapse the two onto one path. The build then removes "a previous
+# customized image" - which IS the base image - and the copy that follows
+# has no source. Asserted rather than defended against, because there is no
+# sane recovery: the file is gone and this role does not download it.
+- name: Refuse to build if the customized name collides with the base image
+  ansible.builtin.assert:
+    that:
+      - customized_lab_image | length > 0
+      - customized_lab_image != rhel9_kvm_image
+    fail_msg: >-
+      customized_lab_image ({{ customized_lab_image }}) must be a DIFFERENT filename from
+      rhel9_kvm_image ({{ rhel9_kvm_image }}) - they share base_image_dir,
+      and building onto the base image's own name would delete it. Leave
+      customized_lab_image at its default, or give it a name of its own.
+    success_msg: >-
+      Building {{ customized_lab_image }} from {{ rhel9_kvm_image }} - separate
+      files in {{ base_image_dir }}.
+
+# Recorded so the run can PROVE it left the base image alone, rather than
+# asserting it from the shape of the tasks. Size and mtime, not a checksum:
+# a sha256 of a 10G image costs far more than this is worth, and nothing
+# here could modify the file without changing one of the two.
+- name: Note the base image's size and mtime before the build
+  ansible.builtin.set_fact:
+    customized_lab_image_base_before: >-
+      {{ customized_lab_image_base.stat.size }}:{{ customized_lab_image_base.stat.mtime }}
+
+- name: Check whether the customized image already exists
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ customized_lab_image }}"
+  register: customized_lab_image_existing
+
+- name: Report that the image is already built
+  ansible.builtin.debug:
+    msg: >-
+      {{ base_image_dir }}/{{ customized_lab_image }} already exists - nothing to
+      do. Pass -e customized_lab_image_force=true to rebuild it, which deletes and
+      recreates it.
+  when:
+    - customized_lab_image_existing.stat.exists
+    - not (customized_lab_image_force | bool)
+
+# Everything below is the build, and it only runs when there is one to do.
+- name: Build the image
+  when: (not customized_lab_image_existing.stat.exists) or (customized_lab_image_force | bool)
+  block:
+    # Deleted rather than overwritten. virt-customize edits in place, so a
+    # rebuild onto a half-built image from a failed earlier run would layer
+    # onto whatever that left behind - including, in the worst case, a
+    # registration that was never cleaned.
+    - name: Remove a previous customized image
+      ansible.builtin.file:
+        path: "{{ base_image_dir }}/{{ customized_lab_image }}"
+        state: absent
+      when: customized_lab_image_existing.stat.exists
+
+    # Built under a .partial name so an interrupted run cannot leave
+    # something at the real path that the lab would then detect and trust.
+    # The rename at the end is what publishes it.
+    - name: Copy the base image (sparse)
+      ansible.builtin.command:
+        cmd: >-
+          cp --sparse=always
+          {{ base_image_dir }}/{{ rhel9_kvm_image }}
+          {{ base_image_dir }}/{{ customized_lab_image }}.partial
+
+    - name: Show what is about to be installed
+      ansible.builtin.debug:
+        msg: >-
+          Customizing {{ customized_lab_image }}.partial with
+          {{ customized_lab_image_packages | join(' ') }}{{
+          ' plus ' + (customized_lab_image_docker_packages | join(' '))
+          if customized_lab_image_with_docker | bool else '' }}. This takes a few
+          minutes.
+
+    # The virt-customize run, in command-line order, which is the order the
+    # options take effect in:
+    #
+    #   1. the same preparation setup_bm_host.yaml applies to the base image
+    #      - root password, lab ssh key, cloud-init removed, root login
+    #      permitted - applied here to the COPY. It runs unconditionally and
+    #      is written to be safe on an already-prepared base: the password is
+    #      a set, a repeated key append is harmless, the removal is || true
+    #      when there is no cloud-init left, and the sshd line is grep-guarded.
+    #   2. register, so there are repositories to install from
+    #   3. the packages
+    #   4. clean and unregister, so the published image carries no consumer
+    #      identity - otherwise every guest cloned from it would share one
+    #      registration in Red Hat's inventory
+    #
+    # no_log because org_id and activation_key are on this command line. They
+    # are still visible in the host's process table for the length of the run
+    # - accepted on a single-user lab host, and the reason this is not
+    # something to run on a shared machine.
+    - name: Prepare, register, install and unregister inside the image (virt-customize)
+      ansible.builtin.command:
+        argv: "{{ customized_lab_image_argv }}"
+      vars:
+        customized_lab_image_argv: >-
+          {{
+            ['virt-customize', '-a',
+             base_image_dir + '/' + customized_lab_image + '.partial',
+             '--network',
+            ]
+            + (['--root-password', 'password:' + (lab_root_password | string)]
+               if lab_root_password is defined else [])
+            + [
+             '--ssh-inject', 'root:file:' + lab_ssh_pubkey_path,
+             '--run-command', 'yum remove cloud-init* -y || true',
+             '--run-command', 'passwd -u -f root || true',
+             '--run-command',
+             'printf "%s\\n" "image=' + customized_lab_image +
+             '" "built=' + (ansible_date_time.iso8601 | default('unknown')) +
+             '" > /etc/lab-image-release',
+             '--run-command',
+             'grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config ||'
+             ' echo "PermitRootLogin yes" >>/etc/ssh/sshd_config',
+            ]
+            + (['--run-command',
+                'subscription-manager register --org=' + (org_id | string) +
+                ' --activationkey=' + (activation_key | string) + ' --force']
+               if customized_lab_image_register | bool else [])
+            + (['--run-command',
+                'curl -sSL ' + customized_lab_image_docker_repo +
+                ' -o /etc/yum.repos.d/docker-ce.repo']
+               if customized_lab_image_with_docker | bool else [])
+            + ['--install', customized_lab_image_packages | join(',')]
+            + (['--install', customized_lab_image_docker_packages | join(',')]
+               if customized_lab_image_with_docker | bool else [])
+            + (['--run-command', 'systemctl enable docker']
+               if customized_lab_image_with_docker | bool else [])
+            + ['--run-command', 'dnf clean all']
+            + (['--run-command', 'subscription-manager unregister || true',
+                '--run-command', 'subscription-manager clean || true',
+                '--run-command', 'rm -f /etc/yum.repos.d/redhat.repo',
+                '--run-command', 'rm -rf /var/log/rhsm/*']
+               if customized_lab_image_register | bool else [])
+            + ['--selinux-relabel']
+          }}
+      # setup_bm_host.yaml exports this for the same binary, and on a host
+      # where the libvirt backend cannot start the appliance virt-customize
+      # fails without it. Matched here rather than discovered the hard way.
+      environment:
+        LIBGUESTFS_BACKEND: direct
+      no_log: true
+      register: customized_lab_image_customize
+
+    # Proof, not assumption. virt-customize exits non-zero on a failed
+    # --install, but a package that resolved to something unexpected, or a
+    # dnf that installed nothing because the registration silently produced
+    # no repositories, would still exit 0. rpm -q inside the finished image
+    # is the only thing that actually answers "is it in there".
+    #
+    # --whatprovides because RHEL 9 satisfies `dnf install curl` with the
+    # already-installed curl-minimal, which provides curl under another
+    # name. A bare rpm -q would fail here on a correct image.
+    - name: Verify every package really landed in the image
+      ansible.builtin.command:
+        argv:
+          - virt-customize
+          - -a
+          - "{{ base_image_dir }}/{{ customized_lab_image }}.partial"
+          - --run-command
+          - >-
+            rpm -q --whatprovides {{ customized_lab_image_packages | join(' ') }}
+            {{ customized_lab_image_docker_packages | join(' ')
+               if customized_lab_image_with_docker | bool else '' }}
+      environment:
+        LIBGUESTFS_BACKEND: direct
+      register: customized_lab_image_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if a package is missing from the finished image
+      ansible.builtin.assert:
+        that: customized_lab_image_verify.rc == 0
+        fail_msg: >-
+          The image was customized but rpm -q could not find every package:
+          {{ customized_lab_image_verify.stdout | default('') }}
+          {{ customized_lab_image_verify.stderr | default('') }}
+          The partial image is left at
+          {{ base_image_dir }}/{{ customized_lab_image }}.partial for inspection
+          and is NOT published, so the lab will keep using the normal
+          register-and-dnf path.
+
+    # Only now does it get the name the lab looks for.
+    - name: Publish the finished image
+      ansible.builtin.command:
+        cmd: >-
+          mv {{ base_image_dir }}/{{ customized_lab_image }}.partial
+          {{ base_image_dir }}/{{ customized_lab_image }}
+
+    # The base image is only ever a `cp` source and a `stat` target in this
+    # role, and virt-customize - which DOES edit in place - is pointed at
+    # the .partial copy. This is the check that says so out loud instead of
+    # asking anyone to take that on trust.
+    - name: Re-read the base image
+      ansible.builtin.stat:
+        path: "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
+      register: customized_lab_image_base_after
+
+    - name: Confirm the base image was not touched
+      ansible.builtin.assert:
+        that:
+          - customized_lab_image_base_after.stat.exists
+          - (customized_lab_image_base_after.stat.size | string) + ':' +
+            (customized_lab_image_base_after.stat.mtime | string)
+            == customized_lab_image_base_before
+        fail_msg: >-
+          {{ base_image_dir }}/{{ rhel9_kvm_image }} changed during this
+          build - it was {{ customized_lab_image_base_before }} (size:mtime) and is
+          now
+          {{ customized_lab_image_base_after.stat.size | default('gone') }}:{{
+             customized_lab_image_base_after.stat.mtime | default('gone') }}.
+          Nothing in this role writes to it, so something else on this host
+          did. Do not trust the image just built.
+        success_msg: >-
+          Base image {{ rhel9_kvm_image }} unchanged
+          ({{ customized_lab_image_base_before }}).
+
+    - name: Report what was built
+      ansible.builtin.debug:
+        msg:
+          - "Built {{ base_image_dir }}/{{ customized_lab_image }}"
+          - "Packages: {{ customized_lab_image_packages | join(' ') }}"
+          - "Docker: {{ 'yes - ' + (customized_lab_image_docker_packages | join(' '))
+                        if customized_lab_image_with_docker | bool else 'no' }}"
+          - "The lab will now use this image and skip subscription-manager
+             and dnf on every guest. Delete it to go back to the normal
+             path."

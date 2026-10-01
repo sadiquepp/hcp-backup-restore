@@ -1,7 +1,12 @@
 *.qcow2
 vault.yaml
+# this host's overrides - see vars-metal.yaml.example
+vars-metal.yaml
 .DS_Store
 roles/.DS_Store
 ceph-odf/
 __pycache__/
 *.pyc
+snapshots/
+udn-bgp/
+build-logs/

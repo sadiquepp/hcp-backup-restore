@@ -99,12 +99,12 @@ hosted_cluster_addon_cert_policy_controller: true
 ## change one and check the other.
 ##
 ## Everything below assumes the mirror registry from setup_mirror_registry.yaml
-## and the hub from setup_hub_cluster_disconnected.yaml, so it reads
+## and the hub from a disconnected setup_hub_cluster.yaml run, so it reads
 ## mirror_registry_* / mirror_release_repository from vars.yaml.
 ## ---------------------------------------------------------------------------
 
 ## The one switch the whole disconnected path hangs off - the same
-## disconnected_install setup_mirror_registry.yaml, setup_hub_cluster_disconnected.yaml
+## disconnected_install setup_mirror_registry.yaml, setup_hub_cluster.yaml
 ## and setup-hub-acm already gate on, not a second name for it. Set it in
 ## vars.yaml or pass -e disconnected_install=true. Repeated here only so the
 ## role still has a value if it is ever run without vars.yaml.

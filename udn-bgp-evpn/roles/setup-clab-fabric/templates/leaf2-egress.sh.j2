@@ -1,0 +1,41 @@
+#!/bin/sh
+# Rendered by setup-clab-fabric. Run inside leaf2 by the containerlab exec
+# block, after the tenant VRFs exist and before FRR reads its config.
+#
+# Internet egress for the tenants with evpn_internet set. FRR originates their
+# default route into EVPN (default-originate in leaf2's frr.conf); this puts a
+# real path behind it. Three pieces per tenant:
+#
+#   1. The VRF's default leaves by eth0, the containerlab MANAGEMENT NIC, which
+#      is in the main table - a cross-VRF route, hence 'onlink'. The host
+#      running containerlab NATs it (setup-clab-fabric egress-nat.yml): this
+#      image has no iptables, so the NAT cannot live here.
+#   2. Private space stays unreachable INSIDE the VRF, so the default carries
+#      public destinations only and is not a way round tenant isolation.
+#   3. The return leak: replies come back on eth0, in the main table, already
+#      un-NATted to the pod's address; this sends them into the VRF, where the
+#      type-5 routes know which node holds the pod.
+#
+# A script rather than exec lines because the gateway has to be read at run
+# time, and containerlab exec does not go through a shell.
+set -eu
+
+gw=$(ip -4 route show default | awk '/^default/ {print $3; exit}')
+if [ -z "$gw" ]; then
+    echo "lab-egress: no default route in leaf2's main table, so no management" >&2
+    echo "gateway to hand tenant traffic to. Is eth0 on the containerlab" >&2
+    echo "management network?" >&2
+    exit 1
+fi
+
+{% for t in udn_bgp_tenants
+      if (t.topology | default('Layer3')) != 'Layer2' and (t.evpn_internet | default(false) | bool) %}
+# {{ t.name }}: VRF table {{ 1000 + t.vlan }}, pods in {{ t.udn_subnet }}
+ip route replace table {{ 1000 + t.vlan }} default via "$gw" dev eth0 onlink
+for p in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+    ip route replace table {{ 1000 + t.vlan }} unreachable "$p"
+done
+ip route replace {{ t.udn_subnet }} dev {{ t.name }}
+echo "lab-egress: {{ t.name }} -> internet via $gw (eth0), return {{ t.udn_subnet }} -> vrf {{ t.name }}"
+
+{% endfor %}

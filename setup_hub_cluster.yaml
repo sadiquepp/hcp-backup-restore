@@ -1,26 +1,145 @@
+## Installs the hub cluster (KVM/libvirt UPI: bootstrap/master/worker VMs
+## booted from RHCOS + ignition) and chains into setup-hub-acm for the day-2
+## operators once it is up.
+##
+## One playbook, two install modes, selected by disconnected_install
+## (vars.yaml, default false) - the same flag the rest of the disconnected
+## flow hangs off:
+##
+## Connected (default) - hub1:
+##   ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
+## installs roles/setup-hub-cluster into hub_install_folder and pulls
+## release/operator images from quay.io + registry.redhat.io, exactly as
+## before.
+##
+## Disconnected - hubd:
+##   ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass \
+##     -e disconnected_install=true
+## installs roles/setup-hub-cluster-disconnected into
+## hub_disconnected_install_folder instead, and the cluster is configured to
+## pull every release/operator image solely from the local mirror registry
+## (see setup_mirror_registry.yaml). It also cuts the hub's own nodes off from
+## the real internet first, so a "disconnected" install cannot quietly succeed
+## for the wrong reason.
+##
+## Either mode ends in the same setup-hub-acm import, so --tags acm re-runs
+## just the day-2 part against whichever hub the flag selects:
+##   ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass --tags acm
+##   ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass --tags acm \
+##     -e disconnected_install=true
+##
+## The two hubs CO-EXIST, with hub2 (setup_hub_cluster2.yaml) as well: the
+## disconnected hub has its own IP block (ip_list.hubd_*), its own subdomain
+## (hub_disconnected_domain) and its own VM/install directories, so all three
+## can be running at the same time. Adding the hubd_* entries to ip_list is
+## what gives it DHCP reservations and DNS records, so re-run setup_bm_host.yaml
+## (at minimum its dns/lb tags) after pulling those vars in, otherwise
+## api/api-int/*.apps for that cluster won't resolve.
+##
+## A disconnected run additionally requires the mirror registry to be stood up
+## already via setup_mirror_registry.yaml (mirror registry CA trusted +
+## credentials available locally, oc-mirror output present on the
+## mirror-registry VM); the preflight below fails fast if it isn't.
+
 - name: Setting Up Hub Cluster
   hosts: localhost
   become: true
   vars_files:
     - vars.yaml
-    - vault.yaml 
-  tasks: 
+    - vault.yaml
+  vars:
+    ## Every difference between the two modes is derived from this one flag,
+    ## so the connected and disconnected runs differ in their inputs rather
+    ## than in their steps. Play vars rather than a set_fact, so a --tags acm
+    ## run resolves them too.
+    hub_disconnected: "{{ disconnected_install | default(false) | bool }}"
+    ## hub_disconnected is a play var, so it reaches a task as the rendered
+    ## template rather than a native bool - hence the '| bool' on every use,
+    ## the same way the roles read disconnected_install itself.
+    hub_install_folder_selected: >-
+      {{ hub_disconnected_install_folder
+         if (disconnected_install | default(false) | bool)
+         else hub_install_folder }}
+    hub_kubeconfig: "{{ hub_install_folder_selected }}/auth/kubeconfig"
+    ## Pool names are the same on every hub; metallb_hub picks this hub's
+    ## address for each hosted cluster - hub for hub1 (.60-.62), hubd for the
+    ## disconnected hub (.67-.69). See hosted_cluster_metallb_pools in
+    ## vars.yaml.
+    metallb_hub_selected: "{{ (hub_disconnected | bool) | ternary('hubd', 'hub') }}"
+  tasks:
+  - name: Report which hub is being installed
+    ansible.builtin.debug:
+      msg: >-
+        {{ (hub_disconnected | bool) | ternary('Disconnected', 'Connected') }} hub
+        install into {{ hub_install_folder_selected }}, MetalLB addresses from
+        metallb_hub={{ metallb_hub_selected }}
+
+  # Only the disconnected install has a prerequisite outside this playbook:
+  # setup_mirror_registry.yaml has to have stood the registry up and run
+  # setup-mirror-registry-trust here, or the install cannot pull anything.
+  - name: Fail fast if the mirror registry CA has not been trusted locally yet
+    ansible.builtin.stat:
+      path: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+    register: mirror_ca_status
+    when: hub_disconnected | bool
+
+  - ansible.builtin.assert:
+      that:
+        - mirror_ca_status.stat.exists
+      fail_msg: >-
+        Mirror registry CA not found locally - run setup_mirror_registry.yaml
+        first (it stands up the mirror registry and runs
+        setup-mirror-registry-trust to trust its CA here).
+    when: hub_disconnected | bool
+
   - ansible.builtin.import_role:
       name: setup-hub-cluster
+    when: not (hub_disconnected | bool)
 
+  - ansible.builtin.import_role:
+      name: setup-hub-cluster-disconnected
+    when: hub_disconnected | bool
+
+  # Both roles ship a byte-identical copy of this; hub2 already includes hub1's,
+  # so keep to that one file rather than branching on the mode here.
   - name: Wait for ClusterOperators to be healthy before day-2 install
     ansible.builtin.include_tasks: roles/setup-hub-cluster/tasks/wait-for-cluster-operators.yml
     vars:
-      kubeconfig_path: "{{ hub_install_folder }}/auth/kubeconfig"
+      kubeconfig_path: "{{ hub_kubeconfig }}"
+
+  # The ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource oc-mirror generated
+  # are applied here rather than dropped into the install manifests directory.
+  # In manifests/ they are rendered into a MachineConfig by the in-cluster MCO,
+  # which then has to match what the bootstrap MCO rendered from
+  # install-config.yaml's imageDigestSources - and an ImageTagMirrorSet has no
+  # imageDigestSources equivalent, so the two can never agree. Applied on day 2
+  # they are an ordinary MachineConfig update instead. The install itself does
+  # not need them: the installer generates its own ImageDigestMirrorSet from
+  # imageDigestSources.
+  - name: Apply the mirror registry's day-2 resources (IDMS/ITMS/CatalogSource)
+    ansible.builtin.include_tasks: roles/setup-hub-cluster-disconnected/tasks/apply-day2-mirror-resources.yml
+    vars:
+      kubeconfig_path: "{{ hub_kubeconfig }}"
+    when: hub_disconnected | bool
 
   # One single-address MetalLB pool per hosted cluster, from
-  # hosted_cluster_metallb_pools in vars.yaml. Pool names are the same on
-  # every hub; metallb_hub picks this hub's address for each cluster.
+  # hosted_cluster_metallb_pools in vars.yaml.
+  #
+  # The role reads disconnected_install itself, so a disconnected run also
+  # renders the disconnected AgentServiceConfig (spec.mirrorRegistryRef, osImages
+  # served off the helper), publishes the mirror registry CA to openshift-config
+  # and injects it into the cluster image config, and creates a ClusterImageSet
+  # per osImage version against the mirror registry - see
+  # roles/setup-hub-acm/defaults/main.yml. Re-run just this part with --tags acm.
+  #
+  # In either mode the AgentServiceConfig itself is only rendered, not applied:
+  # review roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml and
+  # apply it by hand.
   - ansible.builtin.import_role:
       name: setup-hub-acm
     vars:
-      metallb_hub: hub
+      metallb_hub: "{{ metallb_hub_selected }}"
     environment:
-      KUBECONFIG: "{{ hub_install_folder }}/auth/kubeconfig"
+      KUBECONFIG: "{{ hub_kubeconfig }}"
     tags:
       - acm

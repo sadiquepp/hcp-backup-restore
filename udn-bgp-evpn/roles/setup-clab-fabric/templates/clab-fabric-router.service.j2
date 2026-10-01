@@ -1,0 +1,12 @@
+[Unit]
+Description=Fabric router address and UDN routes for the clab VM
+After=clab-fabric-bridge.service
+Requires=clab-fabric-bridge.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/clab-fabric-router.sh
+
+[Install]
+WantedBy=multi-user.target

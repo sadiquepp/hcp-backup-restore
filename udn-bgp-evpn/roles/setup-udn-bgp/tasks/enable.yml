@@ -1,0 +1,247 @@
+---
+# Phase 1a - turn on FRR and route advertisements.
+#
+# One merge patch does both, and it has to: route advertisements cannot be
+# Enabled unless the FRR routing-capability provider is already available, so
+# setting them in separate patches fails on the first one.
+#
+# This restarts every ovnkube-node pod. On this lab that is a few minutes of
+# rolling disruption to pod egress; the API, the hosted clusters' control
+# planes and MetalLB are unaffected.
+
+- name: Enable the FRR routing capability and route advertisements
+  ansible.builtin.command:
+    cmd: >-
+      oc patch network.operator.openshift.io cluster --type=merge
+      -p {{ patch | to_json | quote }}
+  vars:
+    patch:
+      spec:
+        additionalRoutingCapabilities:
+          providers: ["FRR"]
+        defaultNetwork:
+          ovnKubernetesConfig:
+            routeAdvertisements: "Enabled"
+  register: udn_bgp_enable_patch
+  changed_when: "'patched' in udn_bgp_enable_patch.stdout and 'no change' not in udn_bgp_enable_patch.stdout"
+
+# VRF-Lite and EVPN are only implemented in local gateway mode. Done as a
+# separate, opt-out patch because flipping gateway mode is a second full
+# ovnkube-node rollout and changes how ALL pod egress leaves the node - not
+# something to do silently on the way to a phase that may not need it.
+- name: Switch OVN-Kubernetes to local gateway mode (required for VRF-Lite and EVPN)
+  ansible.builtin.command:
+    cmd: >-
+      oc patch network.operator.openshift.io cluster --type=merge
+      -p {{ patch | to_json | quote }}
+  vars:
+    patch:
+      spec:
+        defaultNetwork:
+          ovnKubernetesConfig:
+            gatewayConfig:
+              routingViaHost: true
+  when: udn_bgp_set_local_gateway | bool
+  register: udn_bgp_gateway_patch
+  changed_when: "'patched' in udn_bgp_gateway_patch.stdout and 'no change' not in udn_bgp_gateway_patch.stdout"
+
+# The one that makes the fabric NIC forward, and the reason the sysctl route
+# never held.
+#
+# gatewayConfig.ipForwarding defaults to Restricted, under which ovnkube-node
+# keeps net.ipv4.ip_forward at 0 and forwards only across the interfaces it
+# manages - br-ex and ovn-k8s-mpN. The fabric NIC is not one of those. Because
+# ip_forward and conf.all.forwarding are the same value, and a write to it
+# propagates to every interface, each ovnkube-node restart re-zeroed the
+# fabric NIC that this role had just set to 1.
+#
+# Nothing put it back, because nothing was watching: the Node Tuning Operator
+# runs tuned in no_daemon mode (tuned-adm in the tuned pod answers "Not
+# supported in no_daemon mode"), so the profile is applied once and no daemon
+# remains to re-assert it. Its Profile CR still reports Applied=True, which is
+# a receipt for that one write and says nothing about the current value. Last
+# writer wins permanently - which is how three workers with identical config
+# came to disagree, ovnkube-node having restarted on some and not others.
+#
+# Global makes OVN-Kubernetes set ip_forward=1 itself, so there is no writer
+# to lose to. Deliberately placed before the rollout wait below, so enabling
+# it and the gateway mode together costs one ovnkube-node rollout.
+- name: Let the host forward traffic that OVN-Kubernetes does not manage
+  ansible.builtin.command:
+    cmd: >-
+      oc patch network.operator.openshift.io cluster --type=merge
+      -p {{ patch | to_json | quote }}
+  vars:
+    patch:
+      spec:
+        defaultNetwork:
+          ovnKubernetesConfig:
+            gatewayConfig:
+              ipForwarding: Global
+  when: udn_bgp_set_ip_forwarding | bool
+  register: udn_bgp_ipfwd_patch
+  changed_when: "'patched' in udn_bgp_ipfwd_patch.stdout and 'no change' not in udn_bgp_ipfwd_patch.stdout"
+
+# Waiting for Progressing=False immediately after a patch is a race, and it
+# reads as a wait while doing nothing. The operator has not necessarily
+# observed the change yet, so the condition is still False from the previous
+# steady state and `oc wait` returns at once - after which this phase builds
+# the VTEP and the tenant CUDNs on top of an ovnkube-node that is about to
+# restart underneath them.
+#
+# On the hub, three nodes roll one at a time and a long phase usually absorbs
+# it. On the SNO there is one node, and its restart lands directly on the work.
+#
+# So wait for the rollout to START first. It may legitimately never start - a
+# no-change patch rolls nothing - which is why this tolerates its own timeout
+# rather than failing on it, and why it is skipped entirely when none of the
+# three patches above reported a change.
+- name: Wait for the network operator to pick up the patch
+  ansible.builtin.command:
+    cmd: >-
+      oc wait clusteroperator/network --for=condition=Progressing=True
+      --timeout=60s
+  changed_when: false
+  failed_when: false
+  when: >-
+    (udn_bgp_enable_patch.changed | default(false))
+    or (udn_bgp_gateway_patch.changed | default(false))
+    or (udn_bgp_ipfwd_patch.changed | default(false))
+
+- name: Wait for the network operator to finish rolling out
+  ansible.builtin.command:
+    cmd: >-
+      oc wait clusteroperator/network
+      --for=condition=Progressing=False
+      --timeout={{ udn_bgp_rollout_timeout }}s
+  changed_when: false
+
+- name: Wait for the network operator to report Available
+  ansible.builtin.command:
+    cmd: >-
+      oc wait clusteroperator/network
+      --for=condition=Available=True
+      --timeout={{ udn_bgp_rollout_timeout }}s
+  changed_when: false
+
+# This is where the feature CRDs are supposed to appear. Preflight only
+# reported on them, because before this patch their absence says nothing
+# about the cluster; here it means the enablement did not take, and every
+# later task would fail on a missing resource type with a far less obvious
+# message.
+- name: Wait for the route advertisements CRD the enablement installs
+  ansible.builtin.command:
+    cmd: oc get crd routeadvertisements.k8s.ovn.org
+  register: udn_bgp_ra_crd_after
+  retries: 30
+  delay: 10
+  until: udn_bgp_ra_crd_after.rc == 0
+  failed_when: false
+  changed_when: false
+
+- name: Fail if enabling route advertisements did not install its CRD
+  ansible.builtin.assert:
+    that: udn_bgp_ra_crd_after.rc == 0
+    fail_msg: >-
+      routeadvertisements.k8s.ovn.org still does not exist several minutes
+      after patching the Network CR. Check that the patch actually applied
+      and that the network operator is healthy:
+        oc get network.operator.openshift.io cluster -o yaml | grep -A3 additionalRoutingCapabilities
+        oc get co network
+        oc -n openshift-network-operator logs deploy/network-operator --tail=50
+
+- name: Wait for the VTEP CRD (EVPN, {{ udn_bgp_evpn_min_version }}+)
+  ansible.builtin.command:
+    cmd: oc get crd vteps.k8s.ovn.org
+  register: udn_bgp_vtep_crd_after
+  retries: 12
+  delay: 10
+  until: udn_bgp_vtep_crd_after.rc == 0
+  failed_when: false
+  changed_when: false
+  when: udn_bgp_has_evpn | bool
+
+- name: Note if the VTEP CRD did not appear on a version that should have it
+  ansible.builtin.debug:
+    msg: >-
+      vteps.k8s.ovn.org is not present even though this cluster is
+      {{ udn_bgp_cluster_version.stdout }}. Phases 1-3 are unaffected; only
+      the evpn phase needs it. It may still be rolling out - re-run the
+      preflight tag in a few minutes before concluding anything.
+  when:
+    - udn_bgp_has_evpn | bool
+    - udn_bgp_vtep_crd_after.rc | default(1) != 0
+
+# This task used to be named "Confirm FRR-K8s is running on every node" and
+# check `oc get daemonset ... -o wide` for rc == 0 - which confirms that the
+# DaemonSet OBJECT EXISTS, and nothing else. A DaemonSet with 2 of 3 pods
+# ready passes it, and so does every downstream task. The failure it lets
+# through: no frr-k8s pod on a node means nothing is listening on TCP/179,
+# so the leaf sits in Connect with 0 messages exchanged in either direction
+# forever, while the cluster stays green.
+#
+# To be clear about provenance - this was found while chasing a different
+# bug with those exact symptoms, and was NOT its cause; that cluster had
+# every pod Running. The check is wrong on its own terms.
+#
+# Compare desiredNumberScheduled against numberReady instead, and wait for
+# them to converge - a rollout legitimately takes a moment. Nothing below
+# this point means anything on a node without frr-k8s.
+- name: Confirm FRR-K8s is ready on every node
+  ansible.builtin.command:
+    cmd: >-
+      oc get daemonset frr-k8s -n {{ udn_bgp_frrk8s_namespace }}
+      -o jsonpath={.status.desiredNumberScheduled}/{.status.numberReady}
+  register: udn_bgp_frrk8s_ready
+  retries: 20
+  delay: 15
+  # Jinja's `and` short-circuits, so the length test guards the two that
+  # index into the split.
+  until: >-
+    udn_bgp_frrk8s_ready.rc == 0
+    and ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | length == 2)
+    and (((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | first | int) > 0)
+    and (((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | last | int)
+         == ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | first | int))
+  changed_when: false
+  # Same reason as the forwarding check in verify.yml: let the assert below
+  # report which node and what to run, rather than dying on Ansible's bare
+  # "Timeout when waiting for ...".
+  failed_when: false
+
+- name: Fail with the pod to look at if FRR-K8s is not ready everywhere
+  ansible.builtin.assert:
+    that:
+      - udn_bgp_frrk8s_ready.rc == 0
+      - (udn_bgp_frrk8s_ready.stdout | default('')).split('/') | length == 2
+      - ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | first | int) > 0
+      - ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | last | int)
+        == ((udn_bgp_frrk8s_ready.stdout | default('')).split('/') | first | int)
+    fail_msg: >-
+      The frr-k8s DaemonSet in {{ udn_bgp_frrk8s_namespace }} reports
+      '{{ udn_bgp_frrk8s_ready.stdout | default('(no output)') | trim }}'
+      (desired, ready) after waiting
+      {{ 20 * 15 }}s. Every node needs an frr-k8s pod: it is what holds the
+      BGP session to the leaf, so a node without one leaves the leaf in
+      Connect with 0 messages sent and 0 received - a session that looks
+      configured from both sides and has never existed. Nothing this role
+      does after this point is meaningful on such a node, and the cluster
+      stays green while its pods are unreachable over the fabric.
+      Find the node with `oc get pods -n {{ udn_bgp_frrk8s_namespace }}
+      -o wide` and read that pod's events; a Pending pod is usually a taint
+      or a resource limit, CrashLoopBackOff is usually the FRR container.
+    success_msg: >-
+      frr-k8s ready on all
+      {{ (udn_bgp_frrk8s_ready.stdout | default('0/0')).split('/') | first }}
+      nodes.
+
+- name: Read the FRR-K8s daemonset for the report
+  ansible.builtin.command:
+    cmd: "oc get daemonset frr-k8s -n {{ udn_bgp_frrk8s_namespace }} -o wide"
+  register: udn_bgp_frrk8s_ds
+  changed_when: false
+  failed_when: false
+
+- name: Show the FRR-K8s daemonset
+  ansible.builtin.debug:
+    msg: "{{ udn_bgp_frrk8s_ds.stdout_lines }}"
