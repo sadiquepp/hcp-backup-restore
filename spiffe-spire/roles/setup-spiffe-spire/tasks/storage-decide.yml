@@ -3,6 +3,14 @@
 # node. Reads only. Included by preflight, storage and spire, so all three
 # reach the same answer from the same cluster state.
 #
+# The expected answer on this lab is the default class, lvms-vg1: the base
+# hub and SNO builds install LVM Storage whenever use_lvm_storage is true. The
+# local PV is the fallback for a cluster without it.
+#
+# A SpireServer that already exists keeps the class it was created with:
+# spec.persistence is immutable, so re-rendering it with a different class
+# would be rejected (and would mean a new CA anyway).
+#
 # Sets:
 #   spire_storage_mode        default | local | named
 #   spire_server_storage_sc   the class name written into the SpireServer CR
@@ -17,12 +25,22 @@
   register: spire_sd_default
   changed_when: false
 
+- name: Read the class an existing SpireServer was created with
+  ansible.builtin.command:
+    cmd: oc get spireserver cluster -o jsonpath={.spec.persistence.storageClass}
+  register: spire_sd_existing_sc
+  changed_when: false
+  failed_when: false
+
 - name: Choose the storage mode
   ansible.builtin.set_fact:
+    spire_sd_kept: "{{ spire_sd_existing_sc.rc == 0 and spire_sd_existing_sc.stdout | length > 0 }}"
     spire_storage_mode: >-
-      {{ ('default' if spire_sd_default.stdout_lines else 'local')
-         if spire_storage_class == 'auto' else
-         ('local' if spire_storage_class == 'local' else 'named') }}
+      {{ ('local' if spire_sd_existing_sc.stdout == spire_local_storage_class else 'named')
+         if (spire_sd_existing_sc.rc == 0 and spire_sd_existing_sc.stdout | length > 0) else
+         (('default' if spire_sd_default.stdout_lines else 'local')
+          if spire_storage_class == 'auto' else
+          ('local' if spire_storage_class == 'local' else 'named')) }}
 
 - name: Pick the node for the local PV
   when: spire_storage_mode == 'local'
@@ -64,9 +82,13 @@
   ansible.builtin.set_fact:
     spire_server_storage_sc: >-
       {{ spire_sd_default.stdout_lines[0] if spire_storage_mode == 'default'
-         else (spire_local_storage_class if spire_storage_mode == 'local' else spire_storage_class) }}
+         else (spire_local_storage_class if spire_storage_mode == 'local'
+               else (spire_sd_existing_sc.stdout if spire_sd_kept | bool else spire_storage_class)) }}
     spire_storage_summary: >-
       {{ 'the default StorageClass, ' ~ spire_sd_default.stdout_lines[0] if spire_storage_mode == 'default'
          else ('a local PV on ' ~ spire_local_node ~ ':' ~ spire_local_pv_path ~ ' (StorageClass '
-               ~ spire_local_storage_class ~ '; the cluster has no default)' if spire_storage_mode == 'local'
-               else 'StorageClass ' ~ spire_storage_class ~ ', as set') }}
+               ~ spire_local_storage_class ~ (', as the existing SpireServer was created'
+               if spire_sd_kept | bool else '; the cluster has no default StorageClass - expected lvms-vg1 from'
+               ~ ' the base build: ./build-lab.sh --only lvm adds it') ~ ')' if spire_storage_mode == 'local'
+               else ('StorageClass ' ~ spire_sd_existing_sc.stdout ~ ', as the existing SpireServer was created'
+                     if spire_sd_kept | bool else 'StorageClass ' ~ spire_storage_class ~ ', as set')) }}

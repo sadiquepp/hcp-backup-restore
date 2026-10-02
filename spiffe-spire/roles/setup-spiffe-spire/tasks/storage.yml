@@ -1,7 +1,8 @@
 ---
 # The SPIRE server's PersistentVolume, when the cluster has no StorageClass
-# to provision one. On a cluster with a default class - or with
-# spire_storage_class naming one - this phase only reports and does nothing.
+# to provision one. On a cluster with a default class - lvms-vg1, from the
+# base build's LVM Storage, is the normal case - or with spire_storage_class
+# naming one, this phase only reports and does nothing.
 
 - name: Decide where the SPIRE server's data will live
   ansible.builtin.include_tasks: storage-decide.yml

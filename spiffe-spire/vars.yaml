@@ -114,14 +114,21 @@ spire_server_resources:
 ## The SPIRE server keeps its datastore (sqlite) and its CA signing keys on a
 ## PersistentVolume, and the SpireServer API makes persistence mandatory.
 ##
-## The base clusters have NO StorageClass: LVM Storage comes from setup-hub-acm,
-## which the base build skips (--skip-tags acm), and the SNO has none at all.
+## The base builds provide one: with use_lvm_storage true (the default) the
+## hub and the SNO get LVM Storage as part of the cluster build - the hub on
+## its workers' storage disks, the SNO on a second disk added after install -
+## and lvms-vg1 is their default StorageClass. On a lab built before that,
+## ./build-lab.sh --only lvm adds it (base playbooks, --tags lvm/snostorage).
 ##
-##   auto   use the cluster's default StorageClass if it has one (a hub built
-##          with --tags acm has lvms-vg1), otherwise 'local'
+##   auto   use the cluster's default StorageClass - lvms-vg1 - if it has one,
+##          otherwise 'local'
 ##   local  a static local PersistentVolume on one node, under this lab's own
-##          StorageClass - nothing cluster-wide, nothing another use case sees
+##          StorageClass - the fallback for a cluster with no storage at all
 ##   <name> that StorageClass, as it stands
+##
+## A SpireServer that already exists keeps the class it was created with
+## (persistence is immutable). Moving one from 'local' to lvms-vg1 means
+## --tags cleanup and building SPIRE again: a new PVC is a new CA.
 spire_storage_class: auto
 spire_local_storage_class: spire-local
 ## On the node's own disk. Holds the CA keys: wiping it wipes the trust domain.

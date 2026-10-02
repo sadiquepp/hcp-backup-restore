@@ -35,7 +35,7 @@ with SPIRE issuing every sidecar's certificate in place of istiod.
 - [Layout](#layout)
 - [Design decisions](#design-decisions)
   - [Red Hat's operator, found in the catalog, not assumed](#red-hats-operator-found-in-the-catalog-not-assumed)
-  - [Storage: a local PV, because the base has no StorageClass](#storage-a-local-pv-because-the-base-has-no-storageclass)
+  - [Storage: LVM Storage from the base build](#storage-lvm-storage-from-the-base-build)
   - [Why this lab's own federation Route](#why-this-labs-own-federation-route)
   - [Federation: ClusterFederatedTrustDomain, with the bootstrap bundle in it](#federation-clusterfederatedtrustdomain-with-the-bootstrap-bundle-in-it)
   - [`className` on every ClusterSPIFFEID](#classname-on-every-clusterspiffeid)
@@ -57,7 +57,7 @@ with SPIRE issuing every sidecar's certificate in place of istiod.
  hub: trust domain hub.mylab.com            SNO: trust domain sno.mylab.com
  ns zero-trust-workload-identity-manager    ns zero-trust-workload-identity-manager
    spire-server-0 (+ controller manager)      spire-server-0 (+ controller manager)
-     PV on worker1                              PV on the node
+     PVC on lvms-vg1 (a worker's disk)          PVC on lvms-vg1 (its 2nd disk)
    spire-agent, CSI driver: 3 workers         spire-agent, CSI driver: 1 node
    Route spire-federation.apps.hub  <─ bundle refresh ─>  Route spire-federation.apps.sno
 
@@ -75,7 +75,7 @@ with SPIRE issuing every sidecar's certificate in place of istiod.
 | `SpireAgent` | DaemonSet: 3 hub workers, the one SNO node | `k8s_psat` node attestation, `k8s` workload attestation |
 | `SpiffeCSIDriver` | DaemonSet | mounts the Workload API socket into pods; `restricted` CSI profile |
 | Route `spire-federation` | `spire-federation.apps.<cluster>.mylab.com`, passthrough | the bundle endpoint, see [below](#why-this-labs-own-federation-route) |
-| StorageClass `spire-local` + PV | only when the cluster has no default StorageClass | the base build has none |
+| PVC `spire-data-spire-server-0` | on `lvms-vg1`, the default StorageClass the base build's LVM Storage provides | [storage](#storage-lvm-storage-from-the-base-build); a `spire-local` StorageClass + local PV only as a fallback on a cluster with no default class |
 | `spiffe-demo` | ClusterSPIFFEID, `echo-server`, `client`, `intruder`, passthrough Route | [demo](#the-demo) |
 | `ClusterFederatedTrustDomain` | one, naming the other cluster | carries the bootstrap bundle |
 | `online-boutique` (`--tags boutique`) | Online Boutique, one hop under ghostunnel mTLS | [Online Boutique](#online-boutique-spiffe-on-a-real-application) |
@@ -105,9 +105,10 @@ cd /root/hcp-backup-restore/spiffe-spire
 | --- | --- | --- |
 | `bmhost` | `../setup_bm_host.yaml` - skipped if the helper VM exists | 15 min |
 | `clusters` | `../setup_hub_cluster.yaml --skip-tags acm` and `../setup_sno.yaml` in parallel - each skipped if its kubeconfig exists | 75 min |
+| `lvm` | per cluster: LVM Storage from the base playbooks (`../setup_hub_cluster.yaml --tags lvm`, `../setup_sno.yaml --tags snostorage`) - a no-op on clusters the `clusters` step just built | 1-10 min |
 | `preflight` | per cluster: operator in the catalog? which channel? StorageClass? Changes nothing | 1 min |
 | `operator` | per cluster: Subscription, CSV, CRDs, API check | 5 min |
-| `storage` | per cluster: local PV when there is no default StorageClass | 1 min |
+| `storage` | per cluster: nothing when `lvms-vg1` is there; a local PV as a fallback when there is no default StorageClass | 1 min |
 | `spire` | per cluster: the four CRs and the federation Route, wait Ready, every agent attested | 5 min |
 | `demo` | per cluster: `spiffe-demo`, wait for SVIDs | 3 min |
 | `verify` | per cluster: asserts - entries, mTLS allowed, intruder refused | 1 min |
@@ -195,19 +196,39 @@ The operator phase then reads the CRDs and fails in words if the installed
 operator predates the 1.x API (0.x put the trust domain on `SpireServer`
 and had no federation), rather than letting `oc apply` fail on unknown fields.
 
-### Storage: a local PV, because the base has no StorageClass
+### Storage: LVM Storage from the base build
 
 `SpireServer` requires a PVC - the sqlite datastore and the CA keys live on
-it. The base clusters have no StorageClass (LVM Storage comes from
-`setup-hub-acm`, which the base build skips with `--skip-tags acm`). With
-`spire_storage_class: auto` the lab uses the default class when there is one
-and otherwise creates its own `spire-local` StorageClass (no-provisioner,
-`WaitForFirstConsumer`) and one local PV per cluster: on the first worker's
-`/var/lib/spire-server-data`, reserved for the SPIRE server's PVC by
-`claimRef`, reclaim policy `Retain`. The SPIRE server is thereby pinned to
-that node. Nothing cluster-wide changes - no default class is set - and
-`--tags cleanup` removes the PV, the class and the directory (the directory
-holds the CA keys, so a rebuild is a genuinely new trust domain root).
+it - and the operator names a StorageClass in it.
+
+The class comes from the base lab, not from this one. With
+`use_lvm_storage: true` (the base default) LVM Storage is part of the
+cluster builds themselves (`roles/setup-lvm-storage`): the hub's, on the
+500G `storage_worker<N>.qcow2` disk every worker is built with - outside
+`--tags acm`, so `--skip-tags acm` keeps it - and the SNO's, on a second
+disk `setup_sno.yaml` hot-plugs after the install. Either way the cluster
+comes up with `lvms-vg1` as its default StorageClass, and
+`spire_storage_class: auto` uses it: a thin LV on whichever node the SPIRE
+server is scheduled to, `Delete` reclaim, so `--tags cleanup` deleting the
+PVC also deletes the CA keys - a rebuild is a genuinely new trust domain root.
+
+On a lab whose clusters were built before LVM Storage moved into the build,
+the `lvm` step (`./build-lab.sh --only lvm`) runs the base playbooks with just
+their storage tags - `../setup_hub_cluster.yaml --tags lvm` and
+`../setup_sno.yaml --tags snostorage` - and touches nothing else.
+
+**Fallback, a local PV.** A cluster with no default class at all (the SNO on
+the Ceph path, `use_lvm_storage: false`) gets this lab's own `spire-local`
+StorageClass (no-provisioner, `WaitForFirstConsumer`) and one local PV on the
+first worker's `/var/lib/spire-server-data`, reserved for the SPIRE server's
+PVC by `claimRef`, reclaim policy `Retain` - which pins the SPIRE server to
+that node. `--tags cleanup` removes the PV, the class and the directory.
+
+**`persistence` is immutable.** An existing `SpireServer` keeps the class it
+was created with - the lab reads it back and renders the same one - so a
+lab that has been running on `spire-local` stays there after LVM Storage
+arrives. Moving it is `--tags cleanup` and building SPIRE again (a new CA,
+and the peer must re-federate).
 
 ### Why this lab's own federation Route
 
@@ -456,6 +477,9 @@ existing hub workers and the SNO. Requests and limits are set explicitly
 | an Envoy per pod, gateway included (`spire_mesh_proxy_resources`, 48/256 Mi) | 13 | 624 Mi / 3328 Mi | 13 | 624 Mi / 3328 Mi |
 | **total with `mesh`** | | **~3.8 GiB / ~11 GiB** | | **~3.2 GiB / ~10 GiB** |
 
+LVM Storage's own pods (operator, `vg-manager`, TopoLVM) are part of the base
+build now, not of this lab, and are not counted here.
+
 Against the smallest supported sizing (3 × 24 GiB hub workers, a 32 GiB
 SNO): about 1.4% of the hub workers' memory requested, ~4.6% at the limits;
 about 2.5% of the SNO requested, ~7% at the limits. The limits are ceilings,
@@ -510,7 +534,7 @@ oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py \
 | Symptom | First look |
 | --- | --- |
 | preflight: no package matching | `oc -n openshift-marketplace get catalogsource,pods` - is `redhat-operators` healthy |
-| `SpireServer` never Ready, PVC `Pending` | `oc -n zero-trust-workload-identity-manager get pvc,pv`; no default class and no `--tags storage`? |
+| `SpireServer` never Ready, PVC `Pending` | `oc -n zero-trust-workload-identity-manager get pvc,pv` and `oc get sc` - no `lvms-vg1`? `./build-lab.sh --only lvm`; `oc -n openshift-storage get lvmcluster -o yaml` says why LVM Storage is not Ready |
 | agents fewer than workers | `oc -n zero-trust-workload-identity-manager logs ds/spire-agent`; node attestation errors name the cause |
 | ClusterSPIFFEID `.status` empty | missing or wrong `spec.className` |
 | pod has no `/svid/svid.pem` | `oc -n spiffe-demo logs deploy/<pod> -c spiffe-helper` - `no identity issued` means no entry matches the pod |

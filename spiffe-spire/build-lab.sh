@@ -26,6 +26,15 @@
 # cluster that looks half-built (VMs defined, no kubeconfig) stops the run
 # rather than being built over.
 #
+# STORAGE. The third step, lvm, is the base playbooks' own storage step:
+# ../setup_hub_cluster.yaml --tags lvm and ../setup_sno.yaml --tags
+# snostorage. A cluster built by the clusters step already has it (LVM
+# Storage is part of the build when use_lvm_storage is true, --skip-tags acm
+# or not), so there it is a quick no-op; on a lab built before that, it is
+# what gives the hub and the SNO lvms-vg1 - the default StorageClass the
+# SPIRE server's PVC then uses. Neither playbook touches anything else when
+# run with just that tag.
+#
 # THE WORKSHOP. --workshop runs what an attendee is not there to learn: the
 # base lab, the preflight, the operator install (a quarter of an hour of
 # waiting on OLM and image pulls) and the SPIRE server's storage, then writes
@@ -64,8 +73,8 @@ NO_BOUTIQUE=0
 MESH=0
 EXTRA_VARS=()
 
-ALL_STEPS=(bmhost clusters preflight operator storage spire demo verify federation xverify boutique boutique-federate)
-WORKSHOP_STEPS=(bmhost clusters preflight operator storage prep)
+ALL_STEPS=(bmhost clusters lvm preflight operator storage spire demo verify federation xverify boutique boutique-federate)
+WORKSHOP_STEPS=(bmhost clusters lvm preflight operator storage prep)
 # Valid for --only, in no sequence.
 EXTRA_STEPS=(prep check boutique-verify mesh mesh-verify mesh-cleanup cleanup)
 
@@ -77,12 +86,15 @@ list_steps() {
              when the helper VM already exists
   clusters   ../setup_hub_cluster.yaml --skip-tags acm and ../setup_sno.yaml,
              IN PARALLEL. Each skipped when its kubeconfig already exists
+  lvm        per cluster: LVM Storage from the base playbooks (--tags lvm /
+             --tags snostorage) - lvms-vg1, the default StorageClass. A no-op
+             where the clusters step already did it
   preflight  per cluster: is the operator in redhat-operators, which channel,
              is there a StorageClass. Changes nothing
   operator   per cluster: Namespace, OperatorGroup, Subscription; waits for
              the CSV and checks for the 1.x API
-  storage    per cluster: the SPIRE server's local PV, if there is no default
-             StorageClass
+  storage    per cluster: nothing when lvms-vg1 (or any default class) is
+             there; otherwise a local PV for the SPIRE server, as a fallback
   spire      per cluster: ZeroTrustWorkloadIdentityManager, SpireServer,
              SpireAgent, SpiffeCSIDriver, the federation Route; waits for Ready
   demo       per cluster: spiffe-demo - ClusterSPIFFEID, echo-server, client,
@@ -293,6 +305,13 @@ EOF
         for c in "${want[@]}"; do
             if [[ $c == hub ]]; then play_bg hub ../setup_hub_cluster.yaml --skip-tags acm
             else play_bg sno ../setup_sno.yaml; fi
+        done
+        wait_all ;;
+    lvm)
+        say "$(pos lvm)  LVM Storage on ${CLUSTERS[*]} (base playbooks)"
+        for c in "${CLUSTERS[@]}"; do
+            if [[ $c == hub ]]; then play_bg hub-lvm ../setup_hub_cluster.yaml --tags lvm
+            else play_bg sno-storage ../setup_sno.yaml --tags snostorage; fi
         done
         wait_all ;;
     preflight|operator|storage|spire|demo|verify|prep)

@@ -114,10 +114,11 @@ tmux new -s lab          # the cluster installs take over an hour
 | Step | What it builds | About |
 | --- | --- | --- |
 | `bmhost` | the helper VM - DNS for `mylab.com`, the load balancer. Skipped if it exists | 15 min |
-| `clusters` | the hub and the SNO, **in parallel**, logging to `build-logs/`. Each skipped if already installed | 75 min |
+| `clusters` | the hub and the SNO, **in parallel**, logging to `build-logs/`, each with LVM Storage as part of its build. Each skipped if already installed | 75 min |
+| `lvm` | per cluster: LVM Storage from the base playbooks - a no-op on a cluster `clusters` just built; on an older one it adds `lvms-vg1`, the default StorageClass | 1-10 min |
 | `preflight` | per cluster: is Red Hat's SPIRE operator in `redhat-operators`, which channel, is there a StorageClass | 1 min |
 | `operator` | per cluster: the Zero Trust Workload Identity Manager - Namespace, OperatorGroup, Subscription - and a wait for it | 5 min |
-| `storage` | per cluster: a PersistentVolume for the SPIRE server, because the base clusters have no StorageClass | 1 min |
+| `storage` | per cluster: nothing when `lvms-vg1` is there; a local PersistentVolume for the SPIRE server only on a cluster with no default StorageClass | 1 min |
 | `prep` | `/root/spiffe-workshop.env`, and one file per cluster that `lab` loads | - |
 
 What it deliberately leaves **undone**: every SPIRE custom resource. The
@@ -196,7 +197,7 @@ lab hub          # oc -> the hub, and $TD, $PEER_TD, $APPS, $SPIRE_SC, $M to mat
 | `lab hub` / `lab sno` | switch `oc` and the variables below to that cluster | `export KUBECONFIG=... TD=hub.mylab.com ...` from `/root/spiffe-workshop.d/hub.env` |
 | `$TD`, `$PEER_TD` | this cluster's trust domain, and the other's | `hub.mylab.com`, `sno.mylab.com` |
 | `$APPS`, `$PEER_APPS` | the two clusters' `*.apps` domains | `apps.hub.mylab.com`, ... |
-| `$SPIRE_SC` | the StorageClass the SPIRE server's volume uses | `spire-local` on a base cluster |
+| `$SPIRE_SC` | the StorageClass the SPIRE server's volume uses | `lvms-vg1`, from the base build's LVM Storage |
 | `$ZT_NS` | the operator's namespace, where SPIRE runs | `zero-trust-workload-identity-manager` |
 | `$DEMO_NS` | the demo namespace | `spiffe-demo` |
 | `$CLASS` | the class every ClusterSPIFFEID must name | `zero-trust-workload-identity-manager-spire` |
@@ -223,7 +224,8 @@ oc -n $ZT_NS get csv                          # zero-trust-workload-identity-man
 oc get crd | grep -e spiffe -e spire          # the eight APIs you will use
 oc get zerotrustworkloadidentitymanager,spireserver,spireagent,spiffecsidriver
                                               # No resources found - no trust domain yet
-oc get pv                                     # spire-server-data-hub  Available (if $SPIRE_SC is spire-local)
+oc get sc                                     # lvms-vg1 (default) - where the SPIRE server's PVC will go
+oc get pv                                     # spire-server-data-hub  Available - only if $SPIRE_SC is spire-local
 ```
 
 ---

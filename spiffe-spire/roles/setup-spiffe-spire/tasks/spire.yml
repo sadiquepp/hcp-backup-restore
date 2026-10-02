@@ -29,9 +29,10 @@
       ansible.builtin.assert:
         that: spire_sp_pv.rc == 0
         fail_msg: >-
-          This cluster has no default StorageClass, so the SPIRE server needs the
-          local PV spire-server-data-{{ spire_c.name }}, and it is not there. Run
-          --tags storage first.
+          The SPIRE server is to use the local PV spire-server-data-{{ spire_c.name }}
+          ({{ spire_storage_summary }}), and it is not there. Either give the
+          cluster LVM Storage (./build-lab.sh --only lvm) so it has a default
+          StorageClass, or run --tags storage first.
 
 - name: Render the operator's CRs
   ansible.builtin.template:
