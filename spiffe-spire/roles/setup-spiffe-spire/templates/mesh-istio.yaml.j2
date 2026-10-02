@@ -1,0 +1,106 @@
+{# The mesh's control plane, with SPIRE as its certificate authority.
+   Rendered to <manifest dir>/51-mesh-istio.yaml.
+
+   Follows Red Hat's "Integrating Red Hat OpenShift Service Mesh with Zero
+   Trust Workload Identity Manager in a single-cluster", less the parts that
+   are only for JWT-SVIDs (jwksResolverExtraRootCA and remote JWKS: they need
+   the OIDC discovery provider, which this lab does not deploy).
+
+   How the certificates move:
+     - the `spire` injection template adds a CSI volume (csi.spiffe.io) to
+       every injected pod, mounted into istio-proxy at
+       /run/secrets/workload-spiffe-uds - the SPIRE agent's Workload API
+       socket
+     - WORKLOAD_IDENTITY_SOCKET_FILE tells the proxy's pilot-agent the socket
+       is there and is called spire-agent.sock; finding it, pilot-agent hands
+       Envoy that socket for SDS instead of serving certificates from istiod
+     - the SPIRE agent's SDS answers "default" with the pod's X.509-SVID and
+       "ROOTCA" with every bundle it holds - its own trust domain's and any
+       federated one's (the operator configures the agent that way)
+   istiod still runs its own CA, but only for istiod's serving certificate;
+   no workload certificate comes from it.
+
+   trustDomain must equal the SPIRE trust domain: Istio's principals
+   ("<td>/ns/<ns>/sa/<sa>") and AuthorizationPolicy are written against it.
+
+   ENABLE_NATIVE_SIDECARS: istio-proxy runs as a native sidecar - an init
+   container that keeps running. The `spire` template patches it under
+   initContainers for that reason, and it lets the load generator's own init
+   container reach the frontend through the mesh. Set here so it does not
+   depend on the Istio version's default. #}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ spire_mesh_cni_namespace }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ spire_mesh_control_plane_namespace }}
+---
+apiVersion: sailoperator.io/v1
+kind: IstioCNI
+metadata:
+  name: default
+  labels:
+    {{ spire_mesh_owner_label }}: spiffe-spire
+spec:
+{% if spire_mesh_istio_version %}
+  version: {{ spire_mesh_istio_version }}
+{% endif %}
+  namespace: {{ spire_mesh_cni_namespace }}
+---
+apiVersion: sailoperator.io/v1
+kind: Istio
+metadata:
+  name: default
+  labels:
+    {{ spire_mesh_owner_label }}: spiffe-spire
+spec:
+{% if spire_mesh_istio_version %}
+  version: {{ spire_mesh_istio_version }}
+{% endif %}
+  namespace: {{ spire_mesh_control_plane_namespace }}
+  updateStrategy:
+    type: InPlace
+  values:
+    meshConfig:
+      trustDomain: {{ spire_c.trust_domain }}
+      defaultConfig:
+        proxyMetadata:
+          WORKLOAD_IDENTITY_SOCKET_FILE: spire-agent.sock
+    pilot:
+      env:
+        ENABLE_NATIVE_SIDECARS: "true"
+      resources: {{ spire_mesh_istiod_resources | to_json }}
+    global:
+      proxy:
+        resources: {{ spire_mesh_proxy_resources | to_json }}
+    sidecarInjectorWebhook:
+      templates:
+        spire: |
+          spec:
+            initContainers:
+            - name: istio-proxy
+              volumeMounts:
+              - name: workload-socket
+                mountPath: /run/secrets/workload-spiffe-uds
+                readOnly: true
+            volumes:
+            - name: workload-socket
+              csi:
+                driver: "{{ spire_csi_driver_name }}"
+                readOnly: true
+        spireGateway: |
+          spec:
+            containers:
+            - name: istio-proxy
+              volumeMounts:
+              - name: workload-socket
+                mountPath: /run/secrets/workload-spiffe-uds
+                readOnly: true
+            volumes:
+            - name: workload-socket
+              csi:
+                driver: "{{ spire_csi_driver_name }}"
+                readOnly: true

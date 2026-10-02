@@ -245,6 +245,55 @@ spire_boutique_payment_server_id: >-
   }}/ns/{{ spire_boutique_namespace }}/sa/paymentservice
 
 ## ---------------------------------------------------------------------------
+## Online Boutique on Service Mesh, with SPIRE as the mesh's CA (--tags mesh)
+## ---------------------------------------------------------------------------
+## The same application, from the same pinned commit, in its own namespace:
+## every pod gets an Envoy sidecar from OpenShift Service Mesh 3, and every
+## sidecar's certificate comes from the SPIRE agent over the SPIFFE CSI
+## driver - not from istiod. mTLS is STRICT for the whole namespace, and an
+## AuthorizationPolicy lets only checkoutservice call paymentservice. See
+## README.md "Online Boutique on Service Mesh".
+##
+## A different namespace from the ghostunnel version, so the two never touch
+## each other's objects; run one or both (mind the memory budget).
+##
+## Sidecar mode only: ambient mode's ztunnel takes its certificates from
+## istiod's CA API and has no way to use the SPIRE agent's socket.
+spire_mesh_operator_package: servicemeshoperator3
+## "" = the package's defaultChannel, read from the catalog at run time.
+spire_mesh_operator_channel: ""
+## The cluster's global OperatorGroup lives here, so no OperatorGroup of our
+## own. Service Mesh 3 is an AllNamespaces operator.
+spire_mesh_operator_namespace: openshift-operators
+## "" = whatever Istio version the installed operator defaults to. Set both
+## IstioCNI and Istio to one version, from
+## `oc get istio default -o jsonpath={.status.version}` or the operator docs.
+spire_mesh_istio_version: ""
+spire_mesh_control_plane_namespace: istio-system
+spire_mesh_cni_namespace: istio-cni
+spire_mesh_namespace: boutique-mesh
+spire_mesh_render_dir: "{{ spire_manifest_dir }}/boutique-mesh"
+## Marks the Subscription, Istio and IstioCNI this lab created, so cleanup
+## removes those and nothing a mesh-using neighbour put there.
+spire_mesh_owner_label: spiffe.mylab.com/created-by
+## istiod's defaults are sized for production (500m / 2Gi requested), and the
+## Envoy default is 100m / 128Mi per pod, twelve pods here.
+spire_mesh_istiod_resources:
+  requests: {cpu: 50m, memory: 256Mi}
+  limits: {memory: 1Gi}
+spire_mesh_proxy_resources:
+  requests: {cpu: 10m, memory: 48Mi}
+  limits: {memory: 256Mi}
+## The ingress gateway: the one way in from outside the mesh. The app's own
+## Route is repointed at it.
+spire_mesh_gateway_name: boutique-gateway
+spire_mesh_gateway_port: 8080
+## Who may call paymentservice, as Istio principals - a SPIFFE ID without
+## the spiffe:// scheme.
+spire_mesh_payment_allowed:
+  - "{{ spire_c.trust_domain }}/ns/{{ spire_mesh_namespace }}/sa/checkoutservice"
+
+## ---------------------------------------------------------------------------
 ## Where things are written on the lab host
 ## ---------------------------------------------------------------------------
 ## Every manifest the playbook applies is rendered here first, one directory per

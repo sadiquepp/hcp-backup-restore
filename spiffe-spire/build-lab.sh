@@ -12,6 +12,8 @@
 #   ./build-lab.sh --dry-run           # print the commands, run nothing
 #   ./build-lab.sh --only cleanup      # remove SPIRE from both clusters
 #   ./build-lab.sh --no-boutique       # everything but Online Boutique
+#   ./build-lab.sh --mesh              # Online Boutique on Service Mesh instead
+#   ./build-lab.sh --only mesh         # ... or as well, on a lab already built
 #   ./build-lab.sh -e @my-vars.yaml    # extra vars, passed to every playbook
 #
 # THE BASE LAB. The first two steps are the repository's own playbooks,
@@ -59,12 +61,13 @@ FROM=""
 ONLY=""
 CLUSTERS=(hub sno)
 NO_BOUTIQUE=0
+MESH=0
 EXTRA_VARS=()
 
 ALL_STEPS=(bmhost clusters preflight operator storage spire demo verify federation xverify boutique boutique-federate)
 WORKSHOP_STEPS=(bmhost clusters preflight operator storage prep)
 # Valid for --only, in no sequence.
-EXTRA_STEPS=(prep check boutique-verify cleanup)
+EXTRA_STEPS=(prep check boutique-verify mesh mesh-verify mesh-cleanup cleanup)
 
 usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
@@ -94,6 +97,9 @@ list_steps() {
   boutique-federate
              hub's checkoutservice pays through the SNO's paymentservice,
              across the trust domains; asserts on both
+  mesh       per cluster, with --mesh in place of the two above: Online
+             Boutique in its own namespace on Service Mesh 3, every Envoy's
+             certificate from SPIRE, mTLS STRICT; then its asserts
 
   Not in any sequence, with --only:
 
@@ -101,6 +107,10 @@ list_steps() {
   check      per cluster: verify, for the workshop - what was built by hand
   boutique-verify
              per cluster: the Online Boutique asserts alone (workshop Part C)
+  mesh-verify
+             per cluster: the Service Mesh asserts alone (workshop Part D)
+  mesh-cleanup
+             per cluster: remove the Service Mesh version and the mesh only
   cleanup    per cluster: remove the demo, SPIRE and the operator. Asks first
 EOF
     printf '\n  this run (%s): %s\n' "$( (( WORKSHOP )) && echo workshop || echo full)" "${STEPS[*]}"
@@ -117,6 +127,7 @@ while [[ $# -gt 0 ]]; do
         -e|--extra-vars)       EXTRA_VARS+=(-e "$2"); shift 2 ;;
         -y|--yes)              ASSUME_YES=1; shift ;;
         --no-boutique)         NO_BOUTIQUE=1; shift ;;
+        --mesh)                MESH=1; shift ;;
         --dry-run)             DRY_RUN=1; shift ;;
         --list)                WANT_LIST=1; shift ;;
         -h|--help)             usage; exit 0 ;;
@@ -129,6 +140,14 @@ else STEPS=("${ALL_STEPS[@]}"); fi
 # Thirteen more images and ~1.4 GiB per cluster; still reachable with --only.
 if (( NO_BOUTIQUE )); then
     STEPS=("${STEPS[@]/boutique-federate}"); STEPS=("${STEPS[@]/boutique}")
+    read -r -a STEPS <<< "${STEPS[*]}"
+    EXTRA_STEPS+=(boutique boutique-federate)
+fi
+# The mesh version in place of the ghostunnel one: istiod, an Envoy per pod
+# and the gateway on top of the same application. Either is still reachable
+# with --only.
+if (( MESH && ! NO_BOUTIQUE )); then
+    STEPS=("${STEPS[@]/boutique-federate}"); STEPS=("${STEPS[@]/boutique/mesh}")
     read -r -a STEPS <<< "${STEPS[*]}"
     EXTRA_STEPS+=(boutique boutique-federate)
 fi
@@ -284,6 +303,10 @@ EOF
         per_cluster boutique,boutique-verify ;;
     boutique-verify)
         per_cluster boutique-verify ;;
+    mesh)
+        per_cluster mesh,mesh-verify ;;
+    mesh-verify|mesh-cleanup)
+        per_cluster "$step" ;;
     boutique-federate)
         both_clusters boutique-federate || { [[ $? == 1 ]] && return 0; return 1; }
         say "$(pos boutique-federate)  hub checkoutservice -> SNO paymentservice"

@@ -13,7 +13,10 @@
 ## every name it needs is under a cluster's *.apps wildcard. On each cluster it
 ## adds one operator (its own namespace), one StorageClass and one PV of its
 ## own when the cluster has no default StorageClass, and the spiffe-demo
-## namespace. `--tags cleanup` removes all of it.
+## namespace. --tags mesh adds the Service Mesh 3 operator (in
+## openshift-operators, beside the cluster's other AllNamespaces operators)
+## and the istio-system and istio-cni namespaces. `--tags cleanup` removes
+## all of it.
 ##
 ## Run from inside spiffe-spire/ (ansible.cfg is read from the working
 ## directory). build-lab.sh runs every phase in order; by hand:
@@ -45,6 +48,19 @@
 ##   --tags boutique-verify
 ##                      assert only: registrations, the mTLS hop carrying
 ##                      orders, an outsider refused, the bypass blocked.
+##   --tags mesh        Online Boutique again, in its own namespace, on
+##                      OpenShift Service Mesh 3 with SPIRE as the mesh's CA:
+##                      every Envoy's certificate is an SVID from the SPIRE
+##                      agent; mTLS STRICT; paymentservice admits
+##                      checkoutservice only. Installs the Service Mesh
+##                      operator, IstioCNI and Istio. Independent of
+##                      --tags boutique; run either or both.
+##   --tags mesh-verify assert only: every Envoy holds its SPIRE SVID, orders
+##                      pay over mTLS as checkoutservice, another mesh
+##                      workload is refused, plaintext from outside is
+##                      refused, the Route through the gateway answers.
+##   --tags mesh-cleanup
+##                      remove the mesh version and the mesh only.
 ##   --tags prep        the workshop's environment file. Nothing on a cluster.
 ##   --tags cleanup     remove everything above from that cluster.
 ##
@@ -86,7 +102,7 @@
           Pass -e spire_cluster=<{{ spire_clusters.keys() | join('|') }}>.
           Every per-cluster phase runs against exactly one cluster; the
           federation and xverify phases take none and use both.
-      tags: &spire_phase_tags [preflight, operator, storage, spire, demo, verify, boutique, boutique-verify, prep, cleanup]
+      tags: &spire_phase_tags [preflight, operator, storage, spire, demo, verify, boutique, boutique-verify, mesh, mesh-verify, mesh-cleanup, prep, cleanup]
 
     - name: Look for the selected cluster's kubeconfig
       ansible.builtin.stat:
@@ -163,6 +179,24 @@
         name: setup-spiffe-spire
         tasks_from: boutique-verify.yml
       tags: [boutique-verify, never]
+
+    - name: Online Boutique on Service Mesh, SPIRE as the mesh's CA
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: mesh.yml
+      tags: [mesh, never]
+
+    - name: Online Boutique on Service Mesh - asserts only
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: mesh-verify.yml
+      tags: [mesh-verify, never]
+
+    - name: Remove Online Boutique on Service Mesh, and the mesh
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: mesh-cleanup.yml
+      tags: [mesh-cleanup, never]
 
     - name: The workshop's environment file
       ansible.builtin.import_role:

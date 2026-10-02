@@ -1,0 +1,17 @@
+{# OpenShift Service Mesh 3: one Subscription, in the namespace that already
+   holds the cluster's global OperatorGroup. Rendered to
+   <manifest dir>/50-mesh-operator.yaml. The label is how cleanup tells this
+   Subscription from one somebody else made. #}
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: {{ spire_mesh_pkg }}
+  namespace: {{ spire_mesh_operator_namespace }}
+  labels:
+    {{ spire_mesh_owner_label }}: spiffe-spire
+spec:
+  channel: {{ spire_mesh_chan }}
+  name: {{ spire_mesh_pkg }}
+  source: {{ spire_catalog_source }}
+  sourceNamespace: {{ spire_catalog_namespace }}
+  installPlanApproval: Automatic

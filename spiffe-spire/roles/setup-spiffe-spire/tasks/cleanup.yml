@@ -11,6 +11,11 @@
 # The peer cluster still has a ClusterFederatedTrustDomain naming this one
 # until cleanup runs there too; it just fails to refresh meanwhile.
 
+# The mesh first, while SPIRE still runs: its own tasks, so --tags
+# mesh-cleanup can remove it alone.
+- name: Remove Online Boutique on Service Mesh, and the mesh
+  ansible.builtin.import_tasks: mesh-cleanup.yml
+
 - name: Delete the demo namespaces and their registrations
   ansible.builtin.command:
     cmd: oc delete {{ item }} --ignore-not-found --wait=true --timeout=300s

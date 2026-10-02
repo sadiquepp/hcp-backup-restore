@@ -1,0 +1,73 @@
+{# Online Boutique on Service Mesh, rendered to
+   <manifest dir>/boutique-mesh/kustomization.yaml. `oc kustomize` of that
+   directory is written to <manifest dir>/52-boutique-mesh.yaml and applied.
+
+   The same upstream application as the ghostunnel version - the repo's
+   overlays/{{ spire_boutique_overlay }} at {{ spire_boutique_ref }}, never
+   edited - moved to its own namespace, {{ spire_mesh_namespace }}. Nothing
+   in the application changes: no ports, no addresses, no sidecar of our
+   own. What this overlay adds:
+
+     namespace label   istio-injection=enabled: every pod gets istio-proxy
+     pod annotation    inject.istio.io/templates: sidecar,spire - the
+                       proxy's certificate comes from the SPIRE agent
+     policy            mTLS STRICT for the namespace; paymentservice admits
+                       checkoutservice only
+     gateway           an ingress gateway with its own SPIRE identity, and
+                       the app's Route repointed at it - the router is not
+                       in the mesh, so it can no longer talk to frontend
+                       directly
+
+   The ClusterSPIFFEID that registers every pod is NOT in here: it is
+   cluster-scoped, and kustomize's namespace transformer does not know that
+   about a custom resource and would give it a namespace. It is applied on
+   its own, first, from clusterspiffeid.yaml. #}
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: {{ spire_mesh_namespace }}
+
+resources:
+  - {{ (spire_boutique_src_dir ~ '/' ~ spire_boutique_path ~ '/overlays/' ~ spire_boutique_overlay)
+       | relpath(spire_mesh_render_dir) }}
+  - policy.yaml
+  - gateway.yaml
+
+patches:
+  - target:
+      kind: Namespace
+    patch: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: any
+        labels:
+          istio-injection: enabled
+  # The application's Deployments only - matched by the label the repo's base
+  # puts on them - so the gateway below keeps its own templates.
+  - target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/part-of=online-boutique
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: any
+      spec:
+        template:
+          metadata:
+            annotations:
+              inject.istio.io/templates: sidecar,spire
+  - target:
+      kind: Route
+      name: frontend
+    patch: |
+      - op: test
+        path: /spec/to/name
+        value: frontend
+      - op: replace
+        path: /spec/to/name
+        value: {{ spire_mesh_gateway_name }}
+      - op: replace
+        path: /spec/port/targetPort
+        value: {{ spire_mesh_gateway_port }}

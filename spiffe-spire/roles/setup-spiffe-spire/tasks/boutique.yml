@@ -47,26 +47,8 @@
   ansible.builtin.set_fact:
     spire_boutique_federates_with: "{{ [spire_peer.trust_domain] if spire_bq_cftd.rc == 0 else [] }}"
 
-# ansible.builtin.git needs the git binary on the lab host, and says so
-# plainly ("Failed to find required executable git") if it is missing.
-- name: Clone Online Boutique at the pinned commit
-  ansible.builtin.git:
-    repo: "{{ spire_boutique_repo }}"
-    dest: "{{ spire_boutique_src_dir }}"
-    version: "{{ spire_boutique_ref }}"
-  register: spire_bq_git
-
-- name: Check the overlay the lab builds on is there
-  ansible.builtin.stat:
-    path: "{{ spire_boutique_src_dir }}/{{ spire_boutique_path }}/overlays/{{ spire_boutique_overlay }}/kustomization.yaml"
-  register: spire_bq_base
-
-- name: Say so
-  ansible.builtin.assert:
-    that: spire_bq_base.stat.exists
-    fail_msg: >-
-      No {{ spire_boutique_path }}/overlays/{{ spire_boutique_overlay }} in
-      {{ spire_boutique_repo }} at {{ spire_boutique_ref }}.
+- name: Fetch the application source
+  ansible.builtin.import_tasks: boutique-source.yml
 
 - name: Create the overlay directory
   ansible.builtin.file:

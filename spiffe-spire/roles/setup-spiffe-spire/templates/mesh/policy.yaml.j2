@@ -1,0 +1,29 @@
+{# mTLS only, between workloads that hold SPIRE-issued certificates; and the
+   payment service's allowlist, as Istio policy instead of ghostunnel flags. #}
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+spec:
+  mtls:
+    mode: STRICT
+---
+# An ALLOW policy on a workload denies whatever it does not match. The
+# principal is the caller's SPIFFE ID, read from the certificate SPIRE
+# issued it, without the spiffe:// scheme.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: paymentservice
+spec:
+  selector:
+    matchLabels:
+      app: paymentservice
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+{% for p in spire_mesh_payment_allowed %}
+              - {{ p }}
+{% endfor %}

@@ -1,0 +1,20 @@
+{# Every pod in the namespace, the gateway included, named for its service
+   account: spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_mesh_namespace }}/sa/<sa> -
+   exactly the form Istio expects, since the trust domains are the same. #}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ spire_mesh_namespace }}
+spec:
+  className: {{ spire_class_name }}
+  spiffeIDTemplate: {% raw %}"spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"{% endraw %}
+
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ spire_mesh_namespace }}
+{% if spire_mesh_federates_with | default([]) %}
+  federatesWith:
+{% for td in spire_mesh_federates_with %}
+    - {{ td }}
+{% endfor %}
+{% endif %}
