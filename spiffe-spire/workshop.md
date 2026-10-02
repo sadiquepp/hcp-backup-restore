@@ -41,6 +41,13 @@ exactly what your shell produced before it reaches the cluster.
   - [C3. Put the payment hop under mTLS](#c3-put-the-payment-hop-under-mtls)
   - [C4. Who gets through now](#c4-who-gets-through-now)
   - [C5. Pay in the other trust domain](#c5-pay-in-the-other-trust-domain)
+- [Part D - Optional: the same application on Service Mesh](#part-d---optional-the-same-application-on-service-mesh)
+  - [D1. The operator](#d1-the-operator)
+  - [D2. A mesh whose CA is SPIRE](#d2-a-mesh-whose-ca-is-spire)
+  - [D3. The application, in the mesh - and not yet registered](#d3-the-application-in-the-mesh---and-not-yet-registered)
+  - [D4. Register them, and look at what Envoy holds](#d4-register-them-and-look-at-what-envoy-holds)
+  - [D5. Lock it down](#d5-lock-it-down)
+  - [D6. Who gets through now](#d6-who-gets-through-now)
 - [Catching up, checking, and when something is wrong](#catching-up-checking-and-when-something-is-wrong)
 - [Tearing it down](#tearing-it-down)
 
@@ -1355,6 +1362,465 @@ cd /root/hcp-backup-restore/spiffe-spire
 
 ---
 
+## Part D - Optional: the same application on Service Mesh
+
+Part C put one hop under mTLS with a sidecar pair you wrote yourself. A
+service mesh does that for every hop - but by default the mesh is its own
+certificate authority: istiod signs every Envoy's certificate, with a
+SPIFFE-shaped name, from a CA that has nothing to do with SPIRE. Here you
+make SPIRE that CA. Every Envoy fetches its certificate from the SPIRE agent,
+through the same CSI driver your demo pods use, and the payment allowlist
+becomes an `AuthorizationPolicy` on a SPIFFE ID.
+
+Red Hat supports this from Zero Trust Workload Identity Manager 1.1.0, with
+OpenShift Service Mesh 3 in sidecar mode. Ambient mode is not an option:
+its node proxy, ztunnel, can only get certificates from istiod's
+certificate-signing API, never from a SPIRE socket.
+
+A separate namespace, `$MESH_NS`, so Part C's `$BQ_NS` is untouched. About
+2.8 GiB of memory on the hub: istiod, an Envoy in every pod, and the
+application again. Do it on the hub; the SNO works the same way if it has
+room (README "Memory budget").
+
+### D1. The operator
+
+> **Where:** the hub.
+
+Service Mesh 3 is an AllNamespaces operator, so it goes in
+`openshift-operators`, under the OperatorGroup that namespace already has.
+If `oc get subscriptions.operators.coreos.com -A | grep $MESH_PKG` shows one
+already, skip this block. The label marks it as yours, so that cleanup
+removes it.
+
+```bash
+lab hub
+CHANNEL=$(oc get packagemanifests -n openshift-marketplace -l catalog=$CATALOG \
+          -o jsonpath="{.items[?(@.metadata.name=='$MESH_PKG')].status.defaultChannel}")
+echo "channel: $CHANNEL"
+cat > "$M/d1-mesh-operator.yaml" <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: $MESH_PKG
+  namespace: $MESH_OP_NS
+  labels:
+    $MESH_OWNER: spiffe-spire
+spec:
+  channel: $CHANNEL
+  name: $MESH_PKG
+  source: $CATALOG
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+EOF
+oc apply -f "$M/d1-mesh-operator.yaml"
+until oc wait --for=condition=Established crd/istios.sailoperator.io --timeout=10s 2>/dev/null; do sleep 10; done
+```
+
+### D2. A mesh whose CA is SPIRE
+
+> **Where:** the hub.
+
+Two custom resources. `IstioCNI` sets up each pod's traffic redirection from
+a DaemonSet, so pods need no privileges. `Istio` is the control plane, and
+these parts of it are the point of this part:
+
+- **`trustDomain: $TD`**: the mesh names workloads
+  `spiffe://<trustDomain>/ns/<ns>/sa/<sa>`, which is exactly the ID your
+  ClusterSPIFFEIDs have issued since Lab 5. Different trust domains, and
+  every policy would name identities that no certificate carries.
+- **`WORKLOAD_IDENTITY_SOCKET_FILE`**: when the sidecar's pilot-agent finds a
+  socket of that name in `/run/secrets/workload-spiffe-uds`, it points Envoy
+  straight at it for certificates (SDS) instead of asking istiod. That
+  socket is the SPIRE agent's Workload API.
+- **The `spire` template** puts it there: a `csi.spiffe.io` volume, the same
+  one your demo pods mount, added to `istio-proxy`. It patches `istio-proxy`
+  under `initContainers` because the proxy runs as a *native sidecar*, an
+  init container that keeps running. That way the app's own init containers
+  are already in the mesh, which the load generator needs: its first step is
+  a request to the frontend.
+- **`spireGateway`**: the same for gateways, whose proxy is an ordinary
+  container.
+
+```bash
+cat > "$M/d2-mesh-istio.yaml" <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $MESH_CNI_NS
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $MESH_CP_NS
+---
+apiVersion: sailoperator.io/v1
+kind: IstioCNI
+metadata:
+  name: default
+  labels:
+    $MESH_OWNER: spiffe-spire
+spec:
+  namespace: $MESH_CNI_NS
+---
+apiVersion: sailoperator.io/v1
+kind: Istio
+metadata:
+  name: default
+  labels:
+    $MESH_OWNER: spiffe-spire
+spec:
+  namespace: $MESH_CP_NS
+  updateStrategy:
+    type: InPlace
+  values:
+    meshConfig:
+      trustDomain: $TD
+      defaultConfig:
+        proxyMetadata:
+          WORKLOAD_IDENTITY_SOCKET_FILE: spire-agent.sock
+    pilot:
+      env:
+        ENABLE_NATIVE_SIDECARS: "true"
+      resources: {requests: {cpu: 50m, memory: 256Mi}, limits: {memory: 1Gi}}
+    global:
+      proxy:
+        resources: {requests: {cpu: 10m, memory: 48Mi}, limits: {memory: 256Mi}}
+    sidecarInjectorWebhook:
+      templates:
+        spire: |
+          spec:
+            initContainers:
+            - name: istio-proxy
+              volumeMounts:
+              - name: workload-socket
+                mountPath: /run/secrets/workload-spiffe-uds
+                readOnly: true
+            volumes:
+            - name: workload-socket
+              csi:
+                driver: "$CSI_DRIVER"
+                readOnly: true
+        spireGateway: |
+          spec:
+            containers:
+            - name: istio-proxy
+              volumeMounts:
+              - name: workload-socket
+                mountPath: /run/secrets/workload-spiffe-uds
+                readOnly: true
+            volumes:
+            - name: workload-socket
+              csi:
+                driver: "$CSI_DRIVER"
+                readOnly: true
+EOF
+oc apply -f "$M/d2-mesh-istio.yaml"
+oc wait istiocni/default istio/default --for=condition=Ready --timeout=10m
+oc get istio default -o jsonpath='{.spec.version}{"\n"}'
+```
+
+No version is set, so the operator picks its default and both resources get
+the same one.
+
+### D3. The application, in the mesh - and not yet registered
+
+> **Where:** the hub.
+
+An overlay on the same upstream `overlays/default` as C1. It moves the
+application to `$MESH_NS`, turns injection on for the namespace, and asks
+for the `spire` template on every Deployment. It changes nothing in the
+application itself. Leave the ClusterSPIFFEID out for now, on purpose.
+
+```bash
+[ -d "$BQ_CLONE/.git" ] || git clone "$BQ_REPO" "$BQ_CLONE"
+git -C "$BQ_CLONE" checkout -q "$BQ_REF"
+mkdir -p "$M/boutique-mesh"
+cat > "$M/boutique-mesh/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: $MESH_NS
+resources:
+  - $(realpath --relative-to="$M/boutique-mesh" "$BQ_SRC/overlays/default")
+patches:
+  - target: {kind: Namespace}
+    patch: |
+      apiVersion: v1
+      kind: Namespace
+      metadata: {name: any, labels: {istio-injection: enabled}}
+  - target: {kind: Deployment, labelSelector: app.kubernetes.io/part-of=online-boutique}
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: any}
+      spec: {template: {metadata: {annotations: {inject.istio.io/templates: "sidecar,spire"}}}}
+EOF
+oc kustomize "$M/boutique-mesh" > "$M/d3-boutique-mesh.yaml"
+oc apply -f "$M/d3-boutique-mesh.yaml"
+sleep 60; oc -n $MESH_NS get pods
+```
+
+Nothing comes up. Each pod has its `istio-proxy` and the CSI volume, and
+the SPIRE agent answers on the socket, but it has no registration entry for
+these pods. So Envoy gets no certificate and the proxy never reports ready.
+As a native sidecar it starts first, and the application containers wait
+behind its startup probe:
+
+```bash
+oc -n $MESH_NS get pod -l app=paymentservice -o jsonpath='{.items[0].spec.volumes[*].csi.driver}{"\n"}'   # csi.spiffe.io
+oc -n $MESH_NS logs deploy/paymentservice -c istio-proxy --tail=5
+spire entry show | grep "SPIFFE ID" | grep -c $MESH_NS           # 0
+```
+
+This is Lab 4 again, with a mesh in front of it. In the mesh, no SPIRE
+identity means no traffic at all, not just a refused handshake.
+
+### D4. Register them, and look at what Envoy holds
+
+> **Where:** the hub.
+
+The same ClusterSPIFFEID as C2, for the new namespace. It is cluster-scoped,
+so it is applied on its own, outside the kustomize overlay (kustomize would
+give it a namespace).
+
+```bash
+cat > "$M/d4-clusterspiffeid.yaml" <<EOF
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: $MESH_NS
+spec:
+  className: $CLASS
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: $MESH_NS
+  federatesWith:
+    - $PEER_TD
+EOF
+oc apply -f "$M/d4-clusterspiffeid.yaml"
+oc -n $MESH_NS rollout status deploy/frontend --timeout=10m
+oc -n $MESH_NS get pods                             # 2/2 each: the app and istio-proxy
+spire entry show | grep "SPIFFE ID" | grep $MESH_NS | sort -u
+```
+
+(Drop `federatesWith` if you did not do Lab 7. With it, the SNO's CA is in
+every sidecar's trust bundle as well.)
+
+The pods come up without you touching them (a proxy that gave up waiting
+is restarted by its probe): the entries appear, the agent can answer, and
+Envoy gets its certificate. Ask Envoy what it holds:
+
+```bash
+envoy_cert paymentservice
+# spiffe://hub.mylab.com/ns/boutique-mesh/sa/paymentservice 2026-...T10:00:00Z -> 2026-...T11:00:10Z
+envoy_cert checkoutservice
+```
+
+The certificate is valid for **one hour**, your SpireServer's
+`defaultX509Validity` from Lab 2. A certificate from istiod would be valid
+for 24 hours. Envoy rotates it as the agent does, and nobody restarts
+anything.
+
+### D5. Lock it down
+
+> **Where:** the hub.
+
+So far mTLS is *permissive*: Envoys use it with each other, but anything
+without a sidecar can still talk plaintext. Three things change that, added to the
+same overlay. The kustomization is D3's again, plus two resources and a
+patch for the Route:
+
+- `PeerAuthentication` STRICT: mTLS or nothing, for the whole namespace.
+- `AuthorizationPolicy` on paymentservice: what ghostunnel's `--allow-uri`
+  did in C3, now as policy. The principal is the caller's SPIFFE ID without
+  `spiffe://`.
+- An ingress gateway. The OpenShift router is not in the mesh, so under
+  STRICT it can no longer reach the frontend. A gateway, with a SPIRE
+  certificate of its own (`spireGateway`), takes the router's traffic and
+  opens mTLS onward. The application's Route is repointed at it.
+
+```bash
+cat > "$M/boutique-mesh/policy.yaml" <<EOF
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: paymentservice
+spec:
+  selector:
+    matchLabels:
+      app: paymentservice
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - $TD/ns/$MESH_NS/sa/checkoutservice
+EOF
+cat > "$M/boutique-mesh/gateway.yaml" <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $MESH_GW
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: $MESH_GW
+spec:
+  selector:
+    matchLabels: {istio: $MESH_GW}
+  template:
+    metadata:
+      annotations:
+        inject.istio.io/templates: gateway,spireGateway
+      labels:
+        istio: $MESH_GW
+        sidecar.istio.io/inject: "true"
+    spec:
+      serviceAccountName: $MESH_GW
+      containers:
+        - name: istio-proxy
+          image: auto
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            runAsNonRoot: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: $MESH_GW
+spec:
+  selector: {istio: $MESH_GW}
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}
+---
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: $MESH_GW
+spec:
+  selector: {istio: $MESH_GW}
+  servers:
+    - port: {number: 8080, name: http, protocol: HTTP}
+      hosts: ["*"]
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: frontend
+spec:
+  hosts: ["*"]
+  gateways: [$MESH_GW]
+  http:
+    - route:
+        - destination: {host: frontend, port: {number: 80}}
+EOF
+cat > "$M/boutique-mesh/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: $MESH_NS
+resources:
+  - $(realpath --relative-to="$M/boutique-mesh" "$BQ_SRC/overlays/default")
+  - policy.yaml
+  - gateway.yaml
+patches:
+  - target: {kind: Namespace}
+    patch: |
+      apiVersion: v1
+      kind: Namespace
+      metadata: {name: any, labels: {istio-injection: enabled}}
+  - target: {kind: Deployment, labelSelector: app.kubernetes.io/part-of=online-boutique}
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: any}
+      spec: {template: {metadata: {annotations: {inject.istio.io/templates: "sidecar,spire"}}}}
+  - target: {kind: Route, name: frontend}
+    patch: |
+      - {op: replace, path: /spec/to/name, value: $MESH_GW}
+      - {op: replace, path: /spec/port/targetPort, value: 8080}
+EOF
+oc kustomize "$M/boutique-mesh" > "$M/d5-boutique-mesh.yaml"
+oc apply -f "$M/d5-boutique-mesh.yaml"
+oc -n $MESH_NS rollout status deploy/$MESH_GW --timeout=5m
+oc -n $MESH_NS get route frontend -o jsonpath='https://{.spec.host}{"\n"}'   # the shop, through the gateway
+```
+
+### D6. Who gets through now
+
+> **Where:** the hub.
+
+**checkoutservice → paymentservice.** paymentservice's Envoy counts every
+request it accepts, labelled with the caller's SPIFFE ID, taken from the
+certificate SPIRE issued, and with whether it arrived over mTLS:
+
+```bash
+oc -n $MESH_NS exec deploy/paymentservice -c istio-proxy -- pilot-agent request GET stats/prometheus \
+  | grep '^istio_requests_total{' | grep 'reporter="destination"' \
+  | grep -o 'source_principal="[^"]*"\|connection_security_policy="[^"]*"\|response_code="[^"]*"\|} [0-9]*$' \
+  | paste - - - -
+# source_principal="spiffe://hub.mylab.com/ns/boutique-mesh/sa/checkoutservice"  response_code="200"  connection_security_policy="mutual_tls"  } 42
+```
+
+Those are the load generator's orders, paid.
+
+**Inside the mesh, but not checkoutservice.** The load generator has a
+perfectly good SPIRE certificate. Its Envoy wraps the request in mTLS, and
+paymentservice's Envoy turns it away before the application sees anything:
+
+```bash
+oc -n $MESH_NS exec deploy/loadgenerator -c main -- python3 -c \
+  "import http.client as h; c = h.HTTPConnection('paymentservice', 50051, timeout=10); c.request('GET', '/'); r = c.getresponse(); print(r.status, r.read(60))"
+# 403 b'RBAC: access denied'
+```
+
+**Outside the mesh.** Part B's `client` has an SVID, but no Envoy, so it
+talks plaintext, and STRICT means the frontend's Envoy drops it. The Route
+is the one way in, through the gateway:
+
+```bash
+inpod client python3 -c "import http.client as h; c = h.HTTPConnection('frontend.$MESH_NS.svc', 80, timeout=10); c.request('GET', '/'); print(c.getresponse().status)"
+# ... ConnectionResetError (or RemoteDisconnected)
+HOST=$(oc -n $MESH_NS get route frontend -o jsonpath='{.spec.host}')
+inpod client python3 -c "import http.client as h, ssl; c = h.HTTPSConnection('$HOST', 443, context=ssl._create_unverified_context()); c.request('GET', '/'); print(c.getresponse().status)"
+# 200
+```
+
+**Compared with Part C.** The same allowlist, but nothing was added to the
+application: no ports moved, no tunnel per hop, and every hop is mTLS, not
+one. The identities are the same SPIFFE IDs from the same SPIRE server, and
+a certificate still lasts an hour. The cost is a control plane and an Envoy
+in every pod.
+
+**Check**
+
+```bash
+cd /root/hcp-backup-restore/spiffe-spire
+./build-lab.sh --workshop --only mesh-verify --cluster hub
+```
+
+The full build's own asserts, run against what you built: every Envoy holds
+its own SPIFFE ID with a SPIRE lifetime, orders are paid over mTLS as
+checkoutservice, and the load generator and the outsider are refused.
+
+To take this part away again, mesh and all, and leave SPIRE, Part B and
+Part C as they were:
+
+```bash
+./build-lab.sh --only mesh-cleanup --cluster hub
+```
+
+---
+
 ## Catching up, checking, and when something is wrong
 
 **Check what you built.** The automated build's own asserts, against your
@@ -1387,6 +1853,9 @@ have rather than duplicating it:
 | `federation refresh` fails | the message: `no such host` (DNS), connection refused or 503 (the Route), `x509` (the endpoint's SVID / the bootstrap bundle) |
 | cross-cluster `SERVER NOT TRUSTED` | 7d: `federatesWith`, then wait for the bundle file to hold 2 certificates |
 | cross-cluster `HTTP 403` | 7e, and a minute for the ConfigMap to arrive |
+| D4: pods still not Ready a few minutes after the ClusterSPIFFEID | `oc get clusterspiffeid $MESH_NS -o yaml` - `className`, entries; `oc -n $MESH_NS get pod <pod> -o yaml \| grep -e templates -e csi.spiffe` |
+| `envoy_cert` shows 24 hours | that certificate is istiod's: the pod lacks the `spire` template - check D3's annotation, then `oc -n $MESH_NS rollout restart deploy/<name>` |
+| D5: the shop's Route answers 503 | `oc -n $MESH_NS get pods -l istio=$MESH_GW` - Ready? the `VirtualService` must name the `Gateway` |
 
 ## Tearing it down
 
@@ -1394,7 +1863,8 @@ have rather than duplicating it:
 ./build-lab.sh --only cleanup
 ```
 
-Removes, from both clusters: `spiffe-demo`, every SPIRE CR, the federation
+Removes, from both clusters: Part D's mesh (only what carries the
+`$MESH_OWNER` label), `spiffe-demo`, every SPIRE CR, the federation
 Route, the operator, the SPIRE server's PV and StorageClass, and the data
 directory on the node - the trust domain's CA keys, so a rebuild is a new
 root. The base lab is untouched. The operator's CRDs stay; OLM never removes

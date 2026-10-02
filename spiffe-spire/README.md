@@ -8,7 +8,9 @@ workload with no registration entry gets no SVID and is refused. Then the
 two trust domains are federated, and a hub workload authenticates to a SNO
 workload across the boundary. Optionally, the same identities secure a hop
 inside a real application - [Online Boutique](#online-boutique-spiffe-on-a-real-application) -
-including a payment that crosses from one trust domain to the other.
+including a payment that crosses from one trust domain to the other. Or the
+same application on [OpenShift Service Mesh](#online-boutique-on-service-mesh-spire-as-the-meshs-ca),
+with SPIRE issuing every sidecar's certificate in place of istiod.
 
 - **Build it:** [Quick start](#quick-start), or `./build-lab.sh --help`
 - **Learn it:** [workshop.md](workshop.md) - day 0 automated, then every
@@ -18,8 +20,9 @@ including a payment that crosses from one trust domain to the other.
 > **Status.** The playbook, templates and demo app have been rendered,
 > syntax-checked, linted, and run phase by phase against a simulated `oc`
 > on ansible-core 2.14 and 2.19; the mTLS app was tested against real
-> SPIFFE-shaped certificates; the Online Boutique overlay was built with
-> kustomize against the real source. **None of it has yet run against a live
+> SPIFFE-shaped certificates; both Online Boutique overlays were built with
+> kustomize against the real source, and the `Istio`/`IstioCNI` CRs checked
+> against the Sail operator's CRD schema. **None of it has yet run against a live
 > cluster.** The operator's API was read from its source (release-1.0.0 and
 > release-1.1), not from a running catalog.
 
@@ -54,6 +57,8 @@ including a payment that crosses from one trust domain to the other.
 | StorageClass `spire-local` + PV | only when the cluster has no default StorageClass | the base build has none |
 | `spiffe-demo` | ClusterSPIFFEID, `echo-server`, `client`, `intruder`, passthrough Route | [demo](#the-demo) |
 | `ClusterFederatedTrustDomain` | one, naming the other cluster | carries the bootstrap bundle |
+| `online-boutique` (`--tags boutique`) | Online Boutique, one hop under ghostunnel mTLS | [Online Boutique](#online-boutique-spiffe-on-a-real-application) |
+| `boutique-mesh` (`--tags mesh`) | Online Boutique on Service Mesh 3, every Envoy's certificate from SPIRE; plus the Service Mesh operator, `istio-system`, `istio-cni` | [on Service Mesh](#online-boutique-on-service-mesh-spire-as-the-meshs-ca) |
 
 What it does **not** touch: no base role is run or changed, no VM is added,
 no DNS record is added, nothing on the helper. Every name it needs is under a
@@ -89,12 +94,16 @@ cd /root/hcp-backup-restore/spiffe-spire
 | `xverify` | both: hub client → SNO echo-server, and back | 1 min |
 | `boutique` | per cluster: [Online Boutique](#online-boutique-spiffe-on-a-real-application), every service registered, `checkoutservice → paymentservice` over mTLS, then its asserts | 10 min |
 | `boutique-federate` | the hub's checkoutservice pays through the SNO's paymentservice, across the trust domains | 3 min |
+| `mesh` | with `--mesh`, **in place of** the two above: per cluster, [Online Boutique on Service Mesh](#online-boutique-on-service-mesh-spire-as-the-meshs-ca) with SPIRE as the mesh's CA, then its asserts | 15 min |
 
 `--from <step>` resumes, `--only <step>` runs one, `--cluster hub` limits the
 per-cluster steps to one cluster (federation then skips), `--dry-run` prints
 the commands. `--only cleanup` removes SPIRE from both clusters.
 `--no-boutique` leaves out the last two steps (13 more images, ~1.4 GiB per
-cluster); they stay reachable with `--only`.
+cluster); they stay reachable with `--only`. `--mesh` builds the Service
+Mesh version instead; `--only mesh` adds it to a lab that already has the
+ghostunnel one (they use different namespaces and can run side by side), and
+`--only mesh-cleanup` takes it away again, mesh and all.
 
 By hand, the same thing is one playbook with one tag per phase:
 
@@ -124,9 +133,11 @@ spiffe-spire/
   setup_spiffe_spire.yaml  one play per cluster (phases by tag) + four federation/xverify plays
   workshop.md              the hands-on version
   roles/setup-spiffe-spire/
-    tasks/                 one file per phase; catalog.yml and storage-decide.yml are shared
+    tasks/                 one file per phase; catalog.yml, storage-decide.yml and boutique-source.yml are shared
     templates/             every manifest, one .j2 each
     templates/boutique/    the Online Boutique overlay: ghostunnel patches, NetworkPolicy, Route, ClusterSPIFFEID
+    templates/mesh/        the Service Mesh overlay: gateway, PeerAuthentication, AuthorizationPolicy, ClusterSPIFFEID
+    templates/mesh-*.j2    the Service Mesh operator Subscription; IstioCNI and Istio with the SPIRE templates
     files/                 echo_server.py, spiffe_client.py - the demo app, stdlib Python
 ```
 
@@ -309,38 +320,91 @@ puts payments back on the hub.
 
 What it deliberately does not do: put every hop under mTLS. `frontend` alone
 calls seven services, and a sidecar pair per hop is exactly the plumbing a
-service mesh exists to remove - see the next section.
+service mesh exists to remove - which is the next section.
 
-## Service Mesh with SPIRE: support status
+## Online Boutique on Service Mesh: SPIRE as the mesh's CA
+
+The same application, from the same pinned commit, on OpenShift Service Mesh
+3 - with the mesh's certificates issued by SPIRE rather than istiod. Every
+hop is mTLS, the application is not modified at all, and the authorisation
+rule that ghostunnel's `--allow-uri` expressed becomes an
+`AuthorizationPolicy` on a SPIFFE ID.
+
+**What the lab does with it** (`--tags mesh`, per cluster):
+
+| | |
+| --- | --- |
+| Operator | `servicemeshoperator3` from `redhat-operators`, a Subscription in `openshift-operators` (the cluster's global OperatorGroup), channel from the catalog. If the cluster already has one, it is used as it is |
+| Control plane | `IstioCNI` in `istio-cni`; `Istio` in `istio-system` with `meshConfig.trustDomain` = the SPIRE trust domain, `WORKLOAD_IDENTITY_SOCKET_FILE: spire-agent.sock`, and two injection templates, `spire` and `spireGateway`, that mount the SPIRE agent's socket through `csi.spiffe.io` - as in Red Hat's documented procedure. istiod requests are cut from 500m / 2 GiB to 50m / 256 MiB, each Envoy's to 10m / 48 MiB. Refuses to touch an `Istio` it did not create |
+| Namespace | `boutique-mesh`, labelled `istio-injection=enabled`; the repo's `overlays/default` moved there by kustomize. Separate from `online-boutique`, so the two versions never share an object |
+| Workloads | every Deployment annotated `inject.istio.io/templates: sidecar,spire`; nothing else about them changes |
+| Registration | a ClusterSPIFFEID for the namespace, applied **before** the pods: an Envoy with no entry gets no certificate and its pod never goes Ready. `federatesWith` the peer when the trust domains are federated, so the peer's CA is in every sidecar's `ROOTCA` too |
+| Policy | `PeerAuthentication` STRICT for the namespace; `AuthorizationPolicy` on paymentservice: ALLOW `<td>/ns/boutique-mesh/sa/checkoutservice` only |
+| Ingress | an ingress gateway (`gateway,spireGateway` templates - it holds a SPIRE certificate too) with a `Gateway` and `VirtualService` to frontend. The repo's Route `frontend` is repointed at it: the router is not in the mesh, and STRICT mTLS would otherwise lock it out |
+| Manifests | `50-mesh-operator.yaml`, `51-mesh-istio.yaml`, `52-mesh-clusterspiffeid.yaml`, `53-boutique-mesh.yaml` (the `oc kustomize` output of `boutique-mesh/`) |
+
+How a certificate gets into Envoy: the `spire` template adds the CSI volume
+to `istio-proxy`; pilot-agent finds `spire-agent.sock` in it and points Envoy's
+SDS straight at the SPIRE agent instead of serving certificates from istiod.
+The operator configures the agent's SDS for this (`default` is the pod's
+SVID, `ROOTCA` is every bundle the agent holds, federated ones included).
+istiod keeps its own CA only for its own serving certificate.
+
+**What `mesh-verify` asserts:**
+
+1. every running pod has a registration entry;
+2. every pod's Envoy (`pilot-agent request GET certs`) holds a certificate
+   whose SPIFFE ID is that pod's service account and whose lifetime is a
+   SPIRE SVID's (1h), not an istiod certificate's (24h);
+3. paymentservice's Envoy has accepted requests over `mutual_tls` whose
+   `source_principal` is `spiffe://<td>/ns/boutique-mesh/sa/checkoutservice`
+   (its `istio_requests_total`) - the load generator's orders, paid;
+4. the load generator - inside the mesh, with its own valid SPIRE
+   certificate, but not checkoutservice - gets `403 RBAC: access denied`
+   from paymentservice;
+5. if spiffe-demo is deployed: its `client`, outside the mesh, is cut off
+   when it talks plaintext to `frontend`, and gets the shop's `200` through
+   the Route and the ingress gateway.
+
+**Not built: across the clusters.** Red Hat documents a multi-cluster mesh on
+SPIRE federation, but it needs more than this lab has: east-west gateways on
+LoadBalancer Services (the base clusters have no load balancer provider),
+remote secrets so each istiod can read the other cluster's API, a shared
+`meshID` and network names. The SPIRE half is here - with `federatesWith`,
+each sidecar already trusts the peer's CA.
+
+**Ambient mode does not work with SPIRE.** Ambient's node proxy, ztunnel,
+gets workload certificates only from a CA over Istio's certificate-signing
+API (`CA_ADDRESS`, istiod by default); it has no SDS/Workload API client, so
+it cannot use the SPIRE agent's socket. That was confirmed in the ztunnel
+source (`src/identity/caclient.rs` at upstream `main`, 28 September 2026), and
+Red Hat's procedures cover sidecar mode only. Ambient on OpenShift Service
+Mesh works on its own, but then istiod is the CA and SPIRE is not involved.
+
+### Support status
 
 Checked against the product documentation source (`openshift/openshift-docs`,
 `security/zero_trust_workload_identity_manager/`, as of 2026-09-30):
 
 - **Supported, not Technology Preview.** Zero Trust Workload Identity Manager
   **1.1.0** (30 June 2026) added "single-cluster integration with Red Hat
-  OpenShift Service Mesh", where SPIRE replaces Istio's built-in CA and Envoy
-  sidecars fetch their certificates from the SPIRE agent over SDS, and
-  "multi-cluster integration through SPIRE federation". Neither page carries a
-  Technology Preview notice. 1.1.1 (26 August 2026) is a bug-fix release.
-- **Shape of it:** Service Mesh 3 (Sail operator: `IstioCNI` and `Istio` CRs),
-  sidecar mode, with custom injection templates (`spire`, `spireGateway`)
-  that mount the agent socket through the same `csi.spiffe.io` driver, and
-  the mesh's `trustDomain` set to SPIRE's. Workloads opt in with the `spire`
-  template.
-- **Multi-cluster** needs federation at two layers: SPIRE bundle exchange over
-  `https_spiffe` - which this lab already does - plus Istio's own:
-  east-west gateways and remote secrets. The documented prerequisites add
-  Istio **1.29.2 or later**, `istioctl` and `helm`.
+  OpenShift Service Mesh" and "multi-cluster integration through SPIRE
+  federation". Neither page carries a Technology Preview notice. 1.1.1
+  (26 August 2026) is a bug-fix release.
+- **Shape of it:** Service Mesh 3, sidecar mode, the `spire` and
+  `spireGateway` injection templates, `trustDomain` set to SPIRE's - what
+  `--tags mesh` builds. The documented procedure also sets
+  `jwksResolverExtraRootCA` from the OIDC discovery provider; that is for
+  JWT-SVID request authentication, and this lab deploys no OIDC discovery
+  provider, so it is left out.
+- **Multi-cluster** adds east-west gateways, remote secrets, Istio **1.29.2
+  or later**, `istioctl` and `helm`.
 - Related, from the same 1.1.0 release: a **supported SPIFFE Helper image**,
   `registry.redhat.io/zero-trust-workload-identity-manager/spiffe-helper-rhel9`.
   The lab still defaults to upstream `ghcr.io/spiffe/spiffe-helper:0.11.0`,
   because the docs give no tag and none could be listed from here; set
   `spire_demo_helper_image` to the Red Hat image once you have picked a tag
   (`skopeo list-tags docker://registry.redhat.io/zero-trust-workload-identity-manager/spiffe-helper-rhel9`).
-
-So the mesh is a supported next step for Online Boutique - every hop under
-SPIRE-issued mTLS, authorisation as AuthorizationPolicy on SPIFFE IDs - at the
-cost of a mesh control plane and an Envoy per pod. It is not built here.
 
 ---
 
@@ -364,6 +428,12 @@ existing hub workers and the SNO. Requests and limits are set explicitly
 | Online Boutique, upstream (12 Deployments incl. load generator) | 12 | 1368 Mi / 2542 Mi | 12 | 1368 Mi / 2542 Mi |
 | its two ghostunnel sidecars (32/128 Mi) | 2 | 64 Mi / 256 Mi | 2 | 64 Mi / 256 Mi |
 | **total with `boutique`** | | **~2.4 GiB / ~6.0 GiB** | | **~2.2 GiB / ~5.0 GiB** |
+| *instead, `mesh`:* Service Mesh operator (Sail chart default, 64 Mi / 1 Gi) | 1 | 64 Mi / 1 Gi | 1 | 64 Mi / 1 Gi |
+| istiod (`spire_mesh_istiod_resources`) | 1 | 256 Mi / 1 Gi | 1 | 256 Mi / 1 Gi |
+| istio-cni-node (chart default 100 Mi, no limit; every node) | 6 (3 on masters) | 600 Mi / - | 1 | 100 Mi / - |
+| Online Boutique, upstream | 12 | 1368 Mi / 2542 Mi | 12 | 1368 Mi / 2542 Mi |
+| an Envoy per pod, gateway included (`spire_mesh_proxy_resources`, 48/256 Mi) | 13 | 624 Mi / 3328 Mi | 13 | 624 Mi / 3328 Mi |
+| **total with `mesh`** | | **~3.8 GiB / ~11 GiB** | | **~3.2 GiB / ~10 GiB** |
 
 Against the smallest supported sizing (3 × 24 GiB hub workers, a 32 GiB
 SNO): about 1.4% of the hub workers' memory requested, ~4.6% at the limits;
@@ -379,6 +449,13 @@ With Online Boutique on both clusters: ~3.4% of the hub workers requested
 CPU of requests per cluster, most of it the load generator keeping traffic
 flowing. Still no VM change; `--no-boutique` if the SNO is already busy.
 
+With the mesh version instead: ~4.9% of the hub workers requested and ~10%
+of the SNO. The limits look large (~31% of the SNO) because every Envoy may
+grow to 256 MiB; idle Envoys in an application this size sit far below that.
+Both versions at once add the ghostunnel row's ~1.4 GiB again: ~4.6 GiB
+requested on the SNO, still without a resize, but it is the point where
+`oc adm top node` is worth watching.
+
 ---
 
 ## Verifying
@@ -390,6 +467,8 @@ same way:
 ```bash
 ./build-lab.sh --only verify            # or: --workshop --only check
 ./build-lab.sh --only xverify
+./build-lab.sh --only boutique-verify   # the ghostunnel version
+./build-lab.sh --only mesh-verify       # the Service Mesh version
 ```
 
 By hand, on either cluster:
@@ -420,6 +499,11 @@ oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py \
 | boutique: checkoutservice or paymentservice ghostunnel restarting | `oc -n online-boutique logs deploy/<svc> -c ghostunnel` - it exits if no SVID arrives within `--use-workload-api-timeout` (10m): is the ClusterSPIFFEID `online-boutique` there, with its className? |
 | boutique: `backend_ok: false` | `backend_error` in the same JSON; `unauthorized` on the paymentservice side means the caller's SPIFFE ID is not in `--allow-uri` |
 | boutique-federate: handshake fails | both ClusterSPIFFEIDs need `federatesWith`: re-run `--tags boutique` on both clusters after `--tags federation` |
+| mesh: pods stuck `Init`/not Ready, `istio-proxy` logs waiting for the socket or a certificate | `oc get clusterspiffeid boutique-mesh -o yaml` - is it there, with `className`, entries > 0? `oc -n boutique-mesh get pod <pod> -o yaml \| grep -e templates -e csi.spiffe` - the `spire` template and the CSI volume must both be on the pod |
+| mesh-verify: a certificate valid 24h | it came from istiod: the pod lacks `inject.istio.io/templates: sidecar,spire`, or was created before the `Istio` CR had the templates - `oc -n boutique-mesh rollout restart deploy/<name>` |
+| mesh: shop Route answers 503 | the gateway pod: `oc -n boutique-mesh logs deploy/boutique-gateway`; is it Ready (it needs its own SPIRE entry), does the `VirtualService` name the `Gateway` |
+| mesh-verify: load generator gets 200 from paymentservice | the `AuthorizationPolicy` `paymentservice` is missing, or its principal's trust domain differs from `meshConfig.trustDomain` |
+| mesh: `Istio` not Ready | `oc get istio default -o yaml` - the conditions name the cause; `oc -n openshift-operators logs deploy/servicemesh-operator3` |
 
 Non-trivial debugging on a live cluster goes in a `troubleshooting.md` case
 file here, in the format of [`udn-bgp-evpn/troubleshooting.md`](../udn-bgp-evpn/troubleshooting.md).
