@@ -28,6 +28,27 @@ with SPIRE issuing every sidecar's certificate in place of istiod.
 
 ---
 
+## Contents
+
+- [What it builds](#what-it-builds)
+- [Quick start](#quick-start)
+- [Layout](#layout)
+- [Design decisions](#design-decisions)
+  - [Red Hat's operator, found in the catalog, not assumed](#red-hats-operator-found-in-the-catalog-not-assumed)
+  - [Storage: a local PV, because the base has no StorageClass](#storage-a-local-pv-because-the-base-has-no-storageclass)
+  - [Why this lab's own federation Route](#why-this-labs-own-federation-route)
+  - [Federation: ClusterFederatedTrustDomain, with the bootstrap bundle in it](#federation-clusterfederatedtrustdomain-with-the-bootstrap-bundle-in-it)
+  - [`className` on every ClusterSPIFFEID](#classname-on-every-clusterspiffeid)
+  - [The demo](#the-demo)
+- [Online Boutique: SPIFFE on a real application](#online-boutique-spiffe-on-a-real-application)
+- [Online Boutique on Service Mesh: SPIRE as the mesh's CA](#online-boutique-on-service-mesh-spire-as-the-meshs-ca)
+  - [Support status](#support-status)
+- [Memory budget](#memory-budget)
+- [Verifying](#verifying)
+- [When something is wrong](#when-something-is-wrong)
+
+---
+
 ## What it builds
 
 ```
