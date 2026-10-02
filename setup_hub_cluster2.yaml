@@ -108,6 +108,20 @@
       kubeconfig_path: "{{ hub2_kubeconfig }}"
     when: hub2_disconnected | bool
 
+  # LVM Storage as part of the build, not of the day-2 ACM step: a hub built
+  # with --skip-tags acm still comes up with a default StorageClass (lvms-vg1)
+  # on the workers' storage_worker<N>.qcow2 disks. Off on the Ceph path
+  # (use_lvm_storage: false), where ODF wants openshift-storage to itself.
+  # On a hub that is already up, add it - and nothing else - with:
+  #   ansible-playbook -i inventory/hosts setup_hub_cluster2.yaml --ask-vault-pass --tags lvm
+  - ansible.builtin.import_role:
+      name: setup-lvm-storage
+    when: use_lvm_storage | bool
+    environment:
+      KUBECONFIG: "{{ hub2_kubeconfig }}"
+    tags:
+      - lvm
+
   # Same pool names as hub1, different addresses: this hub is on its own
   # network segment where hub1's MetalLB addresses are not routable, so
   # metallb_hub=hub2 selects the hub2 address for each hosted cluster

@@ -192,7 +192,10 @@ hub_worker_replicas: 3
 disconnected_install: false
 
 ## LVM Storage (true) or Ceph 9 via ODF external mode (false) for the hub's PVs.
-## Has to be decided before the hub is built. Pick Ceph for the backup/restore
+## Has to be decided before the hub is built. true installs LVM Storage as part
+## of the cluster build itself (roles/setup-lvm-storage, tag lvm - not part of
+## --tags acm), so every hub, and the SNO (sno_lvm_storage), comes up with
+## lvms-vg1 as its default StorageClass. Pick Ceph for the backup/restore
 ## demo: LVM Storage ships no VolumeSnapshotClass, so oadp_backup_method=csi -
 ## the only trustworthy control-plane restore - is not available on it.
 use_lvm_storage: true

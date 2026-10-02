@@ -22,6 +22,10 @@
 ## the real internet first, so a "disconnected" install cannot quietly succeed
 ## for the wrong reason.
 ##
+## LVM Storage (use_lvm_storage) is installed by setup-lvm-storage as part
+## of the build, tag lvm, so --skip-tags acm keeps it; --tags lvm adds just
+## that to a hub that is already up.
+##
 ## Either mode ends in the same setup-hub-acm import, so --tags acm re-runs
 ## just the day-2 part against whichever hub the flag selects:
 ##   ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass --tags acm
@@ -121,6 +125,20 @@
     vars:
       kubeconfig_path: "{{ hub_kubeconfig }}"
     when: hub_disconnected | bool
+
+  # LVM Storage as part of the build, not of the day-2 ACM step: a hub built
+  # with --skip-tags acm still comes up with a default StorageClass (lvms-vg1)
+  # on the workers' storage_worker<N>.qcow2 disks. Off on the Ceph path
+  # (use_lvm_storage: false), where ODF wants openshift-storage to itself.
+  # On a hub that is already up, add it - and nothing else - with:
+  #   ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass --tags lvm
+  - ansible.builtin.import_role:
+      name: setup-lvm-storage
+    when: use_lvm_storage | bool
+    environment:
+      KUBECONFIG: "{{ hub_kubeconfig }}"
+    tags:
+      - lvm
 
   # One single-address MetalLB pool per hosted cluster, from
   # hosted_cluster_metallb_pools in vars.yaml.
