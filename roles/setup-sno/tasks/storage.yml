@@ -1,0 +1,81 @@
+---
+# LVM Storage on the SNO, so it has a default StorageClass (lvms-vg1) like
+# the hub. Runs after the install when use_lvm_storage is true
+# (sno_lvm_storage), or on its own against a running SNO:
+#
+#   ansible-playbook -i inventory/hosts setup_sno.yaml --ask-vault-pass --tags snostorage
+#
+# LVMS needs an EMPTY disk, and the SNO is built with exactly one - RHCOS is
+# on it. So a second one is created and hot-plugged into the running VM,
+# persistently. After the install, not at build time, on purpose: the agent
+# installer would otherwise be choosing between two disks, and the
+# rootDeviceHints pin is the only thing keeping it off the empty one. The
+# same step therefore serves a new SNO and one built before this existed,
+# with no reboot either way.
+
+- name: Fail unless the SNO is installed
+  ansible.builtin.stat:
+    path: "{{ sno_install_folder }}/auth/kubeconfig"
+  register: sno_storage_kubeconfig
+
+- name: Say so
+  ansible.builtin.assert:
+    that: sno_storage_kubeconfig.stat.exists
+    fail_msg: >-
+      No {{ sno_install_folder }}/auth/kubeconfig, so there is no SNO to add
+      storage to yet. Build it first (setup_sno.yaml), then run --tags snostorage.
+
+# auth/kubeconfig exists from the moment the ISO is built, so it says
+# nothing about whether the install finished. The API does.
+- name: Wait for the cluster to answer and be Available
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusterversion version
+      -o 'jsonpath={.status.conditions[?(@.type=="Available")].status}'
+  environment:
+    KUBECONFIG: "{{ sno_install_folder }}/auth/kubeconfig"
+    PATH: "{{ sno_install_folder }}:{{ lookup('env', 'PATH') }}"
+  register: sno_storage_cv
+  retries: 30
+  delay: 20
+  until: sno_storage_cv.stdout == 'True'
+  changed_when: false
+
+- name: Create the storage disk
+  ansible.builtin.command:
+    cmd: >-
+      qemu-img create -f qcow2 -o preallocation=metadata
+      {{ sno_vm_folder }}/{{ sno_name }}_storage.qcow2 {{ sno_storage_disk_gb }}G
+    creates: "{{ sno_vm_folder }}/{{ sno_name }}_storage.qcow2"
+
+- name: List the disks the VM has
+  ansible.builtin.command:
+    cmd: virsh domblklist {{ sno_name }} --details
+  register: sno_storage_blk
+  changed_when: false
+
+# --live into the running guest, --persistent into the domain definition, so
+# it is there after the next reboot too. vdb: the root disk is vda
+# (sno_installation_disk), the ISO is on SATA.
+- name: Attach it to the SNO
+  ansible.builtin.command:
+    cmd: >-
+      virsh attach-disk {{ sno_name }}
+      {{ sno_vm_folder }}/{{ sno_name }}_storage.qcow2 {{ sno_storage_disk_target }}
+      --driver qemu --subdriver qcow2 --cache none --targetbus virtio
+      --persistent --live
+  when: (sno_vm_folder ~ '/' ~ sno_name ~ '_storage.qcow2') not in sno_storage_blk.stdout
+  changed_when: true
+
+- name: Install LVM Storage on the SNO
+  ansible.builtin.include_role:
+    name: setup-lvm-storage
+    apply:
+      tags: [sno, snostorage]
+      environment:
+        KUBECONFIG: "{{ sno_install_folder }}/auth/kubeconfig"
+        PATH: "{{ sno_install_folder }}:{{ lookup('env', 'PATH') }}"
+  vars:
+    # The SNO is a connected install whatever the hubs are.
+    lvm_catalog_source: redhat-operators
+    disconnected_install: false

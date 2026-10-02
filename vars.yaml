@@ -690,6 +690,14 @@ sno_memory: 32768
 sno_vcpus: 12
 sno_disk_gb: 200
 
+## LVM Storage on the SNO, as on the hub: a second disk of this size is
+## hot-plugged into the VM after the install and handed to LVMS, which makes
+## lvms-vg1 the default StorageClass. Follows use_lvm_storage; set
+## sno_lvm_storage: false to keep the SNO without storage.
+## Add it to a running SNO with: setup_sno.yaml --tags snostorage
+sno_lvm_storage: "{{ use_lvm_storage }}"
+sno_storage_disk_gb: 100
+
 ## A second, unconfigured NIC on the containerlab fabric, added at build time.
 ## Off by default: this builds a cluster and nothing about a cluster needs the
 ## fabric.

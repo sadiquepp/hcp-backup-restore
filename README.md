@@ -407,7 +407,7 @@ Before running it:
   `<ocp_major_version>.<ocp_minor_version>`, i.e. what the rest of the lab
   installs) and `mirror_catalog_operator_packages`. That last list is what gets
   mirrored beyond the release payload; it already covers the operators
-  `setup-hub-acm` installs (ACM, MCE, LVM Storage, MetalLB, OADP, cincinnati),
+  the hub installs (ACM, MCE, LVM Storage, MetalLB, OADP, cincinnati),
   so add anything else your lab needs **before** the mirror runs rather than
   after.
 - Mirroring the release payload plus those catalogs pulls thousands of images -
@@ -462,11 +462,15 @@ The hub needs a PV provider before anything with a PVC (the hosted clusters'
 etcd, the hello-openshift sample used in the backup/restore walkthrough) will
 schedule.
 There are two options, and the choice has to be made **before** the hub is
-built, because `setup-hub-acm` acts on it during bring-up:
+built, because the hub build acts on it:
 
 - **LVM Storage** (default) - `use_lvm_storage: true` in `vars.yaml`. Nothing
-  else to do; the sections below install it as part of the hub. Good enough to
-  stand up hosted clusters and run workloads on them.
+  else to do: `roles/setup-lvm-storage` installs it as part of the cluster
+  build itself (tag `lvm`), right after the cluster operators settle and
+  before the ACM step - so a hub built with `--skip-tags acm` still has
+  `lvms-vg1` as its default StorageClass. Good enough to stand up hosted
+  clusters and run workloads on them. The SNO (`setup_sno.yaml`) follows the
+  same switch: it gets a second disk and LVM Storage after its install.
 - **Ceph 9 via ODF external mode** - set `use_lvm_storage: false`, then build
   the Ceph cluster and attach it with the two `setup_ceph*.yaml` playbooks,
   before the AgentServiceConfig step - that step's PVCs need a default
@@ -486,11 +490,21 @@ built, because `setup-hub-acm` acts on it during bring-up:
 
 ### Setup Hub Cluster
 
-Deploys an OpenShift cluster with ACM, LVM-Storage, MetalLB, and the OADP
+Deploys an OpenShift cluster with LVM-Storage, then ACM, MetalLB, and the OADP
 operator. LVM-Storage is skipped when `use_lvm_storage: false`.
 
 ```bash
 ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass
+```
+
+LVM Storage is part of the build, not of the `acm` step: `--skip-tags acm`
+keeps it, `--tags acm` does not re-run it. To add it - and nothing else - to
+a hub that is already up (one built before this, or with `--skip-tags acm`
+when LVM Storage was still part of `acm`):
+
+```bash
+ansible-playbook -i inventory/hosts setup_hub_cluster.yaml --ask-vault-pass --tags lvm
+ansible-playbook -i inventory/hosts setup_sno.yaml --ask-vault-pass --tags snostorage   # the SNO's equivalent
 ```
 
 One playbook, both modes - which hub it builds follows `disconnected_install`
@@ -1788,8 +1802,9 @@ ansible-playbook -i inventory/hosts setup_bm_host.yaml --ask-vault-pass
 
 ### Switching the hub off LVM Storage
 
-`use_lvm_storage` in `vars.yaml` gates both the LVM Storage operator
-Subscription and the `LVMCluster` CR in `roles/setup-hub-acm`:
+`use_lvm_storage` in `vars.yaml` gates `roles/setup-lvm-storage` - the LVM
+Storage operator Subscription and the `LVMCluster` CR - in every hub build and
+the SNO's storage step:
 
 ```yaml
 use_lvm_storage: false
@@ -2043,7 +2058,8 @@ delegates.
 
 | Role            | Responsibility                                                        |
 | --------------- | --------------------------------------------------------------------- |
-| `setup-hub-acm` | Installs ACM, LVM-Storage, MetalLB, and OADP operator subscriptions, and creates one single-address MetalLB `IPAddressPool` + `L2Advertisement` per hosted cluster. LVM-Storage (operator + `LVMCluster`) is skipped when `use_lvm_storage: false` |
+| `setup-lvm-storage` | Installs LVM-Storage (operator + `LVMCluster`) and waits for the `lvms-vg1` default StorageClass. Run by the hub builds (tag `lvm`, outside `acm`) and the SNO's `snostorage` step; skipped when `use_lvm_storage: false` |
+| `setup-hub-acm` | Installs ACM, MetalLB, and OADP operator subscriptions, and creates one single-address MetalLB `IPAddressPool` + `L2Advertisement` per hosted cluster |
 | `setup-oadp`    | Creates the cloud-credentials secret and DataProtectionApplication CR; with `oadp_backup_method=csi` also labels the VolumeSnapshotClass Velero selects CSI snapshot classes by |
 | `setup-ceph-vm` | Creates the ceph1-3 + cephadmin VMs and attaches the raw OSD disks |
 | `setup-ceph-prereqs` | Registers the Ceph nodes with subscription-manager (no Satellite), enables the RHCS 9 tools repo, installs cephadm, and installs `pull_secret` as each node's podman authfile |
