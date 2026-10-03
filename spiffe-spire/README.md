@@ -520,7 +520,7 @@ By hand, on either cluster:
 
 ```bash
 export KUBECONFIG=/var/lib/libvirt/images/hub_install/auth/kubeconfig
-S="oc -n zero-trust-workload-identity-manager exec spire-server-0 -c spire-server -- /opt/spire/bin/spire-server"
+S="oc -n zero-trust-workload-identity-manager exec spire-server-0 -c spire-server -- /proc/1/exe"
 $S agent list                                    # one per worker, k8s_psat
 $S entry show                                    # echo-server and client; no intruder
 $S federation show -trustDomain sno.mylab.com
@@ -537,7 +537,7 @@ oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py \
 | `SpireServer` never Ready, PVC `Pending` | `oc -n zero-trust-workload-identity-manager get pvc,pv` and `oc get sc` - no `lvms-vg1`? `./build-lab.sh --only lvm`; `oc -n openshift-storage get lvmcluster -o yaml` says why LVM Storage is not Ready |
 | agents fewer than workers | `oc -n zero-trust-workload-identity-manager logs ds/spire-agent`; node attestation errors name the cause |
 | ClusterSPIFFEID `.status` empty | missing or wrong `spec.className` |
-| `executable file spire-server not found in $PATH` | the server image runs the binary as its entrypoint and does not put it on `$PATH`: call it as `/opt/spire/bin/spire-server` (`spire_server_cli`; the workshop's `spire` helper does) |
+| `executable file ... spire-server not found` | the server image keeps the binary neither on `$PATH` nor at upstream's `/opt/spire/bin`; it is the container's entrypoint, so call it as `/proc/1/exe` (`spire_server_cli`; the workshop's `spire` helper does) |
 | pod has no `/svid/svid.pem` | `oc -n spiffe-demo logs deploy/<pod> -c spiffe-helper` - `no identity issued` means no entry matches the pod |
 | `federation refresh` fails | the message names DNS (`no such host`), the Route (connection refused / 503) or the endpoint's SVID (`x509`) |
 | cross-cluster call `SERVER NOT TRUSTED` | the pod's bundle lacks the peer CA: `federatesWith` on the ClusterSPIFFEID, then wait for spiffe-helper to rewrite it |

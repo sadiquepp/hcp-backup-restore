@@ -98,11 +98,13 @@ spire_server_ca_subject:
   organization: mylab
   commonName: SPIRE Server CA
 spire_server_log_level: info
-## The spire-server CLI inside the server container, for `oc exec`. A full
-## path: Red Hat's image runs it as the entrypoint and does not put it on
-## $PATH (`executable file spire-server not found in $PATH` otherwise). The
-## path Red Hat's own docs use.
-spire_server_cli: /opt/spire/bin/spire-server
+## The spire-server CLI inside the server container, for `oc exec`.
+## /proc/1/exe, not a path in the image: the server container's PID 1 IS
+## spire-server (the image's entrypoint; the pod does not share a process
+## namespace), so this is the binary wherever the image keeps it. Red Hat's
+## image keeps it neither on $PATH nor at upstream's /opt/spire/bin - both
+## fail with "executable file ... not found".
+spire_server_cli: /proc/1/exe
 ## Required by the SpireServer API even when the OIDC discovery provider is
 ## not deployed (it is not, here). Only used for JWT-SVIDs.
 spire_server_jwt_issuer: "https://oidc-discovery.{{ spire_c.apps_domain }}"
