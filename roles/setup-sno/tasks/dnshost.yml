@@ -11,9 +11,10 @@
 # the kubelet at https://<node name>:10250 and got
 #   dial tcp: lookup sno on 172.30.0.10:53: no such host
 #
-# A libvirt DNS host entry, --live and --config: dnsmasq answers at once,
-# with no reboot of the network or the node, and keeps answering after a host
-# reboot. Safe to run against a live SNO on its own:
+# A libvirt DNS host entry, --live and --config: libvirt's dnsmasq answers
+# at once, with no reboot of the network or the node, and keeps answering
+# after a host reboot. On a running SNO the node's own dnsmasq cache is then
+# cleared too (below). Safe to run against a live SNO on its own:
 #   ansible-playbook -i inventory/hosts setup_sno.yaml --ask-vault-pass --tags snodns
 
 - name: Read the default network's DNS host entries
@@ -32,4 +33,44 @@
       --live --config
   when: >-
     ('<hostname>' ~ sno_name ~ '</hostname>') not in sno_dns_net_xml.stdout
+  register: sno_dns_added
   changed_when: true
+
+# On a FRESH build this runs before the VM exists, so nothing has looked the
+# name up yet. On a running SNO something already has - and got "no such
+# host" - and the SNO's own dnsmasq (single-node.conf, port 53 on the node
+# address, first in the node's resolv.conf and so first for cluster DNS)
+# keeps answering from that cached failure. Confirmed live: lookups kept
+# failing after this entry was added, until dnsmasq was sent SIGHUP, which
+# clears its cache and rereads its config without a restart.
+- name: See whether the SNO is up already
+  ansible.builtin.command:
+    cmd: oc get node {{ sno_name }} -o name
+  environment:
+    KUBECONFIG: "{{ sno_install_folder }}/auth/kubeconfig"
+    PATH: "{{ sno_install_folder }}:{{ lookup('env', 'PATH') }}"
+  register: sno_dns_node
+  changed_when: false
+  failed_when: false
+  when: sno_dns_added is changed
+
+# --to-namespace=default: oc debug's own throwaway namespace can race its
+# service account ("serviceaccount default not found"), which is not a DNS
+# fault and is not worth failing on.
+- name: Clear the node's dnsmasq cache of the old "no such host"
+  ansible.builtin.command:
+    cmd: >-
+      oc debug node/{{ sno_name }} -q --to-namespace=default --
+      chroot /host pkill -HUP dnsmasq
+  environment:
+    KUBECONFIG: "{{ sno_install_folder }}/auth/kubeconfig"
+    PATH: "{{ sno_install_folder }}:{{ lookup('env', 'PATH') }}"
+  register: sno_dns_hup
+  retries: 3
+  delay: 10
+  until: sno_dns_hup.rc == 0
+  changed_when: true
+  when:
+    - sno_dns_added is changed
+    - sno_dns_node.rc | default(1) == 0
+
