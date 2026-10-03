@@ -93,7 +93,7 @@
   ansible.builtin.command:
     cmd: >-
       oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server --
-      spire-server agent list
+      {{ spire_server_cli }} agent list
   register: spire_sp_agents
   retries: "{{ spire_wait_retries }}"
   delay: "{{ spire_wait_delay }}"
@@ -107,7 +107,7 @@
   ansible.builtin.command:
     cmd: >-
       oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server --
-      spire-server bundle show
+      {{ spire_server_cli }} bundle show
   register: spire_sp_bundle
   changed_when: false
 

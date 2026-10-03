@@ -24,7 +24,7 @@
       want=$(oc -n {{ spire_operator_namespace }} get daemonset spire-agent \
                -o jsonpath={.status.desiredNumberScheduled})
       have=$(oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server -- \
-               spire-server agent list | sed -n 's/^Found \([0-9]*\) attested agent.*/\1/p')
+               {{ spire_server_cli }} agent list | sed -n 's/^Found \([0-9]*\) attested agent.*/\1/p')
       echo "${have:-0}/$want"
       [ "${have:-0}" -ge "$want" ]
   args:
@@ -59,7 +59,7 @@
   ansible.builtin.command:
     cmd: >-
       oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server --
-      spire-server entry show
+      {{ spire_server_cli }} entry show
       -spiffeID spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_demo_namespace }}/sa/{{ item }}
   loop: [echo-server, client, intruder]
   register: spire_vf_entries

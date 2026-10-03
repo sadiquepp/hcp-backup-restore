@@ -98,6 +98,11 @@ spire_server_ca_subject:
   organization: mylab
   commonName: SPIRE Server CA
 spire_server_log_level: info
+## The spire-server CLI inside the server container, for `oc exec`. A full
+## path: Red Hat's image runs it as the entrypoint and does not put it on
+## $PATH (`executable file spire-server not found in $PATH` otherwise). The
+## path Red Hat's own docs use.
+spire_server_cli: /opt/spire/bin/spire-server
 ## Required by the SpireServer API even when the OIDC discovery provider is
 ## not deployed (it is not, here). Only used for JWT-SVIDs.
 spire_server_jwt_issuer: "https://oidc-discovery.{{ spire_c.apps_domain }}"

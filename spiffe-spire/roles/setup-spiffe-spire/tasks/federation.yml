@@ -38,7 +38,7 @@
   ansible.builtin.shell:
     cmd: >-
       set -o pipefail;
-      s="oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server -- spire-server";
+      s="oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server -- {{ spire_server_cli }}";
       $s federation show -trustDomain {{ spire_peer.trust_domain }} &&
       $s bundle list -id spiffe://{{ spire_peer.trust_domain }} | grep -c 'BEGIN CERTIFICATE'
   args:
@@ -58,7 +58,7 @@
   ansible.builtin.command:
     cmd: >-
       oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server --
-      spire-server federation refresh -id {{ spire_peer.trust_domain }}
+      {{ spire_server_cli }} federation refresh -id {{ spire_peer.trust_domain }}
   register: spire_fd_refresh
   retries: 12
   delay: 10

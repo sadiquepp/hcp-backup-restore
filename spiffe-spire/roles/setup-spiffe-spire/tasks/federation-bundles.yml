@@ -61,7 +61,7 @@
   ansible.builtin.command:
     cmd: >-
       oc --kubeconfig {{ spire_clusters[item].kubeconfig }} -n {{ spire_operator_namespace }}
-      exec spire-server-0 -c spire-server -- spire-server bundle show -format spiffe
+      exec spire-server-0 -c spire-server -- {{ spire_server_cli }} bundle show -format spiffe
   loop: [hub, sno]
   register: spire_fb_bundle
   changed_when: false

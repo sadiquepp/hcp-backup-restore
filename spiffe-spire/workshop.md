@@ -202,7 +202,7 @@ lab hub          # oc -> the hub, and $TD, $PEER_TD, $APPS, $SPIRE_SC, $M to mat
 | `$DEMO_NS` | the demo namespace | `spiffe-demo` |
 | `$CLASS` | the class every ClusterSPIFFEID must name | `zero-trust-workload-identity-manager-spire` |
 | `$LABEL` | the pod label the registration will select | `spiffe.mylab.com/identity` |
-| `spire <args>` | the `spire-server` CLI, inside the SPIRE server pod | `oc -n $ZT_NS exec spire-server-0 -c spire-server -- spire-server <args>` |
+| `spire <args>` | the `spire-server` CLI, inside the SPIRE server pod | `oc -n $ZT_NS exec spire-server-0 -c spire-server -- /opt/spire/bin/spire-server <args>` |
 | `inpod <deploy> <cmd>` | a command in a demo pod's `app` container | `oc -n $DEMO_NS exec deploy/<deploy> -c app -- <cmd>` |
 | `call <from> <url> <id> [--no-cert]` | the demo client, run in pod `<from>` | `inpod <from> python3 /app/spiffe_client.py <url> <id>` |
 | `svid <deploy>` | the SPIFFE ID, issuer and validity of that pod's SVID | a two-line Python decode, see `type svid` |
