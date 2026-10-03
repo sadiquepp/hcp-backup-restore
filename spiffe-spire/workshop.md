@@ -329,6 +329,13 @@ oc wait spireserver/cluster --for=condition=Ready --timeout=10m
   because SPIFFE has no revocation: an SVID stops being trusted when it
   expires, so expiry is the revocation. Agents renew them at half-life; no
   one ever does it by hand.
+- **`jwtIssuer`** is the `iss` claim the server writes into JWT-SVIDs, and
+  the API requires it even if you never issue one. It is only a name here:
+  nothing serves `https://oidc-discovery.$APPS`, and you will find no Route
+  for it. That Route belongs to the OIDC discovery provider (a
+  `SpireOIDCDiscoveryProvider` CR, whose `managedRoute` makes one with this
+  host), which publishes the JWT signing keys for outside verifiers - and
+  which this lab leaves out on purpose (README, "The demo").
 
 **Check**
 
