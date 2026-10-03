@@ -9,9 +9,15 @@
 # into <manifest dir>/boutique/, `oc kustomize` of it is written to
 # <manifest dir>/40-boutique.yaml, and that file is applied.
 
+- name: Fail unless the SPIRE server is up
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_retries: 1
+    spire_sr_delay: 0
+
 - name: Fail unless SPIRE is up
   ansible.builtin.command:
-    cmd: oc wait spireserver/cluster spiffecsidriver/cluster --for=condition=Ready --timeout=10s
+    cmd: oc wait spiffecsidriver/cluster --for=condition=Ready --timeout=10s
   register: spire_bq_ready
   changed_when: false
   failed_when: false
@@ -20,7 +26,7 @@
   ansible.builtin.assert:
     that: spire_bq_ready.rc == 0
     fail_msg: >-
-      The SpireServer or SpiffeCSIDriver on {{ spire_c.name }} is not Ready
+      The SpiffeCSIDriver on {{ spire_c.name }} is not Ready
       ({{ spire_bq_ready.stderr | default('') | trim }}). Run --tags spire first.
 
 - name: Look for a federation with the peer trust domain

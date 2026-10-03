@@ -4,17 +4,24 @@
 # it looks at outcomes (Ready conditions, entries, SVIDs, handshakes), not at
 # how the objects were written.
 #
-#   1. the three operands are Ready and every agent has attested
+#   1. the server is healthy, the agent and CSI driver Ready, and every
+#      agent has attested
 #   2. there is a registration entry for echo-server and client, none for
 #      intruder
 #   3. client -> echo-server over mTLS: allowed, and each end is who it
 #      should be
 #   4. intruder has no SVID, and the server refuses it when it calls anyway
 
-- name: 1. The operands are Ready
+# The server by its conditions, not Ready: see server-ready.yml.
+- name: 1. The SPIRE server is healthy
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_retries: 3
+
+- name: 1. The other operands are Ready
   ansible.builtin.command:
     cmd: oc wait {{ item }}/cluster --for=condition=Ready --timeout=30s
-  loop: [spireserver, spireagent, spiffecsidriver]
+  loop: [spireagent, spiffecsidriver]
   changed_when: false
 
 - name: 1. Every agent has attested

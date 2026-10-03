@@ -18,13 +18,15 @@
       {{ spire_fb_kc.results | rejectattr('stat.exists') | map(attribute='item')
          | map('extract', spire_clusters) | map(attribute='kubeconfig') | join(', ') }}
 
-- name: Wait for both SPIRE servers to be Ready
-  ansible.builtin.command:
-    cmd: >-
-      oc --kubeconfig {{ spire_clusters[item].kubeconfig }}
-      wait spireserver/cluster --for=condition=Ready --timeout=60s
+# Healthy, not Ready: see server-ready.yml.
+- name: Wait for both SPIRE servers to be healthy
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_kubeconfig: "{{ spire_clusters[spire_fb_c].kubeconfig }}"
+    spire_sr_retries: 6
   loop: [hub, sno]
-  changed_when: false
+  loop_control:
+    loop_var: spire_fb_c
 
 - name: Read each server's bundle endpoint profile and Route host
   ansible.builtin.shell:

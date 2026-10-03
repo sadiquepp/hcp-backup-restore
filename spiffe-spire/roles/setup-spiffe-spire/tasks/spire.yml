@@ -65,11 +65,16 @@
 # when everything it owns is up. The CR can be briefly absent from the cache
 # right after the apply, hence the retries around oc wait rather than one
 # long wait.
-- name: Wait for each operand to report Ready
+#
+# Not the SpireServer's Ready: with this lab's federation Route it stays
+# False by design - server-ready.yml says why and checks the rest.
+- name: Wait for the SPIRE server
+  ansible.builtin.include_tasks: server-ready.yml
+
+- name: Wait for each other operand to report Ready
   ansible.builtin.command:
     cmd: oc wait {{ item }}/cluster --for=condition=Ready --timeout=60s
   loop:
-    - spireserver
     - spireagent
     - spiffecsidriver
   register: spire_sp_ready

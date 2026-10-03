@@ -1,0 +1,58 @@
+---
+# Is the SpireServer healthy? Not `oc wait --for=condition=Ready`.
+#
+# With federation on and managedRoute "false" - this lab's choice, see
+# README "Why this lab's own federation Route" - the operator sets
+# RouteAvailable=False, reason FederationRouteDisabled, and its Ready
+# roll-up counts every False condition as a failure except three
+# rollout-in-progress reasons. So a healthy, federating server reports
+# Ready=False for good (operator source: pkg/controller/status/status.go
+# SetReadyCondition, pkg/controller/spire-server/routes.go). Found live:
+#   oc wait spireserver/cluster --for=condition=Ready  ->  timed out
+# while the bundle endpoint answered through the lab's Route.
+#
+# So: every condition must be True, except Ready/Degraded/CreateOnlyMode,
+# which are roll-ups or modes, and that one known-benign RouteAvailable.
+#
+# Takes: spire_sr_kubeconfig (optional; default the play's KUBECONFIG),
+#        spire_sr_retries, spire_sr_delay (default spire_wait_*).
+
+- name: Wait for the SPIRE server to be healthy
+  ansible.builtin.command:
+    cmd: >-
+      oc {{ ('--kubeconfig ' ~ spire_sr_kubeconfig) if spire_sr_kubeconfig | default('') else '' }}
+      get spireserver cluster
+      -o 'jsonpath={range .status.conditions[*]}{.type}={.status}/{.reason}{"\n"}{end}'
+  register: spire_sr
+  retries: "{{ spire_sr_retries | default(spire_wait_retries) }}"
+  delay: "{{ spire_sr_delay | default(spire_wait_delay) }}"
+  until: >-
+    spire_sr.rc == 0 and
+    (spire_sr.stdout_lines | select('search', '=') | list | length) > 0 and
+    (spire_sr.stdout_lines
+       | reject('match', '^(Ready|Degraded|CreateOnlyMode)=')
+       | reject('match', '^RouteAvailable=False/FederationRouteDisabled$')
+       | select('search', '=False/') | list | length) == 0
+  changed_when: false
+  failed_when: false
+
+- name: Fail if it is not
+  ansible.builtin.assert:
+    that:
+      - spire_sr.rc == 0
+      - (spire_sr.stdout_lines | select('search', '=') | list | length) > 0
+      - >-
+        (spire_sr.stdout_lines
+           | reject('match', '^(Ready|Degraded|CreateOnlyMode)=')
+           | reject('match', '^RouteAvailable=False/FederationRouteDisabled$')
+           | select('search', '=False/') | list | length) == 0
+    fail_msg: >-
+      The SpireServer{{ (' on ' ~ spire_sr_kubeconfig) if spire_sr_kubeconfig | default('') else '' }}
+      is not healthy:
+      {{ (spire_sr.stdout_lines
+           | reject('match', '^(Ready|Degraded|CreateOnlyMode)=')
+           | reject('match', '^RouteAvailable=False/FederationRouteDisabled$')
+           | select('search', '=False/') | join(', '))
+         or (spire_sr.stderr | default('') | trim) or 'no status yet' }}.
+      Run --tags spire, or look at `oc get spireserver cluster -o yaml`.
+    quiet: true

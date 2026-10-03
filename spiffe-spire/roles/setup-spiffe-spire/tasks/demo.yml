@@ -3,9 +3,15 @@
 # that gives two of them an identity. Then wait for the two registered pods
 # to hold an SVID.
 
+- name: Fail unless the SPIRE server is up
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_retries: 1
+    spire_sr_delay: 0
+
 - name: Fail unless SPIRE is up
   ansible.builtin.command:
-    cmd: oc wait spireserver/cluster spiffecsidriver/cluster --for=condition=Ready --timeout=10s
+    cmd: oc wait spiffecsidriver/cluster --for=condition=Ready --timeout=10s
   register: spire_dm_ready
   changed_when: false
   failed_when: false
@@ -14,7 +20,7 @@
   ansible.builtin.assert:
     that: spire_dm_ready.rc == 0
     fail_msg: >-
-      The SpireServer or SpiffeCSIDriver on {{ spire_c.name }} is not Ready
+      The SpiffeCSIDriver on {{ spire_c.name }} is not Ready
       ({{ spire_dm_ready.stderr | default('') | trim }}). Run --tags spire first.
 
 - name: Render the namespace, workloads, Service and Route

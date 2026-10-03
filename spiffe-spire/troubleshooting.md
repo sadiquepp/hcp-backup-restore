@@ -245,3 +245,76 @@ svid client
 An alternative for a future rebuild: name the node `sno.sno.mylab.com` in
 agent-config.yaml, which the helper's zone already resolves. Not done: it
 changes the node name of every SNO, and the entry above is enough.
+
+---
+
+## Case 3 - federation on, and the SpireServer is never `Ready` again
+
+**Date:** 2026-10-03 · **Cluster:** hub · **Phase:** workshop Lab 7a
+
+**Status:** cause read from the operator's source; the lab no longer waits
+on `Ready` for the server.
+
+### Symptom
+
+Lab 7a's patch and Route applied, the server rolled, and the bundle endpoint
+answered through the lab's Route - but `Ready` never came:
+
+```text
+spireserver.operator.openshift.io/cluster patched
+route.route.openshift.io/spire-federation created
+partitioned roll out complete: 1 new pods have been updated...
+error: timed out waiting for the condition on spireservers/cluster
+{
+    "keys": [
+        {
+            "use": "x509-svid",
+            ...
+```
+
+### The trail
+
+Nothing on the cluster was wrong; the question was what `Ready` means. In
+the operator (release-1.1 source):
+
+- `pkg/controller/spire-server/routes.go` - with `federation` set and
+  `managedRoute: "false"`, `reconcileRoute` records
+  `RouteAvailable=False`, reason `FederationRouteDisabled`.
+- `pkg/controller/status/status.go`, `SetReadyCondition` - `Ready` is
+  False if any other condition is False, except Ready/Degraded/CreateOnlyMode
+  themselves and three rollout reasons (`StatefulSetNotReady`,
+  `DaemonSetNotReady`, `DeploymentNotReady`). `FederationRouteDisabled` is
+  not one of them, so it counts as a failure.
+
+So a server federating through a Route the operator did not make - this
+lab's deliberate choice, because the operator's would be
+`federation.<trust domain>`, outside the helper's DNS - reports `Ready=False`
+for as long as it runs.
+
+### Fix, and what the lab does now
+
+- `tasks/server-ready.yml`: the SpireServer is healthy when every condition
+  is True except the roll-ups (Ready, Degraded, CreateOnlyMode) and that one
+  `RouteAvailable=False/FederationRouteDisabled`. Used by `spire`, `verify`,
+  `demo`, `boutique`, `mesh` and the federation plays in place of
+  `oc wait spireserver/cluster --for=condition=Ready` - every one of which
+  would have timed out on a federated server.
+- The SPIRE agent and CSI driver are still waited on by `Ready`; their
+  roll-ups have no such condition.
+- The fake `oc` used for simulation now reports these conditions and times
+  out `oc wait ... Ready` on a federated server, as the real one does.
+- Workshop Lab 7a lists the conditions instead of waiting on `Ready`, and
+  says which two False lines are expected.
+
+To check by hand:
+
+```bash
+oc get spireserver cluster -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+# everything True, except:
+#   RouteAvailable=False FederationRouteDisabled
+#   Ready=False Failed
+```
+
+Worth raising with the operator's maintainers: a deliberately disabled
+managed Route should not fail the roll-up (or `FederationRouteDisabled`
+should be reported True / as a non-failure reason).

@@ -11,9 +11,15 @@
 # A namespace of its own, so it neither needs nor disturbs the ghostunnel
 # version in {{ spire_boutique_namespace }}.
 
+- name: Fail unless the SPIRE server is up
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_retries: 1
+    spire_sr_delay: 0
+
 - name: Fail unless SPIRE is up
   ansible.builtin.command:
-    cmd: oc wait spireserver/cluster spireagent/cluster spiffecsidriver/cluster --for=condition=Ready --timeout=10s
+    cmd: oc wait spireagent/cluster spiffecsidriver/cluster --for=condition=Ready --timeout=10s
   register: spire_ms_ready
   changed_when: false
   failed_when: false
@@ -22,7 +28,7 @@
   ansible.builtin.assert:
     that: spire_ms_ready.rc == 0
     fail_msg: >-
-      The SPIRE operands on {{ spire_c.name }} are not Ready
+      The SPIRE agent or CSI driver on {{ spire_c.name }} are not Ready
       ({{ spire_ms_ready.stderr | default('') | trim }}). Run --tags spire first.
 
 ## ---------------------------------------------------------------------------

@@ -838,9 +838,16 @@ spec:
 EOF
 oc apply -f "$M/lab07-federation-route.yaml"
 oc -n $ZT_NS rollout status statefulset/spire-server --timeout=5m
-oc wait spireserver/cluster --for=condition=Ready --timeout=5m
+oc get spireserver cluster -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
 curl -sk https://spire-federation.$APPS/ | head -c 200; echo
 ```
+
+Do not `oc wait` for `Ready` here: from now on it stays **False** on a
+healthy server. With `managedRoute: "false"` the operator records
+`RouteAvailable=False FederationRouteDisabled`, and its `Ready` roll-up
+counts any False condition as a failure. Every *other* condition in that
+list should be True; those two False lines are expected. (The lab's own
+checks read the conditions the same way.)
 
 The last line is the bundle, as JSON, fetched from the lab host through the
 helper and the router: the bundle is public, only the endpoint's *identity*
