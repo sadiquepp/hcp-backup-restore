@@ -1,0 +1,35 @@
+---
+# Make the SNO's node name resolve from inside the cluster.
+#
+# The node is named {{ sno_name }} - a single label (agent-config.yaml
+# hostname) - and anything that dials a node by its name looks that up through
+# cluster DNS, which forwards it to the node's resolver, libvirt's dnsmasq on
+# {{ sno_dns_server }}. dnsmasq answers a bare name only for hosts it knows:
+# the hub's nodes take DHCP leases, which registers their names; the SNO is
+# addressed statically and never takes one, so `{{ sno_name }}` was unknown.
+# The SPIRE agent's workload attestor is the first thing that cared - it calls
+# the kubelet at https://<node name>:10250 and got
+#   dial tcp: lookup sno on 172.30.0.10:53: no such host
+#
+# A libvirt DNS host entry, --live and --config: dnsmasq answers at once,
+# with no reboot of the network or the node, and keeps answering after a host
+# reboot. Safe to run against a live SNO on its own:
+#   ansible-playbook -i inventory/hosts setup_sno.yaml --ask-vault-pass --tags snodns
+
+- name: Read the default network's DNS host entries
+  ansible.builtin.command:
+    cmd: virsh net-dumpxml default
+  register: sno_dns_net_xml
+  changed_when: false
+
+- name: Publish the SNO's node name in libvirt's DNS
+  vars:
+    sno_dns_ip: "{{ lab_network_prefix }}.{{ ip_list[sno_name] }}"
+  ansible.builtin.command:
+    cmd: >-
+      virsh net-update default add dns-host
+      "<host ip='{{ sno_dns_ip }}'><hostname>{{ sno_name }}</hostname></host>"
+      --live --config
+  when: >-
+    ('<hostname>' ~ sno_name ~ '</hostname>') not in sno_dns_net_xml.stdout
+  changed_when: true

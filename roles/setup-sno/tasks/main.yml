@@ -14,6 +14,7 @@
 #   snoimage       fetch the installer, render the manifests, build the ISO
 #   snovm          the libvirt domain, booting that ISO
 #   snowait        block until the cluster is up
+#   snodns         the node name in libvirt's DNS (also part of snovm)
 #   snostorage     a second disk and LVM Storage, when use_lvm_storage is
 #                  true - so the SNO has a default StorageClass
 #
@@ -28,6 +29,15 @@
 - name: Build the agent ISO
   ansible.builtin.include_tasks: image.yml
   tags: [sno, snoimage]
+
+# Before the VM, so the name resolves from the first boot. Its own tag, so a
+# running SNO can get it without the destructive VM step: --tags snodns.
+- name: Publish the node name in libvirt's DNS
+  ansible.builtin.include_tasks:
+    file: dnshost.yml
+    apply:
+      tags: [sno, snovm, snodns]
+  tags: [sno, snovm, snodns]
 
 - name: Build the SNO VM
   ansible.builtin.include_tasks: vm.yml
