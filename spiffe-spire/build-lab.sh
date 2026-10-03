@@ -28,7 +28,8 @@
 #
 # STORAGE. The third step, lvm, is the base playbooks' own storage step:
 # ../setup_hub_cluster.yaml --tags lvm and ../setup_sno.yaml --tags
-# snostorage. A cluster built by the clusters step already has it (LVM
+# snodns,snostorage (snodns: the SNO's node name in libvirt's DNS, which the
+# SPIRE agent needs to reach its kubelet - see troubleshooting.md case 2). A cluster built by the clusters step already has it (LVM
 # Storage is part of the build when use_lvm_storage is true, --skip-tags acm
 # or not), so there it is a quick no-op; on a lab built before that, it is
 # what gives the hub and the SNO lvms-vg1 - the default StorageClass the
@@ -87,8 +88,9 @@ list_steps() {
   clusters   ../setup_hub_cluster.yaml --skip-tags acm and ../setup_sno.yaml,
              IN PARALLEL. Each skipped when its kubeconfig already exists
   lvm        per cluster: LVM Storage from the base playbooks (--tags lvm /
-             --tags snostorage) - lvms-vg1, the default StorageClass. A no-op
-             where the clusters step already did it
+             --tags snodns,snostorage) - lvms-vg1, the default StorageClass,
+             and the SNO's node name in DNS. A no-op where the clusters step
+             already did it
   preflight  per cluster: is the operator in redhat-operators, which channel,
              is there a StorageClass. Changes nothing
   operator   per cluster: Namespace, OperatorGroup, Subscription; waits for
@@ -311,7 +313,7 @@ EOF
         say "$(pos lvm)  LVM Storage on ${CLUSTERS[*]} (base playbooks)"
         for c in "${CLUSTERS[@]}"; do
             if [[ $c == hub ]]; then play_bg hub-lvm ../setup_hub_cluster.yaml --tags lvm
-            else play_bg sno-storage ../setup_sno.yaml --tags snostorage; fi
+            else play_bg sno-storage ../setup_sno.yaml --tags snodns,snostorage; fi
         done
         wait_all ;;
     preflight|operator|storage|spire|demo|verify|prep)
