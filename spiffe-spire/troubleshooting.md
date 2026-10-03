@@ -96,8 +96,9 @@ is then the place to read the real path from.
 
 **Date:** 2026-10-03 · **Cluster:** sno · **Phase:** workshop Lab 5, after the ClusterSPIFFEID
 
-**Status:** cause confirmed from the agent's log; the fix below is written
-and simulated, and awaits its first run on the live SNO.
+**Status:** fixed and confirmed on the live SNO (`svid client` shows
+`spiffe://sno.mylab.com/ns/spiffe-demo/sa/client`, issued by the SPIRE Server
+CA, valid 1h).
 
 ### Symptom
 
@@ -143,42 +144,104 @@ SVID.
    and it dials the kubelet **by node name** (the operator configures it
    with `node_name_env: MY_NODE_NAME`). The SNO's node is named `sno`, a
    single label, and cluster DNS (172.30.0.10) could not resolve it.
-3. **Why the hub is fine** (inferred, not yet checked on the hub itself -
-   `oc get nodes` there and `dig @192.168.122.1 <node>` would confirm).
-   Cluster DNS forwards what it cannot answer to
-   the node's resolver, libvirt's dnsmasq on 192.168.122.1. dnsmasq answers
-   bare names for the hosts it knows - and it learns a host's name from its
-   DHCP lease. The hub's nodes take leases. The SNO is addressed statically
-   from agent-config.yaml and never asks for one, so the `ip-dhcp-host`
-   reservation setup-sno makes is never used and `sno` stays unknown. The
-   helper's zone does have `sno.sno.mylab.com`, but nothing appends that
-   domain to a bare `sno`.
+3. **First fix, half right: the name in libvirt's DNS.** Cluster DNS
+   forwards what it cannot answer to the node's resolvers. The lab's
+   libvirt network did not know a bare `sno` - the SNO is addressed
+   statically, so its DHCP reservation is never used. A libvirt `dns-host`
+   entry made it answer:
+
+   ```text
+   # dig +short @192.168.122.1 sno
+   192.168.122.20
+   ```
+
+   and the pod still could not resolve it, even as the absolute name `sno.`:
+
+   ```text
+   # inpod client python3 -c "import socket; print(socket.gethostbyname('sno.'))"
+   socket.gaierror: [Errno -2] Name or service not known
+   ```
+4. **The resolver in front of libvirt.** Cluster DNS's upstreams on the SNO
+   are not just libvirt:
+
+   ```text
+   # oc -n openshift-dns exec ds/dns-default -c dns -- cat /etc/resolv.conf
+   nameserver 192.168.122.20
+   nameserver 192.168.122.1
+   ```
+
+   192.168.122.20 is the SNO itself, and on it:
+
+   ```text
+   # oc debug node/sno -q -- chroot /host sh -c 'ss -lunp | grep ":53 "; cat /etc/dnsmasq.d/*'
+   UNCONN 0 0 0.0.0.0:53 0.0.0.0:* users:(("dnsmasq",pid=2926,fd=4))
+   address=/apps.sno.mylab.com/192.168.122.20
+   address=/api-int.sno.mylab.com/192.168.122.20
+   address=/api.sno.mylab.com/192.168.122.20
+   ```
+
+   The single-node install's own dnsmasq (`single-node.conf`): it answers
+   the cluster's `api`, `api-int` and `*.apps` names itself and passes
+   everything else on. It had asked about `sno` before the libvirt entry
+   existed and cached the "no such host" - and as the first upstream, its
+   answer was final.
+5. **Confirmed by clearing that cache.** SIGHUP makes dnsmasq drop its
+   cache and reread its config, without a restart:
+
+   ```text
+   # oc debug node/sno -q -- chroot /host pkill -HUP dnsmasq && sleep 5 && \
+       inpod client python3 -c "import socket; print(socket.gethostbyname('sno'))"
+   192.168.122.20
+   # svid client
+   "URI", "spiffe://sno.mylab.com/ns/spiffe-demo/sa/client"   (notBefore 14:39:55, notAfter 15:40:05)
+   ```
+
+   A first attempt failed with `pods "sno-debug-..." is forbidden: ...
+   serviceaccount "default" not found` - `oc debug`'s throwaway namespace
+   racing its own service account, nothing to do with DNS. Re-running
+   worked; `--to-namespace=default` avoids it.
+
+**Why the hub never had this.** Its nodes are named by DHCP, with fully
+qualified names (`dhcp_fqdn` in setup-bm-host's `default-network.xml.j2`:
+`<node>.hub.mylab.com`), which libvirt forwards to the helper's zone. And it
+is a multi-node install, so there is no `single-node.conf` dnsmasq in front
+of anything. The SNO is the only cluster here whose node name is a bare,
+static `sno` - agent-config.yaml's `hostname`.
 
 ### Root cause
 
 A node name that resolves nowhere. Nothing in the base needed it before:
 the API, the ingress and the console are all reached by `api.` / `*.apps.`
 names. The SPIRE agent's attestor is the first client that dials a node by
-its own name.
+its own name. Then, once the name did resolve, a cached failure in the
+single-node install's own dnsmasq - the first resolver cluster DNS asks on
+an SNO - kept the old answer alive.
 
 ### Fix, and what the lab does now
 
 - setup-sno publishes the node name as a libvirt DNS host entry
-  (`virsh net-update default add dns-host ... --live --config`): dnsmasq
-  answers at once and after reboots, with no change to the node. It runs
-  before the VM is defined on a fresh build, and on its own against a live
-  SNO with `setup_sno.yaml --tags snodns`.
+  (`virsh net-update default add dns-host ... --live --config`). On a fresh
+  build it runs before the VM exists, so nothing has looked the name up yet
+  and there is no stale answer to clear.
+- On an SNO that is already running, the same step then sends the node's
+  dnsmasq SIGHUP (`oc debug ... --to-namespace=default`, retried), so the
+  cached "no such host" goes at once: `setup_sno.yaml --tags snodns`.
 - build-lab.sh's `lvm` step runs `--tags snodns,snostorage`, so an older
-  lab gets it with `./build-lab.sh --only lvm`.
+  lab gets both with `./build-lab.sh --only lvm`.
 - Nothing to restart afterwards: spiffe-helper retries every 30s and the
   agent re-attests on each try.
 
-The by-hand equivalent, on the lab host (the SNO is ip_list.sno, .20 here):
+By hand, on the lab host (the SNO is ip_list.sno, .20 here):
 
 ```bash
 virsh net-update default add dns-host \
   "<host ip='192.168.122.20'><hostname>sno</hostname></host>" --live --config
-dig +short @192.168.122.1 sno                     # 192.168.122.20
-oc -n $ZT_NS logs ds/spire-agent --since=2m | grep -c 'no such host'   # stops growing
+dig +short @192.168.122.1 sno                                   # 192.168.122.20
+oc debug node/sno -q --to-namespace=default -- chroot /host pkill -HUP dnsmasq
+inpod client python3 -c "import socket; print(socket.gethostbyname('sno'))"
 svid client
 ```
+
+An alternative for a future rebuild: name the node `sno.sno.mylab.com` in
+agent-config.yaml, which the helper's zone already resolves. Not done: it
+changes the node name of every SNO, and the entry above is enough.

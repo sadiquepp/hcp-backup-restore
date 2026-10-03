@@ -537,7 +537,7 @@ oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py \
 | `SpireServer` never Ready, PVC `Pending` | `oc -n zero-trust-workload-identity-manager get pvc,pv` and `oc get sc` - no `lvms-vg1`? `./build-lab.sh --only lvm`; `oc -n openshift-storage get lvmcluster -o yaml` says why LVM Storage is not Ready |
 | agents fewer than workers | `oc -n zero-trust-workload-identity-manager logs ds/spire-agent`; node attestation errors name the cause |
 | ClusterSPIFFEID `.status` empty | missing or wrong `spec.className` |
-| SNO only: `no identity issued`; agent log `lookup sno on 172.30.0.10:53: no such host` | the agent reaches the kubelet by node name, and the SNO's (`sno`) was not in DNS: `../setup_sno.yaml --tags snodns` (or `./build-lab.sh --only lvm`). [troubleshooting.md](troubleshooting.md) case 2 |
+| SNO only: `no identity issued`; agent log `lookup sno on 172.30.0.10:53: no such host` | the agent reaches the kubelet by node name, and the SNO's (`sno`) was not in DNS - and the SNO's own dnsmasq cached the failure: `../setup_sno.yaml --tags snodns` (or `./build-lab.sh --only lvm`) adds the name and clears that cache. [troubleshooting.md](troubleshooting.md) case 2 |
 | `executable file ... spire-server not found` | the server image keeps the binary neither on `$PATH` nor at upstream's `/opt/spire/bin`; it is the container's entrypoint, so call it as `/proc/1/exe` (`spire_server_cli`; the workshop's `spire` helper does) |
 | pod has no `/svid/svid.pem` | `oc -n spiffe-demo logs deploy/<pod> -c spiffe-helper` - `no identity issued` means no entry matches the pod |
 | `federation refresh` fails | the message names DNS (`no such host`), the Route (connection refused / 503) or the endpoint's SVID (`x509`) |
