@@ -207,6 +207,19 @@ lab hub          # oc -> the hub, and $TD, $PEER_TD, $APPS, $SPIRE_SC, $M to mat
 | `call <from> <url> <id> [--no-cert]` | the demo client, run in pod `<from>` | `inpod <from> python3 /app/spiffe_client.py <url> <id>` |
 | `svid <deploy>` | the SPIFFE ID, issuer and validity of that pod's SVID | a two-line Python decode, see `type svid` |
 
+**Every helper shows what it runs.** Before it does anything, a helper
+prints the call as you typed it with every variable expanded, then the `oc`
+command it actually runs - so `$PEER_APPS` and friends are never a mystery,
+and either line can be copied and run as it stands:
+
+```text
++ call client https://echo-spiffe-demo.apps.sno.mylab.com/ spiffe://sno.mylab.com/ns/spiffe-demo/sa/echo-server
+  = oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py https://echo-spiffe-demo.apps.sno.mylab.com/ spiffe://sno.mylab.com/ns/spiffe-demo/sa/echo-server
+```
+
+Those two lines go to stderr, so `spire bundle show -format spiffe > file`
+still writes only the bundle. `export LAB_ECHO=0` turns them off.
+
 **Every manifest is a file.** Each block writes into `$M` -
 `/root/spiffe-workshop-manifests/hub` or `.../sno`, set by `lab` - then
 applies it. Between the two you can look, and ask the API for its verdict
