@@ -551,5 +551,5 @@ oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py \
 | mesh-verify: load generator gets 200 from paymentservice | the `AuthorizationPolicy` `paymentservice` is missing, or its principal's trust domain differs from `meshConfig.trustDomain` |
 | mesh: `Istio` not Ready | `oc get istio default -o yaml` - the conditions name the cause; `oc -n openshift-operators logs deploy/servicemesh-operator3` |
 
-Non-trivial debugging on a live cluster goes in a `troubleshooting.md` case
-file here, in the format of [`udn-bgp-evpn/troubleshooting.md`](../udn-bgp-evpn/troubleshooting.md).
+Non-trivial debugging on a live cluster goes in [troubleshooting.md](troubleshooting.md)
+(case 1: where `spire-server` lives in Red Hat's image), in the format of [`udn-bgp-evpn/troubleshooting.md`](../udn-bgp-evpn/troubleshooting.md).
