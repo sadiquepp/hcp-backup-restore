@@ -8,7 +8,11 @@
    The installer needs api.<zone> to resolve before `agent wait-for` can watch
    the install, and the router needs *.apps.<zone> before any route works - so
    this zone is rendered whether or not the cluster exists yet. A zone serving
-   an address nothing answers on is harmless; a missing zone is not. #}
+   an address nothing answers on is harmless; a missing zone is not.
+
+   One file per single-node cluster: tasks/main.yml loops this with dns_sno
+   set to the cluster's name. #}
+{% set sno_zone = dns_sno | default(sno_name) %}
 $TTL 1D
 @	IN SOA	helper.{{ hub_domain }}. root.{{ hub_domain }}. (
 					0	; serial
@@ -17,7 +21,7 @@ $TTL 1D
 					1W	; expire
 					3H )	; minimum
 		NS	helper.{{ hub_domain }}.
-{{ "%-15s" | format(sno_name) }}A	{{ lab_network_prefix }}.{{ ip_list[sno_name] }}
-api		A	{{ lab_network_prefix }}.{{ ip_list[sno_name] }}
-api-int		A	{{ lab_network_prefix }}.{{ ip_list[sno_name] }}
-*.apps		A	{{ lab_network_prefix }}.{{ ip_list[sno_name] }}
+{{ "%-15s" | format(sno_zone) }}A	{{ lab_network_prefix }}.{{ ip_list[sno_zone] }}
+api		A	{{ lab_network_prefix }}.{{ ip_list[sno_zone] }}
+api-int		A	{{ lab_network_prefix }}.{{ ip_list[sno_zone] }}
+*.apps		A	{{ lab_network_prefix }}.{{ ip_list[sno_zone] }}

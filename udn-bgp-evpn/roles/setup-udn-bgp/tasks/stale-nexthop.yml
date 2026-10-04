@@ -117,7 +117,7 @@
 - name: Wait again for this cluster's BGP sessions to the border leaf
   ansible.builtin.command:
     cmd: >-
-      docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
+      docker exec {{ udn_bgp_peer_leaf_container }} vtysh
       -c 'show bgp neighbor {{ clab_fabric_prefix }}.{{ ip_list[item.ip_key] }}'
   delegate_to: "{{ clab_exec_host }}"
   loop: "{{ udn_bgp_cluster_nodes }}"

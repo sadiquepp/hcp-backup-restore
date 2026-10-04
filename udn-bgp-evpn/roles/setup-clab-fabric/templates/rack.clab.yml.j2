@@ -1,0 +1,57 @@
+{#
+  One further fabric segment's leaf, as a containerlab lab of its own:
+  {{ clab_rack_lab }}. Rendered by tasks/rack-clab.yml.
+
+  Its own lab rather than another node in {{ clab_lab_name }}.clab.yml, so
+  that adding it never redeploys leaf1, leaf2 or the spine - a deploy with
+  --reconfigure recreates every node of the lab it is given, and this lab has
+  one node. The uplink to the spine is made afterwards with
+  `containerlab tools veth create`, for the same reason: the two ends are in
+  different labs.
+
+    {{ clab_rack_seg.leaf }} lo0 {{ clab_rack_seg.leaf_loopback }}
+    {{ clab_rack_seg.leaf }}:eth1  on {{ clab_rack_bridge }}, {{ clab_rack_seg.prefix }}.{{ clab_rack_seg.router_octet }}/{{ clab_rack_seg.netmask_bits }} - this rack's nodes
+    {{ clab_rack_seg.leaf }}:eth10 <-> spine:{{ clab_rack_seg.spine_link.spine_if }}   {{ clab_rack_seg.spine_link.leaf_ip }} / {{ clab_rack_seg.spine_link.spine_ip }}
+
+  Its role is leaf1's, for this rack: a static /32 to each node's VTEP, the
+  rack's VTEP /24 originated into the fabric, and EVPN transit between its
+  nodes and the spine. No VRFs and no VTEP of its own.
+#}
+name: {{ clab_rack_lab }}
+
+mgmt:
+  network: {{ clab_rack_lab }}-mgmt
+  ipv4-subnet: {{ clab_rack_seg.mgmt_subnet }}
+
+topology:
+  nodes:
+    {{ clab_rack_bridge }}:
+      kind: bridge
+
+    {{ clab_rack_seg.leaf }}:
+      kind: linux
+      image: {{ clab_frr_image }}
+      binds:
+        - {{ clab_rack_seg.leaf }}/frr.conf:/etc/frr/frr.conf
+        - {{ clab_rack_seg.leaf }}/daemons:/etc/frr/daemons
+        - {{ clab_rack_seg.leaf }}/vtysh.conf:/etc/frr/vtysh.conf
+      exec:
+        - ip link add lo0 type dummy
+        - ip addr add {{ clab_rack_seg.leaf_loopback }}/32 dev lo0
+        - ip link set lo0 up
+        - ip link set eth1 mtu {{ clab_fabric_mtu }} up
+        - ip addr add {{ clab_rack_seg.prefix }}.{{ clab_rack_seg.router_octet }}/{{ clab_rack_seg.netmask_bits }} dev eth1
+        ## The way in to each node's VTEP, as on leaf1.
+{% for n in clab_rack.value %}
+        - ip route replace {{ clab_rack_seg.vtep_prefix }}.{{ ip_list[n.ip_key] }}/32 via {{ clab_rack_seg.prefix }}.{{ ip_list[n.ip_key] }} dev eth1
+{% endfor %}
+        ## Makes 'network {{ clab_rack_seg.vtep_prefix }}.0/24' originate; the /32s
+        ## above do the forwarding.
+        - ip route replace blackhole {{ clab_rack_seg.vtep_prefix }}.0/24
+        ## vtysh -b, never frrinit.sh restart - see leaf1 in
+        ## udnbgp-evpn.clab.yml.j2. eth10 does not exist yet; rack-clab.yml
+        ## adds it, and the spine session comes up then.
+        - vtysh -b
+
+  links:
+    - endpoints: ["{{ clab_rack_seg.leaf }}:eth1", "{{ clab_rack_bridge }}:{{ clab_rack_seg.leaf }}-fab"]

@@ -65,6 +65,6 @@ $TTL    600
    Guarded on the ip_list entry like every other optional block here, so a lab
    without a single-node cluster renders a valid zone rather than a PTR to
    an address that belongs to nothing. #}
-{% if (sno_name | default('')) and (ip_list[sno_name] is defined) %}
-{{ ip_list[sno_name] }} 		IN PTR 		{{ sno_name }}.{{ sno_name }}.{{ base_domain }}.
-{% endif %}
+{% for dns_sno in setup_dns_sno_names %}
+{{ ip_list[dns_sno] }} 		IN PTR 		{{ dns_sno }}.{{ dns_sno }}.{{ base_domain }}.
+{% endfor %}

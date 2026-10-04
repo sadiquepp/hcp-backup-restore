@@ -1,0 +1,77 @@
+{#
+  A further segment's leaf - leaf1's job, for one rack. See
+  leaf1-frr-evpn.conf.j2 for why each line is there; this is the same
+  configuration with the rack's addresses:
+
+    1. Underlay reachability to the rack's VTEPs: static /32s (in the
+       topology's exec) and the rack's VTEP /24 originated into the fabric.
+       leaf1 and leaf2 learn it from the spine, and the hub and the SNO from
+       leaf1, so a tunnel to this rack's nodes is routed through the spine.
+    2. EVPN transit between the rack's nodes and the spine, with
+       'bgp retain route-target all' because it holds no VRFs.
+#}
+frr version 10.2
+frr defaults datacenter
+hostname {{ clab_rack_seg.leaf }}
+log stdout
+service integrated-vtysh-config
+!
+ip prefix-list LAB-MGMT seq 5 permit {{ lab_network_prefix }}.0/24 le 32
+!
+route-map FROM-CLUSTER deny 5
+ match ip address prefix-list LAB-MGMT
+route-map FROM-CLUSTER permit 10
+!
+route-map TO-CLUSTER deny 5
+ match ip address prefix-list LAB-MGMT
+route-map TO-CLUSTER permit 10
+!
+router bgp {{ clab_rack_seg.leaf_asn }}
+ bgp router-id {{ clab_rack_seg.leaf_loopback }}
+ no bgp ebgp-requires-policy
+ bgp log-neighbor-changes
+ neighbor {{ clab_rack_seg.spine_link.spine_ip }} remote-as {{ clab_spine_asn }}
+ neighbor {{ clab_rack_seg.spine_link.spine_ip }} description spine-underlay
+{% if udn_bgp_password | default('') | length > 0 %}
+ neighbor {{ clab_rack_seg.spine_link.spine_ip }} password {{ udn_bgp_password }}
+{% endif %}
+ neighbor 10.0.0.254 remote-as {{ clab_spine_asn }}
+ neighbor 10.0.0.254 description spine-evpn
+ neighbor 10.0.0.254 update-source lo0
+ neighbor 10.0.0.254 ebgp-multihop 3
+{% if udn_bgp_password | default('') | length > 0 %}
+ neighbor 10.0.0.254 password {{ udn_bgp_password }}
+{% endif %}
+{% for n in clab_rack.value %}
+ neighbor {{ clab_rack_seg.prefix }}.{{ ip_list[n.ip_key] }} remote-as {{ n.asn }}
+ neighbor {{ clab_rack_seg.prefix }}.{{ ip_list[n.ip_key] }} description {{ n.ip_key }} [{{ n.cluster }}]
+{% if udn_bgp_password | default('') | length > 0 %}
+ neighbor {{ clab_rack_seg.prefix }}.{{ ip_list[n.ip_key] }} password {{ udn_bgp_password }}
+{% endif %}
+{% endfor %}
+ !
+ address-family ipv4 unicast
+  network {{ clab_rack_seg.leaf_loopback }}/32
+  network {{ clab_rack_seg.vtep_prefix }}.0/24
+  neighbor {{ clab_rack_seg.spine_link.spine_ip }} activate
+{% for n in clab_rack.value %}
+  neighbor {{ clab_rack_seg.prefix }}.{{ ip_list[n.ip_key] }} activate
+  neighbor {{ clab_rack_seg.prefix }}.{{ ip_list[n.ip_key] }} route-map FROM-CLUSTER in
+  neighbor {{ clab_rack_seg.prefix }}.{{ ip_list[n.ip_key] }} route-map TO-CLUSTER out
+{% endfor %}
+  no neighbor 10.0.0.254 activate
+ exit-address-family
+ !
+ address-family l2vpn evpn
+  neighbor 10.0.0.254 activate
+  neighbor 10.0.0.254 allowas-in origin
+{% for n in clab_rack.value %}
+  neighbor {{ clab_rack_seg.prefix }}.{{ ip_list[n.ip_key] }} activate
+  neighbor {{ clab_rack_seg.prefix }}.{{ ip_list[n.ip_key] }} allowas-in origin
+{% endfor %}
+  bgp retain route-target all
+ exit-address-family
+exit
+!
+line vty
+!

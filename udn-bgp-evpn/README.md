@@ -839,3 +839,4 @@ required for `Layer3`.
 | **[bgp-evpn.md](bgp-evpn.md)** | The cluster side: every phase, every CR, packet walks, live migration |
 | **[clab-fabric.md](clab-fabric.md)** | The fabric side: what containerlab builds, and the manual equivalent |
 | **[troubleshooting.md](troubleshooting.md)** | Case files: hard faults, the traces that found them, and the wrong turns |
+| **[rack2.md](rack2.md)** | Optional: a second SNO behind its own leaf, so stretched Layer2 crosses a routed underlay |

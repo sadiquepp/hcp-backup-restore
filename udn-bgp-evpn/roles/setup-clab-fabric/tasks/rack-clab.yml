@@ -1,0 +1,194 @@
+---
+# The containerlab half of rack.yml, delegated to wherever containerlab runs.
+# clab_rack_* facts come from rack.yml.
+
+# vm mode: the rack's NIC on this VM, enslaved to its own bridge, by the same
+# script that builds br-fabric - rendered with the segment's bridge and MAC.
+# Its own unit too, so a reboot of the VM brings it back like br-fabric.
+- name: Install the rack's bridge script
+  ansible.builtin.template:
+    src: clab-fabric-bridge.sh.j2
+    dest: "/usr/local/sbin/clab-fabric-bridge-{{ clab_rack_name }}.sh"
+    mode: '0755'
+  vars:
+    clab_guest_bridge: "{{ clab_rack_seg.guest_bridge }}"
+    clab_fabric_mac_prefix: "{{ clab_rack_seg.mac_prefix }}"
+    clab_fabric_network: "{{ clab_rack_seg.network }}"
+  when: clab_deploy_mode == 'vm'
+
+- name: Create the rack's bridge and enslave its NIC
+  ansible.builtin.command:
+    cmd: "/usr/local/sbin/clab-fabric-bridge-{{ clab_rack_name }}.sh"
+  register: clab_rack_bridge_setup
+  changed_when: false
+  when: clab_deploy_mode == 'vm'
+
+- name: Report the rack's bridge
+  ansible.builtin.debug:
+    msg: "{{ clab_rack_bridge_setup.stdout_lines }}"
+  when: clab_deploy_mode == 'vm'
+
+- name: Make the rack's bridge survive a reboot
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/clab-fabric-bridge-{{ clab_rack_name }}.service"
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Fabric bridge for rack {{ clab_rack_name }} of the containerlab UDN/BGP lab
+      After=network-pre.target
+      Before=docker.service
+      Wants=network-pre.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/clab-fabric-bridge-{{ clab_rack_name }}.sh
+
+      [Install]
+      WantedBy=multi-user.target
+  when: clab_deploy_mode == 'vm'
+
+- name: Enable the rack's bridge unit
+  ansible.builtin.systemd:
+    name: "clab-fabric-bridge-{{ clab_rack_name }}"
+    enabled: true
+    daemon_reload: true
+  when: clab_deploy_mode == 'vm'
+
+# ---------------------------------------------------------------------------
+# The leaf, as its own containerlab lab.
+
+- name: Create the rack lab's directory
+  ansible.builtin.file:
+    path: "{{ clab_rack_dir }}/{{ clab_rack_seg.leaf }}"
+    state: directory
+    mode: '0755'
+
+- name: Render the leaf's daemons and vtysh files
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ clab_rack_dir }}/{{ clab_rack_seg.leaf }}/{{ item }}"
+    mode: '0644'
+  loop:
+    - daemons
+    - vtysh.conf
+  register: clab_rack_files
+
+- name: Render the leaf's FRR configuration
+  ansible.builtin.template:
+    src: rack-leaf-frr.conf.j2
+    dest: "{{ clab_rack_dir }}/{{ clab_rack_seg.leaf }}/frr.conf"
+    mode: '0644'
+  register: clab_rack_frr
+
+- name: Render the rack's containerlab topology
+  ansible.builtin.template:
+    src: rack.clab.yml.j2
+    dest: "{{ clab_rack_dir }}/{{ clab_rack_lab }}.clab.yml"
+    mode: '0644'
+  register: clab_rack_topo
+
+- name: Check whether the leaf is already running
+  ansible.builtin.command:
+    cmd: "docker inspect -f '{{ '{{' }}.State.Running{{ '}}' }}' {{ clab_rack_leaf_ctr }}"
+  register: clab_rack_leaf_running
+  changed_when: false
+  failed_when: false
+
+# Only when something changed or the leaf is not up. The leaf's frr.conf is a
+# bind mount, so a new one needs a new container to be read; and redeploying
+# an unchanged leaf would bounce the rack's sessions for nothing.
+- name: Deploy the rack's leaf
+  ansible.builtin.command:
+    cmd: "containerlab deploy --reconfigure --topo {{ clab_rack_lab }}.clab.yml"
+    chdir: "{{ clab_rack_dir }}"
+  register: clab_rack_deploy
+  when: >-
+    clab_rack_leaf_running.stdout | trim != 'true'
+    or clab_rack_files is changed
+    or clab_rack_frr is changed
+    or clab_rack_topo is changed
+
+- name: Show the deployed rack
+  ansible.builtin.debug:
+    msg: "{{ clab_rack_deploy.stdout_lines }}"
+  when: clab_rack_deploy is changed
+
+# ---------------------------------------------------------------------------
+# The uplink. The spine is in the other lab, so containerlab cannot link the
+# two from either topology file; `tools veth create` joins two running
+# containers instead. A veth dies with either end, so redeploying the leaf
+# above - or the spine, on a full fabric run - removes it, and this puts it
+# back.
+
+- name: Check whether the spine has its link to this rack
+  ansible.builtin.command:
+    cmd: "docker exec {{ clab_spine_ctr }} ip link show {{ clab_rack_seg.spine_link.spine_if }}"
+  register: clab_rack_spine_if
+  changed_when: false
+  failed_when: false
+
+- name: Link the spine to the rack's leaf
+  ansible.builtin.command:
+    cmd: >-
+      containerlab tools veth create
+      -a {{ clab_spine_ctr }}:{{ clab_rack_seg.spine_link.spine_if }}
+      -b {{ clab_rack_leaf_ctr }}:eth10
+      --mtu {{ clab_fabric_mtu }}
+  when: clab_rack_spine_if.rc != 0
+
+- name: Address both ends of the link
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      docker exec {{ clab_spine_ctr }} ip addr replace {{ clab_rack_seg.spine_link.spine_ip }}/{{ clab_rack_seg.spine_link.prefix_len }} dev {{ clab_rack_seg.spine_link.spine_if }}
+      docker exec {{ clab_spine_ctr }} ip link set {{ clab_rack_seg.spine_link.spine_if }} mtu {{ clab_fabric_mtu }} up
+      docker exec {{ clab_rack_leaf_ctr }} ip addr replace {{ clab_rack_seg.spine_link.leaf_ip }}/{{ clab_rack_seg.spine_link.prefix_len }} dev eth10
+      docker exec {{ clab_rack_leaf_ctr }} ip link set eth10 mtu {{ clab_fabric_mtu }} up
+  changed_when: false
+
+# Live, and additive. vtysh -f applies the file on top of the running config:
+# the spine's existing neighbours are restated by nothing here and so are not
+# touched. The same stanzas are in spine-frr.conf.j2 for the next full deploy.
+- name: Render the spine's neighbours for this rack
+  ansible.builtin.template:
+    src: spine-rack.conf.j2
+    dest: "{{ clab_rack_dir }}/spine-{{ clab_rack_name }}.conf"
+    mode: '0644'
+
+- name: Give the spine its neighbours for this rack, live
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      docker cp {{ clab_rack_dir }}/spine-{{ clab_rack_name }}.conf {{ clab_spine_ctr }}:/tmp/spine-{{ clab_rack_name }}.conf
+      docker exec {{ clab_spine_ctr }} vtysh -f /tmp/spine-{{ clab_rack_name }}.conf
+  changed_when: false
+
+- name: Wait for the spine's sessions to the rack's leaf
+  ansible.builtin.shell:
+    cmd: |
+      for n in {{ clab_rack_seg.spine_link.leaf_ip }} {{ clab_rack_seg.leaf_loopback }}; do
+        docker exec {{ clab_spine_ctr }} vtysh -c "show bgp neighbors $n" | grep -q 'BGP state = Established' || exit 1
+      done
+  register: clab_rack_spine_up
+  retries: 12
+  delay: 5
+  until: clab_rack_spine_up.rc == 0
+  changed_when: false
+
+- name: Show the rack leaf's BGP summary
+  ansible.builtin.command:
+    cmd: "docker exec {{ clab_rack_leaf_ctr }} vtysh -c 'show bgp summary'"
+  register: clab_rack_summary
+  changed_when: false
+
+- name: Report the rack
+  ansible.builtin.debug:
+    msg: >-
+      {{ clab_rack_summary.stdout_lines }}
+
+      {{ clab_rack_seg.leaf }} is up and peering with the spine (underlay and
+      EVPN). Its neighbours toward
+      {{ clab_rack.value | map(attribute='ip_key') | join(', ') }} stay down
+      until each cluster's side is built: setup_udn_bgp_lab.yaml --tags evpn
+      -e clab_topology=evpn -e udn_bgp_cluster=<cluster>.

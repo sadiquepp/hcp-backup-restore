@@ -90,7 +90,8 @@
       {{ (ansible_run_tags | default(['all']))
          | intersect(['all', 'fabric', 'network', 'nodenics', 'clabvm',
                       'clabinstall', 'clabdeploy', 'clabverify', 'clabclient',
-                      'clabtenantclients', 'clabnsclient', 'clabnsproxy'])
+                      'clabtenantclients', 'clabnsclient', 'clabnsproxy',
+                      'rack'])
          | length > 0 }}
   tags: [always]
 
@@ -177,6 +178,61 @@
                               'asn': clab_clusters[item].asn | default(clab_cluster_asn)})
             | list) }}
   loop: "{{ clab_fabric_clusters }}"
+  # A cluster with a fabric_segment is on its own segment with its own leaf
+  # (clab_fabric_segments in vars.yaml), so it is not one of leaf1's: no NIC
+  # on virbr1, no neighbour on leaf1, no static route to its VTEP there.
+  when: clab_clusters[item].fabric_segment is not defined
+  tags: [always]
+
+# The same, per further segment: segment name -> its nodes. Empty unless a
+# cluster in clab_fabric_clusters names a fabric_segment (sno2, with
+# sno2_enabled), and then built by rack.yml under --tags rack.
+- name: Build each further segment's node list
+  ansible.builtin.set_fact:
+    clab_rack_nodes: >-
+      {{ (clab_rack_nodes | default({}))
+         | combine({clab_clusters[item].fabric_segment:
+                     ((clab_rack_nodes | default({}))[clab_clusters[item].fabric_segment] | default([]))
+                     + (clab_clusters[item].nodes
+                        | map('combine', {'cluster': item,
+                                          'asn': clab_clusters[item].asn | default(clab_cluster_asn)})
+                        | list)}) }}
+  loop: "{{ clab_fabric_clusters }}"
+  when: clab_clusters[item].fabric_segment is defined
+  tags: [always]
+
+- name: Record every node on any segment, for the checks that span them
+  ansible.builtin.set_fact:
+    clab_rack_nodes: "{{ clab_rack_nodes | default({}) }}"
+    clab_all_fabric_nodes: >-
+      {{ (clab_fabric_nodes | default([]))
+         + ((clab_rack_nodes | default({})).values() | flatten) }}
+  tags: [always]
+
+- name: Fail if a cluster names a fabric segment that is not declared
+  ansible.builtin.assert:
+    that:
+      - item.key in (clab_fabric_segments | default({}))
+      # Only where this run renders the fabric - a cluster-only run does not
+      # pass clab_topology and has no use for it (see clab_renders_fabric).
+      - clab_topology == 'evpn' or not (clab_renders_fabric | bool)
+    fail_msg: >-
+      {{ ("Fabric segment '" ~ item.key ~ "' (named by "
+          ~ (item.value | map(attribute='cluster') | unique | join(', '))
+          ~ ") is not a key of clab_fabric_segments in vars.yaml.")
+         if item.key not in (clab_fabric_segments | default({})) else
+         ("Fabric segment '" ~ item.key ~ "' is EVPN only, and this run has"
+          ~ " clab_topology=" ~ clab_topology ~ ". A further segment has no"
+          ~ " VRF-Lite VLANs; its clusters ("
+          ~ (item.value | map(attribute='cluster') | unique | join(', '))
+          ~ ") reach the rest of the fabric over EVPN alone. Leave them out"
+          ~ " of clab_fabric_clusters (sno2_enabled=false) for VRF-Lite.") }}
+    success_msg: >-
+      Segment {{ item.key }}: {{ item.value | map(attribute='ip_key') | join(', ') }}
+      behind {{ clab_fabric_segments[item.key].leaf }}.
+  loop: "{{ clab_rack_nodes | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
   tags: [always]
 
 # Two clusters whose nodes share an ip_list octet would collide on the fabric
@@ -187,16 +243,16 @@
 - name: Fail if two fabric nodes share an ip_list octet
   ansible.builtin.assert:
     that:
-      - (clab_fabric_nodes | map(attribute='ip_key') | unique | length)
-        == (clab_fabric_nodes | length)
+      - (clab_all_fabric_nodes | map(attribute='ip_key') | unique | length)
+        == (clab_all_fabric_nodes | length)
     fail_msg: >-
       Two nodes on this fabric have the same ip_list key:
-      {{ clab_fabric_nodes | map(attribute='ip_key') | list }}. Each node's
+      {{ clab_all_fabric_nodes | map(attribute='ip_key') | list }}. Each node's
       fabric address ({{ clab_fabric_prefix }}.<octet>), its fabric MAC
       ({{ clab_fabric_mac_prefix }}:<octet>) and its VTEP address
       ({{ udn_bgp_vtep_prefix }}.<octet>) are all derived from that octet.
     success_msg: >-
-      {{ clab_fabric_nodes | length }} node(s) on this fabric across
+      {{ clab_all_fabric_nodes | length }} node(s) on this fabric across
       {{ clab_fabric_clusters | length }} cluster(s):
       {% for c in clab_fabric_clusters %}
       {{ c }} (AS {{ clab_clusters[c].asn | default(clab_cluster_asn) }}):
@@ -212,7 +268,7 @@
 - name: Fail if two clusters on this fabric share an ASN
   ansible.builtin.assert:
     that:
-      - (clab_fabric_nodes | map(attribute='asn') | unique | length)
+      - (clab_all_fabric_nodes | map(attribute='asn') | unique | length)
         == (clab_fabric_clusters | length)
     fail_msg: >-
       Two of the clusters on this fabric have the same BGP ASN
@@ -429,6 +485,29 @@
       delegate_to: "{{ clab_exec_host }}"
       tags: [fabric, clabdeploy]
   tags: [fabric, clabdeploy]
+
+# The further segments (racks), each with its own leaf - sno2's rack2 when
+# sno2_enabled is true, nothing at all otherwise.
+#
+# --tags rack adds a rack to a fabric that is already running WITHOUT
+# redeploying it: a libvirt network, the rack's node NICs, a NIC and bridge on
+# the containerlab VM, and the leaf as its own containerlab lab, joined to the
+# spine by a veth. The spine learns the new neighbours live; leaf1, leaf2 and
+# every existing session are left alone.
+#
+# It also runs under fabric/clabdeploy, after the deploy above, because that
+# deploy recreates the spine and with it drops the veth to every rack's leaf.
+# Each step is idempotent, so on an unchanged rack this only re-joins it.
+- name: Add the further fabric segments and their leaves
+  ansible.builtin.include_tasks:
+    file: rack.yml
+    apply:
+      tags: [fabric, clabdeploy, rack]
+  loop: "{{ clab_rack_nodes | dict2items }}"
+  loop_control:
+    loop_var: clab_rack
+    label: "{{ clab_rack.key }}"
+  tags: [fabric, clabdeploy, rack]
 
 # EVPN only: the tenants with evpn_internet set get a default route from
 # leaf2, and the NAT that makes it work lives on this host. After the deploy

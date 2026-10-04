@@ -53,6 +53,53 @@
     udn_bgp_cluster_asn: >-
       {{ clab_clusters[udn_bgp_cluster].asn | default(clab_cluster_asn) }}
 
+# ---------------------------------------------------------------------------
+# A cluster on a further fabric segment - clab_clusters.<c>.fabric_segment,
+# sno2 on rack2 - peers with that segment's leaf, on that segment's subnet,
+# with its VTEPs in that segment's block. Every template and check below
+# reads the first segment's names for those: clab_fabric_prefix, the
+# router octet, the fabric NIC MAC prefix, udn_bgp_vtep_prefix, and
+# clab_leaf1_asn as "the ASN of the leaf the nodes peer with". So for such a
+# cluster they are repointed here, once, and the NNCPs, the FRRConfiguration,
+# the VTEP and the session checks all follow without a branch of their own.
+#
+# A cluster without fabric_segment skips this and renders exactly as before.
+# The facts last for this play only; the fabric play has already run.
+- name: Fail if a cluster on a further segment is asked for a non-EVPN phase
+  ansible.builtin.assert:
+    that: udn_phase in ['preflight', 'prep', 'enable', 'evpn', 'web']
+    fail_msg: >-
+      '{{ udn_bgp_cluster }}' is on fabric segment
+      '{{ clab_clusters[udn_bgp_cluster].fabric_segment }}', which is EVPN
+      only - it has no VRF-Lite VLANs, and the shared and default phases
+      advertise into a default VRF its leaf does not carry for anyone else.
+      Run it with --tags prep, evpn or web.
+  when: clab_clusters[udn_bgp_cluster].fabric_segment is defined
+
+- name: Point the fabric addressing at this cluster's segment
+  vars:
+    udn_bgp_seg: "{{ clab_fabric_segments[clab_clusters[udn_bgp_cluster].fabric_segment] }}"
+  ansible.builtin.set_fact:
+    clab_fabric_prefix: "{{ udn_bgp_seg.prefix }}"
+    clab_fabric_netmask_bits: "{{ udn_bgp_seg.netmask_bits }}"
+    clab_fabric_router_octet: "{{ udn_bgp_seg.router_octet }}"
+    clab_fabric_mac_prefix: "{{ udn_bgp_seg.mac_prefix }}"
+    udn_bgp_vtep_prefix: "{{ udn_bgp_seg.vtep_prefix }}"
+    clab_leaf1_asn: "{{ udn_bgp_seg.leaf_asn }}"
+    udn_bgp_peer_leaf_container: >-
+      clab-{{ clab_lab_name }}-{{ clab_clusters[udn_bgp_cluster].fabric_segment }}-{{ udn_bgp_seg.leaf }}
+  when: clab_clusters[udn_bgp_cluster].fabric_segment is defined
+
+- name: Say which segment this cluster is on
+  ansible.builtin.debug:
+    msg: >-
+      '{{ udn_bgp_cluster }}' is on fabric segment
+      {{ clab_clusters[udn_bgp_cluster].fabric_segment }}:
+      {{ clab_fabric_prefix }}.0/{{ clab_fabric_netmask_bits }}, peering with
+      {{ clab_fabric_prefix }}.{{ clab_fabric_router_octet }} (AS {{ clab_leaf1_asn }},
+      {{ udn_bgp_peer_leaf_container }}), VTEPs in {{ udn_bgp_vtep_prefix }}.0/24.
+  when: clab_clusters[udn_bgp_cluster].fabric_segment is defined
+
 # Every tenant the lab declares, captured before the narrowing below
 # overwrites udn_bgp_tenants. Two readers need the whole list rather than
 # this cluster's slice of it: the teardown (see "Remove test namespaces left

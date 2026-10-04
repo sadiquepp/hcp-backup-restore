@@ -372,6 +372,9 @@ ip_list:
   ## TWO DIGITS, because this lab's MAC scheme appends the octet verbatim
   ## (52:54:00:e2:54:<octet>) and a three-digit octet is not a valid MAC.
   sno: 20
+  ## A second single-node cluster, on its own fabric segment (rack2). Same two
+  ## constraints as sno above. Only used when sno2_enabled is true.
+  sno2: 18
   c1worker1: 41
   c1worker2: 42
   c1worker3: 43
@@ -699,6 +702,32 @@ sno_disk_gb: 200
 ## true only saves that one step, and only on a cluster built after the
 ## decision to attach it.
 sno_fabric_nic: false
+
+## ---------------------------------------------------------------------------
+## A second SNO in a second rack (setup_sno2.yaml) - optional
+## ---------------------------------------------------------------------------
+## Off unless sno2_enabled is true. With it on, sno2 joins the EVPN lab on its
+## own fabric segment: its fabric NIC is on virbr2 (clab_fabric_segments.rack2
+## below), it peers with leaf3, and leaf3 reaches leaf1 only through the
+## spine. The VXLAN between sno2 and the hub or sno is then ROUTED by three
+## routers, where the hub and sno share one segment. udn-bgp-evpn/rack2.md is
+## the runbook.
+##
+## Turning it on changes nothing that is already running: hub, sno, leaf1,
+## leaf2 and the spine's existing sessions are left alone, and the rack is
+## added beside them with --tags rack. Off, every play renders exactly what it
+## did before sno2 existed. Set it true on the lab host (here, or
+## -e sno2_enabled=true on every command, or in ../vars-metal.yaml, which
+## build-lab.sh passes).
+sno2_enabled: false
+
+## The same knobs as the SNO's above, kept apart so a sno2 run can never pick
+## up the SNO's install folder - that folder holds the SNO's only kubeconfig.
+sno2_install_folder: "{{ download_dir }}/sno2_install"
+sno2_vm_folder: "{{ download_dir }}/sno2"
+sno2_memory: 32768
+sno2_vcpus: 12
+sno2_disk_gb: 200
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
 ## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE
@@ -1546,6 +1575,50 @@ clab_leaf1_asn: 64513
 clab_leaf2_asn: 64514
 clab_spine_asn: 65000
 
+## Further fabric segments - one per "rack" beyond the one above. A cluster
+## opts in with `fabric_segment: <name>` in clab_clusters; a cluster without
+## one is on the segment above (virbr1, leaf1) exactly as before. A segment is
+## only built once a cluster that uses it is in clab_fabric_clusters, and it
+## is added with --tags rack, EVPN topology only.
+##
+## Each segment gets its own libvirt network and bridge, its own subnet, its
+## own leaf and its own VTEP /24, which that leaf originates the way leaf1
+## originates udn_bgp_vtep_prefix.0/24. The leaf is a separate containerlab
+## lab, <clab_lab_name>-<segment>, joined to the spine by a veth - so adding
+## it never redeploys leaf1, leaf2 or the spine.
+##
+##   network, bridge  the libvirt network and the bridge it creates
+##   guest_bridge     the bridge inside the containerlab VM the leaf joins
+##   prefix ...       the segment's subnet. The leaf takes .router_octet and
+##                    a node its ip_list octet, as on the first segment
+##   mac_prefix       fabric NIC MACs here are <mac_prefix>:<octet>. Not
+##                    clab_fabric_mac_prefix: the containerlab VM has a NIC on
+##                    every segment with the same octet, and they must differ
+##   vtep_prefix      node VTEPs here are <vtep_prefix>.<octet>
+##   leaf ...         the leaf's name, ASN and loopback
+##   spine_link       the /30 between the spine and this leaf, and the spine
+##                    interface it lands on (eth1 and eth2 are leaf1 and leaf2)
+##   mgmt_subnet      the leaf lab's containerlab management network
+clab_fabric_segments:
+  rack2:
+    network: fabric2
+    bridge: virbr2
+    guest_bridge: br-fabric2
+    prefix: "192.168.160"
+    netmask_bits: 24
+    router_octet: 1
+    mac_prefix: "52:54:00:e2:56"
+    vtep_prefix: "100.64.1"
+    leaf: leaf3
+    leaf_asn: 64518
+    leaf_loopback: "10.0.0.3"
+    spine_link:
+      spine_if: eth3
+      spine_ip: "10.1.0.9"
+      leaf_ip: "10.1.0.10"
+      prefix_len: 30
+    mgmt_subnet: "172.30.31.0/24"
+
 ## Container images for the fabric. FRR is what OVN-Kubernetes itself is
 ## built and tested against, and a node costs ~50MB of RAM. Swap in
 ## ghcr.io/nokia/srlinux or ceos if you need vendor-accurate EVPN behaviour -
@@ -1923,6 +1996,35 @@ clab_clusters:
       - domain: "{{ sno_name }}"
         ip_key: sno
 
+  ## The second SNO, in the second rack (setup_sno2.yaml, sno2_enabled). Only
+  ## on the fabric when sno2_enabled is true - see clab_fabric_clusters below.
+  ##
+  ## fabric_segment puts its fabric NIC on rack2 rather than virbr1, so it
+  ## peers with leaf3 and its VTEP is 100.64.1.<octet>. EVPN only: rack2 has
+  ## no VRF-Lite VLANs and nothing leaks a default VRF across it, so the
+  ## role refuses the shared, vrflite and default phases here.
+  ##
+  ## green and purple only - the stretched Layer2 pair, which is the point of
+  ## putting a cluster behind a routed underlay. Its slice of each one's
+  ## addresses is in their evpn_l2_excludes.
+  sno2:
+    install_folder: "{{ sno2_install_folder }}"
+    asn: 64517
+    advertise_default: false
+    fabric_segment: rack2
+    tenants:
+      - green
+      - purple
+    tenants_evpn:
+      - green
+      - purple
+    tenants_web:
+      - green
+      - purple
+    nodes:
+      - domain: sno2
+        ip_key: sno2
+
 ## Which of the clusters above are actually wired into the fabric. This is
 ## what builds clab_fabric_nodes, so it decides which VMs get a NIC on virbr1
 ## and which neighbours leaf1 is configured with.
@@ -1933,9 +2035,12 @@ clab_clusters:
 ##
 ## Order matters only for readability - leaf1's neighbour statements come out
 ## in this order.
-clab_fabric_clusters:
-  - hub
-  - sno
+##
+## sno2 is appended only when sno2_enabled is true. A cluster with a
+## fabric_segment is not one of leaf1's: it gets its own segment's NIC and
+## leaf instead, built by --tags rack, and leaf1's configuration is the same
+## with it as without it.
+clab_fabric_clusters: "{{ ['hub', 'sno'] + (['sno2'] if (sno2_enabled | bool) else []) }}"
 
 ## The fabric NIC's MAC follows the lab's existing scheme with a bumped
 ## fifth octet, so a fabric NIC is recognisable at a glance and can never
@@ -2154,6 +2259,40 @@ udn_bgp_tenants:
         - "10.204.32.0/19"
         - "10.204.64.0/18"
         - "10.204.255.0/24"
+      ## sno2 allocates from 10.204.254.0/24 alone: everything else in the /16
+      ## is reserved, bar the same .1 gateway and .2 management port as the
+      ## SNO's hole above (one node, so .3 is where the reservation starts).
+      ##
+      ## That /24 sits inside the SNO's half. A clean three-way split would
+      ## mean shrinking the SNO's half, which changes a CUDN that is already
+      ## running there - so the SNO is left alone and sno2 takes the top of its
+      ## half. The SNO hands out its lowest free address first, from
+      ## 10.204.128.0, and a lab never gets near .254.
+      ##
+      ## sno2 also brings a third copy of .1 and .2 into the one broadcast
+      ## domain. That is the problem described above, not a new one.
+      sno2:
+        - "10.204.0.3/32"
+        - "10.204.0.4/30"
+        - "10.204.0.8/29"
+        - "10.204.0.16/28"
+        - "10.204.0.32/27"
+        - "10.204.0.64/26"
+        - "10.204.0.128/25"
+        - "10.204.1.0/24"
+        - "10.204.2.0/23"
+        - "10.204.4.0/22"
+        - "10.204.8.0/21"
+        - "10.204.16.0/20"
+        - "10.204.32.0/19"
+        - "10.204.64.0/18"
+        - "10.204.128.0/18"
+        - "10.204.192.0/19"
+        - "10.204.224.0/20"
+        - "10.204.240.0/21"
+        - "10.204.248.0/22"
+        - "10.204.252.0/23"
+        - "10.204.255.0/24"
     evpn_ip_vni: 401
 
   ## The collision tenant. Layer2, and deliberately carrying the SAME
@@ -2256,6 +2395,29 @@ udn_bgp_tenants:
         - "10.204.16.0/20"
         - "10.204.32.0/19"
         - "10.204.64.0/18"
+        - "10.204.255.0/24"
+      ## sno2: the same slice as green's, for the same reasons - see there.
+      sno2:
+        - "10.204.0.3/32"
+        - "10.204.0.4/30"
+        - "10.204.0.8/29"
+        - "10.204.0.16/28"
+        - "10.204.0.32/27"
+        - "10.204.0.64/26"
+        - "10.204.0.128/25"
+        - "10.204.1.0/24"
+        - "10.204.2.0/23"
+        - "10.204.4.0/22"
+        - "10.204.8.0/21"
+        - "10.204.16.0/20"
+        - "10.204.32.0/19"
+        - "10.204.64.0/18"
+        - "10.204.128.0/18"
+        - "10.204.192.0/19"
+        - "10.204.224.0/20"
+        - "10.204.240.0/21"
+        - "10.204.248.0/22"
+        - "10.204.252.0/23"
         - "10.204.255.0/24"
     evpn_ip_vni: 501
 

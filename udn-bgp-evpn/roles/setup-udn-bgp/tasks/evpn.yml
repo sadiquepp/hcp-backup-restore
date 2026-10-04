@@ -80,7 +80,7 @@
 - name: Show the EVPN state the fabric has reached
   ansible.builtin.command:
     cmd: >-
-      docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
+      docker exec {{ udn_bgp_peer_leaf_container }} vtysh
       -c 'show bgp l2vpn evpn summary'
       -c 'show bgp l2vpn evpn'
   delegate_to: "{{ clab_exec_host }}"

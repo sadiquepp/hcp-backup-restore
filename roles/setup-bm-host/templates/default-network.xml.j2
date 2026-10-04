@@ -86,11 +86,17 @@ api.{{ hub2_disconnected_domain }}
     invariant the comment at the top of this dhcp block states. 'sno.sno' reads
     oddly and is right: hostname 'sno' inside zone sno.<base_domain>. -#}
 {{ sno_name }}.{{ sno_name }}.{{ base_domain }}
+{%- elif key == 'sno2' -%}
+{#- sno2 likewise lives in its own zone, sno2.<base_domain>. -#}
+sno2.sno2.{{ base_domain }}
 {%- else -%}
 {{ key }}.{{ hub_domain }}
 {%- endif -%}
 {%- endmacro %}
-     {% for key, value in ip_list.items() %}
+{# sno2 is optional: no reservation unless sno2_enabled. setup-sno adds its
+   reservation live (virsh net-update) when it builds the VM, so this line only
+   matters on the next full redefine of the network. #}
+     {% for key, value in ip_list.items() if key != 'sno2' or (sno2_enabled | default(false) | bool) %}
      <host mac='52:54:00:e2:54:{{ value }}' name='{{ dhcp_fqdn(key) }}' ip='{{ lab_network_prefix }}.{{ value }}'/>
      {% endfor %}
      <bootp file='pxelinux.0' server='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>

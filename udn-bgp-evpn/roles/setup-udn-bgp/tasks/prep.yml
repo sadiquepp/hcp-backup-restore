@@ -112,12 +112,16 @@
         success_msg: >-
           {{ udn_ws_kv_nodes.stdout_lines | length }} nodes can run a VM.
 
+# Not from a cluster on a further fabric segment: main.yml repoints the
+# fabric addressing at that segment for the run, and the file describes the
+# first one. The hub's and the SNO's prep write it, sno2 included.
 - name: Write the attendee's environment file
   ansible.builtin.template:
     src: workshop.env.j2
     dest: "{{ udn_workshop_env_file }}"
     mode: '0644'
   delegate_to: localhost
+  when: clab_clusters[udn_bgp_cluster].fabric_segment is not defined
 
 - name: Say what is ready and what comes next
   ansible.builtin.debug:

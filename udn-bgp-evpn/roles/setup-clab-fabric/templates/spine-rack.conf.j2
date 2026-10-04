@@ -1,0 +1,31 @@
+{#
+  The spine's neighbours for one further segment's leaf, applied to the
+  running spine with `vtysh -f` by tasks/rack-clab.yml. Additive: it restates
+  nothing the spine already has, so its sessions to leaf1 and leaf2 are not
+  touched. spine-frr.conf.j2 carries the same lines for a full redeploy.
+
+  Same shape as leaf1's and leaf2's: an underlay session on the /30, and a
+  loopback-sourced EVPN session with the next hop left unchanged.
+#}
+router bgp {{ clab_spine_asn }}
+ neighbor {{ clab_rack_seg.spine_link.leaf_ip }} remote-as {{ clab_rack_seg.leaf_asn }}
+ neighbor {{ clab_rack_seg.spine_link.leaf_ip }} description {{ clab_rack_seg.leaf }}-underlay
+{% if udn_bgp_password | default('') | length > 0 %}
+ neighbor {{ clab_rack_seg.spine_link.leaf_ip }} password {{ udn_bgp_password }}
+{% endif %}
+ neighbor {{ clab_rack_seg.leaf_loopback }} remote-as {{ clab_rack_seg.leaf_asn }}
+ neighbor {{ clab_rack_seg.leaf_loopback }} description {{ clab_rack_seg.leaf }}-evpn
+ neighbor {{ clab_rack_seg.leaf_loopback }} update-source lo0
+ neighbor {{ clab_rack_seg.leaf_loopback }} ebgp-multihop 3
+{% if udn_bgp_password | default('') | length > 0 %}
+ neighbor {{ clab_rack_seg.leaf_loopback }} password {{ udn_bgp_password }}
+{% endif %}
+ address-family ipv4 unicast
+  neighbor {{ clab_rack_seg.spine_link.leaf_ip }} activate
+  no neighbor {{ clab_rack_seg.leaf_loopback }} activate
+ exit-address-family
+ address-family l2vpn evpn
+  neighbor {{ clab_rack_seg.leaf_loopback }} activate
+  neighbor {{ clab_rack_seg.leaf_loopback }} route-map NEXTHOP-UNCHANGED out
+ exit-address-family
+exit

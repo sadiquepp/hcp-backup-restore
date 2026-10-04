@@ -149,16 +149,19 @@
 # exist first. Guarded on the SAME condition as the stanza in
 # named.rfc1912.zones.j2 - a stanza without its file stops named from starting,
 # which would take every other zone down with it.
-- name: Deploy "{{ sno_name | default('') }}.{{ base_domain }}" - Forward zonefile
+#
+# sno2 (setup_sno2.yaml) gets one too, from the same template, when
+# sno2_enabled is true - setup_dns_sno_names in defaults/main.yml.
+- name: Deploy the single-node clusters' forward zonefiles
   template:
     src: sno_domain.j2
-    dest: "/var/named/{{ sno_name }}.{{ base_domain }}.db"
+    dest: "/var/named/{{ dns_sno }}.{{ base_domain }}.db"
     owner: root
     group: named
     mode: u=rw,g=r,o=r
-  when:
-    - (sno_name | default('')) | length > 0
-    - ip_list[sno_name] is defined
+  loop: "{{ setup_dns_sno_names }}"
+  loop_control:
+    loop_var: dns_sno
   notify:
     -  Restart_Named
 

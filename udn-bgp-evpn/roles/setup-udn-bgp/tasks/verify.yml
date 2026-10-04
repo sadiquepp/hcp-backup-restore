@@ -226,7 +226,7 @@
 - name: Show BGP sessions from the border leaf's point of view
   ansible.builtin.command:
     cmd: >-
-      docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
+      docker exec {{ udn_bgp_peer_leaf_container }} vtysh
       -c 'show bgp summary'
       -c 'show bgp ipv4 unicast'
   delegate_to: "{{ clab_exec_host }}"
@@ -256,7 +256,7 @@
 - name: Wait for each of this cluster's BGP sessions to the border leaf
   ansible.builtin.command:
     cmd: >-
-      docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
+      docker exec {{ udn_bgp_peer_leaf_container }} vtysh
       -c 'show bgp neighbor {{ clab_fabric_prefix }}.{{ ip_list[item.ip_key] }}'
   delegate_to: "{{ clab_exec_host }}"
   loop: "{{ udn_bgp_cluster_nodes }}"
@@ -291,7 +291,7 @@
       fabric reaches its pods, while every cluster-side object stays green -
       the CUDN is realised, the VTEP annotation is present, the
       FRRConfiguration is applied. Work it in this order.
-      (1) `docker exec clab-{{ clab_lab_name }}-leaf1 ping -c2
+      (1) `docker exec {{ udn_bgp_peer_leaf_container }} ping -c2
       {{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}` - no reply
       means the fabric NIC has no address or is not on the bridge, which is
       an NNCP or a libvirt problem, not a BGP one.
@@ -317,7 +317,7 @@
       one end only is discarded before BGP ever sees it, silently, at both
       ends. `tcpdump -M '<key>'` on the node prints 'md5 valid' or 'md5
       invalid' per packet and settles it outright; otherwise compare
-      `docker exec clab-{{ clab_lab_name }}-leaf1 vtysh -c 'show running-config'
+      `docker exec {{ udn_bgp_peer_leaf_container }} vtysh -c 'show running-config'
       | grep {{ clab_fabric_prefix }}.{{ ip_list[item.item.ip_key] }}`
       against `oc get frrnodestate <node> -o jsonpath='{.status.runningConfig}'`
       - both ends must have a password line or neither.
@@ -342,7 +342,7 @@
 - name: Show each tenant VRF's routing table on the border leaf
   ansible.builtin.command:
     cmd: >-
-      docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
+      docker exec {{ udn_bgp_peer_leaf_container }} vtysh
       -c 'show bgp vrf {{ item.name }} ipv4 unicast'
       -c 'show ip route vrf {{ item.name }}'
   loop: "{{ udn_bgp_tenants }}"
@@ -368,7 +368,7 @@
 - name: Show the EVPN and VTEP state
   ansible.builtin.command:
     cmd: >-
-      docker exec clab-{{ clab_lab_name }}-leaf1 vtysh
+      docker exec {{ udn_bgp_peer_leaf_container }} vtysh
       -c 'show bgp l2vpn evpn summary'
       -c 'show bgp l2vpn evpn'
       -c 'show ip route {{ udn_bgp_vtep_prefix }}.0/24 longer-prefixes'
@@ -536,7 +536,7 @@
       {% set ns.step = ns.step + 1 %}
 
       {{ ns.step }}. The fabric learned one route per node, not one blanket route:
-           docker exec clab-{{ clab_lab_name }}-leaf1 vtysh -c 'show bgp ipv4 unicast'
+           docker exec {{ udn_bgp_peer_leaf_container }} vtysh -c 'show bgp ipv4 unicast'
            # expect a prefix per node, each with that node's {{ clab_fabric_prefix }}.x
            # address as next hop
       {% set ns.step = ns.step + 1 %}

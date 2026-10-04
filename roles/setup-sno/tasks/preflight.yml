@@ -97,6 +97,34 @@
     sno_ssh_key: "{{ sno_ssh_out.stdout }}"
     sno_cluster_domain: "{{ sno_name }}.{{ base_domain }}"
 
+# One install folder per cluster. The folder holds auth/kubeconfig, the only
+# copy of a cluster's admin credentials, and `agent create image` writes a new
+# one over it. Building a second SNO with only sno_name changed would reuse
+# the first one's folder and lose that cluster's credentials for good.
+# setup_sno2.yaml passes its own folder; this catches every other way of
+# getting it wrong. Rebuilding the SAME cluster passes - its kubeconfig names
+# its own API.
+- name: Read the API server of any kubeconfig already in the install folder
+  ansible.builtin.shell:
+    cmd: "awk '/server:/ {print $2; exit}' {{ sno_install_folder }}/auth/kubeconfig 2>/dev/null || true"
+  register: sno_existing_kubeconfig
+  changed_when: false
+
+- name: Fail if the install folder holds another cluster's kubeconfig
+  ansible.builtin.assert:
+    that: >-
+      (sno_existing_kubeconfig.stdout | trim) == ''
+      or ('//api.' ~ sno_cluster_domain ~ ':') in sno_existing_kubeconfig.stdout
+    fail_msg: >-
+      {{ sno_install_folder }}/auth/kubeconfig belongs to
+      {{ sno_existing_kubeconfig.stdout | trim }}, not to
+      api.{{ sno_cluster_domain }}. Building {{ sno_name }} here would
+      overwrite that cluster's only admin credentials. Give {{ sno_name }}
+      its own folder with -e sno_install_folder=... (setup_sno2.yaml does
+      this for sno2).
+    success_msg: >-
+      {{ sno_install_folder }} is free for {{ sno_name }}.
+
 # The API server certificate is issued for api.<cluster>.<base_domain>, and the
 # installer's own wait-for resolves that name. If DNS is not serving the zone
 # yet the install completes and every subsequent `oc` call fails, which is a

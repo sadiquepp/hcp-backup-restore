@@ -46,6 +46,12 @@ udn_bgp_password_secret: udn-bgp-fabric-key
 ## has to select exactly the base peering CR for the phase in play.
 udn_bgp_frr_label_key: routeAdvertisements
 
+## The containerlab container of the leaf this cluster's nodes peer with -
+## what the session checks and the EVPN reports exec into. leaf1 for every
+## cluster on the first fabric segment. tasks/main.yml repoints it for a
+## cluster with a fabric_segment (sno2 -> rack2's leaf3).
+udn_bgp_peer_leaf_container: "clab-{{ clab_lab_name }}-leaf1"
+
 ## Label put on the ClusterUserDefinedNetworks so a RouteAdvertisements CR
 ## can select them as a set.
 udn_bgp_cudn_label_key: bgp

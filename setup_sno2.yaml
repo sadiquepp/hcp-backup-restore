@@ -1,0 +1,106 @@
+---
+# Build the second single-node OpenShift, sno2, for the routed-rack EVPN lab.
+#
+#   ansible-playbook -i inventory/hosts setup_sno2.yaml --ask-vault-pass \
+#     -e sno2_enabled=true
+#
+# The same role as setup_sno.yaml, given sno2's name and its own install and
+# VM folders. Nothing about the SNO changes. The folders matter most: the
+# SNO's install folder holds its only kubeconfig, and running setup_sno.yaml
+# with just -e sno_name=sno2 would build sno2 in it. setup-sno's pre-flight
+# refuses a folder whose kubeconfig belongs to another cluster, so that
+# mistake fails instead of overwriting it.
+#
+# Runs on the hypervisor, like setup_sno.yaml. The DNS zone sno2.<base_domain>
+# comes from setup-dns, which renders it when sno2_enabled is true:
+#
+#   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+#     --ask-vault-pass -e sno2_enabled=true
+#
+# Run that first; pre-flight fails if api.sno2.<base_domain> does not resolve.
+# That zone is served by the helper alone, and the lab host finds it through
+# the /etc/hosts block the same --tags dns run writes.
+#
+# DNS IS THE ONE REAL DIFFERENCE FROM THE SNO. The SNO resolves through
+# libvirt's dnsmasq on virbr0, which forwards sno.<base_domain> to the helper.
+# A forwarder for sno2.<base_domain> can only be added by redefining the
+# default network, which restarts virbr0 under every VM in the lab. So sno2
+# asks the helper directly instead. That works now that the helper forwards
+# external names to the lab host's own resolvers (setup-dns, dns_forwarders:
+# auto) with DNSSEC validation off - which is checked below rather than
+# assumed, because a resolver that cannot find quay.io stops a connected
+# install at its first pre-flight.
+#
+# The VM gets one NIC, on virbr0. Its fabric NIC (rack2, virbr2) is added by
+# the UDN lab's --tags rack, the same way the SNO's is added by --tags
+# nodenics. See udn-bgp-evpn/rack2.md.
+#
+# The tags are setup_sno.yaml's: --tags snoimage, snovm, snowait.
+- name: Set up the second single-node OpenShift cluster (sno2)
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  pre_tasks:
+    - name: Fail unless sno2 is enabled
+      ansible.builtin.assert:
+        that: sno2_enabled | bool
+        fail_msg: >-
+          sno2_enabled is false. sno2 is optional and off by default; pass
+          -e sno2_enabled=true (or set it on this host) to build it.
+      tags: [always]
+
+    - name: Ask the helper for an external name and for sno2's API
+      ansible.builtin.shell:
+        # dig and nslookup are both bind-utils, which the lab host may not
+        # have. Without either the check is skipped, not failed.
+        cmd: |
+          h={{ lab_network_prefix }}.{{ ip_list.helper_server }}
+          if command -v dig >/dev/null; then
+            dig +short +time=3 +tries=2 @"$h" {{ item }} | grep -E '^[0-9.]+$' | head -1
+          elif command -v nslookup >/dev/null; then
+            nslookup -timeout=3 {{ item }} "$h" | awk '/^Address: / {print $2; exit}'
+          else
+            echo SKIPPED
+          fi
+      loop:
+        - quay.io
+        - "api.sno2.{{ base_domain }}"
+      register: sno2_helper_dns
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: Fail unless the helper can resolve for sno2
+      ansible.builtin.assert:
+        that: item.stdout | length > 0
+        fail_msg: >-
+          The helper ({{ lab_network_prefix }}.{{ ip_list.helper_server }})
+          does not resolve {{ item.item }}, and sno2 uses it as its only
+          resolver.
+          {{ 'Render the zone: ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass -e sno2_enabled=true'
+             if item.item != 'quay.io' else
+             'External names fail there, so a connected install cannot pull its payload. Check `dig quay.io @' ~ lab_network_prefix ~ '.' ~ ip_list.helper_server ~ '` and `dig +cd` - see dns_forwarders and dns_dnssec_validation in roles/setup-dns/defaults/main.yml.' }}
+        success_msg: >-
+          {{ (item.item ~ ' -> ' ~ item.stdout) if item.stdout != 'SKIPPED' else
+             ('Not checked: no dig or nslookup on this host (dnf install bind-utils).'
+              ~ ' sno2 uses the helper as its only resolver, so it must resolve '
+              ~ item.item ~ '.') }}
+      loop: "{{ sno2_helper_dns.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      tags: [always]
+  tasks:
+    - name: Install sno2
+      ansible.builtin.import_role:
+        name: setup-sno
+      vars:
+        sno_name: sno2
+        sno_install_folder: "{{ sno2_install_folder }}"
+        sno_vm_folder: "{{ sno2_vm_folder }}"
+        sno_memory: "{{ sno2_memory }}"
+        sno_vcpus: "{{ sno2_vcpus }}"
+        sno_disk_gb: "{{ sno2_disk_gb }}"
+        sno_fabric_nic: false
+        sno_dns_server: "{{ lab_network_prefix }}.{{ ip_list.helper_server }}"

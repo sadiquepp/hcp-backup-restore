@@ -8,7 +8,11 @@
     A cluster whose lb key is missing from ip_list is skipped rather than
     rendering 'None': trimming vars.yaml to a single hub is a normal thing to
     do and must not produce a broken hosts file. -#}
-{% for c in lab_etc_hosts_clusters %}
+{# sno2 is optional (sno2_enabled) and only listed when it is on, so a lab
+   without it renders exactly the block it always did. #}
+{% for c in lab_etc_hosts_clusters
+             + ([{'zone': 'sno2.' ~ base_domain, 'lb': 'sno2'}]
+                if (sno2_enabled | default(false) | bool) else []) %}
 {% if ip_list[c.lb] is defined %}
 {% set addr = lab_network_prefix ~ '.' ~ ip_list[c.lb] %}
 {{ '%-16s' | format(addr) }}api.{{ c.zone }} api-int.{{ c.zone }}

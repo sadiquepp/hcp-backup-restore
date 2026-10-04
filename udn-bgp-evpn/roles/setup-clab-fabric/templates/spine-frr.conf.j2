@@ -46,6 +46,24 @@ router bgp {{ clab_spine_asn }}
 {% if udn_bgp_password | default('') | length > 0 %}
  neighbor 10.0.0.2 password {{ udn_bgp_password }}
 {% endif %}
+{# The further segments' leaves (clab_fabric_segments) - none unless a
+   cluster in clab_fabric_clusters names one. rack-clab.yml applies the same
+   stanzas to a running spine from spine-rack.conf.j2. #}
+{% for rack in (clab_rack_nodes | default({})) %}
+{% set seg = clab_fabric_segments[rack] %}
+ neighbor {{ seg.spine_link.leaf_ip }} remote-as {{ seg.leaf_asn }}
+ neighbor {{ seg.spine_link.leaf_ip }} description {{ seg.leaf }}-underlay
+{% if udn_bgp_password | default('') | length > 0 %}
+ neighbor {{ seg.spine_link.leaf_ip }} password {{ udn_bgp_password }}
+{% endif %}
+ neighbor {{ seg.leaf_loopback }} remote-as {{ seg.leaf_asn }}
+ neighbor {{ seg.leaf_loopback }} description {{ seg.leaf }}-evpn
+ neighbor {{ seg.leaf_loopback }} update-source lo0
+ neighbor {{ seg.leaf_loopback }} ebgp-multihop 3
+{% if udn_bgp_password | default('') | length > 0 %}
+ neighbor {{ seg.leaf_loopback }} password {{ udn_bgp_password }}
+{% endif %}
+{% endfor %}
  !
  address-family ipv4 unicast
   network 10.0.0.254/32
@@ -53,6 +71,10 @@ router bgp {{ clab_spine_asn }}
   neighbor 10.1.0.6 activate
   no neighbor 10.0.0.1 activate
   no neighbor 10.0.0.2 activate
+{% for rack in (clab_rack_nodes | default({})) %}
+  neighbor {{ clab_fabric_segments[rack].spine_link.leaf_ip }} activate
+  no neighbor {{ clab_fabric_segments[rack].leaf_loopback }} activate
+{% endfor %}
  exit-address-family
  !
  address-family l2vpn evpn
@@ -63,6 +85,10 @@ router bgp {{ clab_spine_asn }}
   ! data-plane gateway.
   neighbor 10.0.0.1 route-map NEXTHOP-UNCHANGED out
   neighbor 10.0.0.2 route-map NEXTHOP-UNCHANGED out
+{% for rack in (clab_rack_nodes | default({})) %}
+  neighbor {{ clab_fabric_segments[rack].leaf_loopback }} activate
+  neighbor {{ clab_fabric_segments[rack].leaf_loopback }} route-map NEXTHOP-UNCHANGED out
+{% endfor %}
   ! See the note at the top: the spine holds no VRFs, so without this it
   ! discards every EVPN route it is meant to be reflecting.
   bgp retain route-target all

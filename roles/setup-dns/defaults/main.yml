@@ -61,3 +61,12 @@ setup_dns_forwarders_file: /root/.lab-dns-forwarders
 # NOERROR there with SERVFAIL on the plain query means validation, not
 # reachability. Set to 'yes' where the resolvers serve DNSSEC properly.
 dns_dnssec_validation: "no"
+
+# The single-node clusters this helper serves a zone for: the SNO
+# (setup_sno.yaml) when ip_list has it, and sno2 (setup_sno2.yaml) only when
+# sno2_enabled is true. The zone stanza, its file and the PTR are all driven
+# from this one list, because a stanza naming a file that was not rendered
+# stops named from starting.
+setup_dns_sno_names: >-
+  {{ ([sno_name] if ((sno_name | default('')) and (ip_list[sno_name | default('')] is defined)) else [])
+     + (['sno2'] if ((sno2_enabled | default(false) | bool) and (ip_list.sno2 is defined)) else []) }}
