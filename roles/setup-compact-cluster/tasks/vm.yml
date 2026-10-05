@@ -2,6 +2,28 @@
 # The three VMs: for each, a disk, a DHCP reservation, and a domain with TWO
 # NICs on the default network - the bond's two ports - booting the agent ISO.
 
+# Disconnected: cut the nodes off from the internet BEFORE anything boots, so
+# the install cannot quietly fall back to quay.io and succeed for the wrong
+# reason. The same LAB_NO_NAT / LAB_NO_EGRESS chains as hubd; the task file
+# asserts at the end that every node IP really is blocked.
+- name: Cut the compact nodes off from the real internet
+  ansible.builtin.include_tasks:
+    file: "{{ role_path }}/../setup-hub-cluster-disconnected/tasks/block-node-nat.yml"
+    apply:
+      tags: [compact, compactvm]
+  vars:
+    disconnected_nat_enabled: "{{ compact_block_node_nat }}"
+    disconnected_nat_ip_keys: "{{ compact_nodes | map(attribute='ip_key') | list }}"
+    disconnected_nat_label: "{{ compact_name }}"
+  when: compact_disconnected | bool
+
+- name: Serve time to the lab network from this hypervisor
+  ansible.builtin.include_tasks:
+    file: ntp-server.yml
+    apply:
+      tags: [compact, compactvm]
+  when: compact_serve_ntp | bool
+
 # No --remove-all-storage, unlike setup-sno. All three domains share the agent
 # ISO as their cdrom, which virt-install has just put in a storage pool beside
 # it, so libvirt may count it as the domain's storage - and the first undefine

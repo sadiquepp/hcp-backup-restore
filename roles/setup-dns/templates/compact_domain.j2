@@ -1,4 +1,5 @@
-{# Forward zone for the three-node compact cluster (setup_compact_cluster.yaml).
+{# Forward zone for one three-node compact cluster - an entry of compact_clusters
+   in vars.yaml, passed in as compact_cluster (setup-dns tasks/main.yml loops).
 
    Unlike the SNO zone, api and *.apps do NOT point at a node. They point at
    the two VIPs keepalived floats between the masters, so either name keeps
@@ -16,11 +17,11 @@ $TTL 1D
 					1W	; expire
 					3H )	; minimum
 		NS	helper.{{ hub_domain }}.
-{% for node in compact_nodes | default([]) %}
+{% for node in compact_cluster.nodes | default([]) %}
 {% if node.ip_key in ip_list %}
 {{ "%-15s" | format(node.hostname) }}A	{{ lab_network_prefix }}.{{ ip_list[node.ip_key] }}
 {% endif %}
 {% endfor %}
-api		A	{{ lab_network_prefix }}.{{ ip_list[compact_api_vip_key] }}
-api-int		A	{{ lab_network_prefix }}.{{ ip_list[compact_api_vip_key] }}
-*.apps		A	{{ lab_network_prefix }}.{{ ip_list[compact_ingress_vip_key] }}
+api		A	{{ lab_network_prefix }}.{{ ip_list[compact_cluster.api_vip_key] }}
+api-int		A	{{ lab_network_prefix }}.{{ ip_list[compact_cluster.api_vip_key] }}
+*.apps		A	{{ lab_network_prefix }}.{{ ip_list[compact_cluster.ingress_vip_key] }}

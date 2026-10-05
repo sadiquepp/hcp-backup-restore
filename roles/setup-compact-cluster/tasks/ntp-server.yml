@@ -1,0 +1,86 @@
+---
+# Serve time to the lab network from this hypervisor.
+#
+# The agent refuses to install a host that is not time-synced - the
+# `ntp-synced` validation keeps it Insufficient with "Host couldn't
+# synchronize with any NTP server" - and RHCOS's default pool is on the
+# internet, which a disconnected node cannot reach. The hypervisor is the one
+# machine every node can reach that is guaranteed to have good time, and
+# traffic to it is local (INPUT, not FORWARD), so the egress block does not
+# touch it. agent-config.yaml names it in additionalNTPSources.
+
+- name: Make sure chrony is installed
+  ansible.builtin.package:
+    name: chrony
+    state: present
+
+# `local stratum 10` keeps it answering even while its own upstream is
+# unreachable, so a hypervisor that briefly loses its time source does not
+# take the cluster's NTP validation down with it.
+- name: Let the lab subnet use this host as its time source
+  ansible.builtin.blockinfile:
+    path: /etc/chrony.conf
+    marker: "# {mark} hcp-lab: serve time to {{ lab_network_prefix }}.0/24 (setup-compact-cluster)"
+    block: |
+      allow {{ lab_network_prefix }}.0/24
+      local stratum 10
+  register: compact_chrony_conf
+
+- name: Restart chronyd to pick up the change
+  ansible.builtin.systemd:
+    name: chronyd
+    state: restarted
+    enabled: true
+  when: compact_chrony_conf.changed
+
+- name: Make sure chronyd is running
+  ansible.builtin.systemd:
+    name: chronyd
+    state: started
+    enabled: true
+
+# Only when firewalld runs. Without it, libvirt's own INPUT rules leave port
+# 123 alone and the default INPUT policy lets it through.
+- name: Check whether firewalld is running
+  ansible.builtin.command:
+    cmd: systemctl is-active firewalld
+  register: compact_firewalld
+  changed_when: false
+  failed_when: false
+
+- name: Find the firewalld zone of the lab bridge
+  ansible.builtin.command:
+    cmd: firewall-cmd --get-zone-of-interface=virbr0
+  register: compact_virbr0_zone
+  changed_when: false
+  failed_when: false
+  when: compact_firewalld.stdout == 'active'
+
+- name: Open NTP to the lab network in that zone
+  ansible.builtin.shell:
+    cmd: |
+      zone={{ (compact_virbr0_zone.stdout | default('', true) | trim) or 'libvirt' }}
+      changed=0
+      firewall-cmd --zone=$zone --query-service=ntp >/dev/null || { firewall-cmd --zone=$zone --add-service=ntp; changed=1; }
+      firewall-cmd --permanent --zone=$zone --query-service=ntp >/dev/null || { firewall-cmd --permanent --zone=$zone --add-service=ntp; changed=1; }
+      echo "zone=$zone changed=$changed"
+  register: compact_fw_ntp
+  changed_when: "'changed=1' in compact_fw_ntp.stdout"
+  when: compact_firewalld.stdout == 'active'
+
+- name: Check chronyd is listening for NTP clients
+  ansible.builtin.shell:
+    cmd: ss -lun | grep -q ':123 '
+  register: compact_ntp_listen
+  changed_when: false
+  failed_when: false
+
+- name: Fail if chronyd is not serving
+  ansible.builtin.assert:
+    that: compact_ntp_listen.rc == 0
+    fail_msg: >-
+      chronyd is not listening on UDP 123 after adding `allow
+      {{ lab_network_prefix }}.0/24` to /etc/chrony.conf, so the nodes would
+      have no time source and the agent would not install them. Check
+      `systemctl status chronyd` and /etc/chrony.conf.
+    success_msg: "chronyd serves time to {{ lab_network_prefix }}.0/24 at {{ compact_ntp_server }}."

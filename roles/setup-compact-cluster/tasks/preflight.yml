@@ -49,6 +49,28 @@
       in vault.yaml - run the playbook with --ask-vault-pass.
     success_msg: "Pull secret is available."
 
+# Disconnected: the mirror registry has to be up and trusted before anything
+# else is worth doing. setup-mirror-registry-trust puts its CA here and logs
+# podman in to it; both are read again in mirror.yml.
+- name: Check the mirror registry CA is trusted on this host
+  ansible.builtin.stat:
+    path: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+  register: compact_mirror_ca
+  when: compact_disconnected | bool
+
+- name: Fail if the mirror registry has not been set up
+  ansible.builtin.assert:
+    that: compact_mirror_ca.stat.exists
+    fail_msg: >-
+      The mirror registry CA is not trusted on this host
+      (/etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem is missing),
+      so the mirror registry has not been set up. Run
+      setup_compact_cluster_disconnected.yaml without --tags (it runs
+      setup_mirror_registry.yaml first), or run setup_mirror_registry.yaml
+      -e disconnected_install=true on its own.
+    success_msg: "Mirror registry CA is trusted on this host."
+  when: compact_disconnected | bool
+
 - name: Work out which ip_list keys this cluster needs
   ansible.builtin.set_fact:
     compact_required_keys: >-
@@ -99,21 +121,24 @@
       by ARP. Pick octets outside those.
     success_msg: "Every address is clear of every MetalLB pool."
 
-# The MAC scheme appends the octet verbatim, so it has to be two digits - for
-# the VIPs too, because setup-bm-host renders a DHCP reservation for every
-# ip_list key and 52:54:00:e2:54:100 would break the whole network definition.
+# The MAC scheme uses the octet's decimal digits as the MAC's last byte,
+# zero-padded ('%02d'), so it has to fit in two digits - for the VIPs too,
+# because setup-bm-host renders a DHCP reservation for every ip_list key and
+# 52:54:00:e2:54:100 would break the whole network definition. .1 is the
+# gateway. Single digits (the disconnected cluster's .3-.7) pad to 03..09,
+# which no two-digit octet can produce, so the MACs stay unique.
 - name: Fail if an octet cannot form a valid MAC
   vars:
     compact_octets: "{{ compact_required_keys | map('extract', ip_list) | map('int') | list }}"
     compact_bad_octets: >-
-      {{ (compact_octets | select('lt', 10) | list) + (compact_octets | select('gt', 99) | list) }}
+      {{ (compact_octets | select('lt', 2) | list) + (compact_octets | select('gt', 99) | list) }}
   ansible.builtin.assert:
     that: compact_bad_octets | length == 0
     fail_msg: >-
-      {{ compact_bad_octets | join(', ') }} is not a two-digit octet. This lab
-      builds MACs as {{ compact_primary_mac_prefix }}:<octet> (and
+      {{ compact_bad_octets | join(', ') }} cannot form a MAC. This lab builds
+      MACs as {{ compact_primary_mac_prefix }}:<octet, zero-padded> (and
       {{ compact_secondary_mac_prefix }}:<octet> for the bond's second port),
-      so every octet has to be between 10 and 99.
+      so every octet has to be between 2 and 99.
     success_msg: "Every octet forms a well-formed MAC."
 
 - name: Read the lab ssh public key
@@ -139,8 +164,8 @@
            'hostname': item.hostname,
            'domain': item.ip_key,
            'ip': lab_network_prefix ~ '.' ~ ip_list[item.ip_key],
-           'primary_mac': (compact_primary_mac_prefix ~ ':' ~ ip_list[item.ip_key]) | lower,
-           'secondary_mac': (compact_secondary_mac_prefix ~ ':' ~ ip_list[item.ip_key]) | lower
+           'primary_mac': (compact_primary_mac_prefix ~ ':' ~ ('%02d' | format(ip_list[item.ip_key] | int))) | lower,
+           'secondary_mac': (compact_secondary_mac_prefix ~ ':' ~ ('%02d' | format(ip_list[item.ip_key] | int))) | lower
          }] }}
   loop: "{{ compact_nodes }}"
   loop_control:

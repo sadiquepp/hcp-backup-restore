@@ -526,6 +526,22 @@ ip_list:
   compact_api: 17
   compact_ingress: 18
 
+  ## The DISCONNECTED three-node compact cluster
+  ## (setup_compact_cluster_disconnected.yaml). Its own five addresses, so it
+  ## can run beside the connected one. They are SINGLE digits because no
+  ## two-digit octet is left (.63 aside, see above): .2-.9 sit below both DHCP
+  ## pools (dhcpd .100-.200, libvirt .201-.249) and outside every MetalLB band.
+  ## A single digit is still a valid MAC because every consumer of these keys
+  ## zero-pads the octet: 52:54:00:e2:54:03 (default-network.xml.j2 and
+  ## roles/setup-compact-cluster both format it with '%02d'). Two-digit
+  ## octets render exactly as before. Do not reuse .2-.9 elsewhere without
+  ## the same padding - a raw '52:54:00:e2:54:3' is not a MAC that ABI accepts.
+  compactd_master1: 3
+  compactd_master2: 4
+  compactd_master3: 5
+  compactd_api: 6
+  compactd_ingress: 7
+
 helper_name: helper
 helper_disk: helper_disk.qcow2
 ## The helper's disk is expanded from the 10G rhel9_kvm_image to this size when
@@ -752,6 +768,42 @@ compact_nodes:
     ip_key: compact_master3
 compact_api_vip_key: compact_api
 compact_ingress_vip_key: compact_ingress
+
+## The disconnected compact cluster (setup_compact_cluster_disconnected.yaml).
+## Same role, same bonds, its own name, addresses and folders, so both can be
+## up at once. Its images come only from the mirror registry
+## (setup_mirror_registry.yaml) and its nodes' egress past the lab subnet is
+## cut with iptables, exactly as for the disconnected hub (hubd).
+compactd_name: compactd
+compactd_install_folder: "{{ download_dir }}/compactd_install"
+compactd_vm_folder: "{{ download_dir }}/compactd"
+compactd_nodes:
+  - hostname: master1
+    ip_key: compactd_master1
+  - hostname: master2
+    ip_key: compactd_master2
+  - hostname: master3
+    ip_key: compactd_master3
+compactd_api_vip_key: compactd_api
+compactd_ingress_vip_key: compactd_ingress
+## Cut the compactd nodes off from the internet (LAB_NO_NAT / LAB_NO_EGRESS,
+## shared with hubd - roles/setup-hub-cluster-disconnected/tasks/block-node-nat.yml).
+## false installs from the mirror but leaves egress open, which is only useful
+## to tell whether a failure is really caused by the disconnection.
+compactd_block_node_nat: true
+
+## Every compact cluster setup-dns and setup-bm-host publish: a zone, PTRs, a
+## libvirt forwarder, DHCP names and /etc/hosts entries each. One entry per
+## cluster; an entry whose VIP keys are missing from ip_list is skipped.
+compact_clusters:
+  - name: "{{ compact_name }}"
+    nodes: "{{ compact_nodes }}"
+    api_vip_key: "{{ compact_api_vip_key }}"
+    ingress_vip_key: "{{ compact_ingress_vip_key }}"
+  - name: "{{ compactd_name }}"
+    nodes: "{{ compactd_nodes }}"
+    api_vip_key: "{{ compactd_api_vip_key }}"
+    ingress_vip_key: "{{ compactd_ingress_vip_key }}"
 
 ## Per node. These masters are also the workers, so they get more than the
 ## 4 vCPU / 16GiB compact minimum.

@@ -4,6 +4,10 @@ This guide builds a **three-node compact OpenShift cluster** on the lab
 hypervisor from a single **agent ISO**. Every node has **two NICs bonded in
 active-backup mode (mode 1)**, and the node's address lives on the bond.
 
+For the same cluster installed only from the lab's mirror registry, with the
+nodes cut off from the internet, see
+[compact-cluster-disconnected.md](compact-cluster-disconnected.md).
+
 For physical servers instead of lab VMs, see
 [compact-cluster-baremetal.md](compact-cluster-baremetal.md). That guide
 bonds the NICs with LACP (802.3ad) instead of active-backup.

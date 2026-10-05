@@ -82,15 +82,17 @@ zone "{{ sno_name }}.{{ base_domain }}" IN {
 	allow-update { none; };
 };
 {% endif %}
-{# The three-node compact cluster, on the same condition tasks/main.yml renders
-   its zone file on - both VIP keys present in ip_list. #}
-{% if (compact_name | default('')) and ((compact_api_vip_key | default('')) in ip_list) and ((compact_ingress_vip_key | default('')) in ip_list) %}
-zone "{{ compact_name }}.{{ base_domain }}" IN {
+{# The three-node compact clusters, on the same condition tasks/main.yml renders
+   their zone files on - both VIP keys present in ip_list. #}
+{% for c in compact_clusters | default([]) %}
+{% if (c.name | default('')) and ((c.api_vip_key | default('')) in ip_list) and ((c.ingress_vip_key | default('')) in ip_list) %}
+zone "{{ c.name }}.{{ base_domain }}" IN {
 	type master;
-	file "{{ compact_name }}.{{ base_domain }}.db";
+	file "{{ c.name }}.{{ base_domain }}.db";
 	allow-update { none; };
 };
 {% endif %}
+{% endfor %}
 {# One zone per hosted cluster, connected and disconnected alike, derived from
    the cluster lists so a new cluster needs no edit here. The zone name is
    <cluster-name>.<base_domain>, matching the .db files tasks/main.yml writes -

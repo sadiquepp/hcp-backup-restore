@@ -162,21 +162,26 @@
   notify:
     -  Restart_Named
 
-# The three-node compact cluster (setup_compact_cluster.yaml), when vars.yaml
-# carries one. Same reasoning and same guard discipline as the SNO above: this
-# condition is repeated verbatim in named.rfc1912.zones.j2, because a stanza
-# without its file stops named from starting.
-- name: Deploy "{{ compact_name | default('') }}.{{ base_domain }}" - Forward zonefile
+# The three-node compact clusters (setup_compact_cluster.yaml and
+# setup_compact_cluster_disconnected.yaml), one zone per compact_clusters
+# entry. Same guard discipline as the SNO above: this condition is repeated in
+# named.rfc1912.zones.j2, because a stanza without its file stops named from
+# starting.
+- name: Deploy the compact clusters' forward zonefiles
   template:
     src: compact_domain.j2
-    dest: "/var/named/{{ compact_name }}.{{ base_domain }}.db"
+    dest: "/var/named/{{ compact_cluster.name }}.{{ base_domain }}.db"
     owner: root
     group: named
     mode: u=rw,g=r,o=r
+  loop: "{{ compact_clusters | default([]) }}"
+  loop_control:
+    loop_var: compact_cluster
+    label: "{{ compact_cluster.name }}.{{ base_domain }}"
   when:
-    - (compact_name | default('')) | length > 0
-    - (compact_api_vip_key | default('')) in ip_list
-    - (compact_ingress_vip_key | default('')) in ip_list
+    - (compact_cluster.name | default('')) | length > 0
+    - (compact_cluster.api_vip_key | default('')) in ip_list
+    - (compact_cluster.ingress_vip_key | default('')) in ip_list
   notify:
     -  Restart_Named
 

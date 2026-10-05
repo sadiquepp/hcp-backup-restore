@@ -64,6 +64,9 @@ lab_etc_hosts_clusters:
   - zone: "{{ compact_name | default('compact') }}.{{ base_domain }}"
     lb: "{{ compact_api_vip_key | default('compact_api') }}"
     apps_lb: "{{ compact_ingress_vip_key | default('compact_ingress') }}"
+  - zone: "{{ compactd_name | default('compactd') }}.{{ base_domain }}"
+    lb: "{{ compactd_api_vip_key | default('compactd_api') }}"
+    apps_lb: "{{ compactd_ingress_vip_key | default('compactd_ingress') }}"
 
 ## Route names published under *.apps.<cluster>, so the web console is usable
 ## from a browser on this host - over VNC, or through `ssh -D` with SOCKS5

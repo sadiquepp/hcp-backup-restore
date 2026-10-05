@@ -1,0 +1,285 @@
+---
+# Disconnected only: everything the install needs from the mirror registry.
+#
+#   1. oc-mirror's cluster-resources, staged on the hypervisor
+#   2. its ImageDigestMirrorSets, flattened into imageDigestSources
+#   3. openshift-install, extracted from the MIRRORED release with
+#      `oc adm release extract --idms-file`
+#   4. the mirror's CA and a pull secret holding only the mirror's credentials
+#
+# The same steps as roles/setup-hub-cluster-disconnected/tasks/main.yml, whose
+# comments explain each one at length (why --idms-file is needed with
+# oc-mirror v2's repository layout, why the IDMS files are found by content,
+# why the .json duplicates are dropped, why IDMS/ITMS/CatalogSource wait for
+# day 2). They are repeated here with the compact role's variable names rather
+# than shared, because the hubd role inlines them in its own task list.
+#
+# The hypervisor keeps its internet access, as for hubd: only the cluster's
+# nodes are cut off. The oc running the extract is the version-matched client
+# image.yml has just downloaded into compact_install_folder.
+
+- name: Locate the oc-mirror cluster-resources directory on the mirror-registry VM
+  ansible.builtin.shell: |
+    set -o pipefail
+    find /root/mirror/oc-mirror-output -type d -name cluster-resources | head -n1 || true
+  args:
+    executable: /bin/bash
+  register: compact_cr_remote
+  changed_when: false
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+- name: Fail if oc-mirror has not produced any cluster-resources yet
+  ansible.builtin.assert:
+    that: compact_cr_remote.stdout | trim | length > 0
+    fail_msg: >-
+      No cluster-resources directory under /root/mirror/oc-mirror-output on the
+      mirror-registry VM - setup_mirror_registry.yaml has not finished mirroring.
+
+- name: Archive the cluster-resources on the mirror-registry VM
+  ansible.builtin.command:
+    cmd: >-
+      tar czf /root/mirror/{{ compact_name }}-cluster-resources.tar.gz
+      -C {{ compact_cr_remote.stdout | trim | dirname }} cluster-resources
+  changed_when: true
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+- name: Fetch the cluster-resources archive to the hypervisor
+  ansible.builtin.fetch:
+    src: "/root/mirror/{{ compact_name }}-cluster-resources.tar.gz"
+    dest: "{{ compact_cluster_resources_dir }}.tar.gz"
+    flat: true
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+
+# Rebuilt from empty, so a manifest oc-mirror no longer emits cannot survive
+# from an earlier run.
+- name: Clear the cluster-resources staging directory
+  ansible.builtin.file:
+    path: "{{ compact_cluster_resources_dir }}"
+    state: absent
+
+- name: Create the cluster-resources staging directory
+  ansible.builtin.file:
+    path: "{{ compact_cluster_resources_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Unpack the cluster-resources
+  ansible.builtin.unarchive:
+    src: "{{ compact_cluster_resources_dir }}.tar.gz"
+    dest: "{{ compact_cluster_resources_dir }}"
+    remote_src: true
+    extra_opts: ["--strip-components=1"]
+
+# Found by content, release-payload mappings first: `oc adm release extract`
+# takes ONE --idms-file, and the image it has to resolve is a release image.
+- name: List the ImageDigestMirrorSets, release payload first
+  ansible.builtin.shell: |
+    set -o pipefail
+    all=$(grep -rlE '^[[:space:]]*kind:[[:space:]]*ImageDigestMirrorSet' \
+            "{{ compact_cluster_resources_dir }}" | sort) || true
+    [ -n "$all" ] || exit 0
+    rest=
+    while IFS= read -r f; do
+      if grep -q 'openshift-release-dev' "$f"; then
+        printf '%s\n' "$f"
+      else
+        rest="${rest}${f}"$'\n'
+      fi
+    done <<< "$all"
+    printf '%s' "$rest"
+    exit 0
+  args:
+    executable: /bin/bash
+  register: compact_idms_files
+  changed_when: false
+
+- name: Fail if oc-mirror produced no ImageDigestMirrorSet
+  ansible.builtin.assert:
+    that: compact_idms_files.stdout_lines | length > 0
+    fail_msg: >-
+      No ImageDigestMirrorSet in {{ compact_cluster_resources_dir }}. Without
+      one, `oc adm release extract` cannot find the installer image in
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }} and would go to
+      quay.io for it. Check that setup_mirror_registry.yaml mirrored a platform
+      release.
+
+- name: Read every ImageDigestMirrorSet
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ compact_idms_files.stdout_lines }}"
+  register: compact_idms_raw
+
+- name: Start the imageDigestSources list
+  ansible.builtin.set_fact:
+    compact_image_digest_mirrors: []
+
+# Only .source and .mirrors are kept: install-config.yaml's ImageDigestSource
+# type has no mirrorSourcePolicy. Duplicates across files are dropped.
+- name: Collect the source-to-mirror mappings for install-config.yaml
+  ansible.builtin.set_fact:
+    compact_image_digest_mirrors: "{{ compact_image_digest_mirrors + [compact_idms_entry] }}"
+  loop: >-
+    {{ compact_idms_raw.results
+       | map(attribute='content') | map('b64decode')
+       | map('from_yaml_all') | map('list') | flatten
+       | select('mapping')
+       | selectattr('kind', 'defined')
+       | selectattr('kind', 'equalto', 'ImageDigestMirrorSet')
+       | selectattr('spec', 'defined')
+       | map(attribute='spec.imageDigestMirrors') | flatten }}
+  loop_control:
+    label: "{{ item.source }}"
+  vars:
+    compact_idms_entry:
+      source: "{{ item.source }}"
+      mirrors: "{{ item.mirrors }}"
+  when: compact_idms_entry not in compact_image_digest_mirrors
+
+- name: Fail if no source-to-mirror mappings could be read
+  ansible.builtin.assert:
+    that: compact_image_digest_mirrors | length > 0
+    fail_msg: >-
+      Found ImageDigestMirrorSet files ({{ compact_idms_files.stdout_lines | join(', ') }})
+      but no spec.imageDigestMirrors in any of them, so install-config.yaml would
+      have no mirror configuration.
+
+- name: Check that oc supports --idms-file
+  ansible.builtin.shell:
+    cmd: "{{ compact_install_folder }}/oc adm release extract --help | grep -q -- --idms-file"
+  register: compact_oc_idms
+  changed_when: false
+  failed_when: false
+
+- name: Fail if oc is too old to accept an ImageDigestMirrorSet
+  ansible.builtin.assert:
+    that: compact_oc_idms.rc == 0
+    fail_msg: >-
+      {{ compact_install_folder }}/oc has no `oc adm release extract
+      --idms-file` (it arrived in oc 4.13), so it cannot resolve the installer
+      image inside the mirror.
+
+# Any installer left by an earlier run would otherwise be what the version
+# check below reads if the extract silently did nothing.
+- name: Remove any previous openshift-install
+  ansible.builtin.file:
+    path: "{{ compact_install_folder }}/openshift-install"
+    state: absent
+
+# The binary that comes back has the release image it was extracted from
+# built in as its default - the MIRROR's pullspec - so the agent ISO and the
+# cluster install from the mirror. That is the whole point of extracting it
+# rather than downloading it from mirror.openshift.com.
+- name: Extract openshift-install from the release image in the mirror registry
+  ansible.builtin.command:
+    cmd: >-
+      {{ compact_install_folder }}/oc adm release extract
+      -a {{ mirror_registry_authfile }}
+      --idms-file={{ compact_idms_files.stdout_lines[0] }}
+      --command=openshift-install
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }}/{{ mirror_release_repository }}:{{ mirror_ocp_version }}-x86_64
+    chdir: "{{ compact_install_folder }}"
+  changed_when: true
+
+- name: Read the extracted installer's built-in release image
+  ansible.builtin.command:
+    cmd: "{{ compact_install_folder }}/openshift-install version"
+  register: compact_extracted_version
+  changed_when: false
+
+- name: Fail unless the installer installs from the mirror
+  ansible.builtin.assert:
+    that: >-
+      compact_extracted_version.stdout_lines
+      | select('match', '^release image ' ~ (mirror_registry_domain | regex_escape) ~ ':' ~ mirror_registry_port)
+      | list | length > 0
+    fail_msg: >-
+      The extracted openshift-install does not point at the mirror:
+      {{ compact_extracted_version.stdout_lines }}. The ISO would pull the
+      release from somewhere other than {{ mirror_registry_domain }}.
+    success_msg: >-
+      {{ compact_extracted_version.stdout_lines | select('match', '^release image') | first }}
+
+# oc-mirror writes some resources as both .json and .yaml; two manifests for
+# one object make `agent create image` refuse the extra-manifests directory.
+- name: Drop oc-mirror's duplicate .json manifests where a .yaml exists
+  ansible.builtin.shell: |
+    cd "{{ compact_cluster_resources_dir }}" || exit 1
+    for j in *.json; do
+      [ -e "$j" ] || continue
+      for y in "${j%.json}.yaml" "${j%.json}.yml"; do
+        if [ -e "$y" ]; then rm -f -- "$j"; echo "dropped $j"; break; fi
+      done
+    done
+  args:
+    executable: /bin/bash
+  register: compact_dropped_json
+  changed_when: compact_dropped_json.stdout | trim | length > 0
+
+# install/ goes into the agent's extra manifests (the release signature
+# ConfigMap); day2/ is applied once the cluster is up. A file is held back
+# whole if any document in it is a day-2 kind.
+- name: Split the oc-mirror resources into install-time and day-2 sets
+  ansible.builtin.shell: |
+    cd "{{ compact_cluster_resources_dir }}" || exit 1
+    mkdir -p install day2
+    for f in *.yaml *.yml *.json; do
+      [ -e "$f" ] || continue
+      if grep -qE '^[[:space:]]*kind:[[:space:]]*({{ compact_day2_kinds | join("|") }})[[:space:]]*$' "$f"; then
+        mv -- "$f" day2/
+      else
+        mv -- "$f" install/
+      fi
+    done
+    echo "install-time: $(ls install | tr '\n' ' ')"
+    echo "day-2:        $(ls day2 | tr '\n' ' ')"
+  args:
+    executable: /bin/bash
+  register: compact_resource_split
+  changed_when: false
+
+- name: Show how the oc-mirror resources were split
+  ansible.builtin.debug:
+    var: compact_resource_split.stdout_lines
+
+- name: Read the mirror registry CA (trusted here by setup-mirror-registry-trust)
+  ansible.builtin.slurp:
+    src: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+  register: compact_mirror_ca_b64
+
+- name: Read the mirror registry pull secret
+  ansible.builtin.slurp:
+    src: "{{ mirror_registry_authfile }}"
+  register: compact_mirror_auth_b64
+  no_log: true
+
+- name: Work out which authfile entry belongs to the mirror registry
+  ansible.builtin.set_fact:
+    compact_mirror_host: "{{ mirror_registry_domain }}:{{ mirror_registry_port }}"
+    compact_mirror_auths: "{{ (compact_mirror_auth_b64.content | b64decode | from_json).auths | default({}, true) }}"
+    compact_mirror_ca_cert: "{{ compact_mirror_ca_b64.content | b64decode }}"
+  no_log: true
+
+- name: Fail if this host is not logged in to the mirror registry
+  ansible.builtin.assert:
+    that: compact_mirror_host in compact_mirror_auths
+    fail_msg: >-
+      {{ mirror_registry_authfile }} has no credentials for {{ compact_mirror_host }}
+      (it has [{{ compact_mirror_auths.keys() | list | join(', ') }}]).
+      setup-mirror-registry-trust logs podman in there - run
+      setup_mirror_registry.yaml first.
+
+# Only the mirror's own credentials: with imageDigestSources the cluster never
+# needs quay.io or registry.redhat.io, and giving it those credentials would
+# hand every node a route back to the real registries.
+- name: Reduce the pull secret to the mirror registry's credentials
+  ansible.builtin.set_fact:
+    compact_mirror_pull_secret:
+      auths: "{{ {compact_mirror_host: compact_mirror_auths[compact_mirror_host]} }}"
+  no_log: true
+
+- name: Show what the install will use
+  ansible.builtin.debug:
+    msg:
+      - "oc adm release extract --idms-file={{ compact_idms_files.stdout_lines[0] }}"
+      - "imageDigestSources: {{ compact_image_digest_mirrors | map(attribute='source') | join(', ') }}"
+      - "pull secret: {{ compact_mirror_host }} only"

@@ -32,6 +32,15 @@ kind: AgentConfig
 metadata:
   name: {{ compact_name }}
 rendezvousIP: {{ compact_rendezvous_ip }}
+{% if compact_ntp_sources | length > 0 %}
+{# The lab's own time source (the hypervisor) - a disconnected node cannot
+   reach the default internet pool, and the agent will not install a host
+   that is not time-synced. #}
+additionalNTPSources:
+{% for ntp in compact_ntp_sources %}
+  - {{ ntp }}
+{% endfor %}
+{% endif %}
 hosts:
 {% for h in compact_hosts %}
   - hostname: {{ h.hostname }}

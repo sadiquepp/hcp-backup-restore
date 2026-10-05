@@ -1,0 +1,66 @@
+---
+# Disconnected, day 2: oc-mirror's ImageDigestMirrorSet, ImageTagMirrorSet and
+# CatalogSource, held back from the install (mirror.yml) because an IDMS/ITMS
+# in the install manifests has to match the one the installer renders from
+# imageDigestSources byte for byte. Applied now they are an ordinary
+# MachineConfig change: the masters reboot one at a time.
+#
+# The same as roles/setup-hub-cluster-disconnected/tasks/apply-day2-mirror-resources.yml
+# and its wait-for-machineconfigpools.yml, with the cluster's own oc by full
+# path, so nothing depends on an oc on this host's PATH.
+
+- name: Find the day-2 mirror resources
+  ansible.builtin.find:
+    paths: "{{ compact_cluster_resources_dir }}/day2"
+    patterns: ['*.yaml', '*.yml', '*.json']
+  register: compact_day2_files
+
+- name: Apply them
+  ansible.builtin.command:
+    cmd: "{{ compact_install_folder }}/oc apply -f {{ compact_cluster_resources_dir }}/day2"
+  environment:
+    KUBECONFIG: "{{ compact_install_folder }}/auth/kubeconfig"
+  register: compact_day2_apply
+  changed_when: "'created' in compact_day2_apply.stdout or 'configured' in compact_day2_apply.stdout"
+  when: compact_day2_files.matched > 0
+
+- name: Show what was applied
+  ansible.builtin.debug:
+    var: compact_day2_apply.stdout_lines
+  when: compact_day2_files.matched > 0
+
+# The pools do not go Updating the instant the objects land; waiting at once
+# would match the old Updated=True and return immediately.
+- name: Give the MCO time to render the new configuration
+  ansible.builtin.wait_for:
+    timeout: 90
+  when: compact_day2_apply is changed
+
+# Polled, not watched: the rollout reboots the masters, so the API goes with
+# them and a long-lived watch would be dropped mid-rollout.
+- name: Wait for every MachineConfigPool to finish rolling out
+  ansible.builtin.shell: |
+    set -o pipefail
+    fields='{.metadata.name}{"\t"}{.status.machineCount}{"\t"}{.status.updatedMachineCount}'
+    fields="$fields"'{"\t"}{.status.readyMachineCount}{"\t"}{.status.degradedMachineCount}{"\n"}'
+    pools=$({{ compact_install_folder }}/oc get machineconfigpool -o jsonpath="{range .items[*]}$fields{end}") || exit 1
+    [ -n "$pools" ] || exit 1
+    printf '%s\n' "$pools" \
+      | awk -F'\t' 'NF != 5 || $2 != $3 || $2 != $4 || $5 != "0" { print; bad = 1 } END { exit bad + 0 }'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ compact_install_folder }}/auth/kubeconfig"
+  register: compact_mcp_rollout
+  until: compact_mcp_rollout.rc == 0
+  retries: 80
+  delay: 30
+  changed_when: false
+  when: compact_day2_apply is changed
+
+- name: Report the result
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Applied ' ~ compact_day2_files.matched ~ ' day-2 mirror resource file(s); every MachineConfigPool has rolled out.'
+         if compact_day2_files.matched > 0 else
+         'No day-2 mirror resources to apply - the release still resolves through the IDMS the installer created.' }}

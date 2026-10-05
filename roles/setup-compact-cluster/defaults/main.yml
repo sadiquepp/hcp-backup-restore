@@ -122,3 +122,41 @@ compact_ssh_public_key_file: "~/.ssh/lab_rsa.pub"
 
 ## Whether a missing DNS zone is fatal. Same reasoning as sno_require_dns.
 compact_require_dns: true
+
+## ---------------------------------------------------------------------------
+## Disconnected mode (setup_compact_cluster_disconnected.yaml sets these).
+## ---------------------------------------------------------------------------
+## Install from the mirror registry (setup_mirror_registry.yaml) instead of
+## quay.io: openshift-install is extracted from the mirrored release with
+## `oc adm release extract --idms-file`, install-config.yaml carries the mirror
+## as imageDigestSources plus its CA and a mirror-only pull secret, and the
+## nodes' egress past the lab subnet is cut before they boot. Modelled on
+## roles/setup-hub-cluster-disconnected, whose comments explain each piece at
+## length.
+compact_disconnected: false
+
+## Cut the nodes off from the internet (shared LAB_NO_NAT / LAB_NO_EGRESS
+## chains - roles/setup-hub-cluster-disconnected/tasks/block-node-nat.yml).
+compact_block_node_nat: true
+
+## Where oc-mirror's cluster-resources are staged on the hypervisor, rebuilt
+## from the mirror registry VM on every run. Split into install/ (into the
+## agent's extra-manifests directory) and day2/ (applied once the cluster is
+## up), for the MachineConfig reason given in
+## roles/setup-hub-cluster-disconnected/defaults/main.yml.
+compact_cluster_resources_dir: "/tmp/{{ compact_name }}-cluster-resources"
+compact_day2_kinds:
+  - ImageDigestMirrorSet
+  - ImageTagMirrorSet
+  - CatalogSource
+
+## NTP. The agent will not install a host that is not time-synced ("Host
+## couldn't synchronize with any NTP server" keeps it Insufficient), and the
+## default RHCOS pool is on the internet - so a disconnected cluster needs a
+## time source inside the lab. The hypervisor serves it: chronyd there gets an
+## `allow` for the lab subnet, and the nodes get it as additionalNTPSources.
+## Traffic to .1 is local to the hypervisor, so the egress block does not
+## touch it.
+compact_serve_ntp: "{{ compact_disconnected | bool }}"
+compact_ntp_server: "{{ lab_network_prefix }}.1"
+compact_ntp_sources: "{{ [compact_ntp_server] if (compact_serve_ntp | bool) else [] }}"

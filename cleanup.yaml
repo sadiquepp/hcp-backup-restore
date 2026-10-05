@@ -9,6 +9,8 @@
 ##
 ##   --tags sno      the single-node OpenShift cluster only
 ##   --tags compact  the three-node compact cluster only
+##   --tags compactd the disconnected compact cluster only (VMs, folders and
+##                   its egress-blocking iptables rules)
 ##   --tags udnlab   the UDN/BGP/EVPN lab - clab VM, client VMs, fabric net
 ##
 ## The untagged tasks (hub, hub2, hosted clusters, helper, registry, minio,
@@ -211,6 +213,37 @@
       {% endfor %}
       rm -rf {{ compact_vm_folder | default(download_dir ~ '/compact') }}
       rm -rf {{ compact_install_folder | default(download_dir ~ '/compact_install') }}
+
+  ## -------------------------------------------------------------------------
+  ## The disconnected compact cluster (setup_compact_cluster_disconnected.yaml)
+  ## -------------------------------------------------------------------------
+  ## Its iptables rules go too. They carry the comment
+  ## "compactd disconnected: ..." (block-node-nat.yml), so only this cluster's
+  ## rules are deleted; hubd's, and the LAB_NO_NAT / LAB_NO_EGRESS chains and
+  ## their jumps, stay for whoever else uses them. The mirror registry and the
+  ## chronyd `allow` on this host are shared infrastructure and are left alone.
+  - name: Destroy the disconnected compact cluster VMs
+    tags: [compactd]
+    shell: |
+      {% for node in compactd_nodes | default([]) %}
+      virsh destroy  {{ node.ip_key }} >/dev/null 2>&1 || true
+      virsh undefine {{ node.ip_key }} >/dev/null 2>&1 || true
+      {% endfor %}
+      rm -rf {{ compactd_vm_folder | default(download_dir ~ '/compactd') }}
+      rm -rf {{ compactd_install_folder | default(download_dir ~ '/compactd_install') }}
+      rm -rf /tmp/{{ compactd_name | default('compactd') }}-cluster-resources /tmp/{{ compactd_name | default('compactd') }}-cluster-resources.tar.gz
+
+  - name: Remove the disconnected compact cluster's egress-blocking rules
+    tags: [compactd]
+    shell: |
+      for t in "nat LAB_NO_NAT" "filter LAB_NO_EGRESS"; do
+        set -- $t
+        iptables -t $1 -S $2 2>/dev/null \
+          | grep -- '--comment "{{ compactd_name | default('compactd') }} disconnected:' \
+          | sed 's/^-A /-D /' \
+          | while read -r rule; do eval iptables -t $1 $rule; done
+      done
+      true
 
   ## -------------------------------------------------------------------------
   ## The UDN/BGP/EVPN lab (setup_udn_bgp_lab.yaml)

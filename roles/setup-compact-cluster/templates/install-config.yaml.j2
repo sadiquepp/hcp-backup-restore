@@ -44,5 +44,32 @@ platform:
     ingressVIPs:
     - {{ compact_ingress_vip }}
     provisioningNetwork: Disabled
+{% if compact_disconnected | bool %}
+{#
+  Disconnected. imageDigestSources is the ONLY place the mirror is configured
+  for the install: the installer uses it for its own pulls while building the
+  ISO (it hands it to oc as --icsp-file), writes it into the ISO's
+  registries.conf for the agents, and generates the cluster's own
+  ImageDigestMirrorSet from it. oc-mirror's IDMS is deliberately not added as
+  an extra manifest as well - see roles/setup-hub-cluster-disconnected.
+
+  The pull secret holds only the mirror's credentials; to_json twice so no
+  character in it can break the YAML. The CA lets every node, and the agent
+  ISO, pull from the mirror over TLS.
+#}
+imageDigestSources:
+{% for m in compact_image_digest_mirrors %}
+- mirrors:
+{% for mirror in m.mirrors %}
+  - {{ mirror }}
+{% endfor %}
+  source: {{ m.source }}
+{% endfor %}
+pullSecret: {{ compact_mirror_pull_secret | to_json | to_json }}
+sshKey: '{{ compact_ssh_key }}'
+additionalTrustBundle: |
+  {{ compact_mirror_ca_cert | trim | indent(2) }}
+{% else %}
 pullSecret: '{{ pull_secret }}'
 sshKey: '{{ compact_ssh_key }}'
+{% endif %}
