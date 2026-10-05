@@ -578,10 +578,23 @@ for f in $CR/*.yaml $CR/*.yml; do
 done
 
 # Turn off the default OperatorHub catalogs: they point at registry.redhat.io,
-# which the nodes cannot reach.
-cp roles/setup-hub-cluster-disconnected/files/operatorhub-disable-default-sources.yaml $WORK/openshift/
-ls $WORK/openshift
+# which the nodes cannot reach. Written here rather than copied from the repo,
+# so it does not depend on which directory you are in.
+cat > $WORK/openshift/operatorhub-disable-default-sources.yaml <<'EOF'
+apiVersion: config.openshift.io/v1
+kind: OperatorHub
+metadata:
+  name: cluster
+spec:
+  disableAllDefaultSources: true
+EOF
+ls -l $WORK/openshift      # must list operatorhub-disable-default-sources.yaml
 ```
+
+The installer reads only `*.yaml` and `*.yml` from `openshift/`. A file that
+is not there when you run `agent create image` (Step 11) does not reach the
+cluster, and nothing reports it as missing. Step 14 sets the same flag again
+on the running cluster in case it did not.
 
 Do **not** put `oc mirror`'s IDMS or ITMS in `openshift/`. The installer
 already creates an ImageDigestMirrorSet from `imageDigestSources`. A second
@@ -687,10 +700,20 @@ Then check the bonds, as for the connected cluster
 
 *Automated by: `tasks/day2.yml` (`--tags compactday2`)*
 
-Apply what was held back from the install: `oc mirror`'s ImageDigestMirrorSet,
-ImageTagMirrorSet and CatalogSource. The ITMS lets the nodes pull images that
-are referenced by tag. The CatalogSources replace the default OperatorHub
-catalogs that Step 10 turned off.
+First make sure the default OperatorHub catalogs are off. The Step 10
+manifest should already have done this. The patch is safe to run again, and
+it fixes a cluster where the manifest did not reach `$WORK/openshift/`:
+
+```bash
+oc get operatorhub cluster -o jsonpath='{.spec.disableAllDefaultSources}{"\n"}'   # want: true
+oc patch OperatorHub cluster --type json -p '[{"op": "add", "path": "/spec/disableAllDefaultSources", "value": true}]'
+oc get operatorhub cluster -o jsonpath='{.spec.disableAllDefaultSources}{"\n"}'   # true
+```
+
+Then apply what was held back from the install: `oc mirror`'s
+ImageDigestMirrorSet, ImageTagMirrorSet and CatalogSource. The ITMS lets the
+nodes pull images that are referenced by tag. The CatalogSources replace the
+default OperatorHub catalogs.
 
 ```bash
 mkdir -p $CR/day2
@@ -751,7 +774,7 @@ These problems are specific to the disconnected install:
 | The agent cannot pull the release image | The node cannot reach or trust the mirror | On the node: `getent hosts registry.hub.mylab.com`, `curl -v https://registry.hub.mylab.com:8443/v2/` |
 | A node can still reach quay.io | The egress block is missing or below libvirt's rules (after a reboot, or a libvirtd/firewalld reload) | Step 5 checks; re-run `--tags compactvm` |
 | Pods in `ImagePullBackOff` for a `registry.redhat.io` or `quay.io` image by tag | Tag mirrors are only applied on day 2, or the image was never mirrored | Step 14; add the image to the mirror's ImageSetConfiguration |
-| OperatorHub shows no operators, or catalog pods fail to pull | The default catalogs are still enabled (Step 10), or the mirrored CatalogSources are not applied (Step 14) | `oc get operatorhub cluster -o yaml`, `oc get catalogsource -n openshift-marketplace` |
+| OperatorHub shows no operators, or catalog pods fail to pull | The default catalogs are still enabled (the Step 10 manifest did not reach `$WORK/openshift/`; run the `oc patch OperatorHub` in Step 14), or the mirrored CatalogSources are not applied (Step 14) | `oc get operatorhub cluster -o yaml`, `oc get catalogsource -n openshift-marketplace` |
 | `oc adm upgrade` refuses an update with a signature error | The release signature ConfigMap from `oc mirror` is missing | It goes in as an extra manifest (Step 10). On a running cluster, `oc apply` it from `$CR`. |
 | Nodes report `rendered-master-... do not match` on first boot | An IDMS/ITMS was placed in `$WORK/openshift/` | Remove it, rebuild the ISO (Step 10) |
 | `virt-install` or libvirt rejects a MAC like `52:54:00:e2:54:3` | The octet was not zero-padded | Use `$MAC1:0$oct` (Step 12) |

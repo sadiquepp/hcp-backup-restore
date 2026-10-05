@@ -9,6 +9,19 @@
 # and its wait-for-machineconfigpools.yml, with the cluster's own oc by full
 # path, so nothing depends on an oc on this host's PATH.
 
+# The install already disables them with an extra manifest (image.yml). Set it
+# again on the running cluster: harmless when it is already true, and it fixes
+# a cluster where that manifest did not take effect.
+- name: Make sure the default OperatorHub catalogs are off
+  ansible.builtin.command:
+    cmd: >-
+      {{ compact_install_folder }}/oc patch OperatorHub cluster --type json
+      -p '[{"op": "add", "path": "/spec/disableAllDefaultSources", "value": true}]'
+  environment:
+    KUBECONFIG: "{{ compact_install_folder }}/auth/kubeconfig"
+  register: compact_operatorhub_patch
+  changed_when: "'no change' not in compact_operatorhub_patch.stdout"
+
 - name: Find the day-2 mirror resources
   ansible.builtin.find:
     paths: "{{ compact_cluster_resources_dir }}/day2"
