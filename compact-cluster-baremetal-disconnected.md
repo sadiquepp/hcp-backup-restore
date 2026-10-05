@@ -59,7 +59,7 @@ Before you start, you need:
 | The IDMS file from `oc mirror` | `~/oc-mirror-output/working-dir/cluster-resources/idms-oc-mirror.yaml` | `ImageDigestMirrorSet`: maps each quay.io source to its mirror |
 | The mirror's CA certificate | `~/mirror-ca.pem` | PEM. The servers and the installer host must trust it. |
 | Credentials for the mirror | `~/mirror-auth.json` | A `{"auths": {...}}` file with an entry for the mirror registry |
-| Other `oc mirror` output | `~/oc-mirror-output/working-dir/cluster-resources/` | Signature ConfigMap (install time, Step 13); CatalogSources and ImageTagMirrorSets (day 2, Step 16) |
+| Other `oc mirror` output | `~/oc-mirror-output/working-dir/cluster-resources/` | IDMS, ITMS, CatalogSources and the release signature ConfigMap, all applied on day 2 (Step 16) |
 
 `oc mirror` (v2) writes the IDMS and the other cluster resources under
 `<workspace>/working-dir/cluster-resources/`. Older `oc mirror` (v1) writes an
@@ -429,24 +429,14 @@ Nothing in it changes for a disconnected install. The `additionalNTPSources`
 entry matters even more here: the agent does not install a host whose clock
 is not synced, and the servers cannot reach a public NTP pool.
 
-**Extra manifests.** The agent installer applies everything in
-`$WORK/openshift/` during the install. Two things go there:
+**Extra manifest.** The agent installer applies everything in
+`$WORK/openshift/` during the install. One manifest goes there: it turns off
+the default OperatorHub catalogs. They point at registry.redhat.io, which the
+servers cannot reach, so without it their pods would fail to pull from the
+first boot until day 2. All of `oc mirror`'s own resources go on in Step 16.
 
 ```bash
 mkdir -p $WORK/openshift
-
-# oc mirror's install-time resources: everything EXCEPT the IDMS, ITMS and
-# CatalogSources (for example the release signature ConfigMap, needed for
-# upgrades). Only the .yaml copies: oc mirror writes some resources as both
-# .json and .yaml, and two copies of one object make the installer refuse
-# the directory.
-for f in $CR/*.yaml $CR/*.yml; do
-  [ -e "$f" ] || continue
-  grep -qE '^\s*kind:\s*(ImageDigestMirrorSet|ImageTagMirrorSet|CatalogSource)\s*$' "$f" || cp "$f" $WORK/openshift/
-done
-
-# Turn off the default OperatorHub catalogs. They point at registry.redhat.io,
-# which the servers cannot reach, so their pods would fail to pull forever.
 cat > $WORK/openshift/operatorhub-disable-default-sources.yaml <<'EOF'
 apiVersion: config.openshift.io/v1
 kind: OperatorHub
@@ -549,36 +539,39 @@ oc debug node/master1 -- chroot /host grep -c "location = \"$MIRROR" /etc/contai
 
 ### Step 16 - Day 2: catalogs, tag mirrors and signatures
 
-Apply what was held back from the install: `oc mirror`'s
-ImageDigestMirrorSet, ImageTagMirrorSet and CatalogSources. This is where the
-cluster first learns the **operator** mirrors:
-
-- the **IDMS** adds the operator images' digest mappings (the install had
-  only the release's, Step 11)
-- the **ITMS** lets the nodes pull images referenced by tag
-- the **CatalogSources** replace the default OperatorHub catalogs that
-  Step 13 turned off
-
-Do not install operators before this step: their images would not resolve
-to the mirror yet. The release signatures went in at install time (Step 13).
+Apply everything `oc mirror` produced in one go, the way `oc mirror`
+documents it:
 
 ```bash
-mkdir -p $CR/day2
-for f in $CR/*.yaml $CR/*.yml; do
-  [ -e "$f" ] || continue
-  grep -qE '^\s*kind:\s*(ImageDigestMirrorSet|ImageTagMirrorSet|CatalogSource)\s*$' "$f" && cp "$f" $CR/day2/
-done
-oc apply -f $CR/day2/ --dry-run=server     # check first
-oc apply -f $CR/day2/
-sleep 90                                   # let the MCO render the new configuration
-oc get machineconfigpool -w                # wait until master is UPDATED=True, UPDATING=False
+ls $CR
+oc apply -f $CR/ --dry-run=server     # check first
+oc apply -f $CR/
+sleep 90                              # let the MCO render the new configuration
+oc get machineconfigpool -w           # wait until master is UPDATED=True, UPDATING=False
 ```
 
-This is a node configuration change: **the three masters reboot one at a
-time**. Apply the IDMS and ITMS together so that they roll out in one round.
-The cluster stays available, but expect the API to drop briefly while each
-master reboots. The release mappings in `oc mirror`'s IDMS repeat the ones
-the installer already created, which is harmless.
+This applies:
+
+- the **ImageDigestMirrorSet**: the operator images' digest mappings (the
+  install had only the release's, Step 11)
+- the **ImageTagMirrorSet**: lets the nodes pull images referenced by tag
+- the **CatalogSources**: replace the default OperatorHub catalogs that
+  Step 13 turned off
+- the **release signature ConfigMap**: needed to upgrade the cluster from the
+  mirror
+
+This is where the cluster first learns the operator mirrors, so do not
+install operators before this step.
+
+`oc mirror` writes some resources as both `.json` and `.yaml`. Applying both
+is harmless, because they describe the same object. The release mappings in
+`oc mirror`'s IDMS repeat the ones the installer already created, which is
+also harmless.
+
+The mirror sets are a node configuration change: **the three masters reboot
+one at a time**. Applying everything at once makes it a single round. The
+cluster stays available, but expect the API to drop briefly while each
+master reboots.
 
 If you skipped the OperatorHub manifest in Step 13, turn the default
 catalogs off now:
@@ -607,4 +600,4 @@ These problems are specific to the disconnected install:
 | An operator's pods are in `ImagePullBackOff` for `registry.redhat.io/...` right after the install | The operator mappings are added only on day 2 | Apply Step 16 before installing operators. `oc get imagedigestmirrorset` should list `oc mirror`'s IDMS. |
 | OperatorHub shows no operators, or catalog pods fail to pull | The default catalogs are still enabled (Step 13), or the mirrored CatalogSources are not applied (Step 16) | `oc get operatorhub cluster -o yaml`, `oc get catalogsource -n openshift-marketplace` |
 | Nodes report `rendered-master-... do not match` on first boot | An IDMS was also placed in `$WORK/openshift/` and does not match the one from `imageDigestSources` | Remove the extra manifest and rebuild the ISO (Step 13) |
-| `oc adm upgrade` refuses an update with a signature error | The release signature ConfigMap from `oc mirror` is missing | It goes in as an extra manifest (Step 13). On a running cluster, `oc apply` it from `$CR`. |
+| `oc adm upgrade` refuses an update with a signature error | The release signature ConfigMap from `oc mirror` is missing | Apply `oc mirror`'s output (Step 16): `oc apply -f $CR/` |
