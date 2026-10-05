@@ -4,6 +4,9 @@ This guide builds a **three-node compact OpenShift cluster** on the lab
 hypervisor from a single **agent ISO**. Every node has **two NICs bonded in
 active-backup mode (mode 1)**, and the node's address lives on the bond.
 
+For physical servers instead of lab VMs, see
+[compact-cluster-baremetal.md](compact-cluster-baremetal.md).
+
 The whole flow is automated by `setup_compact_cluster.yaml` and the
 `roles/setup-compact-cluster` role. This document walks through the same steps
 by hand, so you can see what each one does, run them one at a time, or debug a
