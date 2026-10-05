@@ -5,7 +5,8 @@ hypervisor from a single **agent ISO**. Every node has **two NICs bonded in
 active-backup mode (mode 1)**, and the node's address lives on the bond.
 
 For physical servers instead of lab VMs, see
-[compact-cluster-baremetal.md](compact-cluster-baremetal.md).
+[compact-cluster-baremetal.md](compact-cluster-baremetal.md). That guide
+bonds the NICs with LACP (802.3ad) instead of active-backup.
 
 The whole flow is automated by `setup_compact_cluster.yaml` and the
 `roles/setup-compact-cluster` role. This document walks through the same steps

@@ -1,14 +1,16 @@
-# Three-node compact cluster on bare metal, with bonded NICs (agent-based installer)
+# Three-node compact cluster on bare metal, with LACP bonds (agent-based installer)
 
 This guide installs a **three-node compact OpenShift cluster on physical
-servers** from a single **agent ISO**. Every server uses **two NICs bonded in
-active-backup mode (mode 1)**, and the server's address lives on the bond.
+servers** from a single **agent ISO**. Every server uses **two NICs bonded with
+LACP (IEEE 802.3ad, bonding mode 4)**, and the server's address lives on the
+bond.
 
 This is the bare-metal version of [compact-cluster.md](compact-cluster.md),
 which builds the same cluster as VMs in the lab. The cluster configuration is
-the same. What changes is the hardware: you collect the MACs and disk IDs from
-real servers, prepare the switch ports, and boot the ISO through each server's
-BMC or from USB.
+the same except for the bond mode: the lab uses active-backup (mode 1), and
+this guide uses LACP. Other differences come from the hardware: you collect
+the MACs and disk IDs from real servers, configure LACP port-channels on the
+switches, and boot the ISO through each server's BMC or from USB.
 
 All addresses, names and IDs below are **examples**. Replace them with your
 own values in [Step 6](#step-6---record-the-plan-as-shell-variables). Every
@@ -41,12 +43,12 @@ later command reads them from there.
 
 ```
       ┌────────────┐                           ┌────────────┐
-      │  switch A  │════ inter-switch link ════│  switch B  │
+      │  switch A  │══ MLAG / vPC peer link ═══│  switch B  │
       └─────┬──────┘       (node VLAN)         └─────┬──────┘
-            │ port 1 (active)                        │ port 2 (backup)
-            │ ens1f0                                 │ ens2f0
+            │ port 1 (active)                        │ port 2 (active)
+            │ ens1f0 ── one LACP port-channel ──     │ ens2f0
       ┌─────┴────────────────────────────────────────┴─────┐
-      │  bond0   active-backup (mode 1)   10.20.30.11      │
+      │  bond0   LACP / 802.3ad (mode 4)   10.20.30.11     │
       │  master1 (rendezvous host)                         │
       └────────────────────────────────────────────────────┘
       master2 (10.20.30.12) and master3 (10.20.30.13) are cabled the same way
@@ -56,9 +58,10 @@ later command reads them from there.
 ```
 
 The diagram shows the recommended cabling: each server's two bond ports go to
-**two different switches**, and where possible to **two different NIC cards**.
-Then a failed cable, NIC, switch port or whole switch takes down only the
-active port, and the bond moves to the other one.
+**two different switches** that act as one LACP partner (an MLAG pair, Cisco
+vPC, or a switch stack), and where possible to **two different NIC cards**.
+Both ports carry traffic. A failed cable, NIC, switch port or whole switch
+removes one port from the bond, and the traffic continues on the other.
 
 | What | Example value | Your value |
 |---|---|---|
@@ -72,9 +75,10 @@ active port, and the bond moves to the other one.
 | master3 | `10.20.30.13` | |
 | API VIP: `api`, `api-int` | `10.20.30.5` | |
 | Ingress VIP: `*.apps` | `10.20.30.6` | |
-| Bond | `bond0`, `active-backup`, `miimon=100`, primary = port 1 | |
+| Bond | `bond0`, `802.3ad` (LACP), `miimon=100`, `lacp_rate=fast`, `xmit_hash_policy=layer3+4` | |
 | Bond port 1 / port 2 names | `ens1f0` / `ens2f0` | |
-| Node VLAN | untagged (access port) | |
+| Node VLAN | untagged (access port-channel) | |
+| Switch port-channel per server | `port-channel11/12/13`, vPC/MLAG ID 11/12/13 | |
 
 Two choices shape the install:
 
@@ -83,10 +87,13 @@ Two choices shape the install:
   an external load balancer, and `api` and `*.apps` keep working when one
   server goes down. The VIPs must be free addresses in the same subnet as the
   servers.
-- **Active-backup (mode 1) bonding.** Only one port carries traffic at a time.
-  This is the one bonding mode that needs **no configuration on the switch**:
-  no LACP and no port-channel. Each port is a normal access port, so the two
-  ports can go to two independent switches.
+- **LACP (802.3ad, mode 4) bonding.** Both ports carry traffic, so a server
+  gets the bandwidth of both links, spread across flows. LACP also checks the
+  link end to end: a port is used only while the switch answers with LACP
+  packets, so a port with link but a broken path is taken out of the bond.
+  The cost is **switch configuration**: each server's two ports must be one
+  LACP port-channel on the switch side. When the ports go to two switches,
+  those switches must be an MLAG pair, vPC pair or stack.
 
 ---
 
@@ -105,7 +112,7 @@ Each of the three servers needs:
 | CPU | 4 physical cores (8 threads) | 16 cores or more. These nodes also run all workloads. |
 | RAM | 16 GB | 64 GB or more |
 | Install disk | 120 GB | 240 GB or more, SSD or NVMe. etcd is sensitive to fsync latency. |
-| NICs | 2 ports for the bond | 2 ports on 2 different cards, each 10 GbE or faster |
+| NICs | 2 ports of the same speed for the bond | 2 ports on 2 different cards, each 10 GbE or faster, same speed |
 | BMC | Optional | Redfish-capable (iDRAC, iLO, XCC, ...) for virtual media and remote console |
 | Firmware | UEFI | UEFI. Secure Boot can be on or off. |
 
@@ -118,41 +125,76 @@ Also check:
 - **Clocks.** The servers' clocks must be close to the real time. TLS
   certificates fail on a node whose clock is hours off. Step 11 adds NTP
   servers, but fix a badly wrong RTC in the BIOS first.
+- **Switches.** The switches must support LACP (802.3ad). To spread a bond
+  across two switches, they must support multi-chassis link aggregation:
+  MLAG, Cisco vPC, Juniper MC-LAG or ESI-LAG, or a stack/virtual chassis. Two
+  independent switches without one of these cannot form one LACP bond.
 
 ### Step 2 - Prepare the switches
 
-Active-backup bonding needs **no switch-side bonding**. Each bond port is a
-normal, independent switch port.
+LACP needs matching configuration on the switch. For each server, its two
+switch ports become **one port-channel running LACP**.
 
-For each of the six ports (two per server):
+For each server:
 
-- Put the port in the **node VLAN**. Use an access port for untagged traffic,
-  or a trunk whose native VLAN is the node VLAN. For a tagged VLAN, see the
+- Create **one port-channel** with both of the server's ports as members,
+  in LACP **active** mode (`channel-group <n> mode active`). Do not use
+  `mode on` (a static LAG without LACP): the server sends LACP and expects
+  the switch to answer.
+- If the two ports go to **two switches**, configure the port-channel on
+  both switches with the **same MLAG / vPC ID**, so the server sees one LACP
+  partner. The MLAG / vPC peer link must carry the node VLAN.
+- Put the **port-channel** in the **node VLAN**. Use an access port-channel
+  for untagged traffic, or a trunk whose native VLAN is the node VLAN. For a
+  tagged VLAN, see the
   [VLAN variant in Step 11](#if-the-node-network-is-a-tagged-vlan).
-- **Do not** put the two ports of a server into a port-channel, LAG or MLAG.
-  If the switch expects LACP and the server does not send it, the switch
-  blocks or flaps the ports.
-- Enable **edge / portfast** (STP edge port), so the port forwards traffic as
-  soon as the link comes up. Otherwise a node that just booted can spend 30
-  seconds or more blocked by spanning tree, and the agent's network checks
-  fail.
-- If you use **port security** or a MAC limit, allow the bond's MAC on
-  **both** ports. When the bond fails over, the bond MAC moves from port 1 to
-  port 2.
-- If the two ports go to **two switches**, the inter-switch link (or the
-  upstream network) must carry the node VLAN. Otherwise a server whose active
-  port is on switch B cannot reach a server whose active port is on switch A.
+- Set the **LACP rate to fast** on the member ports, to match
+  `lacp_rate: fast` on the server. Both sides then send LACP packets every
+  second and detect a dead partner in about 3 seconds instead of 90.
+- Enable **edge / portfast** (STP edge port) on the port-channel, so it
+  forwards traffic as soon as LACP is up. Otherwise a node that just booted
+  can spend 30 seconds or more blocked by spanning tree, and the agent's
+  network checks fail.
+- Let the member ports work **individually when there is no LACP**:
+  `no lacp suspend-individual` on Cisco NX-OS, `port-channel lacp fallback
+  individual` on Arista, `force-up` on Juniper. Before the bond is configured
+  (in the firmware, during PXE, or in a live environment), the server sends no
+  LACP packets. With the default `suspend-individual`, the switch blocks the
+  ports, so PXE boot and anything else that needs the network before the bond
+  is up fails. The agent ISO itself configures the bond before it uses the
+  network, so it works either way.
 
-On a Cisco-style switch, each port looks like this:
+On Cisco NX-OS with a vPC pair, master1's configuration looks like this. Use
+the same `port-channel11` and `vpc 11` on **both** switches. On switch A the
+member is the port cabled to `ens1f0`, and on switch B the port cabled to
+`ens2f0`:
 
 ```
-interface Ethernet1/11
-  description master1 ens1f0 (bond0 port 1)
+interface port-channel11
+  description master1 bond0
   switchport mode access
   switchport access vlan 30
   spanning-tree port type edge
+  no lacp suspend-individual
+  vpc 11
+
+interface Ethernet1/11
+  description master1 bond0 member
+  switchport mode access
+  switchport access vlan 30
+  channel-group 11 mode active
+  lacp rate fast
   no shutdown
 ```
+
+Repeat with `port-channel12` / `vpc 12` for master2 and `port-channel13` /
+`vpc 13` for master3. If both ports go to the **same switch**, leave out the
+`vpc` line. The bond then still survives a cable, NIC or port failure, but
+not the loss of that switch.
+
+Until the servers run the bond, the port-channels show as down or
+individual (`show port-channel summary`). That is expected. They come up when
+the agent ISO boots in Step 13.
 
 Make sure you know which server port goes to which switch port. You need that
 in Step 16 to test failover by shutting down a switch port.
@@ -199,8 +241,13 @@ ls -l /dev/disk/by-path/                           # stable PCI path of each dis
 ethtool -P ens1f0                                  # permanent MAC of a port
 ```
 
-Use the **permanent** MAC of each port (`ethtool -P`). If an earlier OS left
-a bond configured, a port can report the bond's MAC instead of its own.
+Use the **permanent** MAC of each port (`ethtool -P`). In an LACP bond, every
+port uses the bond's MAC, so if an earlier OS left a bond configured, a port
+can report the bond's MAC instead of its own.
+
+The live environment does not need network access for this. If the
+port-channels are already configured without the individual fallback from
+Step 2, the ports may have no connectivity here. That is expected.
 
 Choose **port 1 and port 2 on different NIC cards** if the server has two
 cards. Note which switch port each one is cabled to.
@@ -281,8 +328,8 @@ export NTP1=10.20.30.10
 export API_VIP=10.20.30.5
 export INGRESS_VIP=10.20.30.6
 
-export PORT1=ens1f0                     # bond port 1 (primary), as named on the servers
-export PORT2=ens2f0                     # bond port 2 (backup)
+export PORT1=ens1f0                     # bond port 1, as named on the servers
+export PORT2=ens2f0                     # bond port 2
 
 # hostname  ip  port1-mac  port2-mac  install-disk-wwn
 cat > ~/compact-nodes.txt <<'EOF'
@@ -453,16 +500,22 @@ Each host entry has four parts:
   hints are `serialNumber`, or `deviceName: /dev/disk/by-path/...`.
 - **`networkConfig`** is the [nmstate](https://nmstate.io) configuration that
   the agent applies before the install:
-  - `bond0`, `type: bond`, `mode: active-backup` (mode 1), with both ports
+  - `bond0`, `type: bond`, `mode: 802.3ad` (LACP, mode 4), with both ports
     and the static IP **on the bond**.
-  - `miimon: "100"` checks the link every 100 ms. Without link monitoring the
-    bond never sees a dead port and never fails over.
-  - `primary: <port 1>`. The bond uses port 1 whenever port 1 is up, and
-    returns to it after it recovers.
-  - `mac-address` on the bond is fixed to **port 1's MAC**. Otherwise the bond
-    takes the MAC of whichever port joins first, which can change between
-    boots. Your switch tables, DHCP snooping and ARP caches then always see
-    one MAC for this address.
+  - `miimon: "100"` checks the link every 100 ms, so a port whose link goes
+    down leaves the bond at once instead of after the LACP timeout.
+  - `lacp_rate: fast` sends and expects an LACP packet every second, so a
+    port whose link stays up but whose partner stops answering leaves the
+    bond after about 3 seconds. Set the same rate on the switch (Step 2).
+  - `xmit_hash_policy: layer3+4` chooses the port for each flow from its IP
+    addresses and ports, which spreads traffic across both ports better than
+    the default (`layer2`, MAC addresses only). A single flow still uses only
+    one port, so one TCP connection never goes faster than one link.
+  - `mac-address` on the bond is fixed to **port 1's MAC**. In an LACP bond
+    both ports send with the bond's MAC, and LACP uses it as the server's
+    system ID. Without this setting the bond takes the MAC of whichever port
+    joins first, which can change between boots. Your switch tables, DHCP
+    snooping and ARP caches then always see one MAC for this address.
   - Both ports are listed as `type: ethernet` with no IP of their own.
   - The default route uses `next-hop-interface: bond0`, so it survives the
     loss of either port.
@@ -498,10 +551,11 @@ cat <<EOF
           ipv6:
             enabled: false
           link-aggregation:
-            mode: active-backup
+            mode: 802.3ad
             options:
               miimon: "100"
-              primary: $PORT1
+              lacp_rate: fast
+              xmit_hash_policy: layer3+4
             port:
               - $PORT1
               - $PORT2
@@ -571,10 +625,11 @@ IP on a VLAN interface on top of the bond. The bond itself gets no IP:
           ipv6:
             enabled: false
           link-aggregation:
-            mode: active-backup
+            mode: 802.3ad
             options:
               miimon: "100"
-              primary: ens1f0
+              lacp_rate: fast
+              xmit_hash_policy: layer3+4
             port:
               - ens1f0
               - ens2f0
@@ -697,7 +752,8 @@ The installer can also produce PXE artifacts instead of an ISO:
 `openshift-install --dir $WORK agent create pxe-files`. You serve the kernel,
 initrd and rootfs from your own PXE/iPXE infrastructure. Use this only if
 that infrastructure is already in place, and boot the servers through PXE
-only for the first boot.
+only for the first boot. PXE runs before the bond exists, so it needs the
+individual fallback on the port-channels (Step 2).
 
 #### What you should see
 
@@ -705,6 +761,11 @@ Each server boots RHCOS from the ISO and shows a login prompt on the console.
 Within a few minutes it should answer `ping` on its own address. If a server
 boots but never gets its address, the agent did not find any of its MACs in
 `agent-config.yaml`, so it applied no network config. Go back to Step 3.
+
+On the switches, the server's port-channel should now be up with both
+members bundled (`show port-channel summary` on NX-OS shows `(P)` for each
+member). A member that stays individual or suspended is not receiving LACP
+from the server, or is in the wrong port-channel.
 
 ### Step 14 - Watch the install
 
@@ -758,28 +819,42 @@ Check the bond on every server:
 while read -r name ip _; do
   echo "== $name ($ip)"
   ssh -n -i ~/.ssh/compact core@$ip \
-    "grep -E 'Bonding Mode|Primary Slave|Currently Active|MII Status|Slave Interface|Permanent HW addr' /proc/net/bonding/bond0"
+    "grep -E 'Bonding Mode|Transmit Hash|LACP rate|Number of ports|Partner Mac|Slave Interface|MII Status|Aggregator ID' /proc/net/bonding/bond0"
 done < ~/compact-nodes.txt
 ```
 
 For each server you should see:
 
 ```
-Bonding Mode: fault-tolerance (active-backup)
-Primary Slave: ens1f0 (primary_reselect always)
-Currently Active Slave: ens1f0
+Bonding Mode: IEEE 802.3ad Dynamic link aggregation
+Transmit Hash Policy: layer3+4 (1)
 MII Status: up
+LACP rate: fast
+	Aggregator ID: 1
+	Number of ports: 2
+	Partner Mac Address: 00:de:fb:00:00:01
 Slave Interface: ens1f0
 MII Status: up
-Permanent HW addr: b8:ca:3a:00:00:11
+Aggregator ID: 1
 Slave Interface: ens2f0
 MII Status: up
-Permanent HW addr: b8:ca:3a:00:01:11
+Aggregator ID: 1
 ```
 
-Both ports must show `MII Status: up`. A port that is down here has no
-redundancy behind it. Check its cable and switch port **now**, not when the
-other port fails.
+Check three things on every server:
+
+- **`Number of ports: 2`**, and both ports show the **same `Aggregator ID`**
+  as the active aggregator. Both ports are then in one LACP bundle with the
+  switch.
+- **`Partner Mac Address` is not `00:00:00:00:00:00`.** All zeros means the
+  switch is not answering with LACP: the port-channel is missing, in `mode on`,
+  or on the wrong ports.
+- Both ports show **`MII Status: up`**.
+
+If the two ports show **different** aggregator IDs, the server sees two
+different LACP partners. This usually means the two switches are not
+configured as one MLAG / vPC pair for this port-channel. The bond then uses
+only one of the ports. Fix it **now**, not when the working port fails.
 
 The same information from inside the cluster:
 
@@ -792,7 +867,8 @@ oc debug node/master1 -- chroot /host ip -br addr show br-ex          # the node
 After the install, the node IP is on **`br-ex`**, not on `bond0`. On the first
 boot, OVN-Kubernetes moves the address from the interface that holds the
 default route (`bond0`) onto the `br-ex` bridge, and adds `bond0` as the
-bridge's uplink. `bond0` still does the failover underneath it.
+bridge's uplink. `bond0` still balances traffic and handles port failures
+underneath it.
 
 Check which master holds each VIP:
 
@@ -812,8 +888,8 @@ echo https://console-openshift-console.apps.$ZONE
 ### Step 16 - Test bond failover
 
 Run this test on each server before you put workloads on the cluster. A
-cabling or VLAN mistake on the backup port stays hidden until the day the
-active port fails.
+cabling, VLAN or port-channel mistake on one port can stay hidden while the
+other port carries the traffic.
 
 In a second terminal, keep pinging the server and the API VIP:
 
@@ -822,8 +898,8 @@ ping 10.20.30.11
 ping $API_VIP
 ```
 
-Then fail the **active port**. The realistic way is on the switch. Shut down
-the port that master1's port 1 is cabled to:
+Then fail **port 1**. The realistic way is on the switch. Shut down the member
+port that master1's port 1 is cabled to:
 
 ```
 interface Ethernet1/11
@@ -837,25 +913,30 @@ down on the server itself. This tests the bond, but not the switch path:
 ssh -i ~/.ssh/compact core@10.20.30.11 'sudo ip link set ens1f0 down'
 ```
 
-Check that the bond moved to port 2:
+Check that the bond now runs on port 2 alone:
 
 ```bash
-ssh -i ~/.ssh/compact core@10.20.30.11 "grep -E 'Currently Active|Slave Interface|MII Status' /proc/net/bonding/bond0"
-# Currently Active Slave: ens2f0
+ssh -i ~/.ssh/compact core@10.20.30.11 "grep -E 'Number of ports|Slave Interface|MII Status' /proc/net/bonding/bond0"
+# Number of ports: 1
 # Slave Interface: ens1f0 / MII Status: down
+# Slave Interface: ens2f0 / MII Status: up
 ```
 
-Expect no more than a few lost pings. miimon detects the link loss within
-100 ms, and the bond sends gratuitous ARPs so that the switches learn the
-bond's MAC on the new port.
+Expect no lost pings, or only one or two. The flows that were hashed to
+port 1 move to port 2 as soon as miimon sees the link go down (within
+100 ms). Flows already on port 2 are not affected.
 
 Restore the port (`no shutdown` on the switch, or
-`sudo ip link set ens1f0 up` on the server). Because `primary` is port 1, the
-bond moves back to port 1 when it comes up. Expect another brief interruption.
+`sudo ip link set ens1f0 up` on the server). Within a few seconds, LACP adds
+it back to the bundle, and `Number of ports` returns to 2.
 
-Then fail **port 2** in the same way. Nothing should change, because traffic
-is not using that port. Restore it, and repeat the test on master2 and
-master3.
+Then fail **port 2** in the same way and check that the bond runs on port 1
+alone. Restore it, and repeat both tests on master2 and master3.
+
+If the ports go to an MLAG / vPC pair, also test the loss of a **whole
+switch**, in a maintenance window: reload switch B, or shut down all of its
+member ports. All three servers should continue on their switch-A ports, and
+return to two ports each when switch B is back.
 
 ### Step 17 - After the install
 
@@ -883,9 +964,14 @@ master3.
 | `agent create image` fails with `failed to validate network yaml for host N` | `nmstatectl` is missing on the installer host, or the bond YAML is invalid | `which nmstatectl`. Check the indentation of `link-aggregation`. Every name under `port:` must also be listed under `interfaces:`. |
 | A server boots the ISO but never gets its address or never registers | None of its MACs are in `agent-config.yaml`: a typo, an uppercase MAC, or a MAC read from the wrong port | Compare `ethtool -P <port>` (from a live environment) with `rendered/agent-config.yaml` |
 | The bond comes up but the server cannot reach the gateway | Wrong VLAN on the switch ports, or the ports are tagged and the config expects untagged traffic (or the other way round) | Switch port config. See the [VLAN variant](#if-the-node-network-is-a-tagged-vlan). |
-| The server works on port 1 but loses connectivity after failover to port 2 | Port 2's switch port is in the wrong VLAN, the inter-switch link does not carry the VLAN, or port security blocks the bond MAC on port 2 | Test port 2 alone (Step 16). Check the switch MAC table for the bond MAC. |
-| Switch logs show the bond MAC flapping between two ports | The switch ports are in a port-channel or LAG while the server uses active-backup, or both ports are active | Remove the port-channel. Mode 1 uses plain access ports. |
-| Ports are blocked for 30+ seconds after every reboot | Spanning tree is running on the ports without edge/portfast | Enable `spanning-tree port type edge` (or portfast) on all six ports |
+| `Partner Mac Address: 00:00:00:00:00:00` in `/proc/net/bonding/bond0` | The switch is not running LACP on these ports: no port-channel, a static `mode on` port-channel, or the wrong ports in the channel | `show port-channel summary` / `show lacp neighbor`. Members must use `channel-group <n> mode active` (or passive). |
+| The two ports show different `Aggregator ID`s, and `Number of ports: 1` | The server sees two LACP partners: the two switches are not one MLAG / vPC pair for this port-channel, or the vPC/MLAG IDs differ | `show vpc` (or the MLAG equivalent). Use the same port-channel and vPC/MLAG ID on both switches. |
+| Some flows or hosts work and others do not | One member port is in the wrong VLAN, or the MLAG / vPC peer link does not carry the node VLAN. Flows hashed to that port fail. | Test each port alone (Step 16). Check the VLAN on both members and on the peer link. |
+| Switch logs show the bond MAC flapping between ports, or the member ports are suspended | The switch ports are not in a port-channel while the server bonds them, or the members are in two separate port-channels | Put both members of each server in one port-channel (one vPC/MLAG ID across both switches) |
+| PXE or a live environment has no network, but the agent ISO works | The port-channel suspends ports that send no LACP (`lacp suspend-individual`) | Enable the individual fallback from Step 2 |
+| Ports are blocked for 30+ seconds after every reboot | Spanning tree is running on the port-channel without edge/portfast | Enable `spanning-tree port type edge` (or portfast) on all three port-channels |
+| A port with a working link but a broken path stays in the bond for about 90 seconds | `lacp_rate` is slow on the server or the switch | Set `lacp_rate: fast` (Step 11) and `lacp rate fast` on the member ports (Step 2) |
+| All traffic uses one port | `xmit_hash_policy` is `layer2` and most traffic goes to one MAC (the gateway), or a test uses a single flow | Check `Transmit Hash Policy` in `/proc/net/bonding/bond0`. A single TCP flow always uses one port. |
 | The agent's validation fails on NTP, or the install fails with certificate errors | The server clock is wrong, or the NTP server is unreachable | `additionalNTPSources`. Fix the RTC in the BIOS. Check from the node with `chronyc sources`. |
 | The agent's validation fails on DNS (`SERVFAIL` for quay.io, or `api` does not resolve) | The resolver in `networkConfig` cannot answer external names or the cluster names | `dig @$DNS1 quay.io` and `dig @$DNS1 api.$ZONE` from the node network |
 | RHCOS is installed on the wrong disk | The `rootDeviceHints` WWN is wrong, or a non-unique hint matched another disk | `lsblk -d -o NAME,WWN,SERIAL` on the server. Use `wwn` or `serialNumber`. |
@@ -893,5 +979,5 @@ master3.
 | A server boots an old operating system after the install | Another disk with a bootable OS comes first in the UEFI boot order | Remove the old boot entry, or wipe that disk |
 | `wait-for` cannot connect to the API | `api.$ZONE` does not resolve to the API VIP from the installer host, or a firewall blocks 6443 | `dig api.$ZONE` and `curl -k https://api.$ZONE:6443/version` |
 | Ingress and console operators are degraded | `*.apps` does not resolve to the ingress VIP, or something else on the network uses the ingress VIP | `dig x.apps.$ZONE`. Check that only one MAC answers ARP for the ingress VIP. |
-| Failover works but takes many seconds | `miimon` is 0, or the switch learns MACs slowly | `grep 'MII Polling' /proc/net/bonding/bond0` must not be 0. Check the switch MAC aging and learning settings. |
+| Failover works but takes many seconds | `miimon` is 0, so the bond waits for the LACP timeout | `grep 'MII Polling' /proc/net/bonding/bond0` must not be 0 |
 | The bond comes up with a different MAC on each reboot | `mac-address` is missing on `bond0` | Pin it to port 1's MAC, as in Step 11 |
