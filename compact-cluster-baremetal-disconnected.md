@@ -177,8 +177,9 @@ export RENDEZVOUS=$(awk 'NR==1 {print $2}' ~/compact-nodes.txt)
 If `oc mirror` wrote more than one IDMS file, for example one for the release
 and one for operators, set `IDMS` to the one whose sources include
 `quay.io/openshift-release-dev`. That is the file `oc adm release extract`
-needs. Step 11 uses all of them. Find them by content, because the file names
-differ between `oc mirror` releases:
+needs. Step 11 takes only the release mappings from them for the install, and
+Step 16 applies all of them on day 2. Find them by content, because the file
+names differ between `oc mirror` releases:
 
 ```bash
 export CR=~/oc-mirror-output/working-dir/cluster-resources
@@ -275,22 +276,36 @@ Why this matters:
 
 ### Step 11 - Turn the IDMS into imageDigestSources
 
-`install-config.yaml` describes the same source-to-mirror mappings as the
-IDMS, in its `imageDigestSources` key. Generate it **from the IDMS** instead of
-typing it, so the two cannot drift apart:
+`install-config.yaml` describes source-to-mirror mappings in its
+`imageDigestSources` key, in the same form as the IDMS. For the install, it
+needs **only the release payload's mappings**, the sources under
+`quay.io/openshift-release-dev/`. Those are all the cluster pulls until it is
+up. The **operator** mappings (and any other mirrored images) are left for
+day 2, where they arrive with `oc mirror`'s own IDMS and ITMS and the
+CatalogSources that use them (Step 16).
+
+Generate the release mappings **from the IDMS** instead of typing them, so the
+two cannot drift apart. The filter goes by source, not by file, because
+`oc mirror` can write the release and operator mappings into one combined
+file:
 
 ```bash
 python3 - $(grep -lE '^\s*kind:\s*ImageDigestMirrorSet' $CR/*) \
   > ~/idms-sources.yaml <<'EOF'
 import sys, yaml
+RELEASE = 'quay.io/openshift-release-dev/'
 out = []
 for path in sys.argv[1:]:
     for doc in yaml.safe_load_all(open(path)):
         if doc and doc.get('kind') == 'ImageDigestMirrorSet':
             for m in doc['spec']['imageDigestMirrors']:
+                if not m['source'].startswith(RELEASE):
+                    continue                      # operators etc.: day 2
                 entry = {'mirrors': m['mirrors'], 'source': m['source']}
                 if entry not in out:
                     out.append(entry)
+if not out:
+    sys.exit('no quay.io/openshift-release-dev mappings found - is the release mirrored?')
 print(yaml.safe_dump({'imageDigestSources': out}, default_flow_style=False, sort_keys=False), end='')
 EOF
 cat ~/idms-sources.yaml
@@ -309,11 +324,11 @@ imageDigestSources:
   source: quay.io/openshift-release-dev/ocp-release
 ```
 
-Both release entries are required: `ocp-release` is the release image itself,
-and `ocp-v4.0-art-dev` holds every component image. The script reads every
-IDMS file, including the operator ones, so the nodes can also pull mirrored
-operator images by digest. It drops IDMS-only fields such as
-`mirrorSourcePolicy`, which `install-config.yaml` does not accept.
+Both entries are required: `ocp-release` is the release image itself, and
+`ocp-v4.0-art-dev` holds every component image. Nothing else belongs here. The
+script skips every other source (for example `registry.redhat.io/...` for
+operators). It also drops IDMS-only fields such as `mirrorSourcePolicy`, which
+`install-config.yaml` does not accept.
 
 ### Step 12 - Write install-config.yaml
 
@@ -535,10 +550,17 @@ oc debug node/master1 -- chroot /host grep -c "location = \"$MIRROR" /etc/contai
 ### Step 16 - Day 2: catalogs, tag mirrors and signatures
 
 Apply what was held back from the install: `oc mirror`'s
-ImageDigestMirrorSet, ImageTagMirrorSet and CatalogSources. The ITMS lets the
-nodes pull images referenced by tag, and the CatalogSources replace the
-default OperatorHub catalogs that Step 13 turned off. The release signatures
-went in at install time (Step 13).
+ImageDigestMirrorSet, ImageTagMirrorSet and CatalogSources. This is where the
+cluster first learns the **operator** mirrors:
+
+- the **IDMS** adds the operator images' digest mappings (the install had
+  only the release's, Step 11)
+- the **ITMS** lets the nodes pull images referenced by tag
+- the **CatalogSources** replace the default OperatorHub catalogs that
+  Step 13 turned off
+
+Do not install operators before this step: their images would not resolve
+to the mirror yet. The release signatures went in at install time (Step 13).
 
 ```bash
 mkdir -p $CR/day2
@@ -555,8 +577,8 @@ oc get machineconfigpool -w                # wait until master is UPDATED=True, 
 This is a node configuration change: **the three masters reboot one at a
 time**. Apply the IDMS and ITMS together so that they roll out in one round.
 The cluster stays available, but expect the API to drop briefly while each
-master reboots. `oc mirror`'s release IDMS repeats mappings the installer
-already created, which is harmless.
+master reboots. The release mappings in `oc mirror`'s IDMS repeat the ones
+the installer already created, which is harmless.
 
 If you skipped the OperatorHub manifest in Step 13, turn the default
 catalogs off now:
@@ -582,6 +604,7 @@ These problems are specific to the disconnected install:
 | A host stays *Insufficient*: `Host couldn't synchronize with any NTP server` | The servers cannot reach the NTP server in `additionalNTPSources` | On the node: `chronyc -n sources`. Check the NTP server and any firewall between them. |
 | The agent reports it cannot pull the release image | The servers cannot reach the mirror: DNS for the mirror's name, the CA, the credentials or a firewall | On a node: `getent hosts <mirror host>`, `curl -v https://$MIRROR/v2/`, and `/etc/containers/registries.conf` |
 | Pods are stuck in `ImagePullBackOff` for an image under `quay.io/...` or `registry.redhat.io/...` | That image is not in the mirror, or it is pulled by tag and only an IDMS (digest) mapping exists | Mirror the image. For tag pulls, apply `oc mirror`'s ImageTagMirrorSet (Step 16). |
+| An operator's pods are in `ImagePullBackOff` for `registry.redhat.io/...` right after the install | The operator mappings are added only on day 2 | Apply Step 16 before installing operators. `oc get imagedigestmirrorset` should list `oc mirror`'s IDMS. |
 | OperatorHub shows no operators, or catalog pods fail to pull | The default catalogs are still enabled (Step 13), or the mirrored CatalogSources are not applied (Step 16) | `oc get operatorhub cluster -o yaml`, `oc get catalogsource -n openshift-marketplace` |
 | Nodes report `rendered-master-... do not match` on first boot | An IDMS was also placed in `$WORK/openshift/` and does not match the one from `imageDigestSources` | Remove the extra manifest and rebuild the ISO (Step 13) |
 | `oc adm upgrade` refuses an update with a signature error | The release signature ConfigMap from `oc mirror` is missing | It goes in as an extra manifest (Step 13). On a running cluster, `oc apply` it from `$CR`. |
