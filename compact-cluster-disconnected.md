@@ -476,10 +476,74 @@ with the bond on every host. There are two differences:
 - **`additionalNTPSources`**, pointing at the hypervisor from Step 6.
 - **zero-padded MACs**, because the octets are single digits.
 
-Generate it with the connected guide's `host_block` function and this wrapper:
+Generate it with this block. It is the connected guide's `host_block`
+function with one change: it zero-pads the octet for the MACs itself, so you
+pass plain `3`, `4`, `5`. The IP address keeps the plain octet.
 
 ```bash
-# host_block from compact-cluster.md Step 7, with "$MAC1:$2"/"$MAC2:$2" -> "$MAC1:0$2"/"$MAC2:0$2"
+host_block() {   # $1 = hostname, $2 = last octet (3, 4, 5)
+local m=$(printf '%02d' "$2")   # MAC byte, zero-padded: 3 -> 03
+cat <<EOF
+  - hostname: $1
+    role: master
+    interfaces:
+      - name: enp1s0
+        macAddress: $MAC1:$m
+      - name: enp2s0
+        macAddress: $MAC2:$m
+    rootDeviceHints:
+      deviceName: /dev/vda
+    networkConfig:
+      interfaces:
+        - name: bond0
+          type: bond
+          state: up
+          mac-address: $MAC1:$m
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: $LAB.$2
+                prefix-length: 24
+          ipv6:
+            enabled: false
+          link-aggregation:
+            mode: active-backup
+            options:
+              miimon: "100"
+              primary: enp1s0
+            port:
+              - enp1s0
+              - enp2s0
+        - name: enp1s0
+          type: ethernet
+          state: up
+          mac-address: $MAC1:$m
+          ipv4:
+            enabled: false
+          ipv6:
+            enabled: false
+        - name: enp2s0
+          type: ethernet
+          state: up
+          mac-address: $MAC2:$m
+          ipv4:
+            enabled: false
+          ipv6:
+            enabled: false
+      dns-resolver:
+        config:
+          server:
+            - $LAB.1
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: $LAB.1
+            next-hop-interface: bond0
+            table-id: 254
+EOF
+}
+
 {
 cat <<EOF
 apiVersion: v1alpha1
@@ -493,7 +557,9 @@ hosts:
 EOF
 for n in $NODES; do host_block ${n%%:*} ${n##*:}; done
 } > $WORK/agent-config.yaml
-grep -E 'macAddress|mac-address' $WORK/agent-config.yaml | sort -u    # 52:54:00:e2:5[46]:0[345]
+
+grep -E 'macAddress|mac-address' $WORK/agent-config.yaml | sort -u    # 52:54:00:e2:54:03..05 and 52:54:00:e2:56:03..05
+grep -E '^ +- ip:' $WORK/agent-config.yaml                            # 192.168.122.3, .4, .5
 ```
 
 **Extra manifests.** The agent installer applies everything in
