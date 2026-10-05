@@ -12,6 +12,9 @@ this guide uses LACP. Other differences come from the hardware: you collect
 the MACs and disk IDs from real servers, configure LACP port-channels on the
 switches, and boot the ISO through each server's BMC or from USB.
 
+For servers with no internet access, installing from a mirror registry, see
+[compact-cluster-baremetal-disconnected.md](compact-cluster-baremetal-disconnected.md).
+
 All addresses, names and IDs below are **examples**. Replace them with your
 own values in [Step 6](#step-6---record-the-plan-as-shell-variables). Every
 later command reads them from there.
