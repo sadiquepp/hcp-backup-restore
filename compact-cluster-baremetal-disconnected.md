@@ -67,11 +67,6 @@ Before you start, you need:
 `--icsp-file` wherever this guide uses `--idms-file`, and convert its
 `repositoryDigestMirrors` the same way in Step 11.
 
-On this repo's lab mirror (`setup_mirror_registry.yaml`), the registry is
-`registry.hub.mylab.com:8443`. The release is at
-`openshift/release-images:<version>-x86_64`. The IDMS is under
-`/root/mirror/oc-mirror-output/` on the mirror registry VM.
-
 ---
 
 ## Manual deployment
