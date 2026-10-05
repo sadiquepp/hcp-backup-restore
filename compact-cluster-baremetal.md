@@ -135,6 +135,12 @@ Also check:
 LACP needs matching configuration on the switch. For each server, its two
 switch ports become **one port-channel running LACP**.
 
+> **Note:** Please consult your network admin to get the switches properly
+> configured for LACP. Switch vendors, models, OS versions and MLAG/vPC
+> variants all differ in commands and defaults. The settings and the example
+> below are **for reference only**: they describe what the server side
+> expects, not the exact configuration for your switches.
+
 For each server:
 
 - Create **one port-channel** with both of the server's ports as members,
@@ -164,10 +170,10 @@ For each server:
   is up fails. The agent ISO itself configures the bond before it uses the
   network, so it works either way.
 
-On Cisco NX-OS with a vPC pair, master1's configuration looks like this. Use
-the same `port-channel11` and `vpc 11` on **both** switches. On switch A the
-member is the port cabled to `ens1f0`, and on switch B the port cabled to
-`ens2f0`:
+For reference only, on Cisco NX-OS with a vPC pair, master1's configuration
+could look like this. Use the same `port-channel11` and `vpc 11` on **both**
+switches. On switch A the member is the port cabled to `ens1f0`, and on
+switch B the port cabled to `ens2f0`:
 
 ```
 interface port-channel11
