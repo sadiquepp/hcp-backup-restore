@@ -399,10 +399,12 @@ ip_list:
   # particular is left alone because it is already spoken for elsewhere.
   # Remaining free octets after these: 64-66, 87, 88.
   # (47, 50, 57 and 70 are now the UDN-over-BGP lab's clients, added below;
-  #  64-66 are left alone deliberately - they are legal, but they sit between
-  #  the hub MetalLB band at 60-62 and the hubd band at 67-69, so they are a
-  #  poor place to put anything that must never collide with a pool.)
+  #  87 and 88 too.)
   # (40 is now taken by the containerlab VM, added below.)
+  # (64-66, plus 17 and 18, are now the compact cluster, added below. 64-66
+  #  sit between the hub MetalLB band at 60-62 and the hubd band at 67-69,
+  #  which is why setup-compact-cluster's pre-flight refuses to build if a
+  #  pool ever claims one. .63 is the last free two-digit octet.)
   c1dworker1: 44
   c1dworker2: 45
   c1dworker3: 46
@@ -504,6 +506,25 @@ ip_list:
   udnclient-og: 70
   udnclient-purple: 87
   udnnsclient: 88
+
+  ## The three-node compact cluster (setup_compact_cluster.yaml). Five
+  ## addresses, all two digits for the MAC scheme and all clear of
+  ## hosted_cluster_metallb_pools - these were five of the last six free
+  ## two-digit octets (.63 is left alone, as noted above):
+  ##
+  ##   compact_master1..3  the nodes, contiguous. Each node's primary NIC is
+  ##                       52:54:00:e2:54:<octet> and its second bond port
+  ##                       52:54:00:e2:56:<octet> (compact_secondary_mac_prefix).
+  ##   compact_api         api / api-int VIP, held by keepalived on a master
+  ##   compact_ingress     *.apps VIP, held by keepalived on a master
+  ##
+  ## The VIPs belong to no VM. They are here anyway so nothing else is ever
+  ## given them, exactly as hublb and the c*lb ingress addresses are.
+  compact_master1: 64
+  compact_master2: 65
+  compact_master3: 66
+  compact_api: 17
+  compact_ingress: 18
 
 helper_name: helper
 helper_disk: helper_disk.qcow2
@@ -699,6 +720,44 @@ sno_disk_gb: 200
 ## true only saves that one step, and only on a cluster built after the
 ## decision to attach it.
 sno_fabric_nic: false
+
+## ---------------------------------------------------------------------------
+## Three-node compact OpenShift (setup_compact_cluster.yaml, --tags compact)
+## ---------------------------------------------------------------------------
+## Three schedulable masters, no workers, built from one agent ISO, connected -
+## the SNO pattern scaled to three nodes. Two differences from the SNO:
+##
+##   - platform: baremetal, with an API VIP and an ingress VIP floated between
+##     the masters by in-cluster keepalived (ip_list.compact_api/_ingress).
+##   - every node has two NICs, bonded active-backup (mode 1) as bond0, and
+##     the node's address lives on the bond.
+##
+## Its DNS zone is <compact_name>.<base_domain> - compact.mylab.com - rendered
+## by setup-dns from these values, so they live here rather than only in the
+## role's defaults. Bonding, NIC names, timeouts and the rest are in
+## roles/setup-compact-cluster/defaults/main.yml. The manual equivalent of every
+## step is in compact-cluster.md.
+compact_name: compact
+compact_install_folder: "{{ download_dir }}/compact_install"
+compact_vm_folder: "{{ download_dir }}/compact"
+
+## hostname is the node's name in the cluster and in the zone; ip_key is its
+## ip_list entry and its libvirt domain name. The first is the rendezvous host.
+compact_nodes:
+  - hostname: master1
+    ip_key: compact_master1
+  - hostname: master2
+    ip_key: compact_master2
+  - hostname: master3
+    ip_key: compact_master3
+compact_api_vip_key: compact_api
+compact_ingress_vip_key: compact_ingress
+
+## Per node. These masters are also the workers, so they get more than the
+## 4 vCPU / 16GiB compact minimum.
+compact_memory: 24576
+compact_vcpus: 8
+compact_disk_gb: 150
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
 ## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE

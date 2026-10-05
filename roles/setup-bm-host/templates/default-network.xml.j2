@@ -35,6 +35,13 @@
 {% if (sno_name | default('')) and (ip_list[sno_name] is defined) %}
     <forwarder domain='{{ sno_name }}.{{ base_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
 {% endif %}
+{# The three-node compact cluster, on the same condition setup-dns serves its
+   zone on. Its nodes resolve api-int and *.apps from their own on-node CoreDNS,
+   so the install does not depend on this - every OTHER VM on the network does,
+   to reach the cluster by name. #}
+{% if (compact_name | default('')) and ((compact_api_vip_key | default('')) in ip_list) and ((compact_ingress_vip_key | default('')) in ip_list) %}
+    <forwarder domain='{{ compact_name }}.{{ base_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+{% endif %}
     <forwarder domain='{{ lab_network_reverse_zone }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
   </dns>
   <ip address='{{ lab_network_prefix }}.1' netmask='{{ lab_network_netmask }}'>
@@ -50,6 +57,18 @@
 {% set _ = hosted_cluster_worker_zone.update({key: hcp_name}) %}
 {% endfor %}
 {% endfor %}
+{# ip_list key -> FQDN for the compact cluster, so its nodes and VIPs are named
+   inside compact.<base_domain> rather than falling through to the hub zone.
+   Must match the PTRs named-reverse.hub.j2 renders for the same keys. #}
+{% set compact_dhcp_names = {} %}
+{% if compact_name | default('') %}
+{% set compact_zone = compact_name ~ '.' ~ base_domain %}
+{% for node in compact_nodes | default([]) %}
+{% set _ = compact_dhcp_names.update({node.ip_key: node.hostname ~ '.' ~ compact_zone}) %}
+{% endfor %}
+{% set _ = compact_dhcp_names.update({(compact_api_vip_key | default('compact_api')): 'api.' ~ compact_zone}) %}
+{% set _ = compact_dhcp_names.update({(compact_ingress_vip_key | default('compact_ingress')): 'ingress.apps.' ~ compact_zone}) %}
+{% endif %}
 {% macro dhcp_fqdn(key) -%}
 {%- if key == 'helper_server' -%}
 helper.{{ hub_domain }}
@@ -86,6 +105,8 @@ api.{{ hub2_disconnected_domain }}
     invariant the comment at the top of this dhcp block states. 'sno.sno' reads
     oddly and is right: hostname 'sno' inside zone sno.<base_domain>. -#}
 {{ sno_name }}.{{ sno_name }}.{{ base_domain }}
+{%- elif key in compact_dhcp_names -%}
+{{ compact_dhcp_names[key] }}
 {%- else -%}
 {{ key }}.{{ hub_domain }}
 {%- endif -%}

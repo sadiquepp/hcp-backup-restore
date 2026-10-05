@@ -1,0 +1,124 @@
+---
+# Three-node compact OpenShift, installed from an agent ISO.
+#
+# Three control-plane nodes and zero workers: the masters are schedulable, so
+# the cluster runs its own workloads on the same three machines. Everything
+# else is the SNO pattern from roles/setup-sno - connected, static addressing,
+# one agent ISO, four stages - with two differences:
+#
+#   1. platform: baremetal with an API VIP and an ingress VIP, instead of
+#      platform: none. Three nodes need somewhere to put api and *.apps that
+#      survives one of them going away; the in-cluster keepalived that the
+#      baremetal platform brings does exactly that without an external haproxy.
+#
+#   2. Every node has TWO NICs, bonded active-backup (mode 1) as bond0, and the
+#      node's address lives on the bond - not on either NIC.
+
+## The cluster's name, and with base_domain its DNS zone. setup-dns renders
+## <compact_name>.<base_domain> from the same value, so set it in vars.yaml
+## rather than here if you change it.
+compact_name: compact
+
+## Where the installer works, and where the VM disks live. The install folder
+## holds auth/kubeconfig after the install - the only copy of the admin
+## credentials - so it is wiped only on a rebuild that was asked for.
+compact_install_folder: /var/lib/libvirt/images/compact_install
+compact_vm_folder: /var/lib/libvirt/images/compact
+
+## The three nodes. 'hostname' is the node name inside the cluster and its A
+## record in <compact_name>.<base_domain>; 'ip_key' is the ip_list key that
+## gives it its address and both its MACs - and doubles as the libvirt domain
+## name, the same way hub_master1 is both.
+##
+## The FIRST entry is the rendezvous host: the node the other two agents
+## register with and that drives the install.
+compact_nodes:
+  - hostname: master1
+    ip_key: compact_master1
+  - hostname: master2
+    ip_key: compact_master2
+  - hostname: master3
+    ip_key: compact_master3
+
+## ip_list keys for the two VIPs. Neither belongs to a machine: keepalived
+## inside the cluster moves each one to a healthy node.
+##   api      api.<zone> and api-int.<zone>
+##   ingress  *.apps.<zone>
+compact_api_vip_key: compact_api
+compact_ingress_vip_key: compact_ingress
+
+## Compact minimums are 4 vCPU / 16GiB / 120GB per node - and those are for a
+## cluster running nothing. These nodes ARE the workers too, so they get more.
+compact_memory: 24576
+compact_vcpus: 8
+compact_disk_gb: 150
+compact_os_variant: rhel9.4
+
+## ---------------------------------------------------------------------------
+## Bonding - the one part of this role that has no SNO equivalent.
+## ---------------------------------------------------------------------------
+## The two in-guest NIC names RHCOS gives the two virtio NICs. libvirt puts
+## the NICs on the first PCI slots in the order virt-install lists them, so
+## the first is enp1s0 and the second enp2s0. agent-config.yaml pairs each
+## name with its MAC, and the agent maps by MAC on the real hardware - but
+## keep these right anyway, because nmstate's bond port list is by name.
+compact_bond_primary_nic: enp1s0
+compact_bond_secondary_nic: enp2s0
+
+## bond0, mode 1. active-backup is the one mode that needs nothing from the
+## switch - no LACP, no static port-channel - which is why it is the only
+## sensible choice behind a Linux bridge, and why it is the mode most bare
+## metal installs start from.
+compact_bond_name: bond0
+compact_bond_mode: active-backup
+
+## Link monitoring interval in ms. Without miimon (or arp_interval) the bond
+## never notices a dead port and active-backup does not fail over at all.
+compact_bond_miimon: 100
+
+## The MACs. The primary NIC uses the lab-wide scheme, so the DHCP reservation
+## setup-bm-host renders for every ip_list key is this node's. The secondary
+## needs its own prefix: 52:54:00:e2:55 is already the containerlab fabric
+## NIC (clab_fabric_mac_prefix), so the bond's second port takes e2:56.
+##
+## The bond itself carries the PRIMARY NIC's MAC (pinned in agent-config), so
+## whichever port is active, the address answers ARP with the MAC the libvirt
+## network has reserved for it.
+compact_primary_mac_prefix: "52:54:00:e2:54"
+compact_secondary_mac_prefix: "52:54:00:e2:56"
+
+## Where RHCOS is written. With one virtio disk this is /dev/vda.
+compact_installation_disk: /dev/vda
+
+## Addressing. Static, on the bond: the rendezvous address has to be knowable
+## before the nodes boot, which a DHCP lease is not.
+compact_gateway: "{{ lab_network_prefix }}.1"
+compact_prefix_length: 24
+
+## libvirt's dnsmasq, not the helper - see sno_dns_server in roles/setup-sno
+## for the SERVFAIL this avoids. The baremetal platform also runs CoreDNS on
+## every node for api-int and *.apps, so the nodes do not depend on this to
+## find their own cluster; they depend on it to find quay.io.
+compact_dns_server: "{{ lab_network_prefix }}.1"
+
+## Cluster-internal networks - the OpenShift defaults, same as hub and SNO.
+compact_cluster_network_cidr: 10.128.0.0/14
+compact_cluster_network_host_prefix: 23
+compact_service_network_cidr: 172.30.0.0/16
+
+## Refuse to rebuild over existing VMs unless this is set. A rebuild wipes the
+## generated state in compact_install_folder, including auth/kubeconfig.
+compact_force_reinstall: false
+
+## Block until the cluster is up, in the same two steps as the SNO. A compact
+## cluster takes longer than an SNO: two of the masters install from the
+## rendezvous host, and only then does the rendezvous host install itself.
+compact_wait_for_install: true
+compact_bootstrap_timeout_min: 75
+compact_install_timeout_min: 120
+
+## The key injected into every node for `ssh core@<node>`.
+compact_ssh_public_key_file: "~/.ssh/lab_rsa.pub"
+
+## Whether a missing DNS zone is fatal. Same reasoning as sno_require_dns.
+compact_require_dns: true

@@ -8,11 +8,12 @@
 ## tags to remove everything, or narrow it:
 ##
 ##   --tags sno      the single-node OpenShift cluster only
+##   --tags compact  the three-node compact cluster only
 ##   --tags udnlab   the UDN/BGP/EVPN lab - clab VM, client VMs, fabric net
 ##
 ## The untagged tasks (hub, hub2, hosted clusters, helper, registry, minio,
 ## ceph) have no tag of their own, so they run on an untagged invocation and
-## are skipped by either tag above.
+## are skipped by any tag above.
 ##
 ## WHAT THIS DOES NOT TOUCH. The DHCP reservations these VMs hold on the
 ## libvirt 'default' network are left in place. Every MAC in this lab is
@@ -194,6 +195,22 @@
         virsh undefine {{ sno_name }} >/dev/null 2>&1 || true
       rm -rf {{ sno_vm_folder | default(download_dir ~ '/' ~ sno_name) }}
       rm -rf {{ sno_install_folder }}
+
+  ## -------------------------------------------------------------------------
+  ## The three-node compact cluster (setup_compact_cluster.yaml)
+  ## -------------------------------------------------------------------------
+  ## Same reasoning as the SNO above for taking the install folder with it.
+  ## No --remove-all-storage: the three domains share the agent ISO as their
+  ## cdrom, and the folders are removed outright below anyway.
+  - name: Destroy the compact cluster VMs
+    tags: [compact]
+    shell: |
+      {% for node in compact_nodes | default([]) %}
+      virsh destroy  {{ node.ip_key }} >/dev/null 2>&1 || true
+      virsh undefine {{ node.ip_key }} >/dev/null 2>&1 || true
+      {% endfor %}
+      rm -rf {{ compact_vm_folder | default(download_dir ~ '/compact') }}
+      rm -rf {{ compact_install_folder | default(download_dir ~ '/compact_install') }}
 
   ## -------------------------------------------------------------------------
   ## The UDN/BGP/EVPN lab (setup_udn_bgp_lab.yaml)

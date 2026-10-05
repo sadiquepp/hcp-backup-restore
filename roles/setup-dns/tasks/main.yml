@@ -162,6 +162,24 @@
   notify:
     -  Restart_Named
 
+# The three-node compact cluster (setup_compact_cluster.yaml), when vars.yaml
+# carries one. Same reasoning and same guard discipline as the SNO above: this
+# condition is repeated verbatim in named.rfc1912.zones.j2, because a stanza
+# without its file stops named from starting.
+- name: Deploy "{{ compact_name | default('') }}.{{ base_domain }}" - Forward zonefile
+  template:
+    src: compact_domain.j2
+    dest: "/var/named/{{ compact_name }}.{{ base_domain }}.db"
+    owner: root
+    group: named
+    mode: u=rw,g=r,o=r
+  when:
+    - (compact_name | default('')) | length > 0
+    - (compact_api_vip_key | default('')) in ip_list
+    - (compact_ingress_vip_key | default('')) in ip_list
+  notify:
+    -  Restart_Named
+
 # Every hosted cluster gets a zone, connected and disconnected alike, in one
 # unconditional pass - the helper serves all of them at once and never needs
 # rebuilding to switch between the two. The zones are derived from the cluster

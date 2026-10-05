@@ -1,0 +1,138 @@
+---
+# Fetch the installer, render the two manifests, and build the agent ISO.
+#
+# Identical to roles/setup-sno/tasks/image.yml apart from one step: the
+# generated state of a previous build is cleared before rendering. An agent
+# install directory that still holds .openshift_install_state.json and auth/
+# from an earlier cluster builds an ISO that reuses that cluster's generated
+# assets, and the failure that produces does not point back here.
+
+- name: Create the install and VM directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ compact_install_folder }}"
+    - "{{ compact_vm_folder }}"
+
+# Everything except the downloaded tarballs and the binaries unpacked from
+# them, so a rebuild does not re-download ~1GiB. Pre-flight has already refused
+# to get here over a live cluster unless compact_force_reinstall was set.
+- name: Clear the previous build's generated state
+  ansible.builtin.shell:
+    cmd: >-
+      find {{ compact_install_folder }} -mindepth 1 -maxdepth 1
+      ! -name '*.tar.gz' ! -name openshift-install ! -name oc ! -name kubectl
+      ! -name README.md -print -exec rm -rf {} +
+  register: compact_cleared
+  changed_when: compact_cleared.stdout | length > 0
+
+- name: Get the OpenShift installer for {{ ocp_major_version }}.{{ ocp_minor_version }}
+  ansible.builtin.get_url:
+    url: >-
+      https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-install-linux.tar.gz
+    dest: "{{ compact_install_folder }}/openshift-install-linux.tar.gz"
+    mode: '0644'
+
+- name: Extract openshift-install
+  ansible.builtin.unarchive:
+    src: "{{ compact_install_folder }}/openshift-install-linux.tar.gz"
+    dest: "{{ compact_install_folder }}"
+    remote_src: true
+
+# Our own oc, beside the installer and on PATH only for the build - see
+# roles/setup-sno/tasks/image.yml for the race that sharing /usr/bin/oc with a
+# hub play running in parallel caused.
+- name: Get the OpenShift client for {{ ocp_major_version }}.{{ ocp_minor_version }}
+  ansible.builtin.get_url:
+    url: >-
+      https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-client-linux.tar.gz
+    dest: "{{ compact_install_folder }}/openshift-client-linux.tar.gz"
+    mode: '0644'
+
+- name: Extract oc
+  ansible.builtin.unarchive:
+    src: "{{ compact_install_folder }}/openshift-client-linux.tar.gz"
+    dest: "{{ compact_install_folder }}"
+    remote_src: true
+
+- name: Report the client version
+  ansible.builtin.command:
+    cmd: "{{ compact_install_folder }}/oc version --client"
+  register: compact_oc_version
+  changed_when: false
+
+- name: Report the installer version
+  ansible.builtin.command:
+    cmd: "{{ compact_install_folder }}/openshift-install version"
+  register: compact_installer_version
+  changed_when: false
+
+- name: Show the installer and client versions
+  ansible.builtin.debug:
+    msg: "{{ compact_installer_version.stdout_lines + compact_oc_version.stdout_lines }}"
+
+# `agent create image` CONSUMES both manifests, so keep a readable copy.
+- name: Keep a readable copy of what is being installed
+  ansible.builtin.file:
+    path: "{{ compact_install_folder }}/rendered"
+    state: directory
+    mode: '0755'
+
+- name: Render install-config.yaml and agent-config.yaml
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ compact_install_folder }}/rendered/{{ item }}"
+    mode: '0600'
+  loop:
+    - install-config.yaml
+    - agent-config.yaml
+
+- name: Place the manifests where the installer will consume them
+  ansible.builtin.copy:
+    src: "{{ compact_install_folder }}/rendered/{{ item }}"
+    dest: "{{ compact_install_folder }}/{{ item }}"
+    mode: '0600'
+    remote_src: true
+  loop:
+    - install-config.yaml
+    - agent-config.yaml
+
+# This is where a malformed bond fails: openshift-install hands each host's
+# networkConfig to nmstatectl on this host before it writes the ISO.
+- name: Build the agent ISO
+  ansible.builtin.command:
+    cmd: "{{ compact_install_folder }}/openshift-install --dir {{ compact_install_folder }} agent create image"
+  register: compact_iso_build
+  changed_when: true
+  environment:
+    PATH: "{{ compact_install_folder }}:{{ ansible_env.PATH }}"
+
+- name: Report the ISO build
+  ansible.builtin.debug:
+    msg: "{{ compact_iso_build.stdout_lines | default([], true) + compact_iso_build.stderr_lines | default([], true) }}"
+
+- name: Confirm the ISO exists
+  ansible.builtin.stat:
+    path: "{{ compact_install_folder }}/agent.x86_64.iso"
+  register: compact_iso
+
+- name: Fail if the ISO was not produced
+  ansible.builtin.assert:
+    that: compact_iso.stat.exists
+    fail_msg: >-
+      openshift-install reported success but there is no
+      {{ compact_install_folder }}/agent.x86_64.iso. The rendered manifests are
+      in {{ compact_install_folder }}/rendered/ - check them, since the
+      installer consumed the originals.
+    success_msg: >-
+      Agent ISO built: {{ compact_install_folder }}/agent.x86_64.iso
+      ({{ (compact_iso.stat.size / 1024 / 1024) | round | int }} MiB).
+
+- name: Let qemu read the ISO
+  ansible.builtin.file:
+    path: "{{ compact_install_folder }}/agent.x86_64.iso"
+    mode: '0644'

@@ -1,0 +1,26 @@
+{# Forward zone for the three-node compact cluster (setup_compact_cluster.yaml).
+
+   Unlike the SNO zone, api and *.apps do NOT point at a node. They point at
+   the two VIPs keepalived floats between the masters, so either name keeps
+   answering when the node holding it goes down. Each node still gets its own
+   A record - that is what the PTRs in named-reverse.hub.j2 point back at.
+
+   Rendered whether or not the cluster exists yet: the installer needs
+   api.<zone> before `agent wait-for` can watch the install. Node records are
+   rendered only for nodes whose ip_list key exists. #}
+$TTL 1D
+@	IN SOA	helper.{{ hub_domain }}. root.{{ hub_domain }}. (
+					0	; serial
+					1D	; refresh
+					1H	; retry
+					1W	; expire
+					3H )	; minimum
+		NS	helper.{{ hub_domain }}.
+{% for node in compact_nodes | default([]) %}
+{% if node.ip_key in ip_list %}
+{{ "%-15s" | format(node.hostname) }}A	{{ lab_network_prefix }}.{{ ip_list[node.ip_key] }}
+{% endif %}
+{% endfor %}
+api		A	{{ lab_network_prefix }}.{{ ip_list[compact_api_vip_key] }}
+api-int		A	{{ lab_network_prefix }}.{{ ip_list[compact_api_vip_key] }}
+*.apps		A	{{ lab_network_prefix }}.{{ ip_list[compact_ingress_vip_key] }}

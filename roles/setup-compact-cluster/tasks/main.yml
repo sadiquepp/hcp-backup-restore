@@ -1,0 +1,31 @@
+---
+# Three-node compact OpenShift from an agent ISO, connected, with every node's
+# address on an active-backup bond over two NICs.
+#
+# The same four stages as roles/setup-sno, each runnable on its own by tag:
+#
+#   compactpreflight   everything knowable before anything is built
+#   compactimage       fetch the installer, render the manifests, build the ISO
+#   compactvm          the three libvirt domains, each with two NICs, booting it
+#   compactwait        block until the cluster is up
+#
+# One ISO boots all three nodes. It carries every host's networkConfig, and
+# each agent picks its own by matching the MACs it finds against the
+# interfaces lists in agent-config.yaml.
+
+- name: Pre-flight
+  ansible.builtin.include_tasks: preflight.yml
+  tags: [compact, compactpreflight, compactimage, compactvm, compactwait]
+
+- name: Build the agent ISO
+  ansible.builtin.include_tasks: image.yml
+  tags: [compact, compactimage]
+
+- name: Build the compact cluster VMs
+  ansible.builtin.include_tasks: vm.yml
+  tags: [compact, compactvm]
+
+- name: Wait for the cluster
+  ansible.builtin.include_tasks: wait.yml
+  when: compact_wait_for_install | bool
+  tags: [compact, compactwait]

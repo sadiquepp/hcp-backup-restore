@@ -58,6 +58,12 @@ lab_etc_hosts_clusters:
     lb: hub2dlb
   - zone: "{{ sno_name }}.{{ base_domain }}"
     lb: "{{ sno_name }}"
+  ## The compact cluster is the one entry whose api and *.apps differ: two
+  ## VIPs, not one haproxy. 'apps_lb' names the ingress one; every other
+  ## entry leaves it out and its routes follow 'lb'.
+  - zone: "{{ compact_name | default('compact') }}.{{ base_domain }}"
+    lb: "{{ compact_api_vip_key | default('compact_api') }}"
+    apps_lb: "{{ compact_ingress_vip_key | default('compact_ingress') }}"
 
 ## Route names published under *.apps.<cluster>, so the web console is usable
 ## from a browser on this host - over VNC, or through `ssh -D` with SOCKS5

@@ -1,0 +1,233 @@
+---
+# Everything that can be known before anything is built.
+
+- name: Check for libvirt tooling
+  ansible.builtin.command:
+    cmd: "which virsh qemu-img virt-install"
+  register: compact_virsh
+  changed_when: false
+  failed_when: false
+
+- name: Fail if this is not the libvirt host
+  ansible.builtin.assert:
+    that: compact_virsh.rc == 0
+    fail_msg: >-
+      virsh, qemu-img or virt-install is missing, so this is not the lab's
+      libvirt host. This role builds VMs and must run ON the hypervisor.
+    success_msg: "libvirt tooling is present."
+
+# `agent create image` runs nmstatectl on THIS host to validate every host's
+# networkConfig before it builds anything. A bond is exactly the kind of
+# config it exists to check, so without it the build stops at
+#   failed to validate network yaml for host 0, install nmstate package
+# - which is the right outcome, just a later and noisier place to learn it.
+- name: Check for nmstatectl
+  ansible.builtin.command:
+    cmd: "which nmstatectl"
+  register: compact_nmstatectl
+  changed_when: false
+  failed_when: false
+
+- name: Fail if nmstatectl is missing
+  ansible.builtin.assert:
+    that: compact_nmstatectl.rc == 0
+    fail_msg: >-
+      nmstatectl is not installed on this host. openshift-install validates
+      each node's bond configuration with it before it will build the ISO.
+      Install the nmstate package (it is in basic_packages, so
+      setup_bm_host.yaml installs it on a fresh host).
+    success_msg: "nmstatectl is present."
+
+- name: Fail if the pull secret is not available
+  ansible.builtin.assert:
+    that:
+      - pull_secret is defined
+      - (pull_secret | trim | length) > 0
+    fail_msg: >-
+      pull_secret is not set. This is a CONNECTED install, so the nodes pull
+      their release payload from quay.io and cannot start without it. It lives
+      in vault.yaml - run the playbook with --ask-vault-pass.
+    success_msg: "Pull secret is available."
+
+- name: Work out which ip_list keys this cluster needs
+  ansible.builtin.set_fact:
+    compact_required_keys: >-
+      {{ (compact_nodes | map(attribute='ip_key') | list)
+         + [compact_api_vip_key, compact_ingress_vip_key] }}
+
+- name: Fail if a node or VIP has no address reserved in ip_list
+  ansible.builtin.assert:
+    that: compact_required_keys | reject('in', ip_list) | list | length == 0
+    fail_msg: >-
+      ip_list in vars.yaml has no entry for
+      {{ compact_required_keys | reject('in', ip_list) | list | join(', ') }}.
+      A compact cluster needs five addresses known before the ISO is built:
+      one per node, an API VIP and an ingress VIP.
+    success_msg: "All five addresses are reserved in ip_list."
+
+- name: Fail if two of the cluster's addresses are the same
+  ansible.builtin.assert:
+    that: >-
+      (compact_required_keys | map('extract', ip_list) | map('int') | unique | list | length)
+      == (compact_required_keys | length)
+    fail_msg: >-
+      The nodes and VIPs share an octet:
+      {% for k in compact_required_keys %}{{ k }}={{ ip_list[k] }} {% endfor %}.
+      Each needs its own address - a VIP on a node's address is a VIP that
+      cannot move.
+    success_msg: "Five distinct addresses."
+
+# Same trap the SNO guards against: MetalLB L2 mode ARPs for its pool
+# addresses itself, so a node or a VIP holding one fights a hosted cluster's
+# API service for it, intermittently.
+- name: Fail if any of the cluster's addresses is inside a MetalLB pool
+  vars:
+    compact_metallb_octets: >-
+      {{ hosted_cluster_metallb_pools | default({}) | dict2items
+         | map(attribute='value.ip') | map('dict2items') | flatten
+         | map(attribute='value') | map('int') | list }}
+    compact_clashes: >-
+      {{ compact_required_keys | select('in', ip_list)
+         | map('extract', ip_list) | map('int')
+         | select('in', compact_metallb_octets) | list }}
+  ansible.builtin.assert:
+    that: compact_clashes | length == 0
+    fail_msg: >-
+      {{ compact_clashes | join(', ') }} is inside hosted_cluster_metallb_pools
+      ({{ compact_metallb_octets | sort | list }}). MetalLB may hand that
+      address to a hosted cluster's API service and the two would fight over it
+      by ARP. Pick octets outside those.
+    success_msg: "Every address is clear of every MetalLB pool."
+
+# The MAC scheme appends the octet verbatim, so it has to be two digits - for
+# the VIPs too, because setup-bm-host renders a DHCP reservation for every
+# ip_list key and 52:54:00:e2:54:100 would break the whole network definition.
+- name: Fail if an octet cannot form a valid MAC
+  vars:
+    compact_octets: "{{ compact_required_keys | map('extract', ip_list) | map('int') | list }}"
+    compact_bad_octets: >-
+      {{ (compact_octets | select('lt', 10) | list) + (compact_octets | select('gt', 99) | list) }}
+  ansible.builtin.assert:
+    that: compact_bad_octets | length == 0
+    fail_msg: >-
+      {{ compact_bad_octets | join(', ') }} is not a two-digit octet. This lab
+      builds MACs as {{ compact_primary_mac_prefix }}:<octet> (and
+      {{ compact_secondary_mac_prefix }}:<octet> for the bond's second port),
+      so every octet has to be between 10 and 99.
+    success_msg: "Every octet forms a well-formed MAC."
+
+- name: Read the lab ssh public key
+  ansible.builtin.shell:
+    cmd: "cat {{ compact_ssh_public_key_file }}"
+  register: compact_ssh_out
+  changed_when: false
+
+- name: Record the cluster-wide addressing
+  ansible.builtin.set_fact:
+    compact_cluster_domain: "{{ compact_name }}.{{ base_domain }}"
+    compact_api_vip: "{{ lab_network_prefix }}.{{ ip_list[compact_api_vip_key] }}"
+    compact_ingress_vip: "{{ lab_network_prefix }}.{{ ip_list[compact_ingress_vip_key] }}"
+    compact_ssh_key: "{{ compact_ssh_out.stdout }}"
+    compact_hosts: []
+
+# One record per node with everything the templates and the VM step need, so
+# neither has to re-derive an address or a MAC - and so they cannot disagree.
+- name: Record each node's addressing
+  ansible.builtin.set_fact:
+    compact_hosts: >-
+      {{ compact_hosts + [{
+           'hostname': item.hostname,
+           'domain': item.ip_key,
+           'ip': lab_network_prefix ~ '.' ~ ip_list[item.ip_key],
+           'primary_mac': (compact_primary_mac_prefix ~ ':' ~ ip_list[item.ip_key]) | lower,
+           'secondary_mac': (compact_secondary_mac_prefix ~ ':' ~ ip_list[item.ip_key]) | lower
+         }] }}
+  loop: "{{ compact_nodes }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+
+- name: Record the rendezvous host
+  ansible.builtin.set_fact:
+    compact_rendezvous_ip: "{{ compact_hosts[0].ip }}"
+
+- name: Show the plan
+  ansible.builtin.debug:
+    msg: "{{ compact_plan.splitlines() }}"
+  vars:
+    compact_plan: |-
+      api, api-int  {{ compact_api_vip }}  (VIP)
+      *.apps        {{ compact_ingress_vip }}  (VIP)
+      {% for h in compact_hosts %}
+      {{ '%-13s' | format(h.hostname) }} {{ h.ip }}  {{ compact_bond_name }} ({{ compact_bond_mode }}) =
+      {{ '%-13s' | format('') }} {{ compact_bond_primary_nic }} {{ h.primary_mac }} + {{ compact_bond_secondary_nic }} {{ h.secondary_mac }}
+      {% endfor %}
+
+# The installer's `agent wait-for` resolves api.<cluster>.<base_domain> from
+# this host, and the API certificate is issued for it. On the hypervisor that
+# comes from /etc/hosts (setup-bm-host --tags etchosts) or from the helper.
+- name: Check that the cluster's API name resolves
+  ansible.builtin.command:
+    cmd: "getent hosts api.{{ compact_cluster_domain }}"
+  register: compact_api_dns
+  changed_when: false
+  failed_when: false
+
+- name: Fail if the cluster's DNS zone is not being served
+  ansible.builtin.assert:
+    that: >-
+      not (compact_require_dns | bool)
+      or (compact_api_dns.rc == 0
+          and (compact_api_dns.stdout.split() | first) == compact_api_vip)
+    fail_msg: |-
+      {% if compact_api_dns.rc != 0 %}
+      api.{{ compact_cluster_domain }} does not resolve.
+      {% else %}
+      api.{{ compact_cluster_domain }} resolves to {{ compact_api_dns.stdout.split() | first }},
+      not to the API VIP {{ compact_api_vip }} - a stale /etc/hosts entry or zone.
+      {% endif %}
+
+      The installer needs it before `agent wait-for` can watch the install, the
+      API certificate is issued for it, and every later `oc` call depends on
+      it - so this stops here rather than an hour in.
+
+      Render the zone on the helper and the api/*.apps entries in this host's
+      /etc/hosts first:
+        ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+          --ask-vault-pass
+
+      To build the ISO anyway, pass -e compact_require_dns=false.
+    success_msg: "api.{{ compact_cluster_domain }} -> {{ compact_api_dns.stdout }}"
+
+- name: Check whether any of the cluster's VMs already exist
+  ansible.builtin.shell:
+    cmd: "virsh dominfo {{ item.domain }} 2>/dev/null | awk '/State/ {print $2}'"
+  register: compact_vm_state
+  changed_when: false
+  loop: "{{ compact_hosts }}"
+  loop_control:
+    label: "{{ item.domain }}"
+
+- name: Record which VMs already exist
+  ansible.builtin.set_fact:
+    compact_existing_vms: >-
+      {{ compact_vm_state.results | selectattr('stdout', '!=', '')
+         | map(attribute='item.domain') | list }}
+
+# Rebuilding wipes the generated state in compact_install_folder, including
+# auth/kubeconfig - the only copy of the admin credentials for a cluster that
+# may be perfectly healthy. So it has to be asked for.
+- name: Fail rather than rebuild over an existing compact cluster
+  ansible.builtin.assert:
+    that: compact_existing_vms | length == 0 or (compact_force_reinstall | bool)
+    fail_msg: >-
+      libvirt domains already exist: {{ compact_existing_vms | join(', ') }}.
+      Rebuilding wipes the generated state in {{ compact_install_folder }},
+      which holds auth/kubeconfig - the only copy of this cluster's admin
+      credentials.
+
+      To rebuild anyway, pass -e compact_force_reinstall=true. To remove the
+      cluster first:
+        ansible-playbook -i inventory/hosts cleanup.yaml --tags compact
+    success_msg: >-
+      {% if compact_existing_vms %}Rebuilding {{ compact_existing_vms | join(', ') }} as requested.
+      {% else %}No existing compact cluster VMs; building fresh.{% endif %}

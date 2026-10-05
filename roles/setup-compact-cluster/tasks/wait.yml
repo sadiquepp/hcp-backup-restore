@@ -1,0 +1,102 @@
+---
+# Two waits, because they fail for different reasons - see
+# roles/setup-sno/tasks/wait.yml. Then one check the SNO does not need: that
+# every node really came up on a mode-1 bond with both ports enslaved.
+
+- name: Wait for bootstrap to complete (up to {{ compact_bootstrap_timeout_min }}m)
+  ansible.builtin.command:
+    cmd: >-
+      {{ compact_install_folder }}/openshift-install --dir {{ compact_install_folder }}
+      agent wait-for bootstrap-complete --log-level=info
+  register: compact_bootstrap
+  changed_when: false
+  failed_when: false
+  timeout: "{{ (compact_bootstrap_timeout_min | int) * 60 }}"
+
+- name: Report the bootstrap result
+  ansible.builtin.debug:
+    msg: "{{ (compact_bootstrap.stderr_lines | default([], true) + compact_bootstrap.stdout_lines | default([], true))[-25:] }}"
+
+- name: Fail if bootstrap did not complete
+  ansible.builtin.assert:
+    that: compact_bootstrap.rc == 0
+    fail_msg: >-
+      The compact cluster did not reach a working control plane. Look at the
+      rendezvous host first - it runs the assisted service the other two
+      register with:
+        virsh console {{ compact_hosts[0].domain }}
+        ssh -i ~/.ssh/lab_rsa core@{{ compact_rendezvous_ip }} 'sudo journalctl -u assisted-service -u agent'
+      A node that never got an address means its bond did not come up: check
+      the MACs in {{ compact_install_folder }}/rendered/agent-config.yaml
+      against `virsh domiflist <node>`. Fewer than three hosts registered
+      usually means a node cannot reach {{ compact_rendezvous_ip }}.
+    success_msg: "Control plane is up."
+
+- name: Wait for the install to complete (up to {{ compact_install_timeout_min }}m)
+  ansible.builtin.command:
+    cmd: >-
+      {{ compact_install_folder }}/openshift-install --dir {{ compact_install_folder }}
+      agent wait-for install-complete --log-level=info
+  register: compact_complete
+  changed_when: false
+  failed_when: false
+  timeout: "{{ (compact_install_timeout_min | int) * 60 }}"
+
+- name: Report the install result
+  ansible.builtin.debug:
+    msg: "{{ (compact_complete.stderr_lines | default([], true) + compact_complete.stdout_lines | default([], true))[-25:] }}"
+
+- name: Fail if the install did not complete
+  ansible.builtin.assert:
+    that: compact_complete.rc == 0
+    fail_msg: >-
+      The control plane came up but the cluster did not finish settling. It is
+      reachable, so look at it directly:
+        export KUBECONFIG={{ compact_install_folder }}/auth/kubeconfig
+        oc get nodes ; oc get clusteroperators
+      Degraded ingress or console operators usually mean *.apps.{{ compact_cluster_domain }}
+      does not resolve to the ingress VIP {{ compact_ingress_vip }}.
+    success_msg: "{{ compact_name }} is installed."
+
+# Read straight from the kernel, over ssh, rather than from the
+# NodeNetworkState: it needs no operator, and /proc/net/bonding is the one
+# place that cannot be out of date about which port is carrying traffic.
+- name: Read each node's bond state
+  ansible.builtin.command:
+    cmd: >-
+      ssh -i {{ compact_ssh_public_key_file | regex_replace('[.]pub$', '') }}
+      -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=10 core@{{ item.ip }}
+      cat /proc/net/bonding/{{ compact_bond_name }}
+  register: compact_bond_state
+  changed_when: false
+  failed_when: false
+  loop: "{{ compact_hosts }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+
+- name: Fail if a node is not on an active-backup bond over both NICs
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - "'fault-tolerance (active-backup)' in item.stdout"
+      - "('Slave Interface: ' ~ compact_bond_primary_nic) in item.stdout"
+      - "('Slave Interface: ' ~ compact_bond_secondary_nic) in item.stdout"
+    fail_msg: >-
+      {{ item.item.hostname }} ({{ item.item.ip }}) is not running
+      {{ compact_bond_name }} in active-backup mode over
+      {{ compact_bond_primary_nic }} and {{ compact_bond_secondary_nic }}:
+      {{ (item.stdout_lines | default([])) + (item.stderr_lines | default([])) }}
+    success_msg: >-
+      {{ item.item.hostname }}: {{ compact_bond_name }} active-backup,
+      {{ item.stdout | regex_search('Currently Active Slave: \S+') }}
+  loop: "{{ compact_bond_state.results }}"
+  loop_control:
+    label: "{{ item.item.hostname }}"
+
+- name: Report how to use the cluster
+  ansible.builtin.debug:
+    msg:
+      - "export KUBECONFIG={{ compact_install_folder }}/auth/kubeconfig"
+      - "kubeadmin password: {{ compact_install_folder }}/auth/kubeadmin-password"
+      - "console: https://console-openshift-console.apps.{{ compact_cluster_domain }}"

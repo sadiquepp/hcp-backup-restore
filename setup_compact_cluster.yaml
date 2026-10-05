@@ -1,0 +1,40 @@
+---
+# Build a connected three-node compact OpenShift cluster from an agent ISO,
+# with every node's address on an active-backup (mode 1) bond over two NICs.
+#
+#   ansible-playbook -i inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
+#
+# Runs on the hypervisor. --ask-vault-pass is not optional: this is a connected
+# install and the nodes pull their release payload from quay.io with the pull
+# secret out of vault.yaml.
+#
+# DNS IS NOT DONE HERE, for the same reason as setup_sno.yaml: the zone
+# compact.<base_domain> is rendered by setup-dns, which runs on the HELPER and
+# is owned by setup_bm_host.yaml. Run this first:
+#
+#   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+#     --ask-vault-pass
+#
+# That renders the zone on the helper and the api/*.apps names in this host's
+# /etc/hosts. Pre-flight fails with the same command if api.compact.<domain>
+# does not resolve to the API VIP yet.
+#
+# Useful subsets:
+#   --tags compactimage   rebuild the agent ISO without touching the VMs
+#   --tags compactvm      rebuild the VMs from the ISO already built
+#   --tags compactwait    just block until an install already running finishes
+#
+# Rebuilding over an existing cluster needs -e compact_force_reinstall=true;
+# the rebuild wipes the only copy of its kubeconfig.
+#
+# Every step this automates is written out by hand in compact-cluster.md.
+- name: Set up a three-node compact OpenShift cluster
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+    - name: Install the compact cluster
+      ansible.builtin.import_role:
+        name: setup-compact-cluster
