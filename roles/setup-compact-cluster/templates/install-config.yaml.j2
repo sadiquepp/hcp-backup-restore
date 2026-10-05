@@ -67,6 +67,10 @@ imageDigestSources:
 {% endfor %}
 pullSecret: {{ compact_mirror_pull_secret | to_json | to_json }}
 sshKey: '{{ compact_ssh_key }}'
+{# Also put the CA in the cluster-wide trusted bundle, for pods that talk to
+   the registry themselves; the default (Proxyonly) does that only with a
+   proxy configured. #}
+additionalTrustBundlePolicy: Always
 additionalTrustBundle: |
   {{ compact_mirror_ca_cert | trim | indent(2) }}
 {% else %}

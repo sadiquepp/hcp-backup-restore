@@ -340,8 +340,18 @@ export IDMS=$(grep -lE '^\s*kind:\s*ImageDigestMirrorSet' $CR/* | xargs grep -l 
 
 *Automated by: `tasks/mirror.yml`*
 
+First confirm the mirror really has this release. The component pullspecs it
+lists still say `quay.io/...`; that is expected, because the IDMS maps them to
+the mirror:
+
 ```bash
 cd $WORK
+./oc adm release info -a $AUTHFILE $RELEASE | head -20      # Name: <your version>
+```
+
+Then extract the installer:
+
+```bash
 ./oc adm release extract -a $AUTHFILE \
   --idms-file=$IDMS \
   --command=openshift-install \
@@ -350,7 +360,7 @@ cd $WORK
 ./openshift-install version
 ```
 
-The last line of the output must name **the mirror**:
+The `release image` line of the output must name **the mirror**:
 
 ```
 release image registry.hub.mylab.com:8443/openshift/release-images@sha256:...
@@ -433,6 +443,7 @@ platform:
 $(cat $WORK/idms-sources.yaml)
 pullSecret: $(jq -c . $WORK/pull-secret-mirror.json | jq -R .)
 sshKey: '$(cat ~/.ssh/lab_rsa.pub)'
+additionalTrustBundlePolicy: Always
 additionalTrustBundle: |
 $(sed 's/^/  /' $MIRROR_CA)
 EOF
@@ -449,6 +460,10 @@ Compared with the connected `install-config.yaml`:
   JSON as one quoted YAML string, so no character in it can break the file.
 - **`additionalTrustBundle`** is the mirror's CA, for the agent ISO and every
   node.
+- **`additionalTrustBundlePolicy: Always`** also adds the CA to the
+  cluster-wide trusted CA bundle, for pods that talk to the registry
+  themselves. The default (`Proxyonly`) adds it there only when a proxy is
+  configured.
 
 ### Step 10 - Write agent-config.yaml and the extra manifests
 
@@ -661,11 +676,16 @@ These problems are specific to the disconnected install:
 | The playbook stops at once: `Pass -e disconnected_install=true` | `setup_mirror_registry.yaml` requires it | Add `-e disconnected_install=true`, or use `--tags compact` if the mirror is already built |
 | Pre-flight: `mirror registry CA is not trusted on this host` | The mirror registry has not been built | Step 2 |
 | `oc adm release extract` tries `quay.io/...ocp-v4.0-art-dev` | No `--idms-file`, or the operator IDMS instead of the release IDMS | Use the IDMS that maps `quay.io/openshift-release-dev` (Step 7) |
+| `oc adm release extract` fails with `unknown flag: --idms-file` | The `oc` in `$WORK` is older than 4.13 | Step 7: download the `oc` for `$OCP` |
+| `x509: certificate signed by unknown authority` on the hypervisor | The mirror's CA is not trusted here | Step 2: `setup_mirror_registry.yaml` (its `mirror-trust` tag) |
 | `openshift-install version` shows a `quay.io` release image | The installer was downloaded, not extracted from the mirror | Step 8 |
 | `agent create image` fails with `Failed to extract base ISO from release payload` | The installer could not pull from the mirror: `oc` not first on `PATH`, no `imageDigestSources`, or no mirror entry in the pull secret | `create-image.log` (debug), `PATH=$WORK:$PATH which oc`, `rendered/install-config.yaml` |
+| `agent create image` warns `Using older version of "oc" that does not support mirroring` | The `oc` on `PATH` is too old for the installer's mirror handling | Put `$WORK` first on `PATH` (Step 11) |
 | A host stays *Insufficient*: `Host couldn't synchronize with any NTP server` | The hypervisor is not serving time, or firewalld blocks UDP 123 | Step 6: `ss -lun \| grep :123`, `firewall-cmd --zone=libvirt --list-services`; on the node `chronyc -n sources` |
 | The agent cannot pull the release image | The node cannot reach or trust the mirror | On the node: `getent hosts registry.hub.mylab.com`, `curl -v https://registry.hub.mylab.com:8443/v2/` |
 | A node can still reach quay.io | The egress block is missing or below libvirt's rules (after a reboot, or a libvirtd/firewalld reload) | Step 5 checks; re-run `--tags compactvm` |
 | Pods in `ImagePullBackOff` for a `registry.redhat.io` or `quay.io` image by tag | Tag mirrors are only applied on day 2, or the image was never mirrored | Step 14; add the image to the mirror's ImageSetConfiguration |
+| OperatorHub shows no operators, or catalog pods fail to pull | The default catalogs are still enabled (Step 10), or the mirrored CatalogSources are not applied (Step 14) | `oc get operatorhub cluster -o yaml`, `oc get catalogsource -n openshift-marketplace` |
+| `oc adm upgrade` refuses an update with a signature error | The release signature ConfigMap from `oc mirror` is missing | It goes in as an extra manifest (Step 10). On a running cluster, `oc apply` it from `$CR`. |
 | Nodes report `rendered-master-... do not match` on first boot | An IDMS/ITMS was placed in `$WORK/openshift/` | Remove it, rebuild the ISO (Step 10) |
 | `virt-install` or libvirt rejects a MAC like `52:54:00:e2:54:3` | The octet was not zero-padded | Use `$MAC1:0$oct` (Step 12) |
