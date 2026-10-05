@@ -539,7 +539,16 @@ oc debug node/master1 -- chroot /host grep -c "location = \"$MIRROR" /etc/contai
 
 ### Step 16 - Day 2: catalogs, tag mirrors and signatures
 
-Apply everything `oc mirror` produced in one go, the way `oc mirror`
+First make sure the default OperatorHub catalogs are off. The Step 13
+manifest already did this, but the patch is safe to run again, and it covers
+a cluster installed without that manifest:
+
+```bash
+oc patch OperatorHub cluster --type json -p '[{"op": "add", "path": "/spec/disableAllDefaultSources", "value": true}]'
+oc get operatorhub cluster -o jsonpath='{.spec.disableAllDefaultSources}{"\n"}'   # true
+```
+
+Then apply everything `oc mirror` produced in one go, the way `oc mirror`
 documents it:
 
 ```bash
@@ -573,10 +582,6 @@ one at a time**. Applying everything at once makes it a single round. The
 cluster stays available, but expect the API to drop briefly while each
 master reboots.
 
-If you skipped the OperatorHub manifest in Step 13, turn the default
-catalogs off now:
-`oc patch operatorhub cluster --type merge -p '{"spec":{"disableAllDefaultSources":true}}'`.
-
 ---
 
 ## Troubleshooting
@@ -598,6 +603,6 @@ These problems are specific to the disconnected install:
 | The agent reports it cannot pull the release image | The servers cannot reach the mirror: DNS for the mirror's name, the CA, the credentials or a firewall | On a node: `getent hosts <mirror host>`, `curl -v https://$MIRROR/v2/`, and `/etc/containers/registries.conf` |
 | Pods are stuck in `ImagePullBackOff` for an image under `quay.io/...` or `registry.redhat.io/...` | That image is not in the mirror, or it is pulled by tag and only an IDMS (digest) mapping exists | Mirror the image. For tag pulls, apply `oc mirror`'s ImageTagMirrorSet (Step 16). |
 | An operator's pods are in `ImagePullBackOff` for `registry.redhat.io/...` right after the install | The operator mappings are added only on day 2 | Apply Step 16 before installing operators. `oc get imagedigestmirrorset` should list `oc mirror`'s IDMS. |
-| OperatorHub shows no operators, or catalog pods fail to pull | The default catalogs are still enabled (Step 13), or the mirrored CatalogSources are not applied (Step 16) | `oc get operatorhub cluster -o yaml`, `oc get catalogsource -n openshift-marketplace` |
+| OperatorHub shows no operators, or catalog pods fail to pull | The default catalogs are still enabled (Step 13, or the `oc patch OperatorHub` in Step 16), or the mirrored CatalogSources are not applied (Step 16) | `oc get operatorhub cluster -o yaml`, `oc get catalogsource -n openshift-marketplace` |
 | Nodes report `rendered-master-... do not match` on first boot | An IDMS was also placed in `$WORK/openshift/` and does not match the one from `imageDigestSources` | Remove the extra manifest and rebuild the ISO (Step 13) |
 | `oc adm upgrade` refuses an update with a signature error | The release signature ConfigMap from `oc mirror` is missing | Apply `oc mirror`'s output (Step 16): `oc apply -f $CR/` |
