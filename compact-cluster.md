@@ -276,7 +276,13 @@ does not need the forwarder, so you can add it later.
 Use the installer that matches the cluster version. The ISO records the
 release image of the installer that built it.
 
+Start from an **empty** `$WORK`. If it holds an earlier build, its
+`.openshift_install_state.json` and `auth/` would be reused in the new ISO.
+Emptying it also deletes the old cluster's `auth/kubeconfig`, so back that up
+first if you still need it.
+
 ```bash
+rm -rf $WORK
 mkdir -p $WORK $VMDIR
 cd $WORK
 curl -LO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP/openshift-install-linux.tar.gz
@@ -290,15 +296,6 @@ tar xzf openshift-client-linux.tar.gz
 `agent create image` runs `oc` to extract the base ISO from the release
 payload. Step 8 puts this directory at the front of `PATH` so the installer
 uses this `oc`.
-
-If this directory was used for an earlier build, remove its generated state
-first. Stale `.openshift_install_state.json` and `auth/` files get reused in
-the new ISO:
-
-```bash
-cd $WORK && find . -mindepth 1 -maxdepth 1 ! -name '*.tar.gz' ! -name openshift-install \
-  ! -name oc ! -name kubectl ! -name README.md -exec rm -rf {} +
-```
 
 ### Step 6 - Write install-config.yaml
 

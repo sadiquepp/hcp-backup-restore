@@ -422,7 +422,13 @@ it stops if the check fails.
 Use the installer for the OpenShift version you want. The ISO it builds
 installs that version.
 
+Start from an **empty** `$WORK`. If you reuse it from an earlier attempt, the
+installer would otherwise reuse the old cluster's certificates and `auth/`
+files. Emptying it also deletes the old cluster's `auth/kubeconfig`, so back
+that up first if you still need it.
+
 ```bash
+rm -rf $WORK
 mkdir -p $WORK && cd $WORK
 curl -LO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP/openshift-install-linux.tar.gz
 curl -LO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP/openshift-client-linux.tar.gz
@@ -435,15 +441,6 @@ tar xzf openshift-client-linux.tar.gz
 `agent create image` runs `oc` to extract the base ISO from the release
 payload. Step 12 puts `$WORK` at the front of `PATH` so the installer uses
 this `oc`.
-
-If you reuse `$WORK` from an earlier attempt, remove the generated state
-first. The installer would otherwise reuse the old cluster's certificates and
-`auth/` files:
-
-```bash
-cd $WORK && find . -mindepth 1 -maxdepth 1 ! -name '*.tar.gz' ! -name openshift-install \
-  ! -name oc ! -name kubectl ! -name README.md -exec rm -rf {} +
-```
 
 ### Step 10 - Write install-config.yaml
 

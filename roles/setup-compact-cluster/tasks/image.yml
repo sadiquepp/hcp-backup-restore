@@ -18,14 +18,20 @@
     - "{{ compact_install_folder }}"
     - "{{ compact_vm_folder }}"
 
-# Everything except the downloaded tarballs and the binaries unpacked from
-# them, so a rebuild does not re-download ~1GiB. Pre-flight has already refused
-# to get here over a live cluster unless compact_force_reinstall was set.
+# Before anything is downloaded: everything except THIS version's tarballs
+# and the binaries unpacked from them, so a rebuild at the same version does
+# not re-download ~1GiB. The tarball names carry the version (below), so a
+# version bump removes the old tarballs here and fetches new ones - get_url
+# skips a dest that exists, so with a version-less name it would quietly reuse
+# the old installer. The binaries are re-extracted from the right tarball
+# every run. Pre-flight has already refused to get here over a live cluster
+# unless compact_force_reinstall was set.
 - name: Clear the previous build's generated state
   ansible.builtin.shell:
     cmd: >-
       find {{ compact_install_folder }} -mindepth 1 -maxdepth 1
-      ! -name '*.tar.gz' ! -name openshift-install ! -name oc ! -name kubectl
+      ! -name 'openshift-*-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz'
+      ! -name openshift-install ! -name oc ! -name kubectl
       ! -name README.md -print -exec rm -rf {} +
   register: compact_cleared
   changed_when: compact_cleared.stdout | length > 0
@@ -34,12 +40,12 @@
   ansible.builtin.get_url:
     url: >-
       https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-install-linux.tar.gz
-    dest: "{{ compact_install_folder }}/openshift-install-linux.tar.gz"
+    dest: "{{ compact_install_folder }}/openshift-install-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz"
     mode: '0644'
 
 - name: Extract openshift-install
   ansible.builtin.unarchive:
-    src: "{{ compact_install_folder }}/openshift-install-linux.tar.gz"
+    src: "{{ compact_install_folder }}/openshift-install-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz"
     dest: "{{ compact_install_folder }}"
     remote_src: true
 
@@ -50,12 +56,12 @@
   ansible.builtin.get_url:
     url: >-
       https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-client-linux.tar.gz
-    dest: "{{ compact_install_folder }}/openshift-client-linux.tar.gz"
+    dest: "{{ compact_install_folder }}/openshift-client-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz"
     mode: '0644'
 
 - name: Extract oc
   ansible.builtin.unarchive:
-    src: "{{ compact_install_folder }}/openshift-client-linux.tar.gz"
+    src: "{{ compact_install_folder }}/openshift-client-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz"
     dest: "{{ compact_install_folder }}"
     remote_src: true
 
