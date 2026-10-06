@@ -177,7 +177,7 @@ resource "aws_instance" "metal" {
       - path: /etc/profile.d/lab.sh
         content: |
           # Set by terraform. The lab is built from here.
-          export LAB_REPO_DIR=/root/hcp-backup-restore
+          export LAB_REPO_DIR=/root/ocp-onpremise
     CLOUDCFG
 
   tags = { Name = "${var.project}-${count.index + 1}" }

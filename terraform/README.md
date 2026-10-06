@@ -122,7 +122,7 @@ match on first boot.
 
 - installs `ansible-core`, `tmux`, `git`, `python3-libvirt`, `python3-lxml`
 - installs the `community.libvirt` and `community.crypto` collections
-- clones this repository to `/root/hcp-backup-restore`
+- clones this repository to `/root/ocp-onpremise`
 - creates `base_image_dir` (default `/opt/lab-images`) — **not**
   `/var/lib/libvirt/images`, which does not exist until the libvirt RPM
   creates it
@@ -162,7 +162,7 @@ ssh -i ~/.ssh/id_ed25519 ec2-user@<ip> 'sudo mv /tmp/rhel-9.8-x86_64-kvm.qcow2 /
 **2. `vault.yaml`.**
 
 ```bash
-sudo -i && cd /root/hcp-backup-restore
+sudo -i && cd /root/ocp-onpremise
 ansible-vault create vault.yaml     # pull_secret, org_id, activation_key
 install -m 600 /dev/null ~/.vault_pass    # 0600 before it holds anything
 read -rsp 'Vault password: ' pw && printf '%s' "$pw" > ~/.vault_pass && unset pw; echo
@@ -172,7 +172,7 @@ read -rsp 'Vault password: ' pw && printf '%s' "$pw" > ~/.vault_pass && unset pw
 
 ```bash
 tmux new -s lab
-cd /root/hcp-backup-restore/udn-bgp-evpn
+cd /root/ocp-onpremise/udn-bgp-evpn
 ./build-lab.sh --evpn        # or --vrflite / --shared
 ./build-lab.sh --workshop    # or: day 0 of the workshop only - see workshop.md
 ```
