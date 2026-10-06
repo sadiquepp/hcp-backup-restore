@@ -25,6 +25,8 @@
 #          out of reach
 #   3. Day 2: oc-mirror's ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource,
 #      applied once the cluster is up (one rolling reboot of the masters).
+#   4. LVM Storage (default StorageClass lvms-vg1), from the mirrored catalog
+#      day 2 just applied - so it has to come after it.
 #
 # DNS is rendered by setup_bm_host.yaml, as for every cluster here - run this
 # first (compactd.<base_domain> is in compact_clusters in vars.yaml):
@@ -37,6 +39,7 @@
 #   --tags compactvm        re-assert the egress block / NTP and rebuild the VMs
 #   --tags compactwait      just wait for an install already running
 #   --tags compactday2      just apply the day-2 mirror resources
+#   --tags compactstorage   just add LVM Storage (after day 2 has run once)
 #
 # Rebuilding over an existing compactd needs -e compact_force_reinstall=true.
 # Every manual step this automates is in compact-cluster-disconnected.md.
@@ -96,3 +99,20 @@
         compact_install_folder: "{{ compactd_install_folder }}"
       when: compact_wait_for_install | default(true) | bool
       tags: [compact, compactday2]
+
+    - name: Add LVM Storage from the mirrored catalog (default StorageClass lvms-vg1)
+      ansible.builtin.include_role:
+        name: setup-compact-cluster
+        tasks_from: storage
+        apply:
+          tags: [compact, compactstorage]
+      vars:
+        compact_disconnected: true
+        compact_name: "{{ compactd_name }}"
+        compact_nodes: "{{ compactd_nodes }}"
+        compact_install_folder: "{{ compactd_install_folder }}"
+        compact_vm_folder: "{{ compactd_vm_folder }}"
+      when:
+        - compact_lvm_storage | default(use_lvm_storage | default(true)) | bool
+        - compact_wait_for_install | default(true) | bool
+      tags: [compact, compactstorage]

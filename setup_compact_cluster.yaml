@@ -23,6 +23,9 @@
 #   --tags compactimage   rebuild the agent ISO without touching the VMs
 #   --tags compactvm      rebuild the VMs from the ISO already built
 #   --tags compactwait    just block until an install already running finishes
+#   --tags compactstorage just add LVM Storage (lvms-vg1) to a running cluster,
+#                         attaching the empty disk it needs to any node built
+#                         without one
 #
 # Rebuilding over an existing cluster needs -e compact_force_reinstall=true;
 # the rebuild wipes the only copy of its kubeconfig.
@@ -38,3 +41,17 @@
     - name: Install the compact cluster
       ansible.builtin.import_role:
         name: setup-compact-cluster
+
+    # After the install: the operator needs a running cluster. Its own task
+    # file, so --tags compactstorage runs it alone against a cluster built
+    # earlier.
+    - name: Add LVM Storage (default StorageClass lvms-vg1)
+      ansible.builtin.include_role:
+        name: setup-compact-cluster
+        tasks_from: storage
+        apply:
+          tags: [compact, compactstorage]
+      when:
+        - compact_lvm_storage | default(use_lvm_storage | default(true)) | bool
+        - compact_wait_for_install | default(true) | bool
+      tags: [compact, compactstorage]

@@ -45,7 +45,8 @@ Each step names the role file that automates it.
   12. [Create the three VMs](#step-12---create-the-three-vms)
   13. [Watch the install and check it is really disconnected](#step-13---watch-the-install-and-check-it-is-really-disconnected)
   14. [Day 2: mirror sets and catalogs](#step-14---day-2-mirror-sets-and-catalogs)
-  15. [Clean up](#step-15---clean-up)
+  15. [Add LVM Storage](#step-15---add-lvm-storage)
+  16. [Clean up](#step-16---clean-up)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -65,6 +66,8 @@ Each step names the role file that automates it.
 | Mirror registry | `registry.hub.mylab.com:8443` (`192.168.122.22`) | `mirror_registry_domain`, `ip_list.registry` |
 | Mirrored release | `registry.hub.mylab.com:8443/openshift/release-images:<version>-x86_64` | `mirror_release_repository`, `mirror_ocp_version` |
 | NTP server for the nodes | `192.168.122.1` (the hypervisor) | `compact_ntp_server` |
+| Storage disk per node | 100 GB, empty (`vdb`), for LVM Storage | `compact_storage_disk_gb`, `compact_lvm_storage` |
+| Default StorageClass | `lvms-vg1` (LVM Storage), from the mirrored catalog | `roles/setup-lvm-storage`, `use_lvm_storage` in `vars.yaml` |
 | Egress block | `LAB_NO_NAT` (nat) and `LAB_NO_EGRESS` (filter) chains | shared with hubd |
 
 **Why `.3`-`.7`.** All but one of the free two-digit octets are now in use.
@@ -99,6 +102,7 @@ connected.
 | `compactvm` | Egress block and NTP server, then the three VMs | `tasks/vm.yml`, `tasks/ntp-server.yml`, hubd's `block-node-nat.yml` |
 | `compactwait` | Waits for bootstrap and install-complete, checks the bonds | `tasks/wait.yml` |
 | `compactday2` | Applies `oc mirror`'s IDMS/ITMS/CatalogSource and waits for the rolling reboot | `tasks/day2.yml` |
+| `compactstorage` | Installs LVM Storage from the mirrored catalog and waits for the `lvms-vg1` StorageClass. Attaches the storage disk to any node built without one. Needs `compactday2` to have run. | `tasks/storage.yml`, `roles/setup-lvm-storage` |
 
 To rebuild, add `-e compact_force_reinstall=true`. To remove the cluster, run
 `ansible-playbook -i inventory/hosts cleanup.yaml --tags compactd`.
@@ -636,15 +640,17 @@ does not need one.** The installer reads `imageDigestSources` from
 
 The same as for the connected cluster
 ([compact-cluster.md, Step 9](compact-cluster.md#step-9---create-the-three-vms-each-with-two-nics)):
-a fresh disk and **two NICs on the default network** per node. Use the
-zero-padded MACs and the `compactd` names:
+a fresh disk for RHCOS, a second **empty disk for LVM Storage**, and **two
+NICs on the default network** per node. Use the zero-padded MACs and the
+`compactd` names:
 
 ```bash
 for n in $NODES; do
   host=${n%%:*}; oct=${n##*:}; dom=compactd_$host
 
-  rm -f $VMDIR/${dom}_disk.qcow2
+  rm -f $VMDIR/${dom}_disk.qcow2 $VMDIR/${dom}_storage.qcow2
   qemu-img create -f qcow2 $VMDIR/${dom}_disk.qcow2 150G
+  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 100G   # empty, for LVM Storage (Step 15)
 
   virsh net-dumpxml default | grep -qi "$MAC1:0$oct" || \
     virsh net-update default add ip-dhcp-host \
@@ -653,13 +659,22 @@ for n in $NODES; do
   virt-install --import --name $dom --memory 24576 --vcpus 8 --cpu host-passthrough \
     --os-variant=rhel9.4 \
     --disk $VMDIR/${dom}_disk.qcow2,format=qcow2,cache=none,bus=virtio \
+    --disk $VMDIR/${dom}_storage.qcow2,format=qcow2,cache=none,bus=virtio \
     --disk $WORK/agent.x86_64.iso,device=cdrom,bus=sata,readonly=on \
     --boot hd,cdrom \
     --network network:default,mac=$MAC1:0$oct,model=virtio \
     --network network:default,mac=$MAC2:0$oct,model=virtio \
     --memballoon model=virtio,freePageReporting=on --noautoconsole
 done
+
+for n in $NODES; do virsh domblklist compactd_${n%%:*}; done   # vda (RHCOS) and vdb (storage)
 ```
+
+**The order of the two disks matters.** The RHCOS disk is listed first, so it
+is `vda`. The storage disk is second, so it is `vdb`. `agent-config.yaml` pins
+the install to `/dev/vda` with `rootDeviceHints` (Step 10), which keeps the
+installer off the storage disk. Without that pin the agent picks a disk by its
+own rules, and could install RHCOS on the disk meant for LVM Storage.
 
 ### Step 13 - Watch the install and check it is really disconnected
 
@@ -730,7 +745,129 @@ This is a node configuration change: **the three masters reboot one at a
 time**. The cluster stays available, but expect the API to drop briefly while
 each master reboots.
 
-### Step 15 - Clean up
+### Step 15 - Add LVM Storage
+
+*Automated by: `tasks/storage.yml`, which runs `roles/setup-lvm-storage` (`--tags compactstorage`)*
+
+LVM Storage gives the cluster a default StorageClass, `lvms-vg1`, the same
+one the hub and the SNO get. Its `LVMCluster` names no `deviceSelector`, so on
+every node it takes **every empty disk** it finds and builds a volume group
+and a thin pool on it. On a compact cluster every node is a master and a
+worker, so it runs on all three. The RHCOS disk is not empty, so each node
+needs the second disk from Step 12.
+
+**Check the storage disk on every node.** It should be there, with no
+partitions and no filesystem:
+
+```bash
+for n in $NODES; do
+  echo "== ${n%%:*}"
+  ssh -i ~/.ssh/lab_rsa core@$LAB.${n##*:} 'lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT /dev/vdb'
+done
+```
+
+**A cluster built without the storage disk** (before Step 12 created
+one) can get it now, with no reinstall and no reboot. Create it and hot-plug
+it into each running VM. `--persistent` also adds it to the domain
+definition, so it is still there after the next reboot:
+
+```bash
+for n in $NODES; do
+  dom=compactd_${n%%:*}
+  virsh domblklist $dom | grep -q "${dom}_storage.qcow2" && continue
+  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 100G
+  virsh attach-disk $dom $VMDIR/${dom}_storage.qcow2 vdb \
+    --driver qemu --subdriver qcow2 --cache none --targetbus virtio --persistent --live
+done
+```
+
+**Install the operator from the mirrored catalog.** The default
+`redhat-operators` catalog is turned off on this cluster. The operator comes
+from the CatalogSource that `oc mirror` generated, which Step 14 applied, so
+run this step **after** day 2. `lvms-operator` is in the mirror's operator list
+(`mirror_catalog_operator_packages` in `vars.yaml`), so the catalog has it:
+
+```bash
+oc get catalogsource -n openshift-marketplace
+export CATALOG=$(oc get catalogsource -n openshift-marketplace -o name | grep redhat-operator-index | head -1 | cut -d/ -f2)
+echo $CATALOG                                                                        # cs-redhat-operator-index-v4-22
+oc get packagemanifest lvms-operator -n openshift-marketplace \
+  -o jsonpath='{.status.catalogSource}{"\n"}'                                         # the same name
+
+oc apply -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-storage
+  labels:
+    openshift.io/cluster-monitoring: "true"
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-storage-operatorgroup
+  namespace: openshift-storage
+spec:
+  targetNamespaces:
+  - openshift-storage
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: lvms
+  namespace: openshift-storage
+spec:
+  installPlanApproval: Automatic
+  name: lvms-operator
+  source: $CATALOG
+  sourceNamespace: openshift-marketplace
+EOF
+
+oc -n openshift-storage get csv -w     # wait for lvms-operator.v... PHASE Succeeded, then Ctrl-C
+oc wait --for=condition=Established crd/lvmclusters.lvm.topolvm.io --timeout=300s
+```
+
+**Create the LVMCluster:**
+
+```bash
+oc apply -f - <<'EOF'
+apiVersion: lvm.topolvm.io/v1alpha1
+kind: LVMCluster
+metadata:
+  name: my-lvmcluster
+  namespace: openshift-storage
+spec:
+  storage:
+    deviceClasses:
+      - name: vg1
+        default: true
+        fstype: xfs
+        thinPoolConfig:
+          name: thin-pool-1
+          sizePercent: 90
+          overprovisionRatio: 10
+          chunkSizeCalculationPolicy: Static
+EOF
+
+# Ready once vg-manager has built the volume group on every node (a few minutes)
+oc -n openshift-storage get lvmcluster my-lvmcluster -o jsonpath='{.status.state}{"\n"}'   # Ready
+oc get storageclass                                                                          # lvms-vg1 (default)
+```
+
+Each node now has a volume group `vg1` on `/dev/vdb`:
+
+```bash
+oc -n openshift-storage get lvmvolumegroupnodestatus -o wide
+oc debug node/master1 -- chroot /host vgs
+```
+
+`lvms-vg1` uses `volumeBindingMode: WaitForFirstConsumer`. A new PVC stays
+`Pending` until a pod uses it. That is expected: LVM volumes are local to one
+node, so the volume is created on whichever node the pod is scheduled to.
+LVMS marks `lvms-vg1` as the default class only if no other class is already
+the default.
+
+### Step 16 - Clean up
 
 *Automated by: `cleanup.yaml --tags compactd`*
 
@@ -749,8 +886,9 @@ for t in "nat LAB_NO_NAT" "filter LAB_NO_EGRESS"; do
 done
 ```
 
-The mirror registry, the chronyd `allow`, the DNS records and the DHCP
-reservations are shared lab infrastructure. Cleanup leaves them in place.
+Removing `$VMDIR` deletes the storage disks too. The mirror registry, the
+chronyd `allow`, the DNS records and the DHCP reservations are shared lab
+infrastructure. Cleanup leaves them in place.
 
 ---
 
@@ -778,3 +916,7 @@ These problems are specific to the disconnected install:
 | `oc adm upgrade` refuses an update with a signature error | The release signature ConfigMap from `oc mirror` is missing | It goes in as an extra manifest (Step 10). On a running cluster, `oc apply` it from `$CR`. |
 | Nodes report `rendered-master-... do not match` on first boot | An IDMS/ITMS was placed in `$WORK/openshift/` | Remove it, rebuild the ISO (Step 10) |
 | `virt-install` or libvirt rejects a MAC like `52:54:00:e2:54:3` | The octet was not zero-padded | Use `$MAC1:0$oct` (Step 12) |
+| The `lvms` Subscription stays unresolved (`ResolutionFailed`, no CSV) | It names a CatalogSource that is not on the cluster, or that catalog has no `lvms-operator` | Step 15: `oc get catalogsource -n openshift-marketplace`, `oc get packagemanifest lvms-operator -n openshift-marketplace`. Apply day 2 (Step 14) first. |
+| LVMCluster stays `Progressing` or `Failed`, or `lvms-vg1` never appears | A node has no empty disk: `vdb` is missing, or it already holds partitions, a filesystem or an old volume group | `lsblk /dev/vdb` on each node (Step 15). `oc -n openshift-storage logs ds/vg-manager` names every device it skipped and why. Attach a fresh disk as in Step 15. |
+| RHCOS was installed on the storage disk | `rootDeviceHints` was removed, or the storage disk was listed before the RHCOS disk in `virt-install` | `virsh domblklist compactd_masterN`: the RHCOS disk must be `vda`. Rebuild with the disk order from Step 12. |
+| A PVC stays `Pending` with no pod using it | `lvms-vg1` binds when the first pod uses the PVC (`WaitForFirstConsumer`) | Expected. Start a pod that mounts it. |

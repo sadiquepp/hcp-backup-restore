@@ -1,0 +1,104 @@
+---
+# LVM Storage on the compact cluster, so it has a default StorageClass
+# (lvms-vg1) like the hub and the SNO. roles/setup-lvm-storage does the work,
+# unchanged: its LVMCluster takes every empty disk on every node, and on a
+# compact cluster every node is a master AND a worker, so vg-manager runs on
+# all three.
+#
+# Run by both playbooks after the cluster is up - the disconnected one only
+# after day 2, because the operator resolves against the mirrored
+# CatalogSource that day 2 applies. On its own against a running cluster:
+#
+#   ansible-playbook -i inventory/hosts setup_compact_cluster.yaml --ask-vault-pass --tags compactstorage
+#
+# Each node needs an empty disk. tasks/vm.yml builds every node with one; a
+# cluster built before that gets it here, created and hot-plugged into the
+# running VM (persistently), the way roles/setup-sno/tasks/storage.yml does
+# it for the SNO. No reboot either way - vg-manager rescans for new disks.
+
+# The libvirt domain names are the ip_list keys (as in preflight's
+# compact_hosts), derived here so --tags compactstorage needs no pre-flight.
+- name: Name the cluster's VMs
+  ansible.builtin.set_fact:
+    compact_storage_domains: "{{ compact_nodes | map(attribute='ip_key') | list }}"
+
+- name: Fail unless the cluster is installed
+  ansible.builtin.stat:
+    path: "{{ compact_install_folder }}/auth/kubeconfig"
+  register: compact_storage_kubeconfig
+
+- name: Say so
+  ansible.builtin.assert:
+    that: compact_storage_kubeconfig.stat.exists
+    fail_msg: >-
+      No {{ compact_install_folder }}/auth/kubeconfig, so there is no
+      {{ compact_name }} cluster to add storage to yet. Build it first, then
+      run --tags compactstorage.
+
+# auth/kubeconfig exists from the moment the ISO is built, so it says nothing
+# about whether the install finished. The API does.
+- name: Wait for the cluster to answer and be Available
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusterversion version
+      -o 'jsonpath={.status.conditions[?(@.type=="Available")].status}'
+  environment:
+    KUBECONFIG: "{{ compact_install_folder }}/auth/kubeconfig"
+    PATH: "{{ compact_install_folder }}:{{ lookup('env', 'PATH') }}"
+  register: compact_storage_cv
+  retries: 30
+  delay: 20
+  until: compact_storage_cv.stdout == 'True'
+  changed_when: false
+
+# `creates`, so a disk vm.yml already made - and the volume group LVMS built on
+# it - is left alone.
+- name: Create any storage disk that is missing
+  ansible.builtin.command:
+    cmd: >-
+      qemu-img create -f qcow2 -o preallocation=metadata
+      {{ compact_vm_folder }}/{{ item }}_storage.qcow2 {{ compact_storage_disk_gb }}G
+    creates: "{{ compact_vm_folder }}/{{ item }}_storage.qcow2"
+  loop: "{{ compact_storage_domains }}"
+
+- name: List the disks each VM has
+  ansible.builtin.command:
+    cmd: virsh domblklist {{ item }} --details
+  loop: "{{ compact_storage_domains }}"
+  register: compact_storage_blk
+  changed_when: false
+
+# --live into the running guest, --persistent into the domain definition, so
+# it survives the next reboot. vdb: the root disk is vda
+# (compact_installation_disk), the ISO is on SATA.
+- name: Attach the storage disk to any node that lacks it
+  ansible.builtin.command:
+    cmd: >-
+      virsh attach-disk {{ item.item }}
+      {{ compact_vm_folder }}/{{ item.item }}_storage.qcow2 {{ compact_storage_disk_target }}
+      --driver qemu --subdriver qcow2 --cache none --targetbus virtio
+      --persistent --live
+  loop: "{{ compact_storage_blk.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: (compact_vm_folder ~ '/' ~ item.item ~ '_storage.qcow2') not in item.stdout
+  changed_when: true
+
+# Connected: redhat-operators. Disconnected: the CatalogSource oc-mirror
+# generated, which day 2 applied - setup-lvm-storage's own default derives its
+# name from mirror_catalog_index (or takes acm_catalog_source if vars.yaml sets
+# one), and checks it exists before subscribing. lvms-operator is in
+# mirror_catalog_operator_packages, so the mirror has it.
+- name: Install LVM Storage on the compact cluster
+  ansible.builtin.include_role:
+    name: setup-lvm-storage
+    apply:
+      tags: [compact, compactstorage]
+      environment:
+        KUBECONFIG: "{{ compact_install_folder }}/auth/kubeconfig"
+        PATH: "{{ compact_install_folder }}:{{ lookup('env', 'PATH') }}"
+  vars:
+    disconnected_install: "{{ compact_disconnected | bool }}"
+    lvm_catalog_source: >-
+      {{ (acm_catalog_source if acm_catalog_source is defined else lvm_mirror_catalog_source)
+         if compact_disconnected | bool else 'redhat-operators' }}

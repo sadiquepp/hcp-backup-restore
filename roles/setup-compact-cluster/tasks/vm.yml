@@ -40,13 +40,16 @@
 # Always a fresh disk. A disk left over from an earlier install still holds a
 # bootable RHCOS, and with boot order hd,cdrom the node would boot THAT rather
 # than the agent ISO - so it would never register, and nothing would say why.
-- name: Remove any previous disk
+#
+# The storage disk is replaced too: LVMS only takes a disk with nothing on it,
+# and the old one carries the previous cluster's volume group.
+- name: Remove any previous disks
   ansible.builtin.file:
-    path: "{{ compact_vm_folder }}/{{ item.domain }}_disk.qcow2"
+    path: "{{ compact_vm_folder }}/{{ item.0.domain }}_{{ item.1 }}.qcow2"
     state: absent
-  loop: "{{ compact_hosts }}"
+  loop: "{{ compact_hosts | product(['disk', 'storage']) | list }}"
   loop_control:
-    label: "{{ item.domain }}"
+    label: "{{ item.0.domain }}_{{ item.1 }}"
 
 - name: Create each node's disk
   ansible.builtin.command:
@@ -56,6 +59,19 @@
   loop: "{{ compact_hosts }}"
   loop_control:
     label: "{{ item.domain }}"
+  changed_when: true
+
+# Empty, for LVM Storage (tasks/storage.yml). Attached SECOND, so it is vdb and
+# the rootDeviceHints pin on /dev/vda keeps RHCOS off it.
+- name: Create each node's storage disk
+  ansible.builtin.command:
+    cmd: >-
+      qemu-img create -f qcow2 -o preallocation=metadata
+      {{ compact_vm_folder }}/{{ item.domain }}_storage.qcow2 {{ compact_storage_disk_gb }}G
+  loop: "{{ compact_hosts }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  when: compact_lvm_storage | bool
   changed_when: true
 
 - name: Read the default network's current definition
@@ -103,6 +119,9 @@
       --cpu host-passthrough \
       --os-variant={{ compact_os_variant }} \
       --disk "{{ compact_vm_folder }}/{{ item.domain }}_disk.qcow2",format=qcow2,cache=none,bus=virtio \
+      {% if compact_lvm_storage | bool %}
+      --disk "{{ compact_vm_folder }}/{{ item.domain }}_storage.qcow2",format=qcow2,cache=none,bus=virtio \
+      {% endif %}
       --disk "{{ compact_install_folder }}/agent.x86_64.iso",device=cdrom,bus=sata,readonly=on \
       --boot hd,cdrom \
       --network network:default,mac={{ item.primary_mac }},model=virtio \

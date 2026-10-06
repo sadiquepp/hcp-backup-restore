@@ -241,7 +241,12 @@
 # Rebuilding wipes the generated state in compact_install_folder, including
 # auth/kubeconfig - the only copy of the admin credentials for a cluster that
 # may be perfectly healthy. So it has to be asked for.
+#
+# Only when this run builds something. --tags compactwait waits on the VMs
+# that are already there, so failing because they exist would make that tag
+# unusable.
 - name: Fail rather than rebuild over an existing compact cluster
+  when: ansible_run_tags | intersect(['all', 'compact', 'compactimage', 'compactvm']) | length > 0
   ansible.builtin.assert:
     that: compact_existing_vms | length == 0 or (compact_force_reinstall | bool)
     fail_msg: >-

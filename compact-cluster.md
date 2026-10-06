@@ -31,8 +31,9 @@ step that failed. Each section names the role task file that automates it.
   9. [Create the three VMs, each with two NICs](#step-9---create-the-three-vms-each-with-two-nics)
   10. [Watch the install](#step-10---watch-the-install)
   11. [Verify the cluster and the bonds](#step-11---verify-the-cluster-and-the-bonds)
-  12. [Test bond failover](#step-12---test-bond-failover)
-  13. [Clean up](#step-13---clean-up)
+  12. [Add LVM Storage](#step-12---add-lvm-storage)
+  13. [Test bond failover](#step-13---test-bond-failover)
+  14. [Clean up](#step-14---clean-up)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -66,7 +67,9 @@ step that failed. Each section names the role task file that automates it.
 | Bond | `bond0`, `active-backup`, `miimon=100`, `primary=enp1s0` | `compact_bond_*` in role defaults |
 | Bond port 1 (primary) | `enp1s0`, MAC `52:54:00:e2:54:<octet>` | `compact_primary_mac_prefix` |
 | Bond port 2 (backup) | `enp2s0`, MAC `52:54:00:e2:56:<octet>` | `compact_secondary_mac_prefix` |
-| Per node | 8 vCPU, 24 GiB RAM, 150 GB disk | `compact_vcpus`, `compact_memory`, `compact_disk_gb` |
+| Per node | 8 vCPU, 24 GiB RAM, 150 GB disk (`vda`, RHCOS) | `compact_vcpus`, `compact_memory`, `compact_disk_gb` |
+| Storage disk per node | 100 GB, empty (`vdb`), for LVM Storage | `compact_storage_disk_gb`, `compact_lvm_storage` |
+| Default StorageClass | `lvms-vg1` (LVM Storage, thin-provisioned XFS) | `roles/setup-lvm-storage`, `use_lvm_storage` in `vars.yaml` |
 
 **Why these addresses.** They were five of the last six free two-digit octets
 on the lab network. They are clear of every hosted-cluster MetalLB pool
@@ -109,6 +112,7 @@ ansible-playbook -i inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
 | `compactimage` | Downloads the installer, renders the manifests and builds the ISO. | `tasks/image.yml` |
 | `compactvm` | Builds the three VMs from the ISO that is already there. | `tasks/vm.yml` |
 | `compactwait` | Waits for bootstrap and for install-complete, then checks the bonds. | `tasks/wait.yml` |
+| `compactstorage` | Installs LVM Storage and waits for the `lvms-vg1` StorageClass. Attaches the storage disk to any node built without one. | `tasks/storage.yml`, `roles/setup-lvm-storage` |
 
 To rebuild over an existing cluster, add `-e compact_force_reinstall=true`.
 The rebuild wipes `auth/kubeconfig`. To remove the cluster, run
@@ -483,11 +487,11 @@ ISO boots all three nodes. Each node picks its own configuration by MAC.
 
 *Automated by: `tasks/vm.yml`*
 
-For each node: create a fresh disk, reserve the address for the first NIC's
-MAC, and create a domain with **two `--network` options on the default
-network**. These are the two bond ports. libvirt assigns PCI slots in the
-order the NICs are listed, so the first NIC becomes `enp1s0` and the second
-`enp2s0`.
+For each node: create a fresh disk for RHCOS and a second, **empty disk for
+LVM Storage**, reserve the address for the first NIC's MAC, and create a
+domain with **two `--network` options on the default network**. These are the
+two bond ports. libvirt assigns PCI slots in the order the NICs are listed, so
+the first NIC becomes `enp1s0` and the second `enp2s0`.
 
 ```bash
 for n in $NODES; do
@@ -496,8 +500,12 @@ for n in $NODES; do
   # Always a fresh disk. A disk left from an earlier install already has
   # RHCOS on it, so with boot order hd,cdrom the VM would boot that and never
   # start the agent.
-  rm -f $VMDIR/${dom}_disk.qcow2
+  rm -f $VMDIR/${dom}_disk.qcow2 $VMDIR/${dom}_storage.qcow2
   qemu-img create -f qcow2 $VMDIR/${dom}_disk.qcow2 150G
+
+  # The storage disk: empty, for LVM Storage (Step 12). LVMS only takes a disk
+  # with nothing on it, so it is recreated on every rebuild too.
+  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 100G
 
   # Reserve the address for the bond's MAC (the first NIC's MAC). Skip this if
   # setup-bm-host already did it.
@@ -513,6 +521,7 @@ for n in $NODES; do
     --cpu host-passthrough \
     --os-variant=rhel9.4 \
     --disk $VMDIR/${dom}_disk.qcow2,format=qcow2,cache=none,bus=virtio \
+    --disk $VMDIR/${dom}_storage.qcow2,format=qcow2,cache=none,bus=virtio \
     --disk $WORK/agent.x86_64.iso,device=cdrom,bus=sata,readonly=on \
     --boot hd,cdrom \
     --network network:default,mac=$MAC1:$oct,model=virtio \
@@ -521,9 +530,16 @@ for n in $NODES; do
     --noautoconsole
 done
 
-# Each domain should list two interfaces with the expected MACs
-for n in $NODES; do virsh domiflist compact_${n%%:*}; done
+# Each domain should list two interfaces with the expected MACs,
+# and two disks: vda (RHCOS) and vdb (storage)
+for n in $NODES; do virsh domiflist compact_${n%%:*}; virsh domblklist compact_${n%%:*}; done
 ```
+
+**The order of the two disks matters.** The RHCOS disk is listed first, so it
+is `vda`. The storage disk is second, so it is `vdb`. `agent-config.yaml` pins
+the install to `/dev/vda` with `rootDeviceHints` (Step 7), which keeps the
+installer off the storage disk. Without that pin the agent picks a disk by its
+own rules, and could install RHCOS on the disk meant for LVM Storage.
 
 The VMs use `--import` with `--boot hd,cdrom` instead of `--cdrom`. While the
 disk is empty, the VM falls through to the ISO. Once RHCOS is on the disk, the
@@ -633,7 +649,119 @@ cat $WORK/auth/kubeadmin-password
 # https://console-openshift-console.apps.compact.mylab.com
 ```
 
-### Step 12 - Test bond failover
+### Step 12 - Add LVM Storage
+
+*Automated by: `tasks/storage.yml`, which runs `roles/setup-lvm-storage` (`--tags compactstorage`)*
+
+LVM Storage gives the cluster a default StorageClass, `lvms-vg1`, the same
+one the hub and the SNO get. Its `LVMCluster` names no `deviceSelector`, so on
+every node it takes **every empty disk** it finds and builds a volume group
+and a thin pool on it. On a compact cluster every node is a master and a
+worker, so it runs on all three. The RHCOS disk is not empty, so each node
+needs the second disk from Step 9.
+
+**Check the storage disk on every node.** It should be there, with no
+partitions and no filesystem:
+
+```bash
+for n in $NODES; do
+  echo "== ${n%%:*}"
+  ssh -i ~/.ssh/lab_rsa core@$LAB.${n##*:} 'lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT /dev/vdb'
+done
+```
+
+**A cluster built without the storage disk** (before Step 9 created
+one) can get it now, with no reinstall and no reboot. Create it and hot-plug
+it into each running VM. `--persistent` also adds it to the domain
+definition, so it is still there after the next reboot:
+
+```bash
+for n in $NODES; do
+  dom=compact_${n%%:*}
+  virsh domblklist $dom | grep -q "${dom}_storage.qcow2" && continue
+  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 100G
+  virsh attach-disk $dom $VMDIR/${dom}_storage.qcow2 vdb \
+    --driver qemu --subdriver qcow2 --cache none --targetbus virtio --persistent --live
+done
+```
+
+**Install the operator** from the `redhat-operators` catalog:
+
+```bash
+oc apply -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-storage
+  labels:
+    openshift.io/cluster-monitoring: "true"
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-storage-operatorgroup
+  namespace: openshift-storage
+spec:
+  targetNamespaces:
+  - openshift-storage
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: lvms
+  namespace: openshift-storage
+spec:
+  installPlanApproval: Automatic
+  name: lvms-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
+
+oc -n openshift-storage get csv -w     # wait for lvms-operator.v... PHASE Succeeded, then Ctrl-C
+oc wait --for=condition=Established crd/lvmclusters.lvm.topolvm.io --timeout=300s
+```
+
+**Create the LVMCluster:**
+
+```bash
+oc apply -f - <<'EOF'
+apiVersion: lvm.topolvm.io/v1alpha1
+kind: LVMCluster
+metadata:
+  name: my-lvmcluster
+  namespace: openshift-storage
+spec:
+  storage:
+    deviceClasses:
+      - name: vg1
+        default: true
+        fstype: xfs
+        thinPoolConfig:
+          name: thin-pool-1
+          sizePercent: 90
+          overprovisionRatio: 10
+          chunkSizeCalculationPolicy: Static
+EOF
+
+# Ready once vg-manager has built the volume group on every node (a few minutes)
+oc -n openshift-storage get lvmcluster my-lvmcluster -o jsonpath='{.status.state}{"\n"}'   # Ready
+oc get storageclass                                                                          # lvms-vg1 (default)
+```
+
+Each node now has a volume group `vg1` on `/dev/vdb`:
+
+```bash
+oc -n openshift-storage get lvmvolumegroupnodestatus -o wide
+oc debug node/master1 -- chroot /host vgs
+```
+
+`lvms-vg1` uses `volumeBindingMode: WaitForFirstConsumer`. A new PVC stays
+`Pending` until a pod uses it. That is expected: LVM volumes are local to one
+node, so the volume is created on whichever node the pod is scheduled to.
+LVMS marks `lvms-vg1` as the default class only if no other class is already
+the default.
+
+### Step 13 - Test bond failover
 
 Take down the active port of master1 and check that the bond moves to the
 other port and the node stays reachable.
@@ -659,7 +787,7 @@ detects the dead link and the bridge learns the bond's MAC on the other port.
 Run the same test with `$MAC2:64` to take down the backup port: nothing should
 change, because traffic is not using that port.
 
-### Step 13 - Clean up
+### Step 14 - Clean up
 
 *Automated by: `cleanup.yaml --tags compact`*
 
@@ -673,7 +801,7 @@ rm -rf $VMDIR $WORK
 
 `virsh undefine` is run without `--remove-all-storage` on purpose. The three
 domains share the agent ISO as their cdrom, and removing the folders deletes
-the disks anyway.
+the disks anyway, the storage disks included.
 
 The DHCP reservations, DNS zone and `/etc/hosts` entries stay in place, as
 they do for every other cluster in this lab. They are derived from `ip_list`,
@@ -694,3 +822,6 @@ and a rebuild reuses them.
 | Ingress and console operators are degraded | `*.apps` does not resolve to the ingress VIP, or the VIP is held by something else | `dig @192.168.122.21 x.apps.compact.mylab.com` and `ping 192.168.122.18` with the cluster down |
 | Pings drop during failover and do not recover | `miimon` is 0, so the bond is not monitoring link state | `grep 'MII Polling' /proc/net/bonding/bond0`. It must not be 0. |
 | The bond comes up with a different MAC on each reboot | `mac-address` is missing on `bond0` | Pin it to the primary NIC's MAC, as in Step 7 |
+| LVMCluster stays `Progressing` or `Failed`, or `lvms-vg1` never appears | A node has no empty disk: `vdb` is missing, or it already holds partitions, a filesystem or an old volume group | `lsblk /dev/vdb` on each node (Step 12). `oc -n openshift-storage logs ds/vg-manager` names every device it skipped and why. Attach a fresh disk as in Step 12. |
+| RHCOS was installed on the storage disk | `rootDeviceHints` was removed, or the storage disk was listed before the RHCOS disk in `virt-install` | `virsh domblklist compact_masterN`: the RHCOS disk must be `vda`. Rebuild with the disk order from Step 9. |
+| A PVC stays `Pending` with no pod using it | `lvms-vg1` binds when the first pod uses the PVC (`WaitForFirstConsumer`) | Expected. Start a pod that mounts it. |

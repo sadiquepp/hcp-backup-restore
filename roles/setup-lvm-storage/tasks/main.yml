@@ -1,0 +1,130 @@
+---
+# LVM Storage: operator, then one LVMCluster, then wait until the cluster
+# really has the StorageClass - so whatever the build runs next can make a
+# PVC. Requires KUBECONFIG in the environment.
+#
+# Every object is applied with `oc apply`, under the names setup-hub-acm used
+# when this lived there, so on a hub that already has LVM Storage this is a
+# no-op re-apply and a wait that passes at once.
+
+# Resolved once into a fact: lvm_catalog_source defers to acm_catalog_source
+# when that is set, so handing it to the shared check below AS
+# acm_catalog_source would make it refer to itself.
+- name: Settle on the catalog
+  ansible.builtin.set_fact:
+    lvm_catalog_source_resolved: "{{ lvm_catalog_source | trim }}"
+
+- name: Check the mirrored CatalogSource exists before subscribing (disconnected)
+  ansible.builtin.include_tasks: "{{ role_path }}/../setup-hub-acm/tasks/disconnected-catalog-source.yml"
+  vars:
+    acm_catalog_source: "{{ lvm_catalog_source_resolved }}"
+    acm_catalog_source_namespace: "{{ lvm_catalog_source_namespace }}"
+  when: disconnected_install | bool
+
+- name: Render the LVM Storage Subscription
+  ansible.builtin.template:
+    src: 03-subscription.yaml.j2
+    dest: "{{ role_path }}/files/.rendered-03-subscription.yaml"
+    mode: '0644'
+
+- name: Deploy the LVM Storage operator
+  ansible.builtin.shell: |
+    oc apply -f "{{ role_path }}/files/01-namespace.yaml"
+    oc apply -f "{{ role_path }}/files/02-operatorGroup.yaml"
+    oc apply -f "{{ role_path }}/files/.rendered-03-subscription.yaml"
+  register: lvm_operator_apply
+  changed_when: lvm_operator_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+- name: Wait for the Subscription to name an installed CSV
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ lvm_namespace }} get subscriptions.operators.coreos.com {{ lvm_subscription_name }}
+      -o jsonpath={.status.installedCSV}
+  register: lvm_csv
+  retries: "{{ lvm_wait_retries }}"
+  delay: "{{ lvm_wait_delay }}"
+  until: lvm_csv.rc == 0 and lvm_csv.stdout | length > 0
+  changed_when: false
+
+- name: Wait for the CSV to succeed
+  ansible.builtin.command:
+    cmd: oc -n {{ lvm_namespace }} get csv {{ lvm_csv.stdout }} -o jsonpath={.status.phase}
+  register: lvm_csv_phase
+  retries: "{{ lvm_wait_retries }}"
+  delay: "{{ lvm_wait_delay }}"
+  until: lvm_csv_phase.stdout == 'Succeeded'
+  changed_when: false
+
+- name: Wait for the LVMCluster CRD
+  ansible.builtin.command:
+    cmd: oc wait --for=condition=Established crd/lvmclusters.lvm.topolvm.io --timeout=300s
+  changed_when: false
+
+- name: Create the LVMCluster
+  ansible.builtin.command:
+    cmd: oc apply -f "{{ role_path }}/files/04-lvm-cluster.yaml"
+  register: lvm_cluster_apply
+  changed_when: "' unchanged' not in lvm_cluster_apply.stdout"
+
+# Ready once vg-manager has found a disk on every node and built the volume
+# group and thin pool on it. A node with no empty disk keeps it out of Ready -
+# the state's reason names the node.
+- name: Wait for the LVMCluster to be Ready
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ lvm_namespace }} get lvmcluster {{ lvm_cluster_name }}
+      -o jsonpath={.status.state}
+  register: lvm_state
+  retries: "{{ lvm_wait_retries }}"
+  delay: "{{ lvm_wait_delay }}"
+  until: lvm_state.stdout == 'Ready'
+  changed_when: false
+  failed_when: false
+
+- name: Read why, if it is not
+  ansible.builtin.command:
+    cmd: oc -n {{ lvm_namespace }} get lvmcluster {{ lvm_cluster_name }} -o jsonpath={.status}
+  register: lvm_status
+  changed_when: false
+  failed_when: false
+  when: lvm_state.stdout != 'Ready'
+
+- name: Fail if the LVMCluster did not become Ready
+  ansible.builtin.assert:
+    that: lvm_state.stdout == 'Ready'
+    fail_msg: >-
+      LVMCluster {{ lvm_cluster_name }} is '{{ lvm_state.stdout | default('', true) }}', not
+      Ready: {{ lvm_status.stdout | default('') }}. The usual cause is a node
+      with no empty disk for vg-manager to take - the hub's workers are built
+      with storage_worker<N>.qcow2 for this, the SNO gets one from setup-sno's
+      storage step. `oc -n {{ lvm_namespace }} logs ds/vg-manager` names the
+      devices it looked at and why it skipped them.
+
+- name: Read the default StorageClass
+  ansible.builtin.command:
+    cmd: >-
+      oc get storageclass
+      -o 'jsonpath={range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}'
+  register: lvm_default_sc
+  retries: 12
+  delay: 5
+  until: lvm_storage_class in lvm_default_sc.stdout_lines
+  changed_when: false
+  failed_when: false
+
+# LVMS only marks its class default when no other class already is. Not
+# fatal - the class works - but a PVC with no storageClassName will not get
+# it, so say so.
+- name: Report the StorageClass
+  ansible.builtin.debug:
+    msg: >-
+      {{ lvm_storage_class ~ ' is the default StorageClass.'
+         if lvm_storage_class in lvm_default_sc.stdout_lines else
+         'WARNING - ' ~ lvm_storage_class ~ ' exists but is not the default StorageClass'
+         ~ ' (default: ' ~ (lvm_default_sc.stdout_lines | join(', ') | default('none', true)) ~ ').'
+         ~ ' PVCs that name no class will not use it.' }}
+
+- name: Clean up the rendered Subscription
+  ansible.builtin.file:
+    path: "{{ role_path }}/files/.rendered-03-subscription.yaml"
+    state: absent
