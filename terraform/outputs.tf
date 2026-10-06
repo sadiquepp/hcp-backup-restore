@@ -44,7 +44,7 @@ output "next_steps" {
     2. PUT YOUR CREDENTIALS IN vault.yaml on each host:
 
           sudo -i
-          cd /root/hcp-backup-restore
+          cd /root/ocp-onpremise
           ansible-vault create vault.yaml      # pull_secret, org_id,
                                                # activation_key
           echo '<vault password>' > ~/.vault_pass && chmod 600 ~/.vault_pass
@@ -52,7 +52,7 @@ output "next_steps" {
     3. BUILD, under tmux - it takes hours and an ssh drop kills it:
 
           tmux new -s lab
-          cd /root/hcp-backup-restore/udn-bgp-evpn
+          cd /root/ocp-onpremise/udn-bgp-evpn
           ./build-lab.sh --evpn          # or --vrflite / --shared
 
     VNC (if vnc_enabled) is on loopback only. Tunnel to it:

@@ -137,7 +137,7 @@ variable "run_bootstrap" {
 variable "repo_url" {
   description = "Repository to clone onto each host."
   type        = string
-  default     = "https://github.com/sadiquepp/hcp-backup-restore.git"
+  default     = "https://github.com/sadiquepp/ocp-onpremise.git"
 }
 
 variable "repo_branch" {

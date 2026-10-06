@@ -103,8 +103,8 @@ guest image `rhel-9.8-x86_64-kvm.qcow2` downloaded from
 - it needs your Red Hat login, which is why nothing downloads it for you.
 
 ```bash
-git clone https://github.com/sadiquepp/hcp-backup-restore.git
-cd hcp-backup-restore/terraform
+git clone https://github.com/sadiquepp/ocp-onpremise.git
+cd ocp-onpremise/terraform
 cp terraform.tfvars.example terraform.tfvars
 ```
 
@@ -129,19 +129,19 @@ port opened, and everything else is tunnelled over it.
 `lab-up.sh` checks your tools and credentials before it spends anything, then
 creates the VPC and the instance and runs a bootstrap that installs Ansible,
 tmux and the libvirt bindings, clones this repository to
-`/root/hcp-backup-restore`, and writes `/root/hcp-backup-restore/vars-metal.yaml`
+`/root/ocp-onpremise`, and writes `/root/ocp-onpremise/vars-metal.yaml`
 - the sizing and image location for this host. `./lab-up.sh status` repeats
 the next steps; `./lab-up.sh destroy` when you are done. Details:
 [terraform/README.md](../terraform/README.md).
 
 > **Not on AWS?** Any RHEL 9 host with at least 192 GiB of RAM, ~1 TB of disk
 > and nested virtualisation works. Clone the repository to
-> `/root/hcp-backup-restore`, install `ansible-core`, `tmux` and `git`, put the
+> `/root/ocp-onpremise`, install `ansible-core`, `tmux` and `git`, put the
 > image in `/opt/lab-images/`, and create this host's overrides from the
 > example - it lists what the host needs and sizes the workers to its memory:
 >
 > ```bash
-> cd /root/hcp-backup-restore
+> cd /root/ocp-onpremise
 > cp vars-metal.yaml.example vars-metal.yaml && vi vars-metal.yaml
 > ```
 >
@@ -156,7 +156,7 @@ otherwise take it with it.
 ```bash
 sudo -i
 tmux new -s lab                  # ctrl-b d detaches; tmux attach -t lab returns
-cd /root/hcp-backup-restore
+cd /root/ocp-onpremise
 ```
 
 **1. `vault.yaml` - your secrets.** Three keys:
@@ -206,7 +206,7 @@ cat udn-bgp-evpn/workshop/vars-workshop.yaml
 ### A3. One command: helper, clusters, fabric
 
 ```bash
-cd /root/hcp-backup-restore/udn-bgp-evpn
+cd /root/ocp-onpremise/udn-bgp-evpn
 ./build-lab.sh --workshop
 ```
 
@@ -497,7 +497,7 @@ never answered. Put the key where frr-k8s can read it, as a Secret:
 
 ```bash
 if [ -n "$BGP_AUTH_SECRET" ]; then
-  ansible-vault view /root/hcp-backup-restore/vault.yaml --vault-password-file ~/.vault_pass \
+  ansible-vault view /root/ocp-onpremise/vault.yaml --vault-password-file ~/.vault_pass \
     | python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["udn_bgp_password"], end="")' \
     | oc -n $FRR_NS create secret generic $BGP_AUTH_SECRET --type=kubernetes.io/basic-auth \
         --from-file=password=/dev/stdin --dry-run=client -o yaml \
@@ -1070,7 +1070,7 @@ three platform faults it knows about (forwarding on the fabric NIC, a stale
 BGP nexthop, a missing SNAT exclusion) if any appeared:
 
 ```bash
-cd /root/hcp-backup-restore/udn-bgp-evpn
+cd /root/ocp-onpremise/udn-bgp-evpn
 ./build-lab.sh --workshop --only check-hub
 ```
 
@@ -1477,7 +1477,7 @@ has one network namespace per tenant; haproxy opens each backend connection
 `10.200.4.5:8080` and reach two different pods. Building it is plumbing:
 
 ```bash
-cd /root/hcp-backup-restore/udn-bgp-evpn
+cd /root/ocp-onpremise/udn-bgp-evpn
 ./build-lab.sh --workshop --only nsproxy
 ```
 
@@ -2228,7 +2228,7 @@ a CUDN cannot be switched from EVPN - it is deleted and created again.
 > both clusters alone, so it does not matter which one `lab` points at.
 
 ```bash
-cd /root/hcp-backup-restore/udn-bgp-evpn
+cd /root/ocp-onpremise/udn-bgp-evpn
 ./build-lab.sh --workshop --vrflite --from fabric --switch-topology
 ```
 
@@ -2428,7 +2428,7 @@ leaf1 'show bgp vrf all summary'      # one session per tenant per HUB worker, E
 onleaf1 ip route show vrf blue | grep 10.200
 ext blue ping -c3 $(podip blue)       # blue-ext, now behind leaf1
 ext red  ping -c3 $(podip red)
-cd /root/hcp-backup-restore/udn-bgp-evpn
+cd /root/ocp-onpremise/udn-bgp-evpn
 ./build-lab.sh --workshop --vrflite --only check-hub
 ```
 
@@ -2476,7 +2476,7 @@ from inside its tenant's namespace, exactly as before.
 > **Where:** the lab host. No cluster switching.
 
 ```bash
-cd /root/hcp-backup-restore/udn-bgp-evpn
+cd /root/ocp-onpremise/udn-bgp-evpn
 ./build-lab.sh --workshop --vrflite --only nsproxy -e '{"udn_proxy_clusters": ["hub"]}'
 ```
 
@@ -2534,7 +2534,7 @@ That is the argument for EVPN, now measured on your own lab.
 2. **The lab host** - rebuild the fabric in the EVPN shape:
 
    ```bash
-   cd /root/hcp-backup-restore/udn-bgp-evpn
+   cd /root/ocp-onpremise/udn-bgp-evpn
    ./build-lab.sh --workshop --from fabric --switch-topology
    ```
 
@@ -2613,7 +2613,7 @@ The long form of every one of these, with how it was found:
 From your laptop:
 
 ```bash
-cd hcp-backup-restore/terraform
+cd ocp-onpremise/terraform
 ./lab-up.sh destroy
 ```
 
