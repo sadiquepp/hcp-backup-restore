@@ -135,8 +135,12 @@ export KUBECONFIG=/var/lib/libvirt/images/compact_install/auth/kubeconfig
 export PATH=/var/lib/libvirt/images/compact_install:$PATH     # the cluster's own oc
 ```
 
-Commands marked **(root)** run from the repository root. Commands marked
-**(compact-cluster/)** run from inside `compact-cluster/`.
+The steps alternate between the repository root and `compact-cluster/`:
+commands marked **(root)** run from the root, **(compact-cluster/)** from
+inside the directory. Each block below starts with the `cd` that gets there
+**from the step before**, so following them in order is enough. If you come
+back to a step out of order, check the marker first - a `cd ..` only does the
+right thing from `compact-cluster/`.
 
 ---
 
@@ -163,6 +167,7 @@ dig +short @192.168.122.1 hcpc1worker1.hcp-compact1.compact.mylab.com   # 192.16
 the compact cluster:
 
 ```bash
+cd compact-cluster
 ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass --tags acm
 ```
 
@@ -189,8 +194,9 @@ oc get csv -A | grep -E 'advanced-cluster|multicluster-engine|metallb|lvms|oadp'
 
 ### Step 3 - Apply the AgentServiceConfig
 
-As on the hub, the role only **renders** the AgentServiceConfig and leaves it
-for you to review. Once the MultiClusterHub is `Running`:
+**(compact-cluster/)**, still - the `../roles/...` paths below are relative to
+it. As on the hub, the role only **renders** the AgentServiceConfig and leaves
+it for you to review. Once the MultiClusterHub is `Running`:
 
 ```bash
 less ../roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
@@ -206,6 +212,7 @@ the CAPI RBAC **on the compact cluster**. It then downloads the discovery ISO
 as `compact-bminfra-discovery-<version>.iso`:
 
 ```bash
+cd ..
 ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass -e target_hub=compact
 ```
 
@@ -286,6 +293,7 @@ join, typically in 20-40 minutes.
 **(compact-cluster/)** Once the NodePool reports two ready nodes:
 
 ```bash
+cd compact-cluster
 ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass --tags hcpingress
 ```
 
@@ -373,6 +381,7 @@ oc delete hostedcluster hcp-compact1 -n hcp-compact1 --wait
 Then, **(root)**, remove the worker VMs and the cached ISO:
 
 ```bash
+cd ..
 ansible-playbook -i inventory/hosts cleanup.yaml --tags compacthcp
 ```
 
