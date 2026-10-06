@@ -2047,7 +2047,8 @@ delegates.
 | `cleanup-hub.yaml`            | Destroy hub1 VMs and delete disks             |
 | `cleanup-hub-disconnected.yaml` | Destroy the disconnected hub's VMs and disks (hubd only) |
 | `cleanup-hub2-disconnected.yaml` | Destroy the disconnected DR hub's VMs and disks (hub2d only) |
-| `cleanup.yaml`                | Destroy all VMs (hub + helper)                |
+| `cleanup.yaml`                | Destroy all VMs (hub + helper). The mirror registry is only shut down, so its mirrored content survives |
+| `cleanup-mirror-registry.yaml` | Really remove the mirror registry: VM, disks, and this host's CA trust and podman login for it |
 | `setup_hosted_cluster_vm.yaml` | Create a hosted cluster's worker VMs; builds the disconnected set when `disconnected_install: true` |
 | `create_hosted_cluster.yaml`  | Render the HostedCluster/NodePool bundle; renders the disconnected clusters when `disconnected_install: true` |
 | `setup_ceph.yaml`             | Build the standalone Ceph 9 cluster (ceph1-3 + cephadmin) |
@@ -2115,6 +2116,21 @@ Remove everything (all VMs including helper):
 ```bash
 ansible-playbook -i inventory/hosts cleanup.yaml
 ```
+
+The **mirror registry is the exception**: that run only shuts it down. Its VM,
+its 500G disk and everything `oc-mirror` put there are kept, so a later
+disconnected run starts with `virsh start registry` instead of mirroring tens
+of gigabytes again. This host's CA trust and podman login for it are left in
+place too, and still match. To remove it for good:
+
+```bash
+ansible-playbook -i inventory/hosts cleanup-mirror-registry.yaml
+```
+
+That destroys and undefines the VM, deletes both disks, and removes the CA and
+the podman login - a rebuilt registry gets a new CA, and a stale one makes a
+disconnected run fail on TLS instead of stopping with a clear message. Keep
+them with `-e mirror_registry_remove_local_trust=false`.
 
 Remove the Ceph cluster (VMs + OSD disks; leaves the hubs alone). ODF on the
 hub is not touched - delete the `StorageCluster` there first if you are tearing

@@ -20,6 +20,17 @@
 ## ceph) have no tag of their own, so they run on an untagged invocation and
 ## are skipped by any tag above.
 ##
+## THE MIRROR REGISTRY IS ONLY SHUT DOWN, never deleted. Its VM, its 500G disk
+## and everything oc-mirror put on it survive, so the disconnected flows can be
+## picked up again with `virsh start registry` instead of another mirror run
+## over tens of gigabytes. The CA this host trusts and its podman login are
+## left alone too, since they still match that registry.
+##
+##   ansible-playbook -i inventory/hosts cleanup-mirror-registry.yaml
+##
+## is the one that really removes it - the VM, the disks and, unless told
+## otherwise, the local trust that would otherwise outlive it.
+##
 ## WHAT THIS DOES NOT TOUCH. The DHCP reservations these VMs hold on the
 ## libvirt 'default' network are left in place. Every MAC in this lab is
 ## derived from ip_list in vars.yaml, so a rebuild reuses the same MAC and the
@@ -146,12 +157,66 @@
       virsh undefine helper >/dev/null 2>&1 || true
       rm -f /var/lib/libvirt/images/helper_disk.qcow2
 
-  - name: Destroy Mirror Registry VM
-    shell: |
-      virsh destroy  registry >/dev/null 2>&1 || true
-      virsh undefine registry >/dev/null 2>&1 || true
-      rm -f /var/lib/libvirt/images/registry_disk.qcow2
-      rm -f /var/lib/libvirt/images/registry_extra_disk.qcow2
+  ## The mirror registry is the one VM here that is kept. Everything else in
+  ## this lab is rebuilt from a playbook in minutes; the registry's content is
+  ## an oc-mirror run of tens of gigabytes, and nothing about it is tied to the
+  ## clusters that were just removed. So it is stopped - freeing its 16G of
+  ## RAM, which is the actual reason to care while it is not in use - and left
+  ## defined, with its disks and its mirrored content intact.
+  ##
+  ## `virsh start registry` brings it back, and the disconnected playbooks work
+  ## again with no mirror run: this host's CA trust and podman login are
+  ## untouched here, and the registry comes up with the same name, address and
+  ## certificate. To really remove it, run cleanup-mirror-registry.yaml.
+  ##
+  ## Graceful first (quay stops cleanly, so a restart has no recovery to do),
+  ## with a forced power-off only if it does not stop in three minutes. A
+  ## domain that is absent or already off is left as it is.
+  - name: Check the mirror registry VM's state
+    shell: "virsh domstate {{ mirror_registry_name | default('registry') }} 2>/dev/null || true"
+    register: mirror_registry_state
+    changed_when: false
+
+  ## 'running', but also 'paused' or 'pmsuspended' - anything holding its
+  ## memory. Absent is '' and gives nothing to do.
+  - name: Note whether it is up
+    ansible.builtin.set_fact:
+      mirror_registry_up: "{{ mirror_registry_state.stdout | trim not in ['', 'shut off'] }}"
+
+  - name: Ask the mirror registry VM to shut down
+    shell: "virsh shutdown {{ mirror_registry_name | default('registry') }}"
+    when: mirror_registry_up | bool
+
+  - name: Wait for it to stop (up to 3 minutes)
+    shell: "virsh domstate {{ mirror_registry_name | default('registry') }} 2>/dev/null || true"
+    register: mirror_registry_stopping
+    until: "'shut off' in mirror_registry_stopping.stdout"
+    retries: 18
+    delay: 10
+    failed_when: false
+    changed_when: false
+    when: mirror_registry_up | bool
+
+  ## Only if the guest ignored ACPI. The registry holds no state that a hard
+  ## power-off endangers - quay's data is on the disk and its database is
+  ## crash-safe - so this is a last resort, not a risk.
+  - name: Force it off if the graceful shutdown did not finish
+    shell: "virsh destroy {{ mirror_registry_name | default('registry') }} >/dev/null 2>&1 || true"
+    when:
+      - mirror_registry_up | bool
+      - "'shut off' not in (mirror_registry_stopping.stdout | default(''))"
+
+  - name: Report what happened to the mirror registry
+    ansible.builtin.debug:
+      msg: >-
+        {{ mirror_registry_name | default('registry') }}:
+        {{ 'was ' ~ (mirror_registry_state.stdout | trim) ~ ', now shut off - VM and mirrored content kept.'
+           if (mirror_registry_up | bool)
+           else ((mirror_registry_state.stdout | trim | length > 0)
+                 | ternary('already shut off - VM and mirrored content kept.',
+                           'not defined, nothing to do.')) }}
+        Start it again with: virsh start {{ mirror_registry_name | default('registry') }}
+        - or remove it for good with cleanup-mirror-registry.yaml.
 
   - name: Destroy Minio VM
     shell: |

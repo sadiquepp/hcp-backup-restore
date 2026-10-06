@@ -901,6 +901,14 @@ Removing `$VMDIR` deletes the storage disks too. The mirror registry, the
 chronyd `allow`, the DNS records and the DHCP reservations are shared lab
 infrastructure. Cleanup leaves them in place.
 
+`cleanup.yaml` with no tags shuts the mirror registry down but keeps its VM
+and everything `oc mirror` put on it, so the next disconnected build needs
+only `virsh start registry`. To remove it and its mirrored content for good:
+
+```bash
+ansible-playbook -i inventory/hosts cleanup-mirror-registry.yaml
+```
+
 ---
 
 ## Troubleshooting
