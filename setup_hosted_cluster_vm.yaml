@@ -178,14 +178,35 @@
       loop_control:
         label: "{{ item.name }}"
 
+    # --import with an explicit hd,cdrom boot order, not --cdrom, for the
+    # reason given in roles/setup-sno/tasks/vm.yml and used by
+    # roles/setup-compact-cluster too.
+    #
+    # --cdrom is virt-install's "install from this media" mode. It sets the
+    # domain up as an install session around the ISO, which assumes the guest
+    # reboots once when the installer is finished. The assisted-installer
+    # agent does not work that way - it writes RHCOS to the disk and reboots
+    # the machine to run it - and the session gets in the way of that reboot:
+    # depending on the virt-install version the worker either powers off
+    # partway through provisioning (the NodePool then waits until someone
+    # starts the VM by hand) or boots back into the agent off the ISO, which
+    # is the symptom roles/setup-sno/tasks/vm.yml describes.
+    #
+    # --import defines the domain without an install phase, and hd,cdrom gives
+    # it the boot order these nodes actually want: the disk is empty on the
+    # first boot so the VM falls through to the discovery ISO, and once RHCOS
+    # is on the disk every later boot - including the agent's own reboot -
+    # comes up from it. The ISO stays attached and is simply never reached.
     - name: Deploy Workers for Hosted Cluster
       shell: |
         virt-install \
+        --import \
         --ram {{ hcp_vm_memory }} \
         --vcpus {{ hcp_vm_cpu }} \
         --os-variant rhel9.5 \
-        --cdrom {{ discovery_image_url }} \
         --disk path={{ hcp_vm_folder }}/{{ item.name }}.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+        --disk path={{ discovery_image_url }},device=cdrom,bus=sata,readonly=on \
+        --boot hd,cdrom \
         --memballoon model=virtio,freePageReporting=on \
         --noautoconsole \
         --vnc \
