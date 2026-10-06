@@ -288,6 +288,46 @@ oc get agents -n bminfra                                 # bound to the cluster,
 The control plane is up in about 10 minutes. The two Agents then install and
 join, typically in 20-40 minutes.
 
+**The workers stop once RHCOS is written - start them again.** Each Agent
+writes RHCOS to its worker's disk and then reboots the machine. These two VMs
+were created with `virt-install --cdrom` so they would boot the discovery ISO,
+and that leaves the domain set to stop, rather than restart, on the guest's
+first reboot. So each worker lands in `shut off` partway through the install
+and the NodePool stops making progress until you power it on again. (The SNO
+and the compact cluster's own nodes avoid this with `--import --boot
+hd,cdrom`; the hosted cluster workers follow the hub's pattern, which does
+not.)
+
+Watch for it from the hypervisor while the Agents install, in another
+terminal:
+
+```bash
+watch -n 30 'virsh list --all | grep hcp_compact1'
+```
+
+Start whichever have stopped. They boot from the disk now, not the ISO:
+
+```bash
+for d in hcp_compact1_worker1 hcp_compact1_worker2; do
+  if [ "$(virsh domstate $d)" = "shut off" ]; then virsh start $d; fi
+done
+```
+
+In virt-manager it is the same thing: right-click the domain and choose
+**Run**.
+
+Expect this **once per worker**. After that boot each node comes up from its
+disk, joins the hosted cluster, and its Agent reaches `Done`:
+
+```bash
+oc get agents -n bminfra -o custom-columns=NAME:.metadata.name,STATE:.status.debugInfo.state
+oc get nodepool -n hcp-compact1        # DESIREDNODES 2, CURRENTNODES 2
+```
+
+If you want to see the mechanism rather than take it on trust,
+`virsh dumpxml hcp_compact1_worker1 | grep on_reboot` prints `destroy` - that
+is what turns the guest's reboot into a power-off.
+
 ### Step 8 - Ingress: MetalLB inside the hosted cluster
 
 **(compact-cluster/)** Once the NodePool reports two ready nodes:
@@ -400,7 +440,8 @@ with it.
 | A worker gets an address from `.201`-`.249` | Its DHCP reservation is missing | `virsh net-dumpxml default \| grep 54:08`; re-run Step 5 |
 | The HostedCluster waits on `kube-apiserver` with no EXTERNAL-IP | The MetalLB pool on compact is missing, or names another namespace | `oc get ipaddresspool hcp-compact1-api-pool -n metallb-system -o yaml`; re-run `--tags acm` |
 | Nodes never join; kubelet cannot reach the API | `api.hcp-compact1.compact.mylab.com` does not resolve from the workers | `dig @192.168.122.1 api.hcp-compact1.compact.mylab.com`: Step 1, and the forwarder check in [Before you start](#before-you-start) |
-| `--tags hcpingress` waits forever for Ready workers | The NodePool has not finished, or Agents are unapproved | `oc get nodepool,agents -A` on compact (Step 6) |
+| A worker sits in `shut off` and its Agent stops progressing | Expected once per worker: RHCOS has been written and the guest rebooted, which stops a VM created with `virt-install --cdrom` | `virsh list --all \| grep hcp_compact1`, then `virsh start <domain>` (Step 7) |
+| `--tags hcpingress` waits forever for Ready workers | The NodePool has not finished, Agents are unapproved, or a worker is powered off | `oc get nodepool,agents -A` on compact (Step 6), `virsh list --all` (Step 7) |
 | `metallb-ingress` stays `<pending>` | The pool or advertisement is missing in the hosted cluster, or MetalLB's speakers are not running | `oc --kubeconfig $HCP_KUBECONFIG -n metallb-system get ipaddresspool,l2advertisement,pods` |
 | Ingress and console operators in the hosted cluster are Degraded | `*.apps` does not resolve to `.101`, or `.101` is not answering | `dig x.apps.hcp-compact1.compact.mylab.com`, `arping -c2 -I virbr0 192.168.122.101` |
 | The hub's `--tags acm` now lists `hcp-compact1` as not rendered | Expected: it has no `hub` address | Nothing to fix |
