@@ -842,7 +842,16 @@ compact_hosted_cluster_workers:
     ip_key: hcpc1worker2
 compact_hosted_cluster_vm_folder: "{{ download_dir }}/hcp_compact1"
 compact_hosted_cluster_cpu: "{{ hosted_cluster_cpu }}"
-compact_hosted_cluster_memory: "{{ hosted_cluster_memory }}"
+## NOT hosted_cluster_memory (8512). Two workers of 8.5 GiB are enough to
+## bring a hosted cluster up and no more: by the time its own platform has
+## landed - ovnkube-node and the other per-node DaemonSets, the two routers,
+## and the monitoring stack, which is the expensive part - both nodes are
+## within a few hundred Mi of full, and a workload as small as Online
+## Boutique (1368 Mi of requests, compact-cluster-hcp.md Step 10) leaves most
+## of its pods Pending on "Insufficient memory". 16 GiB a node leaves room to
+## actually run something. Raise it further for a bigger workload; the hub's
+## hosted clusters keep 8512 because nothing here changes them.
+compact_hosted_cluster_memory: 16384
 
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
 ## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE

@@ -53,7 +53,7 @@ client -> *.apps VIP .101 (MetalLB L2, on a worker)
 | Ingress VIP: `*.apps` | `192.168.122.101`, from MetalLB **inside hcp-compact1** | `hosted_cluster_node_keys['hcp-compact1'].apps_vip` |
 | Worker 1 | VM `hcp_compact1_worker1`, `192.168.122.8`, MAC `52:54:00:e2:54:08` | `ip_list.hcpc1worker1`, `compact_hosted_cluster_workers` |
 | Worker 2 | VM `hcp_compact1_worker2`, `192.168.122.9`, MAC `52:54:00:e2:54:09` | `ip_list.hcpc1worker2` |
-| Worker size | 4 vCPU, 8.5 GiB, 120 GB disk, booted from the compact InfraEnv's ISO | `compact_hosted_cluster_cpu/_memory` |
+| Worker size | 4 vCPU, 16 GiB, 120 GB disk, booted from the compact InfraEnv's ISO | `compact_hosted_cluster_cpu/_memory` |
 | Agents | InfraEnv `bminfra` in namespace `bminfra` **on compact** | `setup_bminfra.yaml -e target_hub=compact` |
 
 **Why these addresses.**
@@ -414,10 +414,10 @@ there are no PVCs and the hosted cluster needs no StorageClass of its own.
 ```bash
 cd ..
 export HCP_KUBECONFIG=/var/lib/libvirt/images/hcp-compact1/kubeconfig
-oc --kubeconfig $HCP_KUBECONFIG apply -k tests/online-boutique/overlays/default
+oc --kubeconfig $HCP_KUBECONFIG apply -k tests/online-boutique/overlays/no-loadgenerator
 ```
 
-It pulls 13 images, so the first rollout takes a few minutes:
+It pulls 12 images, so the first rollout takes a few minutes:
 
 ```bash
 oc --kubeconfig $HCP_KUBECONFIG -n online-boutique rollout status deploy/frontend --timeout=10m
@@ -444,17 +444,61 @@ https://frontend-online-boutique.apps.hcp-compact1.compact.mylab.com
    -> Service frontend -> frontend pod -> 10 more services over gRPC
 ```
 
-**What it costs.** 12 deployments, 1.57 CPU and 1368 Mi of requests in total -
-comfortable on two workers of 4 vCPU and 8.5 GiB. The load generator sends
-traffic continuously, which is what makes the graph interesting but also means
-the cluster is never idle; `overlays/no-loadgenerator` is the same app without
-it. Two of the 13 images come from Docker Hub, so an anonymous pull can hit a
-rate limit - retry, or mirror them.
+**What it costs, and why the workers are 16 GiB.** The overlay above is
+`no-loadgenerator`: the same app without the Locust pod that drives continuous
+synthetic traffic. That is the right default here - the traffic is only useful
+when you are looking at traces or autoscaling, and it is the single largest pod
+in the set. `overlays/default` adds it back.
+
+| | requests |
+|---|---|
+| Online Boutique, no load generator | 1.27 CPU / 1112 Mi, 11 deployments |
+| Online Boutique, with it | 1.57 CPU / 1368 Mi, 12 deployments |
+
+Small numbers, but they do not land on an empty cluster. A hosted cluster's
+workers also carry its whole data plane: `ovnkube-node` and the other per-node
+DaemonSets, the two HostNetwork routers from Step 8, and the monitoring stack,
+which is the expensive part. On two workers of **8.5 GiB** - what this guide
+used to build - that platform leaves both nodes within a few hundred Mi of
+full, and most of the app sits `Pending` with:
+
+```
+0/2 nodes are available: 2 Insufficient memory.
+```
+
+Dropping the load generator does not rescue it: it saves 256 Mi where a
+gigabyte is missing. So `compact_hosted_cluster_memory` is **16384** - 16 GiB a
+worker, 32 GiB for the pair - which leaves real room to run something. Check
+what the platform actually took on your own cluster with:
+
+```bash
+oc --kubeconfig $HCP_KUBECONFIG describe node | grep -A6 'Allocated resources'
+```
+
+**Workers already built at 8.5 GiB** keep that size until they are resized or
+rebuilt. Resizing in place is quicker than a rebuild and keeps the node - the
+VM has to be off, because its `<memory>` ceiling cannot be raised on a running
+guest. One at a time, from the hypervisor:
+
+```bash
+for d in hcp_compact1_worker1 hcp_compact1_worker2; do
+  virsh shutdown $d
+  while [ "$(virsh domstate $d)" != "shut off" ]; do sleep 5; done
+  virsh setmaxmem $d 16G --config
+  virsh setmem    $d 16G --config
+  virsh start $d
+done
+```
+
+The node comes back `Ready` with the new capacity in a couple of minutes
+(`oc --kubeconfig $HCP_KUBECONFIG get nodes -w`), the Pending pods schedule
+themselves, and nothing else has to be re-run. Two of the 13 images come from
+Docker Hub, so an anonymous pull can hit a rate limit - retry, or mirror them.
 
 Remove it without touching the cluster:
 
 ```bash
-oc --kubeconfig $HCP_KUBECONFIG delete -k tests/online-boutique/overlays/default
+oc --kubeconfig $HCP_KUBECONFIG delete -k tests/online-boutique/overlays/no-loadgenerator
 ```
 
 [`tests/online-boutique/README.md`](../tests/online-boutique/README.md) covers
@@ -500,6 +544,7 @@ with it.
 | A worker sits in `shut off` and its Agent stops progressing | The VM predates the `--import --boot hd,cdrom` fix in Step 5, so the guest's reboot after RHCOS was written stopped it | `virsh list --all \| grep hcp_compact1`, then `virsh start <domain>` (Step 7). Rebuilt workers do not do this. |
 | `--tags hcpingress` waits forever for Ready workers | The NodePool has not finished, Agents are unapproved, or a worker is powered off | `oc get nodepool,agents -A` on compact (Step 6), `virsh list --all` (Step 7) |
 | `metallb-ingress` stays `<pending>` | The pool or advertisement is missing in the hosted cluster, or MetalLB's speakers are not running | `oc --kubeconfig $HCP_KUBECONFIG -n metallb-system get ipaddresspool,l2advertisement,pods` |
+| Online Boutique pods stay `Pending`: `0/2 nodes are available: 2 Insufficient memory` | The workers are too small for a hosted cluster's data plane plus a workload - 8.5 GiB each leaves almost nothing free | Resize them to 16 GiB (Step 10), or rebuild with `compact_hosted_cluster_memory: 16384`. `oc --kubeconfig $HCP_KUBECONFIG describe node \| grep -A6 'Allocated resources'` shows the real headroom. |
 | The Online Boutique route answers 503 | The router has the Route but no ready `frontend` pod behind it | `oc --kubeconfig $HCP_KUBECONFIG -n online-boutique get pods,endpoints frontend` (Step 10) |
 | Online Boutique pods are `ImagePullBackOff` on `redis:alpine` or `busybox` | Docker Hub anonymous pull-rate limit | Retry, or mirror those two images. `oc --kubeconfig $HCP_KUBECONFIG -n online-boutique describe pod <pod>` names the registry. |
 | Ingress and console operators in the hosted cluster are Degraded | `*.apps` does not resolve to `.101`, or `.101` is not answering | `dig x.apps.hcp-compact1.compact.mylab.com`, `arping -c2 -I virbr0 192.168.122.101` |
