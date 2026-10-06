@@ -538,7 +538,7 @@ oc get sc      # exactly one class marked (default)
 
 Note that AgentServiceConfigs are not restored by OADP. You need to apply the rendered manifests manually before proceeding to the next step. Watch the ansible debug output for the location of the rendered manifests to apply.
 ```bash
-oc apply -f /home/images/hcp-backup-restore/roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
+oc apply -f /home/images/ocp-onpremise/roles/setup-hub-acm/files/.rendered-05-agentserviceconfig.yaml
 oc get pvc -n multicluster-engine    # the three should reach Bound
 ```
 There is no need to create InfraEnv, HostedCluster and discover nodes. OADP will do that automatically.

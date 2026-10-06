@@ -17,7 +17,7 @@
   gather_facts: true
 
   vars:
-    lab_repo_dir: /root/hcp-backup-restore
+    lab_repo_dir: /root/ocp-onpremise
     lab_image_name: rhel-9.8-x86_64-kvm.qcow2
 
     # ~/.tmux.conf. The build runs for hours inside tmux, so these are about
