@@ -36,6 +36,7 @@ client -> *.apps VIP .101 (MetalLB L2, on a worker)
   7. [Create the hosted cluster](#step-7---create-the-hosted-cluster)
   8. [Ingress: MetalLB inside the hosted cluster](#step-8---ingress-metallb-inside-the-hosted-cluster)
   9. [Verify](#step-9---verify)
+  10. [Deploy Online Boutique](#step-10---deploy-online-boutique)
 - [Remove the hosted cluster](#remove-the-hosted-cluster)
 - [Troubleshooting](#troubleshooting)
 
@@ -397,6 +398,71 @@ the `hcp-compact1` namespace on the compact cluster:
 oc -n hcp-compact1 extract secret/hcp-compact1-kubeadmin-password --to=-
 ```
 
+### Step 10 - Deploy Online Boutique
+
+**(root)** A real workload on the hosted cluster, and the end-to-end test of
+the ingress path Step 8 built: a Route on it is reached only if the `*.apps`
+wildcard, the MetalLB address, the ingress Service and the HostNetwork
+routers all work together.
+
+[`tests/online-boutique`](../tests/online-boutique) is Google's
+microservices-demo, vendored and patched to run on OpenShift: 11 services
+across 5 languages talking gRPC, plus a load generator. It suits a hosted
+cluster well because it is **stateless** - `redis-cart` uses `emptyDir`, so
+there are no PVCs and the hosted cluster needs no StorageClass of its own.
+
+```bash
+cd ..
+export HCP_KUBECONFIG=/var/lib/libvirt/images/hcp-compact1/kubeconfig
+oc --kubeconfig $HCP_KUBECONFIG apply -k tests/online-boutique/overlays/default
+```
+
+It pulls 13 images, so the first rollout takes a few minutes:
+
+```bash
+oc --kubeconfig $HCP_KUBECONFIG -n online-boutique rollout status deploy/frontend --timeout=10m
+oc --kubeconfig $HCP_KUBECONFIG -n online-boutique get pods
+```
+
+The Route carries no `host:`, so the hosted cluster's own apps domain supplies
+one:
+
+```bash
+export BOUTIQUE=$(oc --kubeconfig $HCP_KUBECONFIG -n online-boutique   get route frontend -o jsonpath='{.spec.host}')
+echo $BOUTIQUE          # frontend-online-boutique.apps.hcp-compact1.compact.mylab.com
+curl -kI https://$BOUTIQUE      # 200
+```
+
+Open that URL in a browser and you get the shop front. Every hop it took is
+one you configured:
+
+```
+https://frontend-online-boutique.apps.hcp-compact1.compact.mylab.com
+   -> *.apps wildcard (helper DNS, Step 1)        -> 192.168.122.101
+   -> MetalLB L2 on a worker (Step 8)             -> Service openshift-ingress/metallb-ingress
+   -> router pod, HostNetwork :443 on that worker -> Route frontend
+   -> Service frontend -> frontend pod -> 10 more services over gRPC
+```
+
+**What it costs.** 12 deployments, 1.57 CPU and 1368 Mi of requests in total -
+comfortable on two workers of 4 vCPU and 8.5 GiB. The load generator sends
+traffic continuously, which is what makes the graph interesting but also means
+the cluster is never idle; `overlays/no-loadgenerator` is the same app without
+it. Two of the 13 images come from Docker Hub, so an anonymous pull can hit a
+rate limit - retry, or mirror them.
+
+Remove it without touching the cluster:
+
+```bash
+oc --kubeconfig $HCP_KUBECONFIG delete -k tests/online-boutique/overlays/default
+```
+
+[`tests/online-boutique/README.md`](../tests/online-boutique/README.md) covers
+the OpenShift patches, the disconnected image list and how to refresh the
+vendored manifest. For a **stateful** workload instead - two PVCs, to prove
+data survives something - use
+[`tests/microservices-demo`](../tests/microservices-demo) the same way.
+
 ---
 
 ## Remove the hosted cluster
@@ -434,5 +500,7 @@ with it.
 | A worker sits in `shut off` and its Agent stops progressing | The VM predates the `--import --boot hd,cdrom` fix in Step 5, so the guest's reboot after RHCOS was written stopped it | `virsh list --all \| grep hcp_compact1`, then `virsh start <domain>` (Step 7). Rebuilt workers do not do this. |
 | `--tags hcpingress` waits forever for Ready workers | The NodePool has not finished, Agents are unapproved, or a worker is powered off | `oc get nodepool,agents -A` on compact (Step 6), `virsh list --all` (Step 7) |
 | `metallb-ingress` stays `<pending>` | The pool or advertisement is missing in the hosted cluster, or MetalLB's speakers are not running | `oc --kubeconfig $HCP_KUBECONFIG -n metallb-system get ipaddresspool,l2advertisement,pods` |
+| The Online Boutique route answers 503 | The router has the Route but no ready `frontend` pod behind it | `oc --kubeconfig $HCP_KUBECONFIG -n online-boutique get pods,endpoints frontend` (Step 10) |
+| Online Boutique pods are `ImagePullBackOff` on `redis:alpine` or `busybox` | Docker Hub anonymous pull-rate limit | Retry, or mirror those two images. `oc --kubeconfig $HCP_KUBECONFIG -n online-boutique describe pod <pod>` names the registry. |
 | Ingress and console operators in the hosted cluster are Degraded | `*.apps` does not resolve to `.101`, or `.101` is not answering | `dig x.apps.hcp-compact1.compact.mylab.com`, `arping -c2 -I virbr0 192.168.122.101` |
 | The hub's `--tags acm` now lists `hcp-compact1` as not rendered | Expected: it has no `hub` address | Nothing to fix |
