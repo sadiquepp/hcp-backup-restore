@@ -95,7 +95,7 @@ installs; five minutes on a host where the base lab is already up.
 
 The same host as the UDN workshop: RHEL 9, root, nested virtualisation, at
 least 192 GiB of RAM, about 1 TB of disk, outbound internet, and the
-repository at `/root/hcp-backup-restore` with `vault.yaml`,
+repository at `/root/ocp-onpremise` with `vault.yaml`,
 `~/.vault_pass` and `vars-metal.yaml` in place. Follow
 [`udn-bgp-evpn/workshop.md` A1 and A2](../udn-bgp-evpn/workshop.md#a1-a-metal-host-on-aws)
 up to, not including, its A3 - that is the part that builds the UDN lab.
@@ -106,7 +106,7 @@ sizes that page sets; the budget is in [README.md](README.md#memory-budget).
 ### A2. One command
 
 ```bash
-cd /root/hcp-backup-restore/spiffe-spire
+cd /root/ocp-onpremise/spiffe-spire
 tmux new -s lab          # the cluster installs take over an hour
 ./build-lab.sh --workshop
 ```
@@ -1385,7 +1385,7 @@ apply - or `./build-lab.sh --only boutique --cluster hub`.
 **Check**
 
 ```bash
-cd /root/hcp-backup-restore/spiffe-spire
+cd /root/ocp-onpremise/spiffe-spire
 ./build-lab.sh --workshop --only boutique-verify     # both clusters, the same asserts as the full build
 ```
 
@@ -1833,7 +1833,7 @@ in every pod.
 **Check**
 
 ```bash
-cd /root/hcp-backup-restore/spiffe-spire
+cd /root/ocp-onpremise/spiffe-spire
 ./build-lab.sh --workshop --only mesh-verify --cluster hub
 ```
 
@@ -1857,7 +1857,7 @@ objects - they test outcomes (Ready conditions, entries, SVIDs, handshakes),
 not how the manifests were written:
 
 ```bash
-cd /root/hcp-backup-restore/spiffe-spire
+cd /root/ocp-onpremise/spiffe-spire
 ./build-lab.sh --workshop --only check              # Labs 1-6, both clusters
 ./build-lab.sh --workshop --only xverify            # Lab 7, both directions
 ```

@@ -96,7 +96,7 @@ The base lab - helper, hub, SNO - built as the repository's root README and
 `build-lab.sh` builds it first; if it is, it skips straight to SPIRE.
 
 ```bash
-cd /root/hcp-backup-restore/spiffe-spire
+cd /root/ocp-onpremise/spiffe-spire
 ./build-lab.sh --list          # the steps
 ./build-lab.sh                 # base lab if absent, then SPIRE on both, federated, verified
 ```
