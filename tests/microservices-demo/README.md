@@ -86,7 +86,7 @@ kind: Kustomization
 namespace: my-project
 
 resources:
-  - github.com/<org>/hcp-backup-restore//tests/microservices-demo/base?ref=main
+  - github.com/<org>/ocp-onpremise//tests/microservices-demo/base?ref=main
 
 images:
   - name: quay.io/sclorg/python-312-c9s

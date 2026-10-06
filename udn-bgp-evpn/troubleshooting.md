@@ -1074,7 +1074,7 @@ Lab 2's manifest had no `passwordSecret`. Neither half was wrong alone.
 For the lab in hand:
 
 ```bash
-ansible-vault view /root/hcp-backup-restore/vault.yaml --vault-password-file ~/.vault_pass \
+ansible-vault view /root/ocp-onpremise/vault.yaml --vault-password-file ~/.vault_pass \
   | python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["udn_bgp_password"], end="")' \
   | oc -n openshift-frr-k8s create secret generic udn-bgp-fabric-key \
       --type=kubernetes.io/basic-auth --from-file=password=/dev/stdin
