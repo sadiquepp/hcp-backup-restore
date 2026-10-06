@@ -12,8 +12,8 @@ yum install ansible-core -y
 ansible-galaxy collection install community.libvirt
 ansible-galaxy collection install community.crypto
 
-git clone https://github.com/sadiquepp/hcp-backup-restore.git
-cd hcp-backup-restore
+git clone https://github.com/sadiquepp/ocp-onpremise.git
+cd ocp-onpremise
 mkdir -p /opt/lab-images
 cp rhel-9.8-x86_64-kvm.qcow2 /opt/lab-images/   # base_image_dir in vars.yaml
 ```
