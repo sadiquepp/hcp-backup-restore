@@ -20,7 +20,7 @@
                         + (hosted_clusters | default([]) | reject('mapping') | list)
                         + (hosted_clusters_disconnected | default([]) | select('mapping') | map(attribute='name') | list)
                         + (hosted_clusters_disconnected | default([]) | reject('mapping') | list) %}
-    <forwarder domain='{{ hcp_zone_name }}.{{ base_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+    <forwarder domain='{{ hcp_zone_name }}.{{ (hosted_cluster_domains | default({}))[hcp_zone_name] | default(base_domain) }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
 {% endfor %}
     <forwarder domain='{{ hub2_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
     <forwarder domain='{{ hub_disconnected_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
@@ -93,7 +93,7 @@ bootstrap.{{ hub_disconnected_domain }}
 {%- elif key in hosted_cluster_worker_zone -%}
 {#- Hosted cluster worker VMs: the cluster whose hosted_cluster_node_keys list
     the key belongs to, so a new cluster or a '-d' one needs no branch here. -#}
-{{ key }}.{{ hosted_cluster_worker_zone[key] }}.{{ base_domain }}
+{{ key }}.{{ hosted_cluster_worker_zone[key] }}.{{ (hosted_cluster_domains | default({}))[hosted_cluster_worker_zone[key]] | default(base_domain) }}
 {%- elif key == 'hublb' -%}
 api.{{ hub_domain }}
 {%- elif key == 'hub2lb' -%}

@@ -208,6 +208,13 @@ hosted_clusters:
   - hcp-cluster1
   - hcp-cluster2
   - hcp-cluster3
+  ## Managed by the connected COMPACT cluster, not by a hub: its MetalLB
+  ## address in hosted_cluster_metallb_pools is keyed 'compact' and it has no
+  ## 'hub' address, so hub runs skip it (setup-hub-acm, create-hosted-cluster)
+  ## and runs with -e target_hub=compact render only it. Its DNS lives under
+  ## the compact cluster's zone (hosted_cluster_domains). Walkthrough:
+  ## compact-cluster/compact-cluster-hcp.md.
+  - hcp-compact1
 hosted_clusters_disconnected:
   - hcp-cluster1-d
   - hcp-cluster2-d
@@ -542,6 +549,18 @@ ip_list:
   compactd_api: 6
   compactd_ingress: 7
 
+  ## The hosted cluster the compact cluster manages (hcp-compact1, see
+  ## hosted_clusters): its two worker VMs. Two of the last free octets below
+  ## .10, zero-padded into the MAC exactly like compactd's (52:54:00:e2:54:08).
+  ## Its two VIPs are NOT here: the API VIP (.100) and the *.apps VIP (.101)
+  ## are MetalLB addresses in .100-.199, which belong to no VM and need no
+  ## MAC reservation - see hosted_cluster_metallb_pools['hcp-compact1'] and
+  ## hosted_cluster_node_keys['hcp-compact1']. Nothing hands out .100-.200
+  ## dynamically: libvirt's DHCP range is .201-.249, and the helper dhcpd
+  ## (roles/setup-dhcp, .100-.200) is not deployed by any playbook.
+  hcpc1worker1: 8
+  hcpc1worker2: 9
+
 helper_name: helper
 helper_disk: helper_disk.qcow2
 ## The helper's disk is expanded from the 10G rhel9_kvm_image to this size when
@@ -811,6 +830,20 @@ compact_memory: 24576
 compact_vcpus: 8
 compact_disk_gb: 150
 
+## The hosted cluster the compact cluster manages (hcp-compact1, connected):
+## the worker VMs setup_hosted_cluster_vm.yaml builds with -e target_hub=compact.
+## Same shape as hosted_cluster_workers; sizing as for the hub's hosted
+## clusters. Their NodePool takes these two as Agents from the compact
+## cluster's InfraEnv (setup_bminfra.yaml -e target_hub=compact).
+compact_hosted_cluster_workers:
+  - name: hcp_compact1_worker1
+    ip_key: hcpc1worker1
+  - name: hcp_compact1_worker2
+    ip_key: hcpc1worker2
+compact_hosted_cluster_vm_folder: "{{ download_dir }}/hcp_compact1"
+compact_hosted_cluster_cpu: "{{ hosted_cluster_cpu }}"
+compact_hosted_cluster_memory: "{{ hosted_cluster_memory }}"
+
 ## MetalLB IPAddressPools for the hosted clusters' APIServer VIPs
 ## (setup-hub-acm). One pool per hosted cluster, each holding exactly ONE
 ## address, plus one L2Advertisement per pool.
@@ -844,6 +877,8 @@ compact_disk_gb: 150
 ##   hub   - primary hub   (setup_hub_cluster.yaml)
 ##   hub2  - DR hub        (setup_hub_cluster2.yaml)
 ##   hubd  - disconnected hub (setup_hub_cluster.yaml -e disconnected_install=true)
+##   compact - the connected compact cluster as a management cluster
+##           (compact-cluster/setup_compact_cluster.yaml --tags acm)
 ## At DR cutover the hosted cluster comes back on the hub2 address and DNS is
 ## re-rendered to match - see the MetalLB section of the README.
 ##
@@ -930,6 +965,16 @@ hosted_cluster_metallb_pools:
     ip:
       hub2: 95
       hubd: 69
+
+  ## Managed by the compact cluster: its only address is under 'compact', the
+  ## metallb_hub value compact-cluster/setup_compact_cluster.yaml --tags acm
+  ## configures MetalLB with. No 'hub'/'hub2' address, so no hub ever renders
+  ## a pool for it. .100 is outside every DHCP range and every MAC-reserved
+  ## octet (those are all two digits or fewer).
+  hcp-compact1:
+    pool: hcp-compact1-api-pool
+    ip:
+      compact: 100
 
 ## Network the pool addresses sit on, per hub. Anything not listed here uses
 ## lab_network_prefix, which is why this is empty by default - in this lab all
@@ -1146,10 +1191,22 @@ agent_service_image_storage: 50Gi
 ## rejects a version it has no osImage for). Override here if you ever need
 ## the InfraEnv on a different version than the hub.
 bminfra_ocp_version: "{{ ocp_major_version }}"
-discovery_iso_filename: "bminfra-discovery-{{ bminfra_ocp_version }}.iso"
-discovery_boot_kernel_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-vmlinuz"
-discovery_boot_initrd_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-initrd.img"
-discovery_boot_rootfs_filename: "bminfra-discovery-{{ bminfra_ocp_version }}-rootfs.img"
+## The discovery ISO and PXE artifacts are cached in download_dir under these
+## names. The compact cluster has its OWN InfraEnv (setup_bminfra.yaml
+## -e target_hub=compact), whose ISO must not land on the hub's file - the
+## download is skipped when the file exists, so the next hub worker would boot
+## the compact cluster's ISO, or the other way round. Hence the prefix; every
+## hub run keeps the names it always had.
+discovery_file_prefix: "{{ 'compact-' if (target_hub | default('hub')) == 'compact' else '' }}"
+discovery_iso_filename: "{{ discovery_file_prefix }}bminfra-discovery-{{ bminfra_ocp_version }}.iso"
+discovery_boot_kernel_filename: "{{ discovery_file_prefix }}bminfra-discovery-{{ bminfra_ocp_version }}-vmlinuz"
+discovery_boot_initrd_filename: "{{ discovery_file_prefix }}bminfra-discovery-{{ bminfra_ocp_version }}-initrd.img"
+discovery_boot_rootfs_filename: "{{ discovery_file_prefix }}bminfra-discovery-{{ bminfra_ocp_version }}-rootfs.img"
+## Whether the InfraEnv's kernel/initrd/rootfs are copied onto the helper's
+## PXE paths. Those paths are single files serving the HUB's hosted cluster
+## workers, so a compact run - whose workers boot the ISO, never PXE - leaves
+## them alone.
+discovery_copy_pxe_to_helper: "{{ (target_hub | default('hub')) != 'compact' }}"
 
 ## ---------------------------------------------------------------------------
 ## Discovery host ignition (disconnected only)
@@ -1365,6 +1422,28 @@ hosted_cluster_node_keys:
   hcp-cluster3-d:
     workers: [c3dworker1, c3dworker2, c3dworker3]
     apps_lb: c3dlb
+  ## No apps_lb: hcp-compact1's *.apps is NOT the helper's haproxy. MetalLB
+  ## runs INSIDE the hosted cluster, on its two workers, and hands this
+  ## address to a LoadBalancer Service in front of the HostNetwork router pods
+  ## (roles/setup-hcp-ingress-metallb). apps_vip is that address's last
+  ## octet, published as the zone's *.apps record. setup-lb binds nothing for
+  ## a cluster without apps_lb.
+  hcp-compact1:
+    workers: [hcpc1worker1, hcpc1worker2]
+    apps_vip: 101
+
+## The DNS domain each hosted cluster sits under, when it is not base_domain.
+## The HostedCluster's dns.baseDomain, its zone (<name>.<this>), its
+## api/api-int and *.apps names, worker FQDNs and PTRs all follow it.
+##
+## hcp-compact1 sits under the compact cluster's own zone - so its names are
+## api.hcp-compact1.compact.mylab.com and *.apps.hcp-compact1.compact.mylab.com
+## - because the libvirt network already forwards compact.<base_domain> (and
+## everything under it) to the helper. A new top-level zone would need a new
+## forwarder, and adding one means restarting the libvirt network the running
+## compact cluster is on.
+hosted_cluster_domains:
+  hcp-compact1: "{{ compact_name }}.{{ base_domain }}"
 
 ## LEGACY: hosted_domain / hosted_domain2 / hosted_domain3 above are the same
 ## information as hosted_clusters, written twice. Nothing renders from them any

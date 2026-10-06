@@ -41,6 +41,13 @@
 ## the disconnected hub's kubeconfig:
 ##   ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass \
 ##     -e disconnected_install=true -e target_hub=hubd
+##
+## The connected compact cluster is a management cluster too. Its hosted
+## cluster (hcp-compact1) is in hosted_clusters with only a 'compact' MetalLB
+## address, so hub runs skip it and this renders it alone, against the compact
+## cluster's kubeconfig (compact-cluster/compact-cluster-hcp.md):
+##   ansible-playbook -i inventory/hosts create_hosted_cluster.yaml --ask-vault-pass \
+##     -e target_hub=compact
 
 - name: Create Hosted Cluster
   hosts: localhost
@@ -56,6 +63,10 @@
       hub: "{{ hub_install_folder }}"
       hub2: "{{ hub2_install_folder }}"
       hubd: "{{ hub_disconnected_install_folder }}"
+      ## The connected compact cluster as a management cluster (ACM/MCE from
+      ## compact-cluster/setup_compact_cluster.yaml --tags acm). Renders only
+      ## the clusters with a 'compact' MetalLB address - hcp-compact1.
+      compact: "{{ compact_install_folder }}"
     ## Which hub this run talks to. A disconnected run goes to the disconnected
     ## hub without needing -e target_hub=hubd, since that is the only hub the
     ## disconnected clusters exist on - same rule roles/setup-dns applies when

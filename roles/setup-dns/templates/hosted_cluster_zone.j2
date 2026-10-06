@@ -54,4 +54,10 @@ api		A	{{ metallb_prefix }}.{{ pool.ip[zone.hub] }}
 api-int		A	{{ metallb_prefix }}.{{ pool.ip[zone.hub] }}
 {% if (node_keys.apps_lb | default('')) in ip_list %}
 *.apps		A	{{ lab_network_prefix }}.{{ ip_list[node_keys.apps_lb] }}
+{% elif node_keys.apps_vip is defined %}
+{# No helper haproxy for this cluster: *.apps is a MetalLB address inside the
+   hosted cluster itself, handed to a LoadBalancer Service in front of its
+   HostNetwork router pods (roles/setup-hcp-ingress-metallb). Not in ip_list,
+   because no VM owns it and it needs no MAC reservation. #}
+*.apps		A	{{ lab_network_prefix }}.{{ node_keys.apps_vip }}
 {% endif %}

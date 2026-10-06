@@ -8,7 +8,10 @@
 ## tags to remove everything, or narrow it:
 ##
 ##   --tags sno      the single-node OpenShift cluster only
-##   --tags compact  the three-node compact cluster only
+##   --tags compact  the three-node compact cluster only, with the worker VMs
+##                   of the hosted cluster it manages (hcp-compact1)
+##   --tags compacthcp  just those hosted cluster worker VMs and their cached
+##                   discovery ISO - the compact cluster stays
 ##   --tags compactd the disconnected compact cluster only (VMs, folders and
 ##                   its egress-blocking iptables rules)
 ##   --tags udnlab   the UDN/BGP/EVPN lab - clab VM, client VMs, fabric net
@@ -213,6 +216,23 @@
       {% endfor %}
       rm -rf {{ compact_vm_folder | default(download_dir ~ '/compact') }}
       rm -rf {{ compact_install_folder | default(download_dir ~ '/compact_install') }}
+
+  ## The worker VMs of the hosted cluster the compact cluster manages
+  ## (setup_hosted_cluster_vm.yaml -e target_hub=compact). Its control plane is
+  ## pods on the compact cluster, so it goes with it; --tags compacthcp removes
+  ## only the workers, e.g. to rebuild them. To retire the hosted cluster
+  ## while keeping the compact cluster, delete its HostedCluster/NodePool on
+  ## the compact cluster first (compact-cluster/compact-cluster-hcp.md), or
+  ## the NodePool keeps waiting for Agents that no longer exist.
+  - name: Destroy the compact cluster's hosted cluster worker VMs
+    tags: [compact, compacthcp]
+    shell: |
+      {% for w in compact_hosted_cluster_workers | default([]) %}
+      virsh destroy  {{ w.name }} >/dev/null 2>&1 || true
+      virsh undefine {{ w.name }} >/dev/null 2>&1 || true
+      {% endfor %}
+      rm -rf {{ compact_hosted_cluster_vm_folder | default(download_dir ~ '/hcp_compact1') }}
+      rm -f {{ download_dir }}/compact-bminfra-discovery-*
 
   ## -------------------------------------------------------------------------
   ## The disconnected compact cluster (compact-cluster/setup_compact_cluster_disconnected.yaml)

@@ -123,6 +123,8 @@ run from there.
 | `compactvm` | Builds the three VMs from the ISO that is already there. | `tasks/vm.yml` |
 | `compactwait` | Waits for bootstrap and for install-complete, then checks the bonds. | `tasks/wait.yml` |
 | `compactstorage` | Installs LVM Storage and waits for the `lvms-vg1` StorageClass. Attaches the storage disk to any node built without one. | `tasks/storage.yml`, `roles/setup-lvm-storage` |
+| `acm` | Only when asked for (also tagged `never`). ACM/MCE, MetalLB and OADP, making this a management cluster for hosted clusters. See [compact-cluster-hcp.md](compact-cluster-hcp.md). | `roles/setup-hub-acm` |
+| `hcpingress` | Only when asked for. MetalLB inside each hosted cluster this cluster manages, for its `*.apps`. | `roles/setup-hcp-ingress-metallb` |
 
 To rebuild over an existing cluster, add `-e compact_force_reinstall=true`.
 The rebuild wipes `auth/kubeconfig`. To remove the cluster, run

@@ -1970,8 +1970,10 @@ not a Ceph or credentials problem.
 **Lives in [`compact-cluster/`](compact-cluster/).** A three-node compact
 OpenShift cluster from one agent ISO, every node's address on a bond over two
 NICs: in the lab (connected, or disconnected from the mirror registry) and on
-physical servers with LACP. Start with
-[compact-cluster/README.md](compact-cluster/README.md).
+physical servers with LACP. The connected one can also be a management
+cluster for hosted control planes, side by side with the hub
+([compact-cluster/compact-cluster-hcp.md](compact-cluster/compact-cluster-hcp.md)).
+Start with [compact-cluster/README.md](compact-cluster/README.md).
 
 Additive like the UDN lab below: it shares `vars.yaml`, `vault.yaml`,
 `inventory/hosts` and `roles/`, but nothing in the hub, hosted-cluster or OADP

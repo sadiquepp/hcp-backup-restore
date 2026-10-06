@@ -1,0 +1,45 @@
+{# One address, advertised from whichever worker MetalLB's L2 election picks,
+   and given only to the ingress Service below - it asks for the pool by name
+   and the pool does not auto-assign. #}
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: {{ hcp_ingress_pool }}
+  namespace: metallb-system
+spec:
+  addresses:
+  - {{ hcp_ingress_vip }}/32
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: {{ hcp_ingress_pool }}-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - {{ hcp_ingress_pool }}
+---
+{# Selects the default IngressController's router pods. They run with
+   HostNetwork, so targetPort 80/443 is the workers' own ports, where haproxy
+   in the router listens. #}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ hcp_ingress_service }}
+  namespace: openshift-ingress
+  annotations:
+    metallb.io/address-pool: {{ hcp_ingress_pool }}
+spec:
+  type: LoadBalancer
+  selector:
+    ingresscontroller.operator.openshift.io/deployment-ingresscontroller: default
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 80
+  - name: https
+    protocol: TCP
+    port: 443
+    targetPort: 443

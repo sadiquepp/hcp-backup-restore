@@ -103,9 +103,13 @@ zone "{{ c.name }}.{{ base_domain }}" IN {
                 + (hosted_clusters_disconnected | default([]) | select('mapping') | map(attribute='name') | list)
                 + (hosted_clusters_disconnected | default([]) | reject('mapping') | list) %}
 {% if name in (hosted_cluster_metallb_pools | default({})) %}
-zone "{{ name }}.{{ base_domain }}" IN {
+{# hosted_cluster_domains puts a cluster under a domain other than base_domain
+   (hcp-compact1 under compact.<base_domain>). named serves this zone and its
+   parent side by side and answers from the more specific one. #}
+{% set hcp_domain = (hosted_cluster_domains | default({}))[name] | default(base_domain) %}
+zone "{{ name }}.{{ hcp_domain }}" IN {
 	type master;
-	file "{{ name }}.{{ base_domain }}.db";
+	file "{{ name }}.{{ hcp_domain }}.db";
 	allow-update { none; };
 };
 {% endif %}
