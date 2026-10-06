@@ -66,7 +66,7 @@ Each step names the role file that automates it.
 | Mirror registry | `registry.hub.mylab.com:8443` (`192.168.122.22`) | `mirror_registry_domain`, `ip_list.registry` |
 | Mirrored release | `registry.hub.mylab.com:8443/openshift/release-images:<version>-x86_64` | `mirror_release_repository`, `mirror_ocp_version` |
 | NTP server for the nodes | `192.168.122.1` (the hypervisor) | `compact_ntp_server` |
-| Storage disk per node | 100 GB, empty (`vdb`), for LVM Storage | `compact_storage_disk_gb`, `compact_lvm_storage` |
+| Storage disk per node | 500 GB, empty (`vdb`), for LVM Storage | `compact_storage_disk_gb`, `compact_lvm_storage` |
 | Default StorageClass | `lvms-vg1` (LVM Storage), from the mirrored catalog | `roles/setup-lvm-storage`, `use_lvm_storage` in `vars.yaml` |
 | Egress block | `LAB_NO_NAT` (nat) and `LAB_NO_EGRESS` (filter) chains | shared with hubd |
 
@@ -650,7 +650,7 @@ for n in $NODES; do
 
   rm -f $VMDIR/${dom}_disk.qcow2 $VMDIR/${dom}_storage.qcow2
   qemu-img create -f qcow2 $VMDIR/${dom}_disk.qcow2 150G
-  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 100G   # empty, for LVM Storage (Step 15)
+  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 500G   # empty, for LVM Storage (Step 15)
 
   virsh net-dumpxml default | grep -qi "$MAC1:0$oct" || \
     virsh net-update default add ip-dhcp-host \
@@ -775,7 +775,7 @@ definition, so it is still there after the next reboot:
 for n in $NODES; do
   dom=compactd_${n%%:*}
   virsh domblklist $dom | grep -q "${dom}_storage.qcow2" && continue
-  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 100G
+  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 500G
   virsh attach-disk $dom $VMDIR/${dom}_storage.qcow2 vdb \
     --driver qemu --subdriver qcow2 --cache none --targetbus virtio --persistent --live
 done

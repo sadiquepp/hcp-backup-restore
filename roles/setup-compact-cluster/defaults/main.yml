@@ -100,7 +100,7 @@ compact_installation_disk: /dev/vda
 ## (tasks/vm.yml), and hot-plugged into a cluster built before this existed
 ## (tasks/storage.yml). Thin qcow2, so the size is a ceiling, not a cost.
 compact_lvm_storage: "{{ use_lvm_storage | default(true) }}"
-compact_storage_disk_gb: 100
+compact_storage_disk_gb: 500
 compact_storage_disk_target: vdb
 
 ## Addressing. Static, on the bond: the rendezvous address has to be knowable

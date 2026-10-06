@@ -68,7 +68,7 @@ step that failed. Each section names the role task file that automates it.
 | Bond port 1 (primary) | `enp1s0`, MAC `52:54:00:e2:54:<octet>` | `compact_primary_mac_prefix` |
 | Bond port 2 (backup) | `enp2s0`, MAC `52:54:00:e2:56:<octet>` | `compact_secondary_mac_prefix` |
 | Per node | 8 vCPU, 24 GiB RAM, 150 GB disk (`vda`, RHCOS) | `compact_vcpus`, `compact_memory`, `compact_disk_gb` |
-| Storage disk per node | 100 GB, empty (`vdb`), for LVM Storage | `compact_storage_disk_gb`, `compact_lvm_storage` |
+| Storage disk per node | 500 GB, empty (`vdb`), for LVM Storage | `compact_storage_disk_gb`, `compact_lvm_storage` |
 | Default StorageClass | `lvms-vg1` (LVM Storage, thin-provisioned XFS) | `roles/setup-lvm-storage`, `use_lvm_storage` in `vars.yaml` |
 
 **Why these addresses.** They were five of the last six free two-digit octets
@@ -505,7 +505,7 @@ for n in $NODES; do
 
   # The storage disk: empty, for LVM Storage (Step 12). LVMS only takes a disk
   # with nothing on it, so it is recreated on every rebuild too.
-  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 100G
+  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 500G
 
   # Reserve the address for the bond's MAC (the first NIC's MAC). Skip this if
   # setup-bm-host already did it.
@@ -679,7 +679,7 @@ definition, so it is still there after the next reboot:
 for n in $NODES; do
   dom=compact_${n%%:*}
   virsh domblklist $dom | grep -q "${dom}_storage.qcow2" && continue
-  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 100G
+  qemu-img create -f qcow2 -o preallocation=metadata $VMDIR/${dom}_storage.qcow2 500G
   virsh attach-disk $dom $VMDIR/${dom}_storage.qcow2 vdb \
     --driver qemu --subdriver qcow2 --cache none --targetbus virtio --persistent --live
 done
