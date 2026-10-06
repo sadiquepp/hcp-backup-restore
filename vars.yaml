@@ -507,7 +507,7 @@ ip_list:
   udnclient-purple: 87
   udnnsclient: 88
 
-  ## The three-node compact cluster (setup_compact_cluster.yaml). Five
+  ## The three-node compact cluster (compact-cluster/setup_compact_cluster.yaml). Five
   ## addresses, all two digits for the MAC scheme and all clear of
   ## hosted_cluster_metallb_pools - these were five of the last six free
   ## two-digit octets (.63 is left alone, as noted above):
@@ -527,7 +527,7 @@ ip_list:
   compact_ingress: 18
 
   ## The DISCONNECTED three-node compact cluster
-  ## (setup_compact_cluster_disconnected.yaml). Its own five addresses, so it
+  ## (compact-cluster/setup_compact_cluster_disconnected.yaml). Its own five addresses, so it
   ## can run beside the connected one. They are SINGLE digits because no
   ## two-digit octet is left (.63 aside, see above): .2-.9 sit below both DHCP
   ## pools (dhcpd .100-.200, libvirt .201-.249) and outside every MetalLB band.
@@ -738,7 +738,7 @@ sno_disk_gb: 200
 sno_fabric_nic: false
 
 ## ---------------------------------------------------------------------------
-## Three-node compact OpenShift (setup_compact_cluster.yaml, --tags compact)
+## Three-node compact OpenShift (compact-cluster/setup_compact_cluster.yaml, --tags compact)
 ## ---------------------------------------------------------------------------
 ## Three schedulable masters, no workers, built from one agent ISO, connected -
 ## the SNO pattern scaled to three nodes. Two differences from the SNO:
@@ -752,7 +752,7 @@ sno_fabric_nic: false
 ## by setup-dns from these values, so they live here rather than only in the
 ## role's defaults. Bonding, NIC names, timeouts and the rest are in
 ## roles/setup-compact-cluster/defaults/main.yml. The manual equivalent of every
-## step is in compact-cluster.md.
+## step is in compact-cluster/compact-cluster.md.
 compact_name: compact
 compact_install_folder: "{{ download_dir }}/compact_install"
 compact_vm_folder: "{{ download_dir }}/compact"
@@ -769,7 +769,7 @@ compact_nodes:
 compact_api_vip_key: compact_api
 compact_ingress_vip_key: compact_ingress
 
-## The disconnected compact cluster (setup_compact_cluster_disconnected.yaml).
+## The disconnected compact cluster (compact-cluster/setup_compact_cluster_disconnected.yaml).
 ## Same role, same bonds, its own name, addresses and folders, so both can be
 ## up at once. Its images come only from the mirror registry
 ## (setup_mirror_registry.yaml) and its nodes' egress past the lab subnet is

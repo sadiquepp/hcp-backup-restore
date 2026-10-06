@@ -82,13 +82,22 @@ way. Every two-digit octet renders exactly as before.
 ## The automated path
 
 ```bash
-# 1. DNS for compactd (zone on the helper, /etc/hosts here)
+# 1. DNS for compactd, from the repository root (zone on the helper, /etc/hosts here)
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
 
-# 2. Mirror registry, then the cluster, then day 2
-ansible-playbook -i inventory/hosts setup_compact_cluster_disconnected.yaml \
+# 2. From inside compact-cluster/: mirror registry, the cluster, day 2, LVM Storage
+cd compact-cluster
+ansible-playbook -i ../inventory/hosts setup_compact_cluster_disconnected.yaml \
   -e disconnected_install=true --ask-vault-pass
 ```
+
+Run the two compact playbooks from **inside `compact-cluster/`**. Ansible
+reads `ansible.cfg` from the working directory, and the one in this folder
+adds `../roles` to `roles_path`. Run from the repository root, Ansible cannot
+find `setup-compact-cluster`. The shared playbooks (`setup_bm_host.yaml`,
+`setup_mirror_registry.yaml`, `cleanup.yaml`) stay at the repository root and
+run from there.
+
 
 `-e disconnected_install=true` is required because `setup_mirror_registry.yaml`
 refuses to run without it. It affects only this run. `vars.yaml` keeps the lab
@@ -105,7 +114,8 @@ connected.
 | `compactstorage` | Installs LVM Storage from the mirrored catalog and waits for the `lvms-vg1` StorageClass. Attaches the storage disk to any node built without one. Needs `compactday2` to have run. | `tasks/storage.yml`, `roles/setup-lvm-storage` |
 
 To rebuild, add `-e compact_force_reinstall=true`. To remove the cluster, run
-`ansible-playbook -i inventory/hosts cleanup.yaml --tags compactd`.
+`ansible-playbook -i inventory/hosts cleanup.yaml --tags compactd` from the
+repository root.
 
 ---
 
@@ -137,6 +147,7 @@ It pulls only from the mirror.
 *Automated by: `setup_mirror_registry.yaml` (roles `setup-mirror-registry-vm`, `setup-rhsm`, `setup-mirror-registry`, `setup-mirror-registry-trust`)*
 
 ```bash
+# from the repository root
 ansible-playbook -i inventory/hosts setup_mirror_registry.yaml \
   -e disconnected_install=true --ask-vault-pass
 ```

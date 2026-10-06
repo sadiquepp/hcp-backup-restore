@@ -2,12 +2,16 @@
 # Build a DISCONNECTED three-node compact OpenShift cluster from an agent ISO,
 # with every node's address on an active-backup bond over two NICs.
 #
-#   ansible-playbook -i inventory/hosts setup_compact_cluster_disconnected.yaml \
+#   cd compact-cluster
+#   ansible-playbook -i ../inventory/hosts setup_compact_cluster_disconnected.yaml \
 #     -e disconnected_install=true --ask-vault-pass
+#
+# From inside compact-cluster/, like udn-bgp-evpn/: ansible.cfg is read from
+# the working directory, and the one here adds ../roles to roles_path.
 #
 # Three things happen, in order:
 #
-#   1. setup_mirror_registry.yaml - the mirror registry VM, the mirror itself
+#   1. ../setup_mirror_registry.yaml - the mirror registry VM, the mirror itself
 #      (oc-mirror of the release and operators), and trust of its CA and
 #      credentials on this hypervisor. -e disconnected_install=true is what
 #      that playbook insists on; it changes nothing else in this run.
@@ -29,7 +33,8 @@
 #      day 2 just applied - so it has to come after it.
 #
 # DNS is rendered by setup_bm_host.yaml, as for every cluster here - run this
-# first (compactd.<base_domain> is in compact_clusters in vars.yaml):
+# first, from the repository root (compactd.<base_domain> is in
+# compact_clusters in vars.yaml):
 #
 #   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
 #
@@ -48,7 +53,7 @@
   hosts: localhost
   gather_facts: false
   vars_files:
-    - vars.yaml
+    - ../vars.yaml
   tasks:
     - name: Fail early unless the mirror-registry playbook will accept this run
       ansible.builtin.assert:
@@ -61,14 +66,14 @@
           with --tags compact instead.
 
 - name: Build the mirror registry first
-  ansible.builtin.import_playbook: setup_mirror_registry.yaml
+  ansible.builtin.import_playbook: ../setup_mirror_registry.yaml
 
 - name: Set up the disconnected three-node compact cluster
   hosts: localhost
   become: true
   vars_files:
-    - vars.yaml
-    - vault.yaml
+    - ../vars.yaml
+    - ../vault.yaml
   tasks:
     # Task-level vars on the import outrank vars.yaml (vars_files), so the
     # role builds compactd rather than the connected compact cluster.

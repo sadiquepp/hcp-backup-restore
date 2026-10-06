@@ -65,9 +65,10 @@
       The mirror registry CA is not trusted on this host
       (/etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem is missing),
       so the mirror registry has not been set up. Run
-      setup_compact_cluster_disconnected.yaml without --tags (it runs
-      setup_mirror_registry.yaml first), or run setup_mirror_registry.yaml
-      -e disconnected_install=true on its own.
+      compact-cluster/setup_compact_cluster_disconnected.yaml without --tags
+      (it runs setup_mirror_registry.yaml first), or run
+      setup_mirror_registry.yaml -e disconnected_install=true on its own from
+      the repository root.
     success_msg: "Mirror registry CA is trusted on this host."
   when: compact_disconnected | bool
 
@@ -216,7 +217,7 @@
       it - so this stops here rather than an hour in.
 
       Render the zone on the helper and the api/*.apps entries in this host's
-      /etc/hosts first:
+      /etc/hosts first, from the repository root:
         ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
           --ask-vault-pass
 
@@ -256,7 +257,7 @@
       credentials.
 
       To rebuild anyway, pass -e compact_force_reinstall=true. To remove the
-      cluster first:
+      cluster first, from the repository root:
         ansible-playbook -i inventory/hosts cleanup.yaml --tags compact
     success_msg: >-
       {% if compact_existing_vms %}Rebuilding {{ compact_existing_vms | join(', ') }} as requested.

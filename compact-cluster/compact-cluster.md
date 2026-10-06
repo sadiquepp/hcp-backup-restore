@@ -99,12 +99,22 @@ change:
 ## The automated path
 
 ```bash
-# 1. DNS: the zone on the helper, and api/*.apps in the hypervisor's /etc/hosts
+# 1. DNS, from the repository root: the zone on the helper, and api/*.apps in
+#    the hypervisor's /etc/hosts
 ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
 
-# 2. The cluster: pre-flight, ISO, three VMs, then wait for the install
-ansible-playbook -i inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
+# 2. The cluster, from inside compact-cluster/: pre-flight, ISO, three VMs,
+#    wait for the install, then LVM Storage
+cd compact-cluster
+ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
 ```
+
+Run the two compact playbooks from **inside `compact-cluster/`**. Ansible
+reads `ansible.cfg` from the working directory, and the one in this folder
+adds `../roles` to `roles_path`. Run from the repository root, Ansible cannot
+find `setup-compact-cluster`. The shared playbooks (`setup_bm_host.yaml`,
+`setup_mirror_registry.yaml`, `cleanup.yaml`) stay at the repository root and
+run from there.
 
 | Tag | What it does | Role file |
 |---|---|---|
@@ -116,7 +126,8 @@ ansible-playbook -i inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
 
 To rebuild over an existing cluster, add `-e compact_force_reinstall=true`.
 The rebuild wipes `auth/kubeconfig`. To remove the cluster, run
-`ansible-playbook -i inventory/hosts cleanup.yaml --tags compact`.
+`ansible-playbook -i inventory/hosts cleanup.yaml --tags compact` from the
+repository root.
 
 The rendered `install-config.yaml` and `agent-config.yaml` are kept in
 `/var/lib/libvirt/images/compact_install/rendered/`. The installer deletes the

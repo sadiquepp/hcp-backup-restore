@@ -103,7 +103,7 @@
 # first becomes enp1s0 with the primary MAC, the second enp2s0 with the
 # secondary. Both are on the same libvirt network - the bond protects against
 # a port going away, not against the bridge going away, and in a lab the port
-# is the thing you can actually pull (virsh domif-setlink, see compact-cluster.md).
+# is the thing you can actually pull (virsh domif-setlink, see compact-cluster/compact-cluster.md).
 #
 # --import with an explicit hd,cdrom boot order, not --cdrom, for the reason
 # given in roles/setup-sno/tasks/vm.yml: the node must prefer the disk once

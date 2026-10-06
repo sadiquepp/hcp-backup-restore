@@ -137,7 +137,7 @@ compact_ssh_public_key_file: "~/.ssh/lab_rsa.pub"
 compact_require_dns: true
 
 ## ---------------------------------------------------------------------------
-## Disconnected mode (setup_compact_cluster_disconnected.yaml sets these).
+## Disconnected mode (compact-cluster/setup_compact_cluster_disconnected.yaml sets these).
 ## ---------------------------------------------------------------------------
 ## Install from the mirror registry (setup_mirror_registry.yaml) instead of
 ## quay.io: openshift-install is extracted from the mirrored release with

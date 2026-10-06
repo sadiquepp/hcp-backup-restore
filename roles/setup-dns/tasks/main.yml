@@ -162,8 +162,8 @@
   notify:
     -  Restart_Named
 
-# The three-node compact clusters (setup_compact_cluster.yaml and
-# setup_compact_cluster_disconnected.yaml), one zone per compact_clusters
+# The three-node compact clusters (compact-cluster/setup_compact_cluster.yaml
+# and compact-cluster/setup_compact_cluster_disconnected.yaml), one zone per compact_clusters
 # entry. Same guard discipline as the SNO above: this condition is repeated in
 # named.rfc1912.zones.j2, because a stanza without its file stops named from
 # starting.

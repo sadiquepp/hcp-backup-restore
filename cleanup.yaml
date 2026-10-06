@@ -199,7 +199,7 @@
       rm -rf {{ sno_install_folder }}
 
   ## -------------------------------------------------------------------------
-  ## The three-node compact cluster (setup_compact_cluster.yaml)
+  ## The three-node compact cluster (compact-cluster/setup_compact_cluster.yaml)
   ## -------------------------------------------------------------------------
   ## Same reasoning as the SNO above for taking the install folder with it.
   ## No --remove-all-storage: the three domains share the agent ISO as their
@@ -215,7 +215,7 @@
       rm -rf {{ compact_install_folder | default(download_dir ~ '/compact_install') }}
 
   ## -------------------------------------------------------------------------
-  ## The disconnected compact cluster (setup_compact_cluster_disconnected.yaml)
+  ## The disconnected compact cluster (compact-cluster/setup_compact_cluster_disconnected.yaml)
   ## -------------------------------------------------------------------------
   ## Its iptables rules go too. They carry the comment
   ## "compactd disconnected: ..." (block-node-nat.yml), so only this cluster's

@@ -2,7 +2,11 @@
 # Build a connected three-node compact OpenShift cluster from an agent ISO,
 # with every node's address on an active-backup (mode 1) bond over two NICs.
 #
-#   ansible-playbook -i inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
+#   cd compact-cluster
+#   ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
+#
+# From inside compact-cluster/, like udn-bgp-evpn/: ansible.cfg is read from
+# the working directory, and the one here adds ../roles to roles_path.
 #
 # Runs on the hypervisor. --ask-vault-pass is not optional: this is a connected
 # install and the nodes pull their release payload from quay.io with the pull
@@ -10,7 +14,7 @@
 #
 # DNS IS NOT DONE HERE, for the same reason as setup_sno.yaml: the zone
 # compact.<base_domain> is rendered by setup-dns, which runs on the HELPER and
-# is owned by setup_bm_host.yaml. Run this first:
+# is owned by setup_bm_host.yaml. Run this first, from the repository root:
 #
 #   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
 #     --ask-vault-pass
@@ -35,8 +39,8 @@
   hosts: localhost
   become: true
   vars_files:
-    - vars.yaml
-    - vault.yaml
+    - ../vars.yaml
+    - ../vault.yaml
   tasks:
     - name: Install the compact cluster
       ansible.builtin.import_role:

@@ -2,7 +2,7 @@
 # Three-node compact OpenShift from an agent ISO, with every node's address on
 # an active-backup bond over two NICs. Connected by default; disconnected
 # (from the mirror registry, egress cut) when compact_disconnected is true -
-# setup_compact_cluster_disconnected.yaml sets that.
+# compact-cluster/setup_compact_cluster_disconnected.yaml sets that.
 #
 # The same four stages as roles/setup-sno, each runnable on its own by tag:
 #

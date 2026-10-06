@@ -9,7 +9,8 @@
 # after day 2, because the operator resolves against the mirrored
 # CatalogSource that day 2 applies. On its own against a running cluster:
 #
-#   ansible-playbook -i inventory/hosts setup_compact_cluster.yaml --ask-vault-pass --tags compactstorage
+#   cd compact-cluster
+#   ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass --tags compactstorage
 #
 # Each node needs an empty disk. tasks/vm.yml builds every node with one; a
 # cluster built before that gets it here, created and hot-plugged into the

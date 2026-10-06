@@ -59,6 +59,7 @@ In a hurry? [steps.md](steps.md) is the same end-to-end run as commands only.
   - [Attach it to OpenShift](#attach-it-to-openshift)
   - [Verifying](#verifying-1)
   - [Notes and constraints](#notes-and-constraints-1)
+- [Three-node compact cluster](#three-node-compact-cluster)
 - [UDN over BGP, VRF-Lite and EVPN (containerlab fabric)](#udn-over-bgp-vrf-lite-and-evpn-containerlab-fabric)
   - [Can this be simulated on this lab? Yes - here is the honest shape of it](#can-this-be-simulated-on-this-lab-yes---here-is-the-honest-shape-of-it)
   - [The one idea to drop first: you do not move a UDN's default gateway](#the-one-idea-to-drop-first-you-do-not-move-a-udns-default-gateway)
@@ -1963,6 +1964,23 @@ not a Ceph or credentials problem.
 - `setup_ceph_odf.yaml` can be pointed at hub2 as well, but the export step
   re-runs the exporter against the same Ceph cluster, so both hubs end up
   consuming the same pool. That is fine for a lab; it is not isolation.
+
+## Three-node compact cluster
+
+**Lives in [`compact-cluster/`](compact-cluster/).** A three-node compact
+OpenShift cluster from one agent ISO, every node's address on a bond over two
+NICs: in the lab (connected, or disconnected from the mirror registry) and on
+physical servers with LACP. Start with
+[compact-cluster/README.md](compact-cluster/README.md).
+
+Additive like the UDN lab below: it shares `vars.yaml`, `vault.yaml`,
+`inventory/hosts` and `roles/`, but nothing in the hub, hosted-cluster or OADP
+flows reads it. Run its playbooks from inside the directory:
+
+```bash
+cd compact-cluster
+ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
+```
 
 ## UDN over BGP, VRF-Lite and EVPN (containerlab fabric)
 
