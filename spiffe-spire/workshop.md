@@ -1434,6 +1434,23 @@ router, which runs on the node's network - so their source is the node's
 own address on the pod network (`10.128.0.2` here), not a pod IP. A pipe
 from the SNO's own checkoutservice would show that pod's IP instead.
 
+**Place an order yourself, on the hub, and find it on the SNO.** Open the
+hub's shop, put something in the cart, and at checkout replace the prefilled
+card with one the load generator will not use - `4111 1111 1111 1111`, any
+future expiry (paymentservice only checks that it is a well-formed Visa or
+Mastercard):
+
+```bash
+lab hub
+oc -n $BQ_NS get route frontend -o jsonpath='https://{.spec.host}{"\n"}'
+# ... place the order in the browser, then:
+lab sno
+oc -n $BQ_NS logs deploy/paymentservice -c server --since=5m | grep 'visa ending 1111'
+# {"severity":"info",...,"message":"Transaction processed: visa ending 1111     Amount: USD118.980000000"}
+```
+
+A click on the hub's website, charged in the other trust domain.
+
 On the hub, the paymentservice has gone quiet:
 
 ```bash
