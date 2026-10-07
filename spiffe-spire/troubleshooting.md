@@ -318,3 +318,60 @@ oc get spireserver cluster -o jsonpath='{range .status.conditions[*]}{.type}={.s
 Worth raising with the operator's maintainers: a deliberately disabled
 managed Route should not fail the roll-up (or `FederationRouteDisabled`
 should be reported True / as a non-failure reason).
+
+---
+
+## Case 4 - paymentservice stuck at 1/2 after C3
+
+Seen live on the hub, Part C, C3. Fixed.
+
+### Symptom
+
+```text
+# oc -n $BQ_NS get pods -l 'app in (paymentservice,checkoutservice)'
+checkoutservice-85fbbfbd76-pk8wv   2/2     Running   0          10m
+paymentservice-74566fc899-w2vls    1/2     Running   0          10m   <- new, never ready
+paymentservice-869d5b5cb9-9dn44    1/1     Running   0          3h28m <- old, kept by the rollout
+```
+
+The rollout never finishes. Worse, the Service now targets 8443, which the
+only ready pod - the old one - does not listen on, so payments fail.
+
+### The trail
+
+```text
+# oc -n $BQ_NS get pod $P -o jsonpath='{range .status.containerStatuses[*]}{.name}{"  ready="}{.ready}{"\n"}{end}'
+ghostunnel  ready=false
+server  ready=true
+
+# oc -n $BQ_NS describe pod $P      (events)
+Readiness probe failed: HTTP probe failed with statuscode: 400
+
+# oc -n $BQ_NS logs $P -c ghostunnel
+http: TLS handshake error from 10.129.2.2:42434: client sent an HTTP request to an HTTPS server
+
+# oc -n $BQ_NS logs $P -c server
+PaymentService gRPC server started on port 50052
+```
+
+The app is fine and ghostunnel has its SVID - it is serving TLS. The probe
+(plain `httpGet`) reaches the status port and is answered in TLS.
+
+### Root cause
+
+ghostunnel's `main.go`, `serveStatus`: `--status=HOST:PORT` with no scheme
+is parsed as HTTPS (`socket.ParseHTTPAddress` returns `https=true`), and is
+served over TLS whenever the tunnel has a certificate it can serve - which a
+`server` always does. Only an `http://` prefix forces plain HTTP. The
+checkoutservice's ghostunnel, a `client`, served plain HTTP, so the same
+flag and probe worked there and hid the problem.
+
+### Fix, and what the lab does now
+
+- Both ghostunnels run `--status=http://0.0.0.0:8081`: the workshop's C3
+  blocks and `templates/boutique/{payment-server,checkout-client}.yaml.j2`.
+  Explicit on the client too, so neither depends on the mode's default.
+- On a cluster already in this state: edit
+  `$M/boutique/payment-server.yaml` (and `checkout-client.yaml`), then
+  `oc kustomize "$M/boutique" > "$M/c3-boutique-spiffe.yaml" && oc apply -f "$M/c3-boutique-spiffe.yaml"`.
+  The rollout finishes and the old pod goes.

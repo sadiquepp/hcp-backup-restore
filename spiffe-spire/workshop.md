@@ -1207,7 +1207,7 @@ spec:
             - --use-workload-api-addr=unix:///spiffe-workload-api/spire-agent.sock
             - --allow-uri=spiffe://$TD/ns/$BQ_NS/sa/checkoutservice
             - --allow-uri=spiffe://$PEER_TD/ns/$BQ_NS/sa/checkoutservice
-            - --status=0.0.0.0:8081
+            - --status=http://0.0.0.0:8081
           ports:
             - {name: mtls, containerPort: 8443}
             - {name: status, containerPort: 8081}
@@ -1252,7 +1252,7 @@ spec:
             - --target=paymentservice:50051
             - --use-workload-api-addr=unix:///spiffe-workload-api/spire-agent.sock
             - --verify-uri=spiffe://$TD/ns/$BQ_NS/sa/paymentservice
-            - --status=0.0.0.0:8081
+            - --status=http://0.0.0.0:8081
           ports:
             - {name: status, containerPort: 8081}
           securityContext:

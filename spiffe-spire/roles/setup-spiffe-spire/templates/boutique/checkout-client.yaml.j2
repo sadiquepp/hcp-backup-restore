@@ -21,7 +21,7 @@ spec:
             - --target={{ spire_boutique_payment_target }}
             - --use-workload-api-addr=unix:///spiffe-workload-api/spire-agent.sock
             - --verify-uri={{ spire_boutique_payment_server_id }}
-            - --status=0.0.0.0:{{ spire_boutique_status_port }}
+            - --status=http://0.0.0.0:{{ spire_boutique_status_port }}
           # /_status here performs the whole mTLS dial to the paymentservice,
           # SPIFFE ID check included - a good thing to ASK (verify reads it
           # through the API server's pod proxy), and a bad readiness probe: it

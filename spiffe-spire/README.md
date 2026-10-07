@@ -539,6 +539,7 @@ oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py \
 | ClusterSPIFFEID `.status` empty | missing or wrong `spec.className` |
 | SNO only: `no identity issued`; agent log `lookup sno on 172.30.0.10:53: no such host` | the agent reaches the kubelet by node name, and the SNO's (`sno`) was not in DNS - and the SNO's own dnsmasq cached the failure: `../setup_sno.yaml --tags snodns` (or `./build-lab.sh --only lvm`) adds the name and clears that cache. [troubleshooting.md](troubleshooting.md) case 2 |
 | `SpireServer` `Ready=False` after federation, `RouteAvailable=False FederationRouteDisabled` | expected, not a fault: with `managedRoute: "false"` the operator's `Ready` roll-up counts that condition as a failure. Every other condition True means healthy - what the lab's `server-ready.yml` checks. [troubleshooting.md](troubleshooting.md) case 3 |
+| Part C: new paymentservice pod stuck `1/2`, ghostunnel log `client sent an HTTP request to an HTTPS server` | ghostunnel in server mode serves `--status` over TLS unless it is prefixed `http://`, and the probe is plain HTTP: `--status=http://0.0.0.0:8081`. [troubleshooting.md](troubleshooting.md) case 4 |
 | `executable file ... spire-server not found` | the server image keeps the binary neither on `$PATH` nor at upstream's `/opt/spire/bin`; it is the container's entrypoint, so call it as `/proc/1/exe` (`spire_server_cli`; the workshop's `spire` helper does) |
 | pod has no `/svid/svid.pem` | `oc -n spiffe-demo logs deploy/<pod> -c spiffe-helper` - `no identity issued` means no entry matches the pod |
 | `federation refresh` fails | the message names DNS (`no such host`), the Route (connection refused / 503) or the endpoint's SVID (`x509`) |
@@ -554,4 +555,4 @@ oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py \
 | mesh: `Istio` not Ready | `oc get istio default -o yaml` - the conditions name the cause; `oc -n openshift-operators logs deploy/servicemesh-operator3` |
 
 Non-trivial debugging on a live cluster goes in [troubleshooting.md](troubleshooting.md)
-(case 1: where `spire-server` lives in Red Hat's image; case 2: the SNO's node name; case 3: `Ready=False` with federation), in the format of [`udn-bgp-evpn/troubleshooting.md`](../udn-bgp-evpn/troubleshooting.md).
+(case 1: where `spire-server` lives in Red Hat's image; case 2: the SNO's node name; case 3: `Ready=False` with federation; case 4: ghostunnel's status port speaking TLS), in the format of [`udn-bgp-evpn/troubleshooting.md`](../udn-bgp-evpn/troubleshooting.md).
