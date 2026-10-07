@@ -508,6 +508,12 @@ again:
 virsh domifaddr bastion
 ```
 
+**The clone is pinned to a branch.** `main` in `sadiquepp/openshift` does not yet
+carry `test-workloads/online-boutique/hardened` — the build and scan tooling this
+bastion exists to run — so `bastion_git_repos` pins that entry to the branch that
+does. Drop the `version:` line once it merges, otherwise the paths in
+`/root/.bastion-env` point at a directory that is not there.
+
 What it installs: podman, buildah, skopeo, git, jq and friends; `grype` with its
 vulnerability database primed (~1GB, pre-pulled so the first scan does not pay
 for it, and so a database that downloads but cannot unpack fails here rather

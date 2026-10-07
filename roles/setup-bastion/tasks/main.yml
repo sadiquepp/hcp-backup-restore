@@ -48,12 +48,21 @@
   tags:
     - repos
 
+# `update` is a role-level variable rather than a per-repo key on purpose.
+# `item.update` does NOT mean "the update key of item": dot notation resolves
+# Python attributes before dict keys, and `update` is a dict METHOD, so Jinja
+# hands back <built-in method update of dict object ...> and the git module
+# rejects it as a non-boolean. `item['update']` has the same problem -- Jinja's
+# subscript falls back to getattr when the key is missing. Only `item.get(...)`,
+# an `'update' in item` guard, or not using the name at all are safe, and the
+# last is the one that cannot be reintroduced by accident. The same trap waits
+# on items, keys, values, get, copy and pop.
 - name: Clone the lab repositories
   ansible.builtin.git:
     repo: "{{ item.repo }}"
     dest: "{{ bastion_workdir }}/{{ item.dest }}"
     version: "{{ item.version | default('HEAD') }}"
-    update: "{{ item.update | default(false) }}"
+    update: "{{ bastion_git_update }}"
   loop: "{{ bastion_git_repos }}"
   loop_control:
     label: "{{ item.dest }}"

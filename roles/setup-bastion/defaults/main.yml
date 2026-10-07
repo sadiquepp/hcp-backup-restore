@@ -49,10 +49,26 @@ bastion_oc_version: stable-4.18
 
 ## Git repositories to clone into bastion_workdir. The hardened-images build and
 ## scan tooling lives in the first one.
+##
+## Per-repo keys: repo, dest, and optionally version (a branch, tag or SHA).
+## There is deliberately no per-repo `update` key -- see the comment on the
+## clone task in tasks/main.yml for why that name cannot be used safely.
 bastion_workdir: /root/work
+
+## Re-fetch on every run, so a bastion built last week picks up fixes. A clone
+## with local modifications fails the task rather than losing them; set false if
+## you are editing the scripts in place and would rather the playbook not try.
+bastion_git_update: true
+
 bastion_git_repos:
   - repo: https://github.com/sadiquepp/openshift.git
     dest: openshift
+    ## Pinned to the branch because main does NOT yet carry
+    ## test-workloads/online-boutique/hardened -- the build and scan tooling
+    ## this bastion exists to run. Drop this line (or set it to main) once that
+    ## branch merges, otherwise the paths in /root/.bastion-env point at a
+    ## directory that is not there.
+    version: claude/vigilant-babbage-4qxa4j
 
 ## Trust the lab's mirror registry so podman and skopeo can push to it. The CA
 ## is fetched from the registry VM, which means this only works once
