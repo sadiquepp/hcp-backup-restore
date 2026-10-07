@@ -497,6 +497,12 @@ has less free space than `bastion_disk_size`, and names the filesystem and the
 shortfall when it does. Pass `-e bastion_require_free_space=false` to overcommit
 the sparse qcow2 on purpose.
 
+**Tags can be used on their own.** Address discovery and the ssh wait are tagged
+`always`, so the in-memory `bastion` group is rebuilt on every run regardless of
+what else is selected — `--tags repos,scanners` works without recreating the VM.
+That matters because the group is built by `add_host` and exists only for the
+duration of a run; nothing is written to `inventory/hosts`.
+
 **This VM has no address reservation.** Unlike helper and mirror-registry there
 is no `ip_list` entry and no `ip-dhcp-host` entry on the `default` network — it
 takes whatever libvirt's DHCP gives it, which is fine because nothing in the lab

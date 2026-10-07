@@ -6,10 +6,15 @@
 # needs entitled repos, and an unregistered RHEL 9 guest fails them all with
 # "No match for argument" rather than anything about subscriptions.
 
+# `always` so a run narrowed to in-guest tags still waits. Untagged tasks are
+# skipped the moment --tags is given, and skipping this one turns "sshd is still
+# starting" into a connection error on whichever task happens to be first.
 - name: Wait for the bastion to be ready
   ansible.builtin.wait_for_connection:
     delay: 5
     timeout: 300
+  tags:
+    - always
 
 - name: Enable additional RHSM repositories
   ansible.builtin.command:

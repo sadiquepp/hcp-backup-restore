@@ -88,50 +88,9 @@
   tags:
     - virt
 
-# No reservation means no predictable address, so ask libvirt. domifaddr reads
-# the lease the guest actually took; it stays empty until the guest has booted
-# far enough to DHCP, which is why this retries rather than sleeping once.
-- name: Wait for the bastion to take a DHCP address
-  ansible.builtin.shell: >-
-    set -o pipefail;
-    virsh domifaddr {{ bastion_name }}
-    | awk '/ipv4/ {split($4, a, "/"); print a[1]}'
-  args:
-    executable: /bin/bash
-  register: bastion_addr
-  changed_when: false
-  until: bastion_addr.stdout | trim | length > 0
-  retries: "{{ (bastion_boot_timeout | int / 10) | round | int }}"
-  delay: 10
+# Discovery lives in its own file so it can be tagged `always`: add_host builds
+# the `bastion` group for this run only, so a run narrowed to the in-guest tags
+# still has to do it or the second play matches no hosts. See discover.yml.
+- ansible.builtin.import_tasks: discover.yml
   tags:
-    - virt
-
-- name: Record the bastion's address
-  ansible.builtin.set_fact:
-    bastion_ip: "{{ bastion_addr.stdout | trim }}"
-    cacheable: true
-  tags:
-    - virt
-
-# Added to the in-memory inventory so the rest of the playbook can delegate to
-# it without a [bastion] entry in inventory/hosts -- there is nothing stable to
-# write there when the address comes from DHCP.
-- name: Add the bastion to the in-memory inventory
-  ansible.builtin.add_host:
-    name: "{{ bastion_ip }}"
-    groups: bastion
-    ansible_ssh_private_key_file: "{{ bastion_ssh_private_key | default('~/.ssh/lab_rsa') }}"
-    ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
-    ansible_user: root
-  changed_when: false
-  tags:
-    - virt
-
-- name: Report the bastion's address
-  ansible.builtin.debug:
-    msg: >-
-      bastion is at {{ bastion_ip }} (DHCP, no reservation) --
-      ssh -i {{ bastion_ssh_private_key | default('~/.ssh/lab_rsa') }} root@{{ bastion_ip }}.
-      Re-read it any time with: virsh domifaddr {{ bastion_name }}
-  tags:
-    - virt
+    - always

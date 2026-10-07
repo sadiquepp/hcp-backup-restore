@@ -1,0 +1,72 @@
+---
+# Find the bastion's address and put it in the in-memory inventory.
+#
+# Tagged `always` by the import in main.yml, and that is the point. add_host
+# builds the `bastion` group for THIS run only -- nothing is written to
+# inventory/hosts, because a DHCP address is not a thing to write there. So any
+# invocation whose second play needs the group has to run these tasks, including
+# one narrowed to in-guest tags:
+#
+#   ansible-playbook ... --tags repos,scanners,clients,registry-trust,env
+#
+# Without `always` that selection skips the whole first play, the group is never
+# created, and the run ends in:
+#
+#   [WARNING]: Could not match supplied host pattern, ignoring: bastion
+#   PLAY [Configure the bastion] ... skipping: no hosts matched
+#
+# Discovery is skipped rather than failed when the VM does not exist yet, so
+# `--tags preflight` still works before anything has been created.
+
+- name: Check whether the bastion VM exists
+  ansible.builtin.shell: "virsh dominfo {{ bastion_name }} 2>/dev/null | awk '/State/ {print $2}'"
+  register: bastion_discover_state
+  changed_when: false
+  failed_when: false
+
+- name: Explain why discovery is being skipped
+  ansible.builtin.debug:
+    msg: >-
+      No libvirt domain named {{ bastion_name }}, so there is no address to
+      discover and the `bastion` group stays empty -- the second play will
+      report "no hosts matched". Create the VM first:
+      ansible-playbook -i inventory/hosts setup_bastion.yaml --tags bastion-vm
+  when: bastion_discover_state.stdout | trim | length == 0
+
+- name: Wait for the bastion to take a DHCP address
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    virsh domifaddr {{ bastion_name }}
+    | awk '/ipv4/ {split($4, a, "/"); print a[1]}'
+  args:
+    executable: /bin/bash
+  register: bastion_addr
+  changed_when: false
+  until: bastion_addr.stdout | trim | length > 0
+  retries: "{{ (bastion_boot_timeout | int / 10) | round | int }}"
+  delay: 10
+  when: bastion_discover_state.stdout | trim | length > 0
+
+- name: Record the bastion's address
+  ansible.builtin.set_fact:
+    bastion_ip: "{{ bastion_addr.stdout | trim }}"
+    cacheable: true
+  when: bastion_discover_state.stdout | trim | length > 0
+
+- name: Add the bastion to the in-memory inventory
+  ansible.builtin.add_host:
+    name: "{{ bastion_ip }}"
+    groups: bastion
+    ansible_ssh_private_key_file: "{{ bastion_ssh_private_key | default('~/.ssh/lab_rsa') }}"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+    ansible_user: root
+  changed_when: false
+  when: bastion_discover_state.stdout | trim | length > 0
+
+- name: Report the bastion's address
+  ansible.builtin.debug:
+    msg: >-
+      bastion is at {{ bastion_ip }} (DHCP, no reservation) --
+      ssh -i {{ bastion_ssh_private_key | default('~/.ssh/lab_rsa') }} root@{{ bastion_ip }}.
+      Re-read it any time with: virsh domifaddr {{ bastion_name }}
+  when: bastion_discover_state.stdout | trim | length > 0

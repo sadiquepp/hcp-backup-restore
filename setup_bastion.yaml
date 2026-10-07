@@ -31,6 +31,15 @@
 ##
 ## Useful tags: preflight, virt, packages, repos, scanners, clients,
 ## registry-trust, env.
+##
+## Any of the in-guest tags can be used on their own -- address discovery and
+## the ssh wait are tagged `always`, so the `bastion` group is built on every
+## run whatever else is selected. Without that, a run like
+##   --tags repos,scanners
+## skips the whole first play, never populates the group, and ends in
+##   [WARNING]: Could not match supplied host pattern, ignoring: bastion
+##   PLAY [Configure the bastion] ... skipping: no hosts matched
+## which looks like a DHCP problem and is not one.
 
 - name: Create the bastion VM
   hosts: localhost
