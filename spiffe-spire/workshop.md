@@ -1126,6 +1126,49 @@ identity *available*; using it is the workload's job.
 
 > **Where:** the hub, then the SNO.
 
+**What changes, in one picture.** Before - the application as shipped, C1
+and C2:
+
+```text
+  checkoutservice pod                            paymentservice pod
+ ┌──────────────────────────────┐               ┌──────────────────────────────┐
+ │ server                       │ plaintext gRPC│ server                       │
+ │  dials paymentservice:50051  ├──────────────►│  listens on :50051           │
+ │                              │ Service :50051│                              │
+ └──────────────────────────────┘  → pod :50051 └──────────────────────────────┘
+                                                  ▲
+  any pod - the intruder, no SVID ────────────────┘ plaintext: connected
+```
+
+After - this overlay. Neither `server` container changes; each pod gains a
+ghostunnel, and only the ghostunnels speak across the network:
+
+```text
+  checkoutservice pod                            paymentservice pod
+ ┌──────────────────────────────┐               ┌──────────────────────────────┐
+ │ server                       │               │ ghostunnel server            │
+ │  dials localhost:50051       │               │  listens on :8443            │
+ │     │ plaintext, inside      │               │  demands a client SVID, and  │
+ │     ▼ the pod only           │               │  admits only .../checkout-   │
+ │ ghostunnel client            │  mTLS - both  │  service (this TD or peer's) │
+ │  listens on localhost:50051  │  sides show   │     │ plaintext, inside      │
+ │  dials paymentservice:50051  ├──an SVID ────►│     ▼ the pod only           │
+ │  accepts only a server that  │ Service :50051│ server                       │
+ │  is .../sa/paymentservice    │  → pod :8443  │  listens on :50052           │
+ └──────────────┬───────────────┘               └──────────────┬───────────────┘
+                ▲ SVID + trust bundle, renewed by itself       ▲
+                └──── SPIRE agent's Workload API socket ───────┘
+                      (the csi.spiffe.io volume, no files)
+
+  intruder, no SVID  ──► :8443   refused: no client certificate         (C4)
+  client, wrong SVID ──► :8443   refused: not checkoutservice           (C4)
+  anything           ──► :50052  dropped by the NetworkPolicy           (C4)
+```
+
+The callers' view does not change: checkoutservice's code still thinks it
+talks plaintext gRPC to `:50051`, and the Service still answers on 50051 -
+it just forwards to ghostunnel's 8443 now.
+
 Four small files, in an overlay directory next to your other manifests:
 
 ```bash
