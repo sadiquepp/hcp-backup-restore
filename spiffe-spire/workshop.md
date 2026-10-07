@@ -1436,7 +1436,7 @@ from the SNO's own checkoutservice would show that pod's IP instead.
 
 **Place an order yourself, on the hub, and find it on the SNO.** Open the
 hub's shop, put something in the cart, and at checkout replace the prefilled
-card with one the load generator will not use - `4111 1111 1111 1111`, any
+card with one the load generator will not use - `4111111111111111` (no spaces - the form refuses them), any
 future expiry (paymentservice only checks that it is a well-formed Visa or
 Mastercard):
 
