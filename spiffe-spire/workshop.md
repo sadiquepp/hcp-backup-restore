@@ -1345,8 +1345,16 @@ oc -n $BQ_NS rollout status deploy/checkoutservice --timeout=10m
 lab hub
 bq_status
 # {"ok":true,"status":"ok","backend_ok":true,"backend_status":"ok",...}
-oc -n $BQ_NS logs deploy/checkoutservice -c ghostunnel --since=5m | grep -c 'opening pipe'   # orders, paying
+oc -n $BQ_NS logs deploy/checkoutservice -c server --since=5m | grep -c 'payment went through'   # orders, paid
+oc -n $BQ_NS logs deploy/checkoutservice -c ghostunnel | grep 'opening pipe'                   # the tunnel(s) they used
 ```
+
+Many payments, very few pipes - often one. ghostunnel logs a pipe per TCP
+connection, not per request, and checkoutservice's gRPC client opens one
+connection to `localhost:50051` at startup and sends every charge down it
+as a stream on that HTTP/2 connection. So one mTLS handshake carries
+hundreds of orders; a new pipe means a reconnect (a restart, an idle
+timeout), not a new order.
 
 `backend_ok` is checkoutservice's ghostunnel reporting that it just completed a
 full mTLS handshake with the paymentservice and found
@@ -1413,11 +1421,27 @@ Watch the payments arrive on the other cluster:
 
 ```bash
 lab sno
-oc -n $BQ_NS logs deploy/paymentservice -c ghostunnel -f --since=1m | grep 'opening pipe'
+oc -n $BQ_NS logs deploy/paymentservice -c ghostunnel --since=10m | grep 'opening pipe'
+# opening pipe: tcp:10.128.0.2:39666 [O=SPIRE,C=US] <-> tcp:[::1]:50052 [no tls]
+oc -n $BQ_NS logs deploy/paymentservice -c server -f --since=1m | grep 'Transaction processed'
 # ctrl-c when you have seen enough
 ```
 
-Some of those connections now come from the hub, through the SNO's router: a
+As in C4, expect a handful of pipes and a steady stream of transactions:
+each pipe is one connection, and the hub's checkoutservice keeps one open
+and sends every charge down it. Pipes from the hub come in from the SNO's
+router, which runs on the node's network - so their source is the node's
+own address on the pod network (`10.128.0.2` here), not a pod IP. A pipe
+from the SNO's own checkoutservice would show that pod's IP instead.
+
+On the hub, the paymentservice has gone quiet:
+
+```bash
+lab hub
+oc -n $BQ_NS logs deploy/paymentservice -c server --since=2m | grep -c 'Transaction processed'   # 0
+```
+
+Those connections from the hub, through the SNO's router, are a
 checkout in `hub.mylab.com` proving who it is to a payment service in
 `sno.mylab.com`, each checking the other against a CA it holds only because
 the two SPIRE servers exchanged bundles in Lab 7.

@@ -57,14 +57,15 @@
     (spire_bv_status.stdout | from_json).get('backend_ok', false)
   changed_when: false
 
-# The load generator places an order every few seconds; each payment is one
-# connection through the tunnel, logged as it opens.
+# The load generator places an order every few seconds. Counted in the app's
+# own log, not ghostunnel's 'opening pipe': that is one line per connection,
+# and checkoutservice's gRPC client keeps one open for every charge.
 - name: 2. Orders are paying through the tunnel
   ansible.builtin.shell:
     cmd: >-
       set -o pipefail;
-      oc -n {{ spire_boutique_namespace }} logs {{ spire_bv_checkout.stdout }} -c ghostunnel --since=10m
-      | grep -c 'opening pipe'
+      oc -n {{ spire_boutique_namespace }} logs {{ spire_bv_checkout.stdout }} -c server --since=10m
+      | grep -c 'payment went through'
   args:
     executable: /bin/bash
   register: spire_bv_pipes
