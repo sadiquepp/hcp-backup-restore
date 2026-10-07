@@ -1,0 +1,7 @@
+galaxy_info:
+  author: sadiquepp
+  description: Configures the bastion VM for container builds and image scanning
+  license: MIT
+  min_ansible_version: "2.9"
+
+dependencies: []

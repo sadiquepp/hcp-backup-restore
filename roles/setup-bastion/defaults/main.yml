@@ -1,0 +1,65 @@
+---
+# defaults file for setup-bastion
+#
+# In-guest configuration. Runs after roles/setup-rhsm has registered the VM,
+# because every dnf task here needs entitled repos.
+
+## Packages. container-tools brings podman, buildah and skopeo together; the
+## rest is what the build and scan scripts in sadiquepp/openshift call.
+bastion_packages:
+  - git
+  - jq
+  - make
+  - tar
+  - gzip
+  - unzip
+  - wget
+  - bash-completion
+  - python3-pip
+  - bind-utils
+  - podman
+  - buildah
+  - skopeo
+
+## Extra dnf repositories, beyond what the subscription enables. Each item is
+## passed to ansible.builtin.yum_repository, so: name, description, baseurl,
+## gpgcheck, gpgkey, enabled...
+##
+##   bastion_extra_dnf_repos:
+##     - name: epel
+##       description: EPEL 9
+##       baseurl: https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64/
+##       gpgcheck: true
+##       gpgkey: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
+bastion_extra_dnf_repos: []
+
+## Extra RHSM repositories to enable by ID, beyond whatever the activation key
+## turns on. Left empty because the default RHEL 9 key already gives baseos and
+## appstream, which is all the packages above need.
+bastion_rhsm_repos: []
+
+## Vulnerability scanners. grype is what cve-demo/compare.sh and scan-stack.sh
+## use; trivy is an optional second opinion, off by default -- the two use
+## different databases, so it is a cross-check rather than a requirement.
+bastion_install_grype: true
+bastion_install_trivy: false
+
+## oc, for applying the workload overlays from the bastion. Empty means skip.
+bastion_oc_version: stable-4.18
+
+## Git repositories to clone into bastion_workdir. The hardened-images build and
+## scan tooling lives in the first one.
+bastion_workdir: /root/work
+bastion_git_repos:
+  - repo: https://github.com/sadiquepp/openshift.git
+    dest: openshift
+
+## Trust the lab's mirror registry so podman and skopeo can push to it. The CA
+## is fetched from the registry VM, which means this only works once
+## setup_mirror_registry.yaml has run. Set false on a bastion that only talks
+## to registries with publicly-signed certs.
+bastion_trust_mirror_registry: true
+
+## Log the bastion in to the mirror registry. Needs mirror_registry_password
+## from vault.yaml.
+bastion_registry_login: true

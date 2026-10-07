@@ -1,0 +1,193 @@
+---
+# Tasks file for setup-bastion
+#
+# Runs inside the bastion VM. Delegate it there (setup_bastion.yaml does), and
+# only after roles/setup-rhsm has registered the guest -- every dnf task below
+# needs entitled repos, and an unregistered RHEL 9 guest fails them all with
+# "No match for argument" rather than anything about subscriptions.
+
+- name: Wait for the bastion to be ready
+  ansible.builtin.wait_for_connection:
+    delay: 5
+    timeout: 300
+
+- name: Enable additional RHSM repositories
+  ansible.builtin.command:
+    cmd: "subscription-manager repos --enable={{ item }}"
+  loop: "{{ bastion_rhsm_repos }}"
+  when: bastion_rhsm_repos | length > 0
+  tags:
+    - packages
+
+- name: Add extra dnf repositories
+  ansible.builtin.yum_repository:
+    name: "{{ item.name }}"
+    description: "{{ item.description | default(item.name) }}"
+    baseurl: "{{ item.baseurl }}"
+    gpgcheck: "{{ item.gpgcheck | default(true) }}"
+    gpgkey: "{{ item.gpgkey | default(omit) }}"
+    enabled: "{{ item.enabled | default(true) }}"
+  loop: "{{ bastion_extra_dnf_repos }}"
+  loop_control:
+    label: "{{ item.name }}"
+  tags:
+    - packages
+
+- name: Install build and scan packages
+  ansible.builtin.dnf:
+    name: "{{ bastion_packages }}"
+    state: present
+  tags:
+    - packages
+
+- name: Create the work directory
+  ansible.builtin.file:
+    path: "{{ bastion_workdir }}"
+    state: directory
+    mode: "0755"
+  tags:
+    - repos
+
+- name: Clone the lab repositories
+  ansible.builtin.git:
+    repo: "{{ item.repo }}"
+    dest: "{{ bastion_workdir }}/{{ item.dest }}"
+    version: "{{ item.version | default('HEAD') }}"
+    update: "{{ item.update | default(false) }}"
+  loop: "{{ bastion_git_repos }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  tags:
+    - repos
+
+# grype rather than a dnf package because it is not in any Red Hat repo. The
+# installer script drops a single static binary; no daemon, no service.
+- name: Install grype
+  ansible.builtin.shell:
+    cmd: >-
+      curl -sSfL https://get.anchore.io/grype
+      | sh -s -- -b /usr/local/bin
+    creates: /usr/local/bin/grype
+  when: bastion_install_grype | bool
+  tags:
+    - scanners
+
+# Pre-seeds the vulnerability database so the first scan does not pay for it,
+# and so a download that cannot unpack fails here rather than mid-comparison.
+# ~1GB under /root/.cache/grype, which is what the 256G disk is for.
+- name: Prime grype's vulnerability database
+  ansible.builtin.command:
+    cmd: grype db update
+  register: bastion_grype_db
+  changed_when: "'No update available' not in bastion_grype_db.stdout"
+  when: bastion_install_grype | bool
+  tags:
+    - scanners
+
+- name: Verify grype's database is usable
+  ansible.builtin.command:
+    cmd: grype db status
+  changed_when: false
+  when: bastion_install_grype | bool
+  tags:
+    - scanners
+
+- name: Install trivy
+  ansible.builtin.yum_repository:
+    name: trivy
+    description: Trivy repository
+    baseurl: https://aquasecurity.github.io/trivy-repo/rpm/releases/$releasever/$basearch/
+    gpgcheck: false
+    enabled: true
+  when: bastion_install_trivy | bool
+  tags:
+    - scanners
+
+- name: Install the trivy package
+  ansible.builtin.dnf:
+    name: trivy
+    state: present
+  when: bastion_install_trivy | bool
+  tags:
+    - scanners
+
+- name: Install oc and kubectl
+  ansible.builtin.unarchive:
+    src: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ bastion_oc_version }}/openshift-client-linux.tar.gz"
+    dest: /usr/local/bin
+    remote_src: true
+    include:
+      - oc
+      - kubectl
+    mode: "0755"
+    creates: /usr/local/bin/oc
+  when: bastion_oc_version | length > 0
+  tags:
+    - clients
+
+# podman and skopeo will not push to the lab's Quay until its self-signed CA is
+# trusted. Fetched from the registry VM rather than regenerated, so this needs
+# setup_mirror_registry.yaml to have run.
+- name: Fetch the mirror registry CA from the registry VM
+  ansible.builtin.slurp:
+    src: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+  delegate_to: "{{ lab_network_prefix }}.{{ ip_list.registry }}"
+  register: bastion_registry_ca
+  when: bastion_trust_mirror_registry | bool
+  tags:
+    - registry-trust
+
+- name: Install the mirror registry CA on the bastion
+  ansible.builtin.copy:
+    content: "{{ bastion_registry_ca.content | b64decode }}"
+    dest: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+    mode: "0644"
+  when: bastion_trust_mirror_registry | bool
+  tags:
+    - registry-trust
+
+- name: Update the bastion's CA trust bundle
+  ansible.builtin.command:
+    cmd: update-ca-trust extract
+  when: bastion_trust_mirror_registry | bool
+  tags:
+    - registry-trust
+
+- name: Log the bastion in to the mirror registry
+  ansible.builtin.command:
+    cmd: >-
+      podman login
+      -u init
+      -p {{ mirror_registry_password }}
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }}
+  no_log: true
+  when:
+    - bastion_registry_login | bool
+    - mirror_registry_password is defined
+  tags:
+    - registry-trust
+
+# Sourcing this is step 0 of everything in openshift/test-workloads/online-boutique/hardened.
+- name: Write the build environment file
+  ansible.builtin.copy:
+    dest: /root/.bastion-env
+    mode: "0644"
+    content: |
+      # Sourced by hand before running the hardened-image build and scan
+      # scripts in {{ bastion_workdir }}/openshift/test-workloads/online-boutique/hardened.
+      # Written by roles/setup-bastion.
+      export REGISTRY={{ mirror_registry_domain }}:{{ mirror_registry_port }}
+      export NAMESPACE=online-boutique
+  tags:
+    - env
+
+- name: Report what the bastion is ready for
+  ansible.builtin.debug:
+    msg:
+      - "bastion ready. ssh in, then:"
+      - "  source /root/.bastion-env"
+      - "  cd {{ bastion_workdir }}/openshift/test-workloads/online-boutique/hardened"
+      - "  ./preflight.sh --build-check"
+      - "REGISTRY is {{ mirror_registry_domain }}:{{ mirror_registry_port }}"
+  tags:
+    - env

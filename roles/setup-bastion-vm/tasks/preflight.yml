@@ -1,0 +1,97 @@
+---
+# Preflight for setup-bastion-vm.
+#
+# All of this is cheap and runs before a 256G disk is created, because every
+# check here fails in a way that is otherwise only visible much later: a full
+# filesystem shows up as a qemu-img error halfway through virt-resize, and an
+# uncustomized base image shows up as a VM that boots fine and refuses every
+# ssh key you own.
+
+- name: Check the base image exists
+  ansible.builtin.stat:
+    path: "{{ base_image_dir }}/{{ rhel9_kvm_image }}"
+  register: bastion_base_image
+  tags:
+    - preflight
+
+- name: Fail if the base image is missing
+  ansible.builtin.assert:
+    that:
+      - bastion_base_image.stat.exists
+    fail_msg: >-
+      {{ base_image_dir }}/{{ rhel9_kvm_image }} does not exist. Run
+      setup_bm_host.yaml first -- it downloads the RHEL 9 KVM image and
+      customizes it (lab ssh key injected, cloud-init removed). This role
+      reuses that same prepared image rather than preparing its own, exactly
+      as roles/setup-mirror-registry-vm does.
+  tags:
+    - preflight
+
+# The lab key is injected into the base image by setup-bm-host. Without it the
+# VM comes up with no way in, and the in-guest plays fail at wait_for_connection
+# with a timeout rather than anything that names the cause.
+- name: Check the lab ssh key is in the base image
+  ansible.builtin.command:
+    cmd: >-
+      virt-cat -a {{ base_image_dir }}/{{ rhel9_kvm_image }}
+      /root/.ssh/authorized_keys
+  environment:
+    LIBGUESTFS_BACKEND: direct
+  register: bastion_base_authkeys
+  changed_when: false
+  failed_when: false
+  tags:
+    - preflight
+
+- name: Fail if the base image carries no authorized key
+  ansible.builtin.assert:
+    that:
+      - bastion_base_authkeys.rc == 0
+      - bastion_base_authkeys.stdout | trim | length > 0
+    fail_msg: >-
+      {{ rhel9_kvm_image }} has no /root/.ssh/authorized_keys. Run
+      setup_bm_host.yaml (or at least its --tags baseimage) before this
+      playbook -- the VM would otherwise boot with no way to log in.
+  tags:
+    - preflight
+
+- name: Ensure the disk directory exists
+  ansible.builtin.file:
+    path: "{{ bastion_disk_dir }}"
+    state: directory
+    mode: "0711"
+  tags:
+    - preflight
+
+# The point of this VM. If the host had room, the builds would run on the host.
+- name: Measure free space where the disk will live
+  ansible.builtin.command:
+    cmd: "df -B1 --output=avail,target {{ bastion_disk_dir }}"
+  register: bastion_df
+  changed_when: false
+  tags:
+    - preflight
+
+- name: Fail if there is not room for the disk
+  vars:
+    bastion_avail_bytes: "{{ bastion_df.stdout_lines[1].split()[0] | int }}"
+    bastion_wanted_bytes: "{{ bastion_disk_size
+                              | regex_replace('[Gg]$', '')
+                              | int * 1024 * 1024 * 1024 }}"
+  ansible.builtin.assert:
+    that:
+      - bastion_avail_bytes | int >= bastion_wanted_bytes | int
+    fail_msg: >-
+      {{ bastion_disk_dir }} is on {{ bastion_df.stdout_lines[1].split()[1] }},
+      which has {{ (bastion_avail_bytes | int / 1024 / 1024 / 1024) | round(1) }}G
+      free -- less than the {{ bastion_disk_size }} this VM wants. Either point
+      bastion_disk_dir at a filesystem with room, lower bastion_disk_size, or
+      set bastion_require_free_space=false if you are overcommitting the sparse
+      qcow2 deliberately.
+    success_msg: >-
+      {{ bastion_df.stdout_lines[1].split()[1] }} has
+      {{ (bastion_avail_bytes | int / 1024 / 1024 / 1024) | round(1) }}G free for
+      a {{ bastion_disk_size }} disk.
+  when: bastion_require_free_space | bool
+  tags:
+    - preflight

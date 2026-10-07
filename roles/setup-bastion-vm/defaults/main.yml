@@ -1,0 +1,41 @@
+---
+# defaults file for setup-bastion-vm
+#
+# Override any of these in vars.yaml rather than editing them here.
+
+## The VM itself. 256G because this host exists to build container images:
+## the hardened/UBI comparison in sadiquepp/openshift pulls a dozen base
+## images, produces two full stacks of twelve, and saves each one to a tar to
+## scan it. That does not fit in what is left of a baremetal host's /.
+bastion_name: bastion
+bastion_disk: bastion_disk.qcow2
+bastion_disk_size: 256G
+bastion_memory: 16384
+bastion_vcpus: 8
+
+## Where the qcow2 lands. Unlike the other VM roles this is a variable, because
+## the whole reason for this VM is that the baremetal host is short of space --
+## if /var/lib/libvirt/images is on a small /, point this at a filesystem that
+## has room and the disk follows.
+bastion_disk_dir: /var/lib/libvirt/images
+
+## Which partition virt-resize grows. Matches the other RHEL 9 KVM guests in
+## this lab; the role prints the base image's real layout before resizing so a
+## mismatch is visible rather than silent.
+bastion_resize_partition: /dev/sda4
+
+## libvirt network. The bastion takes whatever address DHCP gives it -- there is
+## no ip_list entry and no ip-dhcp-host reservation, unlike helper/registry.
+## Nothing needs to reach it at a predictable address: it is where you run
+## builds from, not something the cluster talks to. The role discovers the
+## address after boot and reports it.
+bastion_network: default
+bastion_os_variant: rhel9.5
+
+## Refuse to create the disk unless the filesystem holding bastion_disk_dir has
+## room for it. qcow2 is sparse so this is technically overcommittable -- set it
+## false if you know you are overcommitting on purpose.
+bastion_require_free_space: true
+
+## How long to wait for the VM to appear with an address.
+bastion_boot_timeout: 300
