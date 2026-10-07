@@ -1,16 +1,54 @@
+## The worker VMs for hcp-cluster2, PXE-booted rather than booted from the
+## discovery ISO.
+##
+##   ansible-playbook -i inventory/hosts setup_hosted_cluster2_vm.yaml --ask-vault-pass
+##   ansible-playbook -i inventory/hosts setup_hosted_cluster2_vm.yaml --ask-vault-pass -e target_hub=hub2
+##
+## PXE, end to end:
+##   - libvirt's dnsmasq offers pxelinux.0 from the helper
+##     (<bootp> in roles/setup-bm-host/templates/default-network.xml.j2)
+##   - the helper serves it over TFTP, with the menu in
+##     roles/setup-tftp/templates/default.j2 naming images/vmlinuz,
+##     images/initrd.img and rootfs.img over HTTP on port 8080
+##   - those three come from the hub InfraEnv's status.bootArtifacts and are
+##     staged on the helper by the include below. assisted-service serves an
+##     initrd with that InfraEnv's ignition already embedded, which is why the
+##     PXE menu needs no ignition URL and why the artifacts have to come from
+##     the InfraEnv these workers are meant to register with.
+##
+## So the ISO itself is never used here, and discovery_download_iso false
+## skips fetching ~1G of it. --boot hd,network is the other half: an empty
+## disk falls through to PXE, and once RHCOS is written every later boot -
+## including the agent's own reboot after it writes the disk - comes up from
+## the disk. (That is also why these VMs never had the --cdrom install-session
+## problem the c1 workers had; see setup_hosted_cluster_vm.yaml.)
+##
+## NOTE the helper has ONE set of PXE artifacts. They belong to whichever
+## InfraEnv last ran this include, so a hub and a hub2 InfraEnv overwrite each
+## other's - run this against the hub whose InfraEnv these workers should join.
+
 - name: Setting Up Hosted Cluster
   hosts: localhost
   become: true
   vars_files:
     - vars.yaml
   vars:
+    ## Anything not named here is hub1, as before. The old two-way ternary
+    ## sent -e target_hub=hubd to hub1's kubeconfig without saying so.
+    hub_install_folders:
+      hub: "{{ hub_install_folder }}"
+      hub2: "{{ hub2_install_folder }}"
+      hubd: "{{ hub_disconnected_install_folder }}"
+      compact: "{{ compact_install_folder }}"
     hub_kubeconfig: >-
-      {{ (target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder) }}/auth/kubeconfig
+      {{ hub_install_folders[target_hub | default('hub')] | default(hub_install_folder) }}/auth/kubeconfig
   environment:
     KUBECONFIG: "{{ hub_kubeconfig }}"
   tasks:
-    - name: Download discovery ISO from hub InfraEnv
+    - name: Stage the InfraEnv's PXE artifacts on the helper
       ansible.builtin.include_tasks: roles/setup-bminfra/tasks/download-discovery-iso.yml
+      vars:
+        discovery_download_iso: false
 
     - name: Create Directory for Hosted Cluster VMs
       file:
@@ -42,7 +80,7 @@
         --memballoon model=virtio,freePageReporting=on \
         --noautoconsole \
         --vnc \
-        --network network:default,mac=52:54:00:e2:54:{{ ip_list.c2worker1 }} \
+        --network network:default,mac=52:54:00:e2:54:{{ '%02d' | format(ip_list.c2worker1 | int) }} \
         --name c2_worker1 \
         --cpu host-passthrough
         
@@ -55,7 +93,7 @@
         --memballoon model=virtio,freePageReporting=on \
         --noautoconsole \
         --vnc \
-        --network network:default,mac=52:54:00:e2:54:{{ ip_list.c2worker2 }} \
+        --network network:default,mac=52:54:00:e2:54:{{ '%02d' | format(ip_list.c2worker2 | int) }} \
         --name c2_worker2 \
         --cpu host-passthrough
 
