@@ -1,0 +1,75 @@
+{# The ingress gateway: an Envoy of its own, injected with the `gateway` and
+   `spireGateway` templates, so it too holds a SPIRE-issued certificate and
+   can open mTLS to the frontend. The OpenShift router sends it plain HTTP
+   on {{ spire_mesh_gateway_port }} (the Route terminates TLS at the edge). #}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ spire_mesh_gateway_name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ spire_mesh_gateway_name }}
+spec:
+  selector:
+    matchLabels:
+      istio: {{ spire_mesh_gateway_name }}
+  template:
+    metadata:
+      annotations:
+        inject.istio.io/templates: gateway,spireGateway
+      labels:
+        istio: {{ spire_mesh_gateway_name }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      serviceAccountName: {{ spire_mesh_gateway_name }}
+      containers:
+        - name: istio-proxy
+          image: auto
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            runAsNonRoot: true
+          resources: {{ spire_mesh_proxy_resources | to_json }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ spire_mesh_gateway_name }}
+spec:
+  selector:
+    istio: {{ spire_mesh_gateway_name }}
+  ports:
+    - name: http
+      port: {{ spire_mesh_gateway_port }}
+      targetPort: {{ spire_mesh_gateway_port }}
+---
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ spire_mesh_gateway_name }}
+spec:
+  selector:
+    istio: {{ spire_mesh_gateway_name }}
+  servers:
+    - port:
+        number: {{ spire_mesh_gateway_port }}
+        name: http
+        protocol: HTTP
+      hosts: ["*"]
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: frontend
+spec:
+  hosts: ["*"]
+  gateways: [{{ spire_mesh_gateway_name }}]
+  http:
+    - route:
+        - destination:
+            host: frontend
+            port:
+              number: 80

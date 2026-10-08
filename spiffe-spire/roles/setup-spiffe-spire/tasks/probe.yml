@@ -1,0 +1,151 @@
+---
+# What the labs need from the network, checked once, before any of it is
+# used. One pod, in a namespace of its own that is deleted afterwards:
+#
+#   - every agent node's name resolves in cluster DNS (the SPIRE agent dials
+#     its kubelet by name; troubleshooting.md case 2)
+#   - a name under this cluster's *.apps, and under the peer's, resolves from
+#     a pod and a router answers TLS on 443 (Lab 6's Route call, Lab 7's
+#     federation, Part C's payments across)
+#   - the two demo images pull (the pod would not start otherwise)
+#
+# Every finding is collected before anything fails, so one run names every
+# problem. spire_probe_strict false reports without failing.
+
+- name: List the nodes an agent will run on
+  ansible.builtin.command:
+    cmd: >-
+      oc get nodes -l node-role.kubernetes.io/worker
+      -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}'
+  register: spire_pb_nodes
+  changed_when: false
+
+- name: Name the two *.apps domains to try
+  ansible.builtin.set_fact:
+    spire_pb_apps: >-
+      {{ {spire_c.name ~ ' (this cluster)': spire_c.apps_domain}
+         | combine({spire_peer.name ~ ' (peer)': spire_peer.apps_domain} if spire_peer.apps_domain is defined else {}) }}
+
+- name: Render the namespace, the script and the pod
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      cat > {{ spire_manifest_dir }}/05-probe-namespace.yaml <<'NS'
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: {{ spire_probe_namespace }}
+        labels: {app.kubernetes.io/part-of: spiffe-spire-lab}
+      NS
+      oc create configmap spiffe-probe -n {{ spire_probe_namespace }} \
+        --from-file={{ role_path }}/files/probe.py --dry-run=client -o yaml \
+        > {{ spire_manifest_dir }}/05-probe-script.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Render the pod
+  ansible.builtin.template:
+    src: probe.yaml.j2
+    dest: "{{ spire_manifest_dir }}/05-probe.yaml"
+    mode: '0644'
+
+- name: Run the probe, and always take its namespace away again
+  block:
+    - name: Start the probe pod
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          oc delete namespace {{ spire_probe_namespace }} --ignore-not-found --wait=true --timeout=120s
+          oc apply -f {{ spire_manifest_dir }}/05-probe-namespace.yaml
+          oc apply -f {{ spire_manifest_dir }}/05-probe-script.yaml
+          oc apply -f {{ spire_manifest_dir }}/05-probe.yaml
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    # Done when it has run, or as soon as an image cannot be pulled - no
+    # point waiting out the back-off.
+    - name: Wait for the probe to finish
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ spire_probe_namespace }} get pod spiffe-probe
+          -o 'jsonpath={.status.phase}{" "}
+          {range .status.initContainerStatuses[*]}{.state.waiting.reason}{" "}{end}
+          {range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{end}'
+      register: spire_pb_phase
+      retries: "{{ spire_wait_retries }}"
+      delay: "{{ spire_wait_delay }}"
+      until: >-
+        spire_pb_phase.stdout.split() | select('in', ['Succeeded', 'Failed', 'ErrImagePull', 'ImagePullBackOff', 'InvalidImageName'])
+        | list | length > 0
+      changed_when: false
+      failed_when: false
+
+    - name: Read which image could not be pulled, if one could not
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ spire_probe_namespace }} get pod spiffe-probe
+          -o 'jsonpath={range .status.initContainerStatuses[*]}{.image}{" "}{.state.waiting.reason}{" "}{.state.waiting.message}{"\n"}{end}
+          {range .status.containerStatuses[*]}{.image}{" "}{.state.waiting.reason}{" "}{.state.waiting.message}{"\n"}{end}'
+      register: spire_pb_images
+      changed_when: false
+      failed_when: false
+
+    - name: Read its answer
+      ansible.builtin.command:
+        cmd: oc -n {{ spire_probe_namespace }} logs spiffe-probe -c probe
+      register: spire_pb_log
+      changed_when: false
+      failed_when: false
+      when: "'Succeeded' in spire_pb_phase.stdout"
+
+  always:
+    - name: Delete the probe's namespace
+      ansible.builtin.command:
+        cmd: oc delete namespace {{ spire_probe_namespace }} --ignore-not-found --wait=false
+      changed_when: true
+      failed_when: false
+
+- name: Make sense of it
+  ansible.builtin.set_fact:
+    spire_pb_result: >-
+      {{ (spire_pb_log.stdout | default('') | from_json)
+         if (spire_pb_log.stdout | default('') | trim | regex_search('^\{')) else {} }}
+    spire_pb_pull_errors: >-
+      {{ spire_pb_images.stdout_lines | default([])
+         | select('search', 'ErrImagePull|ImagePullBackOff|InvalidImageName') | list }}
+
+- name: Collect the problems
+  ansible.builtin.set_fact:
+    spire_pb_problems: >-
+      {{ (['image pull: ' ~ (spire_pb_pull_errors | join('; '))] if spire_pb_pull_errors else [])
+         + ([] if spire_pb_result or spire_pb_pull_errors else
+            ['the probe pod did not finish: ' ~ (spire_pb_phase.stdout | default('?') | trim)
+             ~ ' - oc -n ' ~ spire_probe_namespace ~ ' describe pod spiffe-probe, while it is still there'])
+         + ((spire_pb_result.nodes | default({})) | dict2items | selectattr('value', 'search', '^ERROR')
+            | map(attribute='key') | map('regex_replace', '^', 'node ')
+            | map('regex_replace', '$', ' does not resolve in cluster DNS - the SPIRE agent there cannot'
+                  ~ ' reach its kubelet, and no pod on it will get an SVID (troubleshooting.md case 2)')
+            | list)
+         + ((spire_pb_result.apps | default({})) | dict2items | selectattr('value', 'search', '^ERROR')
+            | map(attribute='value') | map('regex_replace', '^ERROR ', '*.apps from a pod: ') | list) }}
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['images         ' ~ spire_demo_helper_image ~ ', ' ~ spire_demo_python_image ~ ': '
+          ~ ('NOT pulled' if spire_pb_pull_errors else ('pulled' if spire_pb_result else '?'))]
+         + ((spire_pb_result.nodes | default({})) | dict2items
+            | map(attribute='key') | zip((spire_pb_result.nodes | default({})).values())
+            | map('join', ': ') | map('regex_replace', '^', 'node           ') | list)
+         + ((spire_pb_result.apps | default({})) | dict2items
+            | map(attribute='key') | zip((spire_pb_result.apps | default({})).values())
+            | map('join', ': ') | map('regex_replace', '^', '*.apps         ') | list) }}
+
+- name: Fail on what the labs would trip over
+  ansible.builtin.assert:
+    that: spire_pb_problems | length == 0
+    fail_msg: "{{ ['On ' ~ spire_c.name ~ ', the labs would fail here:'] + spire_pb_problems }}"
+    success_msg: "{{ spire_c.name }}: node names, both *.apps and both images - all fine"
+  when: spire_probe_strict | bool

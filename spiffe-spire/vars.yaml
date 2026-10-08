@@ -1,0 +1,339 @@
+## ===========================================================================
+## spiffe-spire/vars.yaml - SPIFFE/SPIRE workload identity on the hub and SNO
+## ===========================================================================
+##
+## Every variable this use case owns lives here, and every one is prefixed
+## spire_. Nothing SPIFFE-specific goes into the root vars.yaml.
+##
+## Loaded AFTER ../vars.yaml by every playbook in this directory:
+##
+##   vars_files:
+##     - ../vars.yaml          # base (and, for now, everyone else's)
+##     - vars.yaml             # this file
+##     - ../vault.yaml
+##
+## so anything below may refer to base variables (hub_domain, sno_name,
+## base_domain, hub_install_folder, ...) - Ansible templates lazily, at the
+## moment a variable is used, by which time all three files are loaded.
+##
+## No addresses here, and none needed: everything this lab reaches, it reaches
+## by name through the helper's existing zones - the cluster APIs, and routes
+## under the *.apps wildcard. If it ever needs a VM address, that goes into
+## ip_list in the root vars.yaml under a "## spiffe-spire" comment, not here.
+
+## ---------------------------------------------------------------------------
+## The two clusters, one trust domain each
+## ---------------------------------------------------------------------------
+## Select one with -e spire_cluster=hub|sno. The federation plays use both.
+##
+## trust_domain  the SPIFFE trust domain - the authority part of every SPIFFE
+##               ID this cluster issues: spiffe://<trust_domain>/... It is
+##               IMMUTABLE on the ZeroTrustWorkloadIdentityManager CR: changing
+##               it means deleting the operands and starting again.
+## cluster_name  names this cluster within its trust domain; also immutable.
+##               It appears in every agent's SPIFFE ID
+##               (spiffe://<td>/spire/agent/k8s_psat/<cluster_name>/<node uid>).
+## apps_domain   the cluster's *.apps wildcard. Routes are named under it so
+##               they resolve through the helper with no DNS change.
+## peer          the other cluster, for federation.
+##
+## Bring your own clusters: `./build-lab.sh --byo <name>=<kubeconfig> ...`
+## writes a vars file that replaces spire_clusters and spire_pair with two
+## clusters of any names, discovered from their kubeconfigs (workshop.md,
+## "Part A, alternatively - bring your own clusters").
+spire_clusters:
+  hub:
+    name: hub
+    kubeconfig: "{{ hub_install_folder }}/auth/kubeconfig"
+    trust_domain: "{{ hub_domain }}"
+    cluster_name: hub
+    apps_domain: "apps.{{ hub_domain }}"
+    peer: sno
+  ## The key is literal: Ansible does not template dict keys. sno_name only
+  ## has to agree with it for the trust domain to read naturally.
+  sno:
+    name: sno
+    kubeconfig: "{{ sno_install_folder }}/auth/kubeconfig"
+    trust_domain: "{{ sno_name }}.{{ base_domain }}"
+    cluster_name: "{{ sno_name }}"
+    apps_domain: "apps.{{ sno_name }}.{{ base_domain }}"
+    peer: hub
+
+## The two clusters the both-cluster plays (federation, xverify) pair up, in
+## order: the first is the one whose payments go across in boutique-federate.
+spire_pair: [hub, sno]
+
+## ---------------------------------------------------------------------------
+## The operator - Red Hat's packaging of SPIFFE/SPIRE
+## ---------------------------------------------------------------------------
+## "Zero Trust Workload Identity Manager" in redhat-operators. It deploys and
+## manages the SPIRE server (with spire-controller-manager as a sidecar), the
+## SPIRE agent DaemonSet, the SPIFFE CSI driver and, optionally, the OIDC
+## discovery provider - all from five CRs, each a singleton named 'cluster'.
+##
+## The package NAME is not hardcoded: the preflight phase looks it up in the
+## catalog by this fragment and fails if there is no match, which is the check
+## for "is Red Hat's packaging available on this cluster". Set
+## spire_operator_package to skip the lookup.
+spire_operator_package_match: zero-trust-workload-identity-manager
+spire_operator_package: ""
+## "" = the package's defaultChannel, read from the catalog at run time.
+spire_operator_channel: ""
+spire_catalog_source: redhat-operators
+spire_catalog_namespace: openshift-marketplace
+## Not a free choice: the operator's Route and some RBAC name this namespace
+## as a constant rather than reading where it was installed.
+spire_operator_namespace: zero-trust-workload-identity-manager
+
+## spire-controller-manager in this operator only acts on ClusterSPIFFEID,
+## ClusterFederatedTrustDomain and ClusterStaticEntry objects whose
+## spec.className is this value (watchClassless: false). An object without it
+## is accepted by the API and then silently ignored - no entry, no SVID.
+spire_class_name: zero-trust-workload-identity-manager-spire
+spire_bundle_configmap: spire-bundle
+
+## ---------------------------------------------------------------------------
+## SPIRE server
+## ---------------------------------------------------------------------------
+## CA lifetime and the default SVID lifetimes. A short X.509 SVID TTL is the
+## point of the exercise - rotation is continuous and nobody touches it - so
+## the operator defaults are kept.
+spire_server_ca_validity: 24h
+spire_server_x509_svid_ttl: 1h
+spire_server_jwt_svid_ttl: 5m
+spire_server_ca_key_type: rsa-2048
+spire_server_ca_subject:
+  country: US
+  organization: mylab
+  commonName: SPIRE Server CA
+spire_server_log_level: info
+## The spire-server CLI inside the server container, for `oc exec`.
+## /proc/1/exe, not a path in the image: the server container's PID 1 IS
+## spire-server (the image's entrypoint; the pod does not share a process
+## namespace), so this is the binary wherever the image keeps it. Red Hat's
+## image keeps it neither on $PATH nor at upstream's /opt/spire/bin - both
+## fail with "executable file ... not found".
+spire_server_cli: /proc/1/exe
+## Required by the SpireServer API even when the OIDC discovery provider is
+## not deployed (it is not, here). Only used for JWT-SVIDs.
+spire_server_jwt_issuer: "https://oidc-discovery.{{ spire_c.apps_domain }}"
+
+## Applied by the operator to BOTH containers of the spire-server pod (the
+## server and spire-controller-manager). See the memory budget in README.md.
+spire_server_resources:
+  requests: {cpu: 50m, memory: 128Mi}
+  limits: {memory: 512Mi}
+
+## ---------------------------------------------------------------------------
+## Storage for the SPIRE server
+## ---------------------------------------------------------------------------
+## The SPIRE server keeps its datastore (sqlite) and its CA signing keys on a
+## PersistentVolume, and the SpireServer API makes persistence mandatory.
+##
+## The base builds provide one: with use_lvm_storage true (the default) the
+## hub and the SNO get LVM Storage as part of the cluster build - the hub on
+## its workers' storage disks, the SNO on a second disk added after install -
+## and lvms-vg1 is their default StorageClass. On a lab built before that,
+## ./build-lab.sh --only lvm adds it (base playbooks, --tags lvm/snostorage).
+##
+##   auto   use the cluster's default StorageClass - lvms-vg1 - if it has one,
+##          otherwise 'local'
+##   local  a static local PersistentVolume on one node, under this lab's own
+##          StorageClass - the fallback for a cluster with no storage at all
+##   <name> that StorageClass, as it stands
+##
+## A SpireServer that already exists keeps the class it was created with
+## (persistence is immutable). Moving one from 'local' to lvms-vg1 means
+## --tags cleanup and building SPIRE again: a new PVC is a new CA.
+spire_storage_class: auto
+spire_local_storage_class: spire-local
+## On the node's own disk. Holds the CA keys: wiping it wipes the trust domain.
+spire_local_pv_path: /var/lib/spire-server-data
+## "" = the first node labelled node-role.kubernetes.io/worker (worker1 on the
+## hub, the one node on the SNO). The SPIRE server is then pinned to that node.
+spire_local_pv_node: ""
+spire_server_pv_size: 1Gi
+
+## ---------------------------------------------------------------------------
+## SPIRE agent and the CSI driver
+## ---------------------------------------------------------------------------
+spire_agent_log_level: info
+spire_agent_resources:
+  requests: {cpu: 20m, memory: 64Mi}
+  limits: {memory: 256Mi}
+## Applied to both containers of each CSI driver pod (the driver and the
+## node-driver-registrar).
+spire_csi_resources:
+  requests: {cpu: 10m, memory: 32Mi}
+  limits: {memory: 128Mi}
+## Where the CSI driver finds the agent's Workload API socket on the node, and
+## the name workloads use in their inline CSI volume.
+spire_agent_socket_path: /run/spire/agent-sockets
+spire_csi_driver_name: csi.spiffe.io
+
+## ---------------------------------------------------------------------------
+## Federation - hub.mylab.com <-> sno.mylab.com
+## ---------------------------------------------------------------------------
+## When true the spire phase enables each server's federation bundle endpoint
+## (https_spiffe profile) and publishes it through a passthrough Route, and the
+## federation plays exchange the bootstrap bundles and create a
+## ClusterFederatedTrustDomain on each side.
+##
+## WHY NOT THE OPERATOR'S OWN ROUTE (managedRoute: "true"). The operator names
+## it federation.<trust_domain> - federation.hub.mylab.com - which is outside
+## the *.apps wildcard and has no record on the helper. It would need a base
+## DNS change. A Route under *.apps resolves today, and for https_spiffe the
+## hostname is only used for routing (SNI): the endpoint is authenticated by
+## its SPIFFE ID, spiffe://<trust_domain>/spire/server, not by its name.
+spire_federation_enabled: true
+spire_federation_route_name: spire-federation
+spire_federation_route_host: "{{ spire_federation_route_name }}.{{ spire_c.apps_domain }}"
+## Seconds; how often the peer re-fetches this bundle (60-3600).
+spire_federation_refresh_hint: 300
+
+## ---------------------------------------------------------------------------
+## The demo workload
+## ---------------------------------------------------------------------------
+## One namespace per cluster with three deployments, each a spiffe-helper
+## sidecar (fetches the SVID over the Workload API socket the CSI driver
+## mounts, writes it to a shared emptyDir, keeps it renewed) and a Python
+## container:
+##
+##   echo-server  mTLS server on 8443: requires a client SVID, checks the
+##                client's SPIFFE ID against an allowlist
+##   client       a registered workload: has an SVID, is on the allowlist
+##   intruder     the same pod spec WITHOUT the registration label, so there is
+##                no registration entry, no SVID, and the server refuses it
+spire_demo_namespace: spiffe-demo
+## The label the ClusterSPIFFEID selects on. 'intruder' does not carry it.
+spire_demo_identity_label: spiffe.mylab.com/identity
+spire_demo_python_image: registry.access.redhat.com/ubi9/python-311:latest
+spire_demo_helper_image: ghcr.io/spiffe/spiffe-helper:0.11.0
+## The probe step's namespace: one pod, deleted when it has answered.
+spire_probe_namespace: spiffe-probe
+## false: report what the probe found, but do not stop the build on it.
+spire_probe_strict: true
+## The echo-server's passthrough Route, for the cross-cluster call.
+spire_demo_route_host: "echo-{{ spire_demo_namespace }}.{{ spire_c.apps_domain }}"
+
+## ---------------------------------------------------------------------------
+## Online Boutique - SPIFFE on a real application (--tags boutique)
+## ---------------------------------------------------------------------------
+## Eleven gRPC services, each with its own ServiceAccount. The lab registers
+## all of them and puts one hop under mTLS - checkoutservice ->
+## paymentservice - with ghostunnel sidecars that take their SVIDs straight
+## from the Workload API. See README.md "Online Boutique".
+##
+## The application is cloned from this repo at this commit and never edited;
+## the SPIFFE changes are a kustomize overlay the lab renders on top of
+## overlays/<spire_boutique_overlay>. Pinned, so an upstream change cannot
+## move under a lab that worked yesterday.
+spire_boutique_repo: https://github.com/sadiquepp/openshift
+spire_boutique_ref: 2ae4f18ed03e719669cff4883650bd7a24bdb6a2
+spire_boutique_path: test-workloads/online-boutique
+spire_boutique_src_dir: /root/spiffe-spire-src/openshift
+## Where the overlay is rendered; `oc kustomize` runs on this directory.
+spire_boutique_render_dir: "{{ spire_manifest_dir }}/boutique"
+## 'default' includes the load generator, which is what keeps orders - and
+## so payments over the mTLS hop - flowing without anyone clicking.
+spire_boutique_overlay: default
+## Fixed by that overlay; it is here so templates can name it.
+spire_boutique_namespace: online-boutique
+
+spire_boutique_ghostunnel_image: docker.io/ghostunnel/ghostunnel:v1.11.3-distroless
+spire_boutique_ghostunnel_resources:
+  requests: {cpu: 10m, memory: 32Mi}
+  limits: {memory: 128Mi}
+## The paymentservice app moves to this port, on the pod only; ghostunnel
+## takes the Service's traffic on the mTLS port.
+spire_boutique_app_port: 50052
+spire_boutique_mtls_port: 8443
+spire_boutique_status_port: 8081
+
+## Where this cluster's checkoutservice sends payments. false: its own
+## paymentservice. true: the PEER cluster's, through that cluster's
+## passthrough Route - across the federation. build-lab.sh's
+## boutique-federate step sets it true for the hub.
+spire_boutique_remote_payments: false
+spire_boutique_payment_route_host: "payment-{{ spire_boutique_namespace }}.{{ spire_c.apps_domain }}"
+
+## Who paymentservice lets in: this cluster's checkoutservice, and the peer's.
+## The peer's line is inert until the trust domains are federated - its
+## certificate does not even chain before then.
+spire_boutique_payment_allowed:
+  - "spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_boutique_namespace }}/sa/checkoutservice"
+  - "spiffe://{{ spire_peer.trust_domain }}/ns/{{ spire_boutique_namespace }}/sa/checkoutservice"
+## What checkoutservice dials, and who must answer. Derived from the switch.
+spire_boutique_payment_target: >-
+  {{ ('payment-' ~ spire_boutique_namespace ~ '.' ~ spire_peer.apps_domain ~ ':443')
+     if spire_boutique_remote_payments | bool else 'paymentservice:50051' }}
+spire_boutique_payment_server_id: >-
+  spiffe://{{ (spire_peer if spire_boutique_remote_payments | bool else spire_c).trust_domain
+  }}/ns/{{ spire_boutique_namespace }}/sa/paymentservice
+
+## ---------------------------------------------------------------------------
+## Online Boutique on Service Mesh, with SPIRE as the mesh's CA (--tags mesh)
+## ---------------------------------------------------------------------------
+## The same application, from the same pinned commit, in its own namespace:
+## every pod gets an Envoy sidecar from OpenShift Service Mesh 3, and every
+## sidecar's certificate comes from the SPIRE agent over the SPIFFE CSI
+## driver - not from istiod. mTLS is STRICT for the whole namespace, and an
+## AuthorizationPolicy lets only checkoutservice call paymentservice. See
+## README.md "Online Boutique on Service Mesh".
+##
+## A different namespace from the ghostunnel version, so the two never touch
+## each other's objects; run one or both (mind the memory budget).
+##
+## Sidecar mode only: ambient mode's ztunnel takes its certificates from
+## istiod's CA API and has no way to use the SPIRE agent's socket.
+spire_mesh_operator_package: servicemeshoperator3
+## "" = the package's defaultChannel, read from the catalog at run time.
+spire_mesh_operator_channel: ""
+## The cluster's global OperatorGroup lives here, so no OperatorGroup of our
+## own. Service Mesh 3 is an AllNamespaces operator.
+spire_mesh_operator_namespace: openshift-operators
+## "" = whatever Istio version the installed operator defaults to. Set both
+## IstioCNI and Istio to one version, from
+## `oc get istio default -o jsonpath={.status.version}` or the operator docs.
+spire_mesh_istio_version: ""
+spire_mesh_control_plane_namespace: istio-system
+spire_mesh_cni_namespace: istio-cni
+spire_mesh_namespace: boutique-mesh
+spire_mesh_render_dir: "{{ spire_manifest_dir }}/boutique-mesh"
+## Marks the Subscription, Istio and IstioCNI this lab created, so cleanup
+## removes those and nothing a mesh-using neighbour put there.
+spire_mesh_owner_label: spiffe.mylab.com/created-by
+## istiod's defaults are sized for production (500m / 2Gi requested), and the
+## Envoy default is 100m / 128Mi per pod, twelve pods here.
+spire_mesh_istiod_resources:
+  requests: {cpu: 50m, memory: 256Mi}
+  limits: {memory: 1Gi}
+spire_mesh_proxy_resources:
+  requests: {cpu: 10m, memory: 48Mi}
+  limits: {memory: 256Mi}
+## The ingress gateway: the one way in from outside the mesh. The app's own
+## Route is repointed at it.
+spire_mesh_gateway_name: boutique-gateway
+spire_mesh_gateway_port: 8080
+## Who may call paymentservice, as Istio principals - a SPIFFE ID without
+## the spiffe:// scheme.
+spire_mesh_payment_allowed:
+  - "{{ spire_c.trust_domain }}/ns/{{ spire_mesh_namespace }}/sa/checkoutservice"
+
+## ---------------------------------------------------------------------------
+## Where things are written on the lab host
+## ---------------------------------------------------------------------------
+## Every manifest the playbook applies is rendered here first, one directory per
+## cluster, then applied with `oc apply -f`. Readable afterwards.
+spire_manifest_root: /root/spiffe-spire-manifests
+spire_manifest_dir: "{{ spire_manifest_root }}/{{ spire_c.name }}"
+## The workshop's shell environment (prep phase).
+spire_workshop_env_file: /root/spiffe-workshop.env
+## One file per cluster, loaded by the env file's `lab <cluster>`.
+spire_workshop_cluster_dir: /root/spiffe-workshop.d
+spire_workshop_manifest_root: /root/spiffe-workshop-manifests
+
+## How long to wait for the operator, the operands and the demo pods. Image
+## pulls from registry.redhat.io and ghcr.io dominate on a fresh cluster.
+spire_wait_retries: 60
+spire_wait_delay: 10

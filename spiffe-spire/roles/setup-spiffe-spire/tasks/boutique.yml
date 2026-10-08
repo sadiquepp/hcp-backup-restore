@@ -1,0 +1,108 @@
+---
+# Online Boutique with SPIFFE: every service registered, checkoutservice ->
+# paymentservice under mTLS through ghostunnel sidecars that use SVIDs from
+# the Workload API. With spire_boutique_remote_payments true, this cluster's
+# checkoutservice pays through the PEER cluster's paymentservice instead -
+# across the federation.
+#
+# The application source is cloned and never edited; the overlay is rendered
+# into <manifest dir>/boutique/, `oc kustomize` of it is written to
+# <manifest dir>/40-boutique.yaml, and that file is applied.
+
+- name: Fail unless the SPIRE server is up
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_retries: 1
+    spire_sr_delay: 0
+
+- name: Fail unless SPIRE is up
+  ansible.builtin.command:
+    cmd: oc wait spiffecsidriver/cluster --for=condition=Ready --timeout=10s
+  register: spire_bq_ready
+  changed_when: false
+  failed_when: false
+
+- name: Say so
+  ansible.builtin.assert:
+    that: spire_bq_ready.rc == 0
+    fail_msg: >-
+      The SpiffeCSIDriver on {{ spire_c.name }} is not Ready
+      ({{ spire_bq_ready.stderr | default('') | trim }}). Run --tags spire first.
+
+- name: Look for a federation with the peer trust domain
+  ansible.builtin.command:
+    cmd: oc get clusterfederatedtrustdomain {{ spire_peer.trust_domain }} -o name
+  register: spire_bq_cftd
+  changed_when: false
+  failed_when: false
+
+# Paying through the peer needs both halves of the federation: this side must
+# trust the peer's paymentservice, and the peer must trust this checkout.
+# The second half is on the other cluster; the first is checked here, and
+# boutique-verify proves the whole path.
+- name: Fail if remote payments are asked for without federation
+  ansible.builtin.assert:
+    that: spire_bq_cftd.rc == 0
+    fail_msg: >-
+      spire_boutique_remote_payments is true, but {{ spire_c.name }} does not
+      federate with {{ spire_peer.trust_domain }}. Run --tags federation first,
+      and --tags boutique on {{ spire_peer.name }} so its paymentservice exists.
+  when: spire_boutique_remote_payments | bool
+
+- name: Decide what the boutique identities federate with
+  ansible.builtin.set_fact:
+    spire_boutique_federates_with: "{{ [spire_peer.trust_domain] if spire_bq_cftd.rc == 0 else [] }}"
+
+- name: Fetch the application source
+  ansible.builtin.import_tasks: boutique-source.yml
+
+- name: Create the overlay directory
+  ansible.builtin.file:
+    path: "{{ spire_boutique_render_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Render the SPIFFE overlay
+  ansible.builtin.template:
+    src: "boutique/{{ item }}.j2"
+    dest: "{{ spire_boutique_render_dir }}/{{ item }}"
+    mode: '0644'
+  loop:
+    - kustomization.yaml
+    - payment-server.yaml
+    - checkout-client.yaml
+    - networkpolicy.yaml
+    - payment-route.yaml
+    - clusterspiffeid.yaml
+
+- name: Build it into one manifest
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      oc kustomize {{ spire_boutique_render_dir }} > {{ spire_manifest_dir }}/40-boutique.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Apply it
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/40-boutique.yaml
+  register: spire_bq_apply
+  changed_when: spire_bq_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+# Thirteen images from Google's registry and Docker Hub on a fresh cluster -
+# minutes, not seconds.
+- name: Wait for every Deployment to roll out
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_boutique_namespace }} rollout status deployment/{{ item }} --timeout=900s
+  loop: [paymentservice, checkoutservice, frontend]
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "Online Boutique on {{ spire_c.name }}: every pod registered; checkoutservice -> paymentservice over mTLS"
+      - "checkoutservice pays via {{ spire_boutique_payment_target }}, which must be {{ spire_boutique_payment_server_id }}"
+      - "paymentservice admits: {{ spire_boutique_payment_allowed | join(', ') }}"
+      - "manifest: {{ spire_manifest_dir }}/40-boutique.yaml (overlay in {{ spire_boutique_render_dir }})"

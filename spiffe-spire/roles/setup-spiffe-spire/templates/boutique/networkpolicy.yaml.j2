@@ -1,0 +1,20 @@
+{# Without this the mTLS is decoration: the app still listens on every
+   interface, so anything that can reach the pod IP could dial
+   :{{ spire_boutique_app_port }} and skip ghostunnel entirely. Only the
+   ghostunnel ports are open; the app's own port is reachable from inside the
+   pod (localhost is not subject to NetworkPolicy) and from the node's
+   kubelet probes, and nothing else. #}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: paymentservice-mtls-only
+  namespace: {{ spire_boutique_namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: paymentservice
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: {{ spire_boutique_mtls_port }}}
+        - {protocol: TCP, port: {{ spire_boutique_status_port }}}

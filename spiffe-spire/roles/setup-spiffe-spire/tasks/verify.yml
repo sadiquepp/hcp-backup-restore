@@ -1,0 +1,139 @@
+---
+# Asserts only - applies nothing. What the lab claims, checked end to end on
+# one cluster. Also the workshop's check of what an attendee built by hand:
+# it looks at outcomes (Ready conditions, entries, SVIDs, handshakes), not at
+# how the objects were written.
+#
+#   1. the server is healthy, the agent and CSI driver Ready, and every
+#      agent has attested
+#   2. there is a registration entry for echo-server and client, none for
+#      intruder
+#   3. client -> echo-server over mTLS: allowed, and each end is who it
+#      should be
+#   4. intruder has no SVID, and the server refuses it when it calls anyway
+
+# The server by its conditions, not Ready: see server-ready.yml.
+- name: 1. The SPIRE server is healthy
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_retries: 3
+
+- name: 1. The other operands are Ready
+  ansible.builtin.command:
+    cmd: oc wait {{ item }}/cluster --for=condition=Ready --timeout=30s
+  loop: [spireagent, spiffecsidriver]
+  changed_when: false
+
+- name: 1. Every agent has attested
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      want=$(oc -n {{ spire_operator_namespace }} get daemonset spire-agent \
+               -o jsonpath={.status.desiredNumberScheduled})
+      have=$(oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server -- \
+               {{ spire_server_cli }} agent list | sed -n 's/^Found \([0-9]*\) attested agent.*/\1/p')
+      echo "${have:-0}/$want"
+      [ "${have:-0}" -ge "$want" ]
+  args:
+    executable: /bin/bash
+  register: spire_vf_agents
+  changed_when: false
+
+# The operator's OIDC discovery provider, when a SpireOIDCDiscoveryProvider
+# CR exists, also creates a FALLBACK ClusterSPIFFEID that gives every pod
+# outside the operator's namespace an identity - the intruder included. This
+# lab never creates that CR; if someone has, say so here rather than as a
+# puzzling "intruder has an entry" below.
+- name: 2. Look for ClusterSPIFFEIDs that would register every pod
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusterspiffeid
+      -o 'jsonpath={range .items[?(@.spec.fallback==true)]}{.metadata.name}{"\n"}{end}'
+  register: spire_vf_fallback
+  changed_when: false
+
+- name: 2. Fail if one exists
+  ansible.builtin.assert:
+    that: spire_vf_fallback.stdout_lines | length == 0
+    fail_msg: >-
+      Fallback ClusterSPIFFEID(s) {{ spire_vf_fallback.stdout_lines | join(', ') }} give every
+      pod an identity, so 'intruder' is registered after all. The operator creates
+      zero-trust-workload-identity-manager-spire-default together with a
+      SpireOIDCDiscoveryProvider; this lab does not use one. Delete the
+      SpireOIDCDiscoveryProvider to remove it.
+
+- name: 2. Read the entries for the three service accounts
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server --
+      {{ spire_server_cli }} entry show
+      -spiffeID spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_demo_namespace }}/sa/{{ item }}
+  loop: [echo-server, client, intruder]
+  register: spire_vf_entries
+  changed_when: false
+
+- name: 2. echo-server and client are registered, intruder is not
+  ansible.builtin.assert:
+    that: >-
+      (item.item == 'intruder' and spire_vf_n | int == 0) or
+      (item.item != 'intruder' and spire_vf_n | int >= 1)
+    fail_msg: >-
+      spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_demo_namespace }}/sa/{{ item.item }}:
+      {{ item.stdout_lines | first | default('no output') }} - expected
+      {{ 'none: intruder does not carry ' ~ spire_demo_identity_label if item.item == 'intruder'
+         else 'at least one: check the ClusterSPIFFEID (className, selectors) and its .status.stats' }}
+    success_msg: "{{ item.item }}: {{ item.stdout_lines | first | default('') }}"
+  vars:
+    spire_vf_n: "{{ item.stdout | regex_findall('Found ([0-9]+) entr') | first | default('0') }}"
+  loop: "{{ spire_vf_entries.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: 3. client -> echo-server over mTLS
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_demo_namespace }} exec deploy/client -c app --
+      python3 /app/spiffe_client.py https://echo-server:8443/
+      spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_demo_namespace }}/sa/echo-server
+  register: spire_vf_client
+  retries: 6
+  delay: 10
+  until: spire_vf_client.rc == 0
+  changed_when: false
+
+- name: 4. intruder has no SVID
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_demo_namespace }} exec deploy/intruder -c app --
+      python3 /app/spiffe_client.py https://echo-server:8443/
+      spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_demo_namespace }}/sa/echo-server
+  register: spire_vf_nosvid
+  changed_when: false
+  failed_when: spire_vf_nosvid.rc != 4
+
+# Exit 2 is the SERVER's refusal. Anything else - 0 above all, but also 5,
+# unreachable - means the refusal was not demonstrated.
+- name: 4. intruder calls without a certificate, and is refused
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_demo_namespace }} exec deploy/intruder -c app --
+      python3 /app/spiffe_client.py https://echo-server:8443/
+      spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_demo_namespace }}/sa/echo-server --no-cert
+  register: spire_vf_refused
+  changed_when: false
+  failed_when: spire_vf_refused.rc != 2
+
+- name: 4. The server logged the refusal
+  ansible.builtin.command:
+    cmd: oc -n {{ spire_demo_namespace }} logs deploy/echo-server -c app --tail=20
+  register: spire_vf_log
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "agents attested (have/want): {{ spire_vf_agents.stdout }}"
+      - "client:   {{ spire_vf_client.stdout_lines | join(' | ') }}"
+      - "intruder: {{ spire_vf_nosvid.stdout_lines | join(' | ') }}"
+      - "intruder --no-cert: {{ spire_vf_refused.stdout_lines | join(' | ') }}"
+      - "echo-server log: {{ spire_vf_log.stdout_lines | select('search', 'ALLOWED|REFUSED|FORBIDDEN') | list | last | default('') }}"

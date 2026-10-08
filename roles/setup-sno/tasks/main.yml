@@ -14,6 +14,9 @@
 #   snoimage       fetch the installer, render the manifests, build the ISO
 #   snovm          the libvirt domain, booting that ISO
 #   snowait        block until the cluster is up
+#   snodns         the node name in libvirt's DNS (also part of snovm)
+#   snostorage     a second disk and LVM Storage, when use_lvm_storage is
+#                  true - so the SNO has a default StorageClass
 #
 # The ISO and the VM are separate on purpose. Rebuilding a VM from an ISO that
 # is already correct is cheap; rebuilding the ISO is not, and doing both when
@@ -27,6 +30,15 @@
   ansible.builtin.include_tasks: image.yml
   tags: [sno, snoimage]
 
+# Before the VM, so the name resolves from the first boot. Its own tag, so a
+# running SNO can get it without the destructive VM step: --tags snodns.
+- name: Publish the node name in libvirt's DNS
+  ansible.builtin.include_tasks:
+    file: dnshost.yml
+    apply:
+      tags: [sno, snovm, snodns]
+  tags: [sno, snovm, snodns]
+
 - name: Build the SNO VM
   ansible.builtin.include_tasks: vm.yml
   tags: [sno, snovm]
@@ -35,3 +47,18 @@
   ansible.builtin.include_tasks: wait.yml
   when: sno_wait_for_install | bool
   tags: [sno, snowait]
+
+# After the wait, so the cluster is up. A run that does not wait
+# (sno_wait_for_install: false) leaves it to an explicit --tags snostorage.
+# apply: a dynamic include's own tags select the include, not the tasks in
+# it - without this, --tags snostorage would run the include and skip
+# everything inside.
+- name: Storage
+  ansible.builtin.include_tasks:
+    file: storage.yml
+    apply:
+      tags: [sno, snostorage]
+  when:
+    - sno_lvm_storage | bool
+    - sno_wait_for_install | bool or 'snostorage' in ansible_run_tags
+  tags: [sno, snostorage]

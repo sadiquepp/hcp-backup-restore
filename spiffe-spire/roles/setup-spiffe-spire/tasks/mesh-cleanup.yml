@@ -1,0 +1,93 @@
+---
+# Remove the Service Mesh version of Online Boutique and the mesh this lab
+# installed for it - and nothing else. SPIRE, the spiffe-demo namespace and
+# the ghostunnel Online Boutique stay. Run on its own with --tags mesh-cleanup
+# to switch back; the full cleanup runs it first.
+#
+# Only what carries this lab's label is deleted: an Istio, IstioCNI or
+# Subscription somebody else made stays, and so do the operator and the
+# control-plane namespaces while any mesh is left on the cluster.
+#
+# Left behind, deliberately: the operator's CRDs, as for SPIRE's.
+
+- name: Delete the application and its registration
+  ansible.builtin.command:
+    cmd: oc delete {{ item }} --ignore-not-found --wait=true --timeout=300s
+  loop:
+    - namespace/{{ spire_mesh_namespace }}
+    - clusterspiffeid/{{ spire_mesh_namespace }}
+  register: spire_mc_app
+  changed_when: "'deleted' in spire_mc_app.stdout"
+  failed_when: spire_mc_app.rc != 0 and 'the server doesn\'t have a resource type' not in spire_mc_app.stderr
+
+- name: Delete the control plane and CNI this lab created
+  ansible.builtin.command:
+    cmd: >-
+      oc delete {{ item }} -l {{ spire_mesh_owner_label }}=spiffe-spire
+      --ignore-not-found --wait=true --timeout=300s
+  loop:
+    - istios.sailoperator.io
+    - istiocnis.sailoperator.io
+  register: spire_mc_cp
+  changed_when: "'deleted' in spire_mc_cp.stdout"
+  failed_when: spire_mc_cp.rc != 0 and 'the server doesn\'t have a resource type' not in spire_mc_cp.stderr
+
+- name: See whether any mesh is left
+  ansible.builtin.command:
+    cmd: oc get istios.sailoperator.io,istiocnis.sailoperator.io -o name
+  register: spire_mc_left
+  changed_when: false
+  failed_when: false
+
+- name: The operator and its namespaces, when no mesh is left
+  when: spire_mc_left.stdout | trim | length == 0
+  block:
+    - name: Delete the control-plane namespaces
+      ansible.builtin.command:
+        cmd: oc delete namespace {{ item }} --ignore-not-found --wait=true --timeout=300s
+      loop:
+        - "{{ spire_mesh_control_plane_namespace }}"
+        - "{{ spire_mesh_cni_namespace }}"
+      register: spire_mc_ns
+      changed_when: "'deleted' in spire_mc_ns.stdout"
+
+    - name: Find this lab's Subscription and the CSV it installed
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ spire_mesh_operator_namespace }} get subscriptions.operators.coreos.com
+          -l {{ spire_mesh_owner_label }}=spiffe-spire
+          -o 'jsonpath={range .items[*]}{.metadata.name} {.status.installedCSV}{"\n"}{end}'
+      register: spire_mc_sub
+      changed_when: false
+      failed_when: false
+
+    # Subscription first, so OLM does not reinstall the CSV it is about to
+    # lose. In openshift-operators every AllNamespaces operator's CSV sits
+    # side by side - so the CSV by the Subscription's own installedCSV only.
+    - name: Uninstall the operator
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ spire_mesh_operator_namespace }} delete --ignore-not-found
+          subscriptions.operators.coreos.com/{{ item.split()[0] }}
+          {{ ('clusterserviceversions.operators.coreos.com/' ~ item.split()[1]) if item.split() | length > 1 else '' }}
+      loop: "{{ spire_mc_sub.stdout_lines | select | list }}"
+      register: spire_mc_op
+      changed_when: "'deleted' in spire_mc_op.stdout"
+
+- name: Say what stayed
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Service Mesh removed from ' ~ spire_c.name ~ '.' if spire_mc_left.stdout | trim | length == 0
+         else 'Left in place, not created by this lab: ' ~ (spire_mc_left.stdout_lines | join(', '))
+              ~ ' - and so the operator and its namespaces too.' }}
+
+- name: Remove the rendered mesh manifests
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ spire_mesh_render_dir }}"
+    - "{{ spire_manifest_dir }}/50-mesh-operator.yaml"
+    - "{{ spire_manifest_dir }}/51-mesh-istio.yaml"
+    - "{{ spire_manifest_dir }}/52-mesh-clusterspiffeid.yaml"
+    - "{{ spire_manifest_dir }}/53-boutique-mesh.yaml"

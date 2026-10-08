@@ -1,0 +1,25 @@
+{# Federate with the peer's trust domain. Rendered to
+   <manifest dir>/30-federation-<peer trust domain>.yaml.
+
+   bundleEndpointURL and the https_spiffe profile say where to fetch the
+   peer's bundle and who must be answering there. trustDomainBundle is the
+   bootstrap: to authenticate the peer's endpoint the first time, this server
+   needs the peer's CA, which it would otherwise only learn FROM that
+   endpoint. It is copied once, out of band (the federation plays read it
+   with `spire-server bundle show -format spiffe`); from then on the server
+   refreshes it over the Route, and CA rotations on the peer arrive that way.
+   spire-controller-manager uses the field only when it creates the
+   relationship, so a stale copy here never overwrites a newer bundle. #}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterFederatedTrustDomain
+metadata:
+  name: {{ spire_peer.trust_domain }}
+spec:
+  className: {{ spire_class_name }}
+  trustDomain: {{ spire_peer.trust_domain }}
+  bundleEndpointURL: https://{{ spire_federation_route_name }}.{{ spire_peer.apps_domain }}
+  bundleEndpointProfile:
+    type: https_spiffe
+    endpointSPIFFEID: spiffe://{{ spire_peer.trust_domain }}/spire/server
+  trustDomainBundle: |-
+    {{ spire_peer_bundle | indent(4) }}

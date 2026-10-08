@@ -1,0 +1,96 @@
+{# The operator's CRs for one cluster. Rendered to
+   <manifest dir>/10-spire.yaml. Every one is a singleton named 'cluster'.
+
+   Order matters only to a human reading it: the operator waits for the
+   ZeroTrustWorkloadIdentityManager before it reconciles the others, so they
+   can all be applied at once. #}
+{# 1. The trust domain. trustDomain and clusterName are IMMUTABLE - the API
+      rejects a change - and together they are in every SPIFFE ID this cluster
+      issues: agents get spiffe://<trustDomain>/spire/agent/k8s_psat/<clusterName>/<node uid>. #}
+apiVersion: operator.openshift.io/v1alpha1
+kind: ZeroTrustWorkloadIdentityManager
+metadata:
+  name: cluster
+spec:
+  trustDomain: {{ spire_c.trust_domain }}
+  clusterName: {{ spire_c.cluster_name }}
+  bundleConfigMap: {{ spire_bundle_configmap }}
+---
+{# 2. The SPIRE server: a StatefulSet of one, with spire-controller-manager as
+      a sidecar turning ClusterSPIFFEIDs into registration entries.
+      persistence is required and immutable. #}
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpireServer
+metadata:
+  name: cluster
+spec:
+  logLevel: {{ spire_server_log_level }}
+  logFormat: text
+  jwtIssuer: {{ spire_server_jwt_issuer }}
+  caValidity: {{ spire_server_ca_validity }}
+  defaultX509Validity: {{ spire_server_x509_svid_ttl }}
+  defaultJWTValidity: {{ spire_server_jwt_svid_ttl }}
+  caKeyType: {{ spire_server_ca_key_type }}
+  caSubject:
+    {{ spire_server_ca_subject | to_nice_yaml(indent=2) | indent(4) | trim }}
+  persistence:
+    size: {{ spire_server_pv_size }}
+    accessMode: ReadWriteOnce
+    storageClass: "{{ spire_server_storage_sc }}"
+  datastore:
+    databaseType: sqlite3
+    connectionString: /run/spire/data/datastore.sqlite3
+  resources:
+    {{ spire_server_resources | to_nice_yaml(indent=2) | indent(4) | trim }}
+{% if spire_federation_enabled | bool %}
+{# The bundle endpoint, and nothing else: which trust domains to federate
+     WITH is declared by ClusterFederatedTrustDomain objects (the federation
+     phase), not by federatesWith here. Those carry the bootstrap bundle, and
+     spire-controller-manager deletes any relationship no such object
+     declares - two sources of truth would fight.
+
+     managedRoute "false": the operator's Route is named
+     federation.<trustDomain>, outside *.apps and unknown to the helper's DNS.
+     This lab's own Route (federation-route.yaml.j2) is under *.apps. #}
+  federation:
+    bundleEndpoint:
+      profile: https_spiffe
+      refreshHint: {{ spire_federation_refresh_hint }}
+    managedRoute: "false"
+{% endif %}
+---
+{# 3. The agent DaemonSet. k8s_psat node attestation: the agent proves which
+      node it is on with a projected service account token the server checks
+      against the API. k8s workload attestation: the agent asks the kubelet
+      which pod owns the process calling the Workload API socket. No
+      tolerations, so on the hub it runs on the three workers only - where
+      the workloads are. #}
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpireAgent
+metadata:
+  name: cluster
+spec:
+  logLevel: {{ spire_agent_log_level }}
+  logFormat: text
+  socketPath: {{ spire_agent_socket_path }}
+  nodeAttestor:
+    k8sPSATEnabled: "true"
+  workloadAttestors:
+    k8sEnabled: "true"
+    workloadAttestorsVerification:
+      type: auto
+  resources:
+    {{ spire_agent_resources | to_nice_yaml(indent=2) | indent(4) | trim }}
+---
+{# 4. The CSI driver: an inline, ephemeral volume that mounts the agent's
+      Workload API socket into any pod that asks for it. No hostPath, no
+      privileged pod - that is its whole reason to exist. #}
+apiVersion: operator.openshift.io/v1alpha1
+kind: SpiffeCSIDriver
+metadata:
+  name: cluster
+spec:
+  agentSocketPath: {{ spire_agent_socket_path }}
+  pluginName: {{ spire_csi_driver_name }}
+  resources:
+    {{ spire_csi_resources | to_nice_yaml(indent=2) | indent(4) | trim }}

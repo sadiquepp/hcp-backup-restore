@@ -1,0 +1,83 @@
+---
+# The demo: a namespace, the app code, three workloads and the registration
+# that gives two of them an identity. Then wait for the two registered pods
+# to hold an SVID.
+
+- name: Fail unless the SPIRE server is up
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_retries: 1
+    spire_sr_delay: 0
+
+- name: Fail unless SPIRE is up
+  ansible.builtin.command:
+    cmd: oc wait spiffecsidriver/cluster --for=condition=Ready --timeout=10s
+  register: spire_dm_ready
+  changed_when: false
+  failed_when: false
+
+- name: Say so
+  ansible.builtin.assert:
+    that: spire_dm_ready.rc == 0
+    fail_msg: >-
+      The SpiffeCSIDriver on {{ spire_c.name }} is not Ready
+      ({{ spire_dm_ready.stderr | default('') | trim }}). Run --tags spire first.
+
+- name: Render the namespace, workloads, Service and Route
+  ansible.builtin.template:
+    src: demo.yaml.j2
+    dest: "{{ spire_manifest_dir }}/20-demo.yaml"
+    mode: '0644'
+
+# The Python is kept as files in the role, and turned into a ConfigMap
+# manifest with --dry-run so the file on disk is exactly what is applied.
+- name: Render the app code as a ConfigMap manifest
+  ansible.builtin.shell:
+    cmd: >-
+      oc create configmap spiffe-demo-app -n {{ spire_demo_namespace }}
+      --from-file={{ role_path }}/files/echo_server.py
+      --from-file={{ role_path }}/files/spiffe_client.py
+      --dry-run=client -o yaml > {{ spire_manifest_dir }}/21-demo-app.yaml
+  changed_when: false
+
+- name: Apply the namespace and the app code
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/{{ item }}
+  loop:
+    - 20-demo.yaml
+    - 21-demo-app.yaml
+  register: spire_dm_apply
+  changed_when: spire_dm_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+- name: Register the workloads
+  ansible.builtin.include_tasks: demo-identities.yml
+
+- name: Wait for the deployments to roll out
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_demo_namespace }} rollout status deployment/{{ item }} --timeout=600s
+  loop: [echo-server, client, intruder]
+  changed_when: false
+
+# The echo server's readiness probe already says it has an SVID (it does not
+# listen without one). The client does nothing until asked, so look.
+- name: Wait for the client's SVID
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_demo_namespace }} exec deploy/client -c app --
+      test -s /svid/svid.pem
+  register: spire_dm_svid
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: spire_dm_svid.rc == 0
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "spiffe-demo on {{ spire_c.name }}: echo-server and client hold SVIDs; intruder has no registration"
+      - "echo-server Route: https://{{ spire_demo_route_host }} (passthrough)"
+      - >-
+        try: oc -n {{ spire_demo_namespace }} exec deploy/client -c app --
+        python3 /app/spiffe_client.py https://echo-server:8443/
+        spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_demo_namespace }}/sa/echo-server

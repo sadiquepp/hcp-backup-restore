@@ -20,7 +20,6 @@
     dest: "{{ role_path }}/files/{{ item }}/.rendered-03-subscription.yaml"
   loop:
     - acm
-    - lvm-storage
     - metal-lb
     - oadp
 
@@ -38,13 +37,9 @@
     oc apply -f "{{ role_path }}/files/acm/.rendered-03-subscription.yaml"
 
 
-- name: Deploy LVM Storage Operator
-  shell: |
-    oc apply -f "{{ role_path }}/files/lvm-storage/01-namespace.yaml"
-    oc apply -f "{{ role_path }}/files/lvm-storage/02-operatorGroup.yaml"
-    oc apply -f "{{ role_path }}/files/lvm-storage/.rendered-03-subscription.yaml"
-  when: use_lvm_storage == true
-
+# LVM Storage is not installed here any more: roles/setup-lvm-storage does it
+# as part of the cluster build itself (tag lvm), so a hub built with
+# --skip-tags acm still has a default StorageClass.
 
 - name: Deploy MetalLB Operator  
   shell: |
@@ -77,11 +72,6 @@
 - name: Apply Provisioning configuration (required by metal3/baremetal-operator before AgentServiceConfig)
   shell: |
     oc apply -f "{{ role_path }}/files/acm/04b-provisioning.yaml"
-
-- name: Setup LVMCluster Resource
-  shell: |
-    oc apply -f "{{ role_path }}/files/lvm-storage/04-lvm-cluster.yaml"
-  when: use_lvm_storage == true
 
 # Pool names are hub-independent but their addresses are not: hub2 is the DR
 # hub on its own segment and hubd the disconnected one, so each hosted cluster

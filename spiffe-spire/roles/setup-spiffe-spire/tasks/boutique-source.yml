@@ -1,0 +1,25 @@
+---
+# The Online Boutique source, cloned at the pinned commit, and the check that
+# the overlay this lab builds on is in it. Included by boutique.yml and
+# mesh.yml - both build on the same upstream overlay.
+
+# ansible.builtin.git needs the git binary on the lab host, and says so
+# plainly ("Failed to find required executable git") if it is missing.
+- name: Clone Online Boutique at the pinned commit
+  ansible.builtin.git:
+    repo: "{{ spire_boutique_repo }}"
+    dest: "{{ spire_boutique_src_dir }}"
+    version: "{{ spire_boutique_ref }}"
+  register: spire_bq_git
+
+- name: Check the overlay the lab builds on is there
+  ansible.builtin.stat:
+    path: "{{ spire_boutique_src_dir }}/{{ spire_boutique_path }}/overlays/{{ spire_boutique_overlay }}/kustomization.yaml"
+  register: spire_bq_base
+
+- name: Say so
+  ansible.builtin.assert:
+    that: spire_bq_base.stat.exists
+    fail_msg: >-
+      No {{ spire_boutique_path }}/overlays/{{ spire_boutique_overlay }} in
+      {{ spire_boutique_repo }} at {{ spire_boutique_ref }}.

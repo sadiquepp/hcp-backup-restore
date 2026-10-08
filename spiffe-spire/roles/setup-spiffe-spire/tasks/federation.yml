@@ -1,0 +1,81 @@
+---
+# One cluster's half of the federation: trust the peer's trust domain, prove
+# the peer's bundle endpoint is reachable through its Route, and give the
+# demo identities the peer's CA.
+#
+# Needs spire_bundles from federation-bundles.yml, earlier in the same run.
+
+- name: Fail unless the bundles were read in this run
+  ansible.builtin.assert:
+    that: spire_bundles is defined and spire_peer.name in spire_bundles
+    fail_msg: >-
+      No bundle for {{ spire_peer.name }} in this run. The federation plays run
+      together: ansible-playbook setup_spiffe_spire.yaml --tags federation.
+
+- name: Create the manifest directory for this cluster
+  ansible.builtin.file:
+    path: "{{ spire_manifest_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Render the ClusterFederatedTrustDomain for {{ spire_peer.trust_domain }}
+  ansible.builtin.template:
+    src: cftd.yaml.j2
+    dest: "{{ spire_manifest_dir }}/30-federation-{{ spire_peer.trust_domain }}.yaml"
+    mode: '0644'
+  vars:
+    spire_peer_bundle: "{{ spire_bundles[spire_peer.name] | from_json | to_nice_json(indent=2) }}"
+
+- name: Apply it
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/30-federation-{{ spire_peer.trust_domain }}.yaml
+  register: spire_fd_apply
+  changed_when: spire_fd_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+# spire-controller-manager creates the relationship through the server API;
+# the server then holds the peer's bundle (the bootstrap copy, at first).
+- name: Wait for the server to list the relationship and hold the peer's bundle
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      s="oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server -- {{ spire_server_cli }}";
+      $s federation show -trustDomain {{ spire_peer.trust_domain }} &&
+      $s bundle list -id spiffe://{{ spire_peer.trust_domain }} | grep -c 'BEGIN CERTIFICATE'
+  args:
+    executable: /bin/bash
+  register: spire_fd_rel
+  retries: 30
+  delay: 10
+  until: spire_fd_rel.rc == 0
+  changed_when: false
+
+# The step that proves the Route, the helper's DNS and the https_spiffe
+# authentication all work: the server fetches the peer's bundle NOW, over
+# https://spire-federation.apps.<peer>/, authenticating the endpoint as
+# spiffe://<peer>/spire/server with the bundle it already has. A failure
+# names the stage - DNS, connection, or the endpoint's SVID - in its message.
+- name: Force a refresh of the peer's bundle over its endpoint
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} exec spire-server-0 -c spire-server --
+      {{ spire_server_cli }} federation refresh -id {{ spire_peer.trust_domain }}
+  register: spire_fd_refresh
+  retries: 12
+  delay: 10
+  until: spire_fd_refresh.rc == 0
+  changed_when: false
+
+- name: Give the demo identities the peer's CA
+  ansible.builtin.include_tasks: demo-identities.yml
+  vars:
+    # The demo may not be deployed on this cluster; federation does not
+    # depend on it, so do not wait on its entries here.
+    spire_demo_expect_entries: false
+  when: spire_demo_present | default(true)
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "{{ spire_c.trust_domain }} federates with {{ spire_peer.trust_domain }}"
+      - "{{ spire_fd_rel.stdout_lines }}"
+      - "refresh over https://{{ spire_federation_route_name }}.{{ spire_peer.apps_domain }}: {{ spire_fd_refresh.stdout | default('ok', true) | trim }}"

@@ -1,0 +1,55 @@
+---
+# The demo's ClusterSPIFFEID. Included by the demo phase and again by the
+# federation plays, and reaches the same answer from either: federatesWith
+# names the peer trust domain exactly when a ClusterFederatedTrustDomain for
+# it exists on this cluster. So a later `--tags demo` on a federated lab
+# keeps the federation, and one on an unfederated lab does not invent it.
+
+- name: Look for a federation with the peer trust domain
+  ansible.builtin.command:
+    cmd: oc get clusterfederatedtrustdomain {{ spire_peer.trust_domain }} -o name
+  register: spire_di_cftd
+  changed_when: false
+  failed_when: false
+
+- name: Decide what the demo identities federate with
+  ansible.builtin.set_fact:
+    spire_demo_federates_with: "{{ [spire_peer.trust_domain] if spire_di_cftd.rc == 0 else [] }}"
+
+- name: Render the ClusterSPIFFEID
+  ansible.builtin.template:
+    src: clusterspiffeid.yaml.j2
+    dest: "{{ spire_manifest_dir }}/22-demo-clusterspiffeid.yaml"
+    mode: '0644'
+
+- name: Apply it
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/22-demo-clusterspiffeid.yaml
+  register: spire_di_apply
+  changed_when: spire_di_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+# A ClusterSPIFFEID the controller rejected (or ignored) looks fine to the
+# API; its status is where the controller says what it made of it. Two
+# entries: echo-server and client. Zero-valued counters are omitted from the
+# status, hence the '/' separator rather than splitting on blanks. With no
+# className the status stays empty forever - the controller never looked.
+- name: Wait for the controller to report entries for it
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusterspiffeid {{ spire_demo_namespace }}
+      -o 'jsonpath={.status.stats.entriesToSet}/{.status.stats.entryFailures}'
+  register: spire_di_stats
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: >-
+    (spire_di_stats.stdout.split('/')[0] | int) >= 2 and
+    (spire_di_stats.stdout.split('/')[1] | default('0') | int) == 0
+  changed_when: false
+  when: spire_demo_expect_entries | default(true) | bool
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      ClusterSPIFFEID {{ spire_demo_namespace }}: entries to set / failed =
+      {{ spire_di_stats.stdout | default('(not waited for)') }};
+      federatesWith {{ spire_demo_federates_with | default([]) }}

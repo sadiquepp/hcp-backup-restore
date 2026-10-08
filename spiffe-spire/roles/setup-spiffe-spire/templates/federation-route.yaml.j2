@@ -1,0 +1,28 @@
+{# The SPIRE server's federation bundle endpoint, published under this
+   cluster's *.apps wildcard so the helper already resolves it. Rendered to
+   <manifest dir>/11-federation-route.yaml.
+
+   Passthrough, because under the https_spiffe profile the TLS session IS the
+   authentication: the peer SPIRE server checks that whoever answers holds
+   the SVID spiffe://{{ spire_c.trust_domain }}/spire/server, signed by the
+   bundle it already has. A router terminating TLS would present its own
+   certificate and fail that check. The hostname only picks the backend (SNI). #}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ spire_federation_route_name }}
+  namespace: {{ spire_operator_namespace }}
+  labels:
+    app.kubernetes.io/part-of: spiffe-spire-lab
+spec:
+  host: {{ spire_federation_route_host }}
+  to:
+    kind: Service
+    name: spire-server
+    weight: 100
+  port:
+    targetPort: federation
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: None
+  wildcardPolicy: None

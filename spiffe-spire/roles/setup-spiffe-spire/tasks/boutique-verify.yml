@@ -1,0 +1,162 @@
+---
+# Asserts only. What the Online Boutique overlay claims, on one cluster:
+#
+#   1. every pod in the namespace is registered
+#   2. checkoutservice's ghostunnel has a working mTLS path to the
+#      paymentservice it is configured for - local, or the peer's - with the
+#      server's SPIFFE ID checked, and real orders are crossing it
+#   3. a workload with a valid SVID but the wrong SPIFFE ID is refused by
+#      paymentservice's ghostunnel (spiffe-demo's client plays it)
+#   4. going around ghostunnel to the app's own port is blocked
+#
+# 3 and 4 borrow the spiffe-demo client pod, and are skipped with a note if
+# the demo is not deployed on this cluster.
+
+- name: 1. Count the pods to be registered
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_boutique_namespace }} get pods --field-selector=status.phase=Running -o name
+  register: spire_bv_pods
+  changed_when: false
+
+- name: 1. Every running pod has an entry
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusterspiffeid {{ spire_boutique_namespace }}
+      -o 'jsonpath={.status.stats.entriesToSet}/{.status.stats.entryFailures}'
+  register: spire_bv_stats
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: >-
+    (spire_bv_stats.stdout.split('/')[0] | int) >= (spire_bv_pods.stdout_lines | length) and
+    (spire_bv_stats.stdout.split('/')[1] | default('0') | int) == 0
+  changed_when: false
+
+- name: 2. Find the checkoutservice pod
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_boutique_namespace }} get pods -l app=checkoutservice
+      --field-selector=status.phase=Running -o 'jsonpath={.items[0].metadata.name}'
+  register: spire_bv_checkout
+  changed_when: false
+
+# ghostunnel's status endpoint, read through the API server's pod proxy - no
+# client pod, no route. In client mode backend_ok means it just completed
+# a full mTLS handshake with the target AND the target presented the
+# SPIFFE ID in --verify-uri.
+- name: 2. checkoutservice's ghostunnel reaches the paymentservice over mTLS
+  ansible.builtin.command:
+    cmd: >-
+      oc get --raw
+      /api/v1/namespaces/{{ spire_boutique_namespace }}/pods/http:{{ spire_bv_checkout.stdout }}:{{ spire_boutique_status_port }}/proxy/_status
+  register: spire_bv_status
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: >-
+    spire_bv_status.rc == 0 and
+    (spire_bv_status.stdout | from_json).get('backend_ok', false)
+  changed_when: false
+
+# The load generator places an order every few seconds. Counted in the app's
+# own log, not ghostunnel's 'opening pipe': that is one line per connection,
+# and checkoutservice's gRPC client keeps one open for every charge.
+- name: 2. Orders are paying through the tunnel
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      oc -n {{ spire_boutique_namespace }} logs {{ spire_bv_checkout.stdout }} -c server --since=10m
+      | grep -c 'payment went through'
+  args:
+    executable: /bin/bash
+  register: spire_bv_pipes
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: spire_bv_pipes.rc == 0 and (spire_bv_pipes.stdout | int) > 0
+  changed_when: false
+
+# What the Deployment really says, not what vars.yaml says: the workshop's C5
+# re-points it by hand, to the peer's Route.
+- name: 2. Read where checkoutservice's ghostunnel sends payments
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_boutique_namespace }} get deployment checkoutservice
+      -o 'jsonpath={.spec.template.spec.containers[?(@.name=="ghostunnel")].args}'
+  register: spire_bv_args
+  changed_when: false
+  failed_when: false
+
+- name: 3/4. Look for the spiffe-demo client to play the outsider
+  ansible.builtin.command:
+    cmd: oc -n {{ spire_demo_namespace }} get deployment client -o name
+  register: spire_bv_demo
+  changed_when: false
+  failed_when: false
+
+- name: 3/4. The outsider checks
+  when: spire_bv_demo.rc == 0
+  block:
+    # A registered workload, a valid SVID from the same trust domain - and
+    # not checkoutservice. The client verifies paymentservice fine; the
+    # server's --allow-uri turns it away during the handshake.
+    - name: 3. spiffe-demo's client is refused by paymentservice
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ spire_demo_namespace }} exec deploy/client -c app --
+          python3 /app/spiffe_client.py
+          https://paymentservice.{{ spire_boutique_namespace }}.svc:50051/
+          spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_boutique_namespace }}/sa/paymentservice
+      register: spire_bv_refused
+      changed_when: false
+      failed_when: spire_bv_refused.rc != 2
+
+    - name: 4. Find the paymentservice pod's address
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ spire_boutique_namespace }} get pods -l app=paymentservice
+          --field-selector=status.phase=Running -o 'jsonpath={.items[0].status.podIP}'
+      register: spire_bv_payip
+      changed_when: false
+
+    # Straight to the app's port on the pod IP, skipping the Service and
+    # ghostunnel: the NetworkPolicy drops it. The ghostunnel port on the same
+    # IP connects - so it is the policy, not the network.
+    - name: 4. The app's own port cannot be reached around ghostunnel
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ spire_demo_namespace }} exec deploy/client -c app --
+          python3 -c "import socket,sys; p=int(sys.argv[2]);
+          socket.create_connection((sys.argv[1], p), 5); print('connected', p)"
+          {{ spire_bv_payip.stdout }} {{ item.port }}
+      loop:
+        - {port: "{{ spire_boutique_app_port }}", expect: blocked}
+        - {port: "{{ spire_boutique_mtls_port }}", expect: open}
+      loop_control:
+        label: "{{ spire_bv_payip.stdout }}:{{ item.port }} expected {{ item.expect }}"
+      register: spire_bv_bypass
+      changed_when: false
+      failed_when: (spire_bv_bypass.rc == 0) != (item.expect == 'open')
+
+    # For the report only: the refusal was already asserted by its exit code.
+    - name: 3. paymentservice's ghostunnel logged the refusal
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          oc -n {{ spire_boutique_namespace }} logs deploy/paymentservice -c ghostunnel --since=5m
+          | grep 'error on TLS handshake' | tail -1
+      args:
+        executable: /bin/bash
+      register: spire_bv_denylog
+      changed_when: false
+      failed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "registered: {{ spire_bv_stats.stdout.split('/')[0] }} entries for {{ spire_bv_pods.stdout_lines | length }} running pods"
+      - "checkout -> {{ (spire_bv_args.stdout | default('[]', true) | from_json
+                           | select('match', '--(target|verify-uri)=') | join(' '))
+                          | default(spire_boutique_payment_target, true) }}: {{ spire_bv_status.stdout }}"
+      - "payments through the tunnel in the last 10 minutes: {{ spire_bv_pipes.stdout }}"
+      - "{{ ('outsider: ' ~ (spire_bv_refused.stdout_lines | join(' | '))) if spire_bv_demo.rc == 0
+           else 'outsider checks skipped: spiffe-demo is not deployed on ' ~ spire_c.name }}"
+      - "{{ ('paymentservice log: ' ~ spire_bv_denylog.stdout) if spire_bv_demo.rc == 0 else '' }}"

@@ -1,0 +1,51 @@
+---
+# What this cluster can do, before anything is changed. Reads only.
+#
+# The questions, in the order a later phase would trip over them:
+#   1. is the API reachable and what version is the cluster
+#   2. is Red Hat's SPIRE operator in the catalog, which channel, which CSV
+#   3. is it installed already
+#   4. is there a default StorageClass, or will the storage phase make a PV
+#   5. which nodes will run a SPIRE agent
+
+- name: Ask the cluster its version
+  ansible.builtin.command:
+    cmd: oc get clusterversion version -o jsonpath={.status.desired.version}
+  register: spire_pf_version
+  changed_when: false
+
+- name: Look the operator up in the catalog
+  ansible.builtin.include_tasks: catalog.yml
+
+- name: Look for an existing Subscription
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_operator_namespace }} get subscriptions.operators.coreos.com
+      -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.spec.channel}{" "}{.status.installedCSV}{"\n"}{end}'
+  register: spire_pf_sub
+  changed_when: false
+  failed_when: false
+
+- name: Decide where the SPIRE server's data will live
+  ansible.builtin.include_tasks: storage-decide.yml
+
+- name: List the nodes an agent will run on (no taint, or the SNO's one node)
+  ansible.builtin.command:
+    cmd: >-
+      oc get nodes -l node-role.kubernetes.io/worker
+      -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}'
+  register: spire_pf_nodes
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "cluster        {{ spire_c.name }}, OpenShift {{ spire_pf_version.stdout }}"
+      - "trust domain   {{ spire_c.trust_domain }}   (cluster name {{ spire_c.cluster_name }})"
+      - "operator       {{ spire_pkg }}, channel {{ spire_chan }} from {{ spire_catalog_source }}"
+      - "installed      {{ spire_pf_sub.stdout_lines | join('; ') if spire_pf_sub.stdout_lines else 'no - the operator phase installs it' }}"
+      - "server storage {{ spire_storage_summary }}"
+      - "agent nodes    {{ spire_pf_nodes.stdout_lines | join(', ') }}"
+      - >-
+        federation     {{ ('https://' ~ spire_federation_route_host ~ ' (https_spiffe, id spiffe://'
+                           ~ spire_c.trust_domain ~ '/spire/server)') if spire_federation_enabled | bool else 'disabled' }}

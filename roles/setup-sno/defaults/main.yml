@@ -40,6 +40,13 @@ sno_primary_nic: enp1s0
 ## rootDeviceHints entry so the installer never has to guess.
 sno_installation_disk: /dev/vda
 
+## LVM Storage on a second disk, added after the install (tasks/storage.yml).
+## Follows the lab-wide use_lvm_storage switch; false leaves the SNO with no
+## StorageClass, as it was before.
+sno_lvm_storage: "{{ use_lvm_storage | default(true) }}"
+sno_storage_disk_gb: 100
+sno_storage_disk_target: vdb
+
 ## Addressing. Static, not DHCP: the agent installer needs the rendezvous
 ## address to be knowable before the node has booted, and a lease is not.
 sno_gateway: "{{ lab_network_prefix }}.1"

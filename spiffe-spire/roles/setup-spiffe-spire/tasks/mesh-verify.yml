@@ -1,0 +1,181 @@
+---
+# Asserts only. What Online Boutique on Service Mesh claims, on one cluster:
+#
+#   1. every pod in the namespace is registered with SPIRE
+#   2. every pod's Envoy holds a certificate FROM SPIRE: its SPIFFE ID is
+#      the pod's service account, and it lives as long as a SPIRE SVID
+#      ({{ spire_server_x509_svid_ttl }}), not as long as an istiod one (24h)
+#   3. real orders reach paymentservice over mTLS, and the identity Envoy
+#      saw on them is checkoutservice's
+#   4. another workload inside the mesh - also with a SPIRE certificate - is
+#      refused by paymentservice's AuthorizationPolicy
+#   5. outside the mesh, plaintext straight to a service is refused, and the
+#      Route through the ingress gateway is the way in
+#
+# 5 borrows the spiffe-demo client pod (no sidecar) and is skipped with a
+# note if the demo is not deployed on this cluster.
+
+- name: 1. Count the pods to be registered
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_mesh_namespace }} get pods --field-selector=status.phase=Running
+      -o 'jsonpath={range .items[*]}{.metadata.name} {.spec.serviceAccountName}{"\n"}{end}'
+  register: spire_mv_pods
+  changed_when: false
+
+- name: 1. Every running pod has an entry
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusterspiffeid {{ spire_mesh_namespace }}
+      -o 'jsonpath={.status.stats.entriesToSet}/{.status.stats.entryFailures}'
+  register: spire_mv_stats
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: >-
+    (spire_mv_stats.stdout.split('/')[0] | int) >= (spire_mv_pods.stdout_lines | length) and
+    (spire_mv_stats.stdout.split('/')[1] | default('0') | int) == 0
+  changed_when: false
+
+# Envoy's own view, from its admin API through pilot-agent - no istioctl on
+# the lab host needed. `certs` lists each TLS context's certificates with
+# their URI SANs and validity.
+- name: 2. Ask each pod's Envoy which certificate it holds
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_mesh_namespace }} exec {{ item.split()[0] }} -c istio-proxy --
+      pilot-agent request GET certs
+  loop: "{{ spire_mv_pods.stdout_lines }}"
+  loop_control:
+    label: "{{ item.split()[0] }}"
+  register: spire_mv_certs
+  changed_when: false
+
+- name: 2. Work out each pod's SPIFFE ID and certificate lifetime
+  ansible.builtin.set_fact:
+    spire_mv_seen: >-
+      {%- set fmt = '%Y-%m-%dT%H:%M:%SZ' -%}
+      {%- set out = [] -%}
+      {%- for r in spire_mv_certs.results -%}
+      {%-   set leaves = (r.stdout | from_json).certificates | default([])
+                         | map(attribute='cert_chain') | select | map('first') | list -%}
+      {%-   set uris = leaves | map(attribute='subject_alt_names') | flatten
+                         | selectattr('uri', 'defined') | map(attribute='uri') | unique | list -%}
+      {%-   set life = leaves | map(attribute='expiration_time') | map('to_datetime', fmt) | list -%}
+      {%-   set born = leaves | map(attribute='valid_from') | map('to_datetime', fmt) | list -%}
+      {%-   set _ = out.append({
+              'pod': r.item.split()[0],
+              'want': 'spiffe://' ~ spire_c.trust_domain ~ '/ns/' ~ spire_mesh_namespace ~ '/sa/' ~ r.item.split()[1],
+              'uris': uris,
+              'seconds': ((life[0] - born[0]).total_seconds() | int) if life else -1}) -%}
+      {%- endfor -%}
+      {{ out }}
+    # A SPIRE SVID's validity is the server's default X.509 TTL (SPIRE
+    # backdates the start a little); istiod would issue 24h.
+    spire_mv_ttl: >-
+      {{ (spire_server_x509_svid_ttl[:-1] | int) * {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[spire_server_x509_svid_ttl[-1]] }}
+
+- name: 2. Every Envoy holds its own SPIFFE ID, with a SPIRE lifetime
+  ansible.builtin.assert:
+    that:
+      - item.uris == [item.want]
+      - item.seconds > 0
+      - item.seconds <= (spire_mv_ttl | int) + 300
+    fail_msg: >-
+      {{ item.pod }}: Envoy holds {{ item.uris | join(', ') or 'no SPIFFE certificate' }},
+      valid for {{ item.seconds }}s; expected {{ item.want }} valid for about
+      {{ spire_mv_ttl }}s. A 24h certificate came from istiod, not SPIRE: check the
+      pod has the inject.istio.io/templates annotation and the CSI volume
+      (oc -n {{ spire_mesh_namespace }} get pod {{ item.pod }} -o yaml | grep -e templates -e csi.spiffe).
+    quiet: true
+  loop: "{{ spire_mv_seen }}"
+  loop_control:
+    label: "{{ item.pod }} -> {{ item.uris | join(',') }} ({{ item.seconds }}s)"
+
+# The destination's own telemetry: every request paymentservice's Envoy
+# accepted, labelled with the caller's SPIFFE ID and whether it came over
+# mTLS. The load generator places an order every few seconds.
+- name: 3. Orders reach paymentservice over mTLS, from checkoutservice
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      oc -n {{ spire_mesh_namespace }} exec deploy/paymentservice -c istio-proxy --
+      pilot-agent request GET stats/prometheus
+      | grep '^istio_requests_total{'
+      | grep 'reporter="destination"'
+      | grep 'source_principal="spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_mesh_namespace }}/sa/checkoutservice"'
+      | grep 'connection_security_policy="mutual_tls"'
+      | grep 'response_code="200"'
+      | awk '{n += $NF} END {print n + 0}'
+  args:
+    executable: /bin/bash
+  register: spire_mv_paid
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: spire_mv_paid.rc == 0 and (spire_mv_paid.stdout | int) > 0
+  changed_when: false
+
+# The load generator is in the mesh: its Envoy opens mTLS to paymentservice
+# with a perfectly good SPIRE certificate - for the wrong identity. The
+# answer comes from paymentservice's Envoy, before the app sees anything.
+- name: 4. The load generator, in the mesh but not checkoutservice, is refused
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_mesh_namespace }} exec deploy/loadgenerator -c main --
+      python3 -c "import http.client as h; c = h.HTTPConnection('paymentservice', 50051, timeout=10);
+      c.request('GET', '/'); r = c.getresponse(); print(r.status, r.read(60).decode(errors='replace'))"
+  register: spire_mv_denied
+  changed_when: false
+  failed_when: spire_mv_denied.rc != 0 or not spire_mv_denied.stdout.startswith('403')
+
+- name: 5. Look for the spiffe-demo client to play the outsider
+  ansible.builtin.command:
+    cmd: oc -n {{ spire_demo_namespace }} get deployment client -o name
+  register: spire_mv_demo
+  changed_when: false
+  failed_when: false
+
+- name: 5. The outsider checks
+  when: spire_mv_demo.rc == 0
+  block:
+    # No sidecar, so no certificate: plaintext. frontend's Envoy wants mTLS
+    # and drops the connection.
+    - name: 5. Plaintext from outside the mesh is refused
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ spire_demo_namespace }} exec deploy/client -c app --
+          python3 -c "import http.client as h; c = h.HTTPConnection('frontend.{{ spire_mesh_namespace }}.svc', 80, timeout=10);
+          c.request('GET', '/'); print(c.getresponse().status)"
+      register: spire_mv_plain
+      changed_when: false
+      failed_when: spire_mv_plain.rc == 0
+
+    - name: 5. Read the Route's host
+      ansible.builtin.command:
+        cmd: oc -n {{ spire_mesh_namespace }} get route frontend -o 'jsonpath={.spec.host}'
+      register: spire_mv_host
+      changed_when: false
+
+    # The router is not in the mesh either; it reaches the gateway, and the
+    # gateway's Envoy - SPIRE certificate and all - opens mTLS to frontend.
+    - name: 5. Through the Route and the ingress gateway, the shop answers
+      ansible.builtin.command:
+        cmd: >-
+          oc -n {{ spire_demo_namespace }} exec deploy/client -c app --
+          python3 -c "import http.client as h, ssl; c = h.HTTPSConnection('{{ spire_mv_host.stdout }}', 443, timeout=15,
+          context=ssl._create_unverified_context()); c.request('GET', '/'); print(c.getresponse().status)"
+      register: spire_mv_route
+      retries: 6
+      delay: 10
+      until: spire_mv_route.rc == 0 and spire_mv_route.stdout == '200'
+      changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "registered: {{ spire_mv_stats.stdout.split('/')[0] }} entries for {{ spire_mv_pods.stdout_lines | length }} running pods"
+      - "every Envoy holds its SPIRE SVID ({{ spire_mv_seen | map(attribute='seconds') | min }}-{{ spire_mv_seen | map(attribute='seconds') | max }}s), e.g. {{ spire_mv_seen[0].uris[0] }}"
+      - "paymentservice: {{ spire_mv_paid.stdout }} requests from checkoutservice over mTLS"
+      - "loadgenerator -> paymentservice: {{ spire_mv_denied.stdout }}"
+      - "{{ ('outsider: plaintext refused (' ~ (spire_mv_plain.stderr_lines | select('search', 'Error|Disconnected') | list | last | default('connection closed') | truncate(80)) ~ '); https://'
+             ~ spire_mv_host.stdout ~ '/ -> ' ~ spire_mv_route.stdout) if spire_mv_demo.rc == 0
+           else 'outsider checks skipped: spiffe-demo is not deployed on ' ~ spire_c.name }}"

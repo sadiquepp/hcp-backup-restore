@@ -1,0 +1,62 @@
+---
+# The SPIRE server's PersistentVolume, when the cluster has no StorageClass
+# to provision one. On a cluster with a default class - lvms-vg1, from the
+# base build's LVM Storage, is the normal case - or with spire_storage_class
+# naming one, this phase only reports and does nothing.
+
+- name: Decide where the SPIRE server's data will live
+  ansible.builtin.include_tasks: storage-decide.yml
+
+- name: Report the decision
+  ansible.builtin.debug:
+    msg: "SPIRE server storage: {{ spire_storage_summary }}"
+
+- name: Make a local PV for the SPIRE server
+  when: spire_storage_mode == 'local'
+  block:
+    - name: Check whether the PV already exists
+      ansible.builtin.command:
+        cmd: oc get pv spire-server-data-{{ spire_c.name }} -o name
+      register: spire_st_pv
+      changed_when: false
+      failed_when: false
+
+    # On the node's own disk, through a debug pod. RHCOS keeps /var writable
+    # and persistent. container_file_t with no MCS categories is readable by
+    # any container; the kubelet relabels a local volume to the pod's own
+    # categories on mount anyway, and applies the pod's fsGroup, so the
+    # server's random UID can write to it under restricted-v2 - this is a
+    # belt to that pair of braces, not a replacement for them.
+    - name: Create the directory on {{ spire_local_node }}
+      ansible.builtin.command:
+        cmd: >-
+          oc debug node/{{ spire_local_node }} --quiet --
+          chroot /host sh -c 'mkdir -p {{ spire_local_pv_path }} &&
+          chmod 0775 {{ spire_local_pv_path }} &&
+          chcon -t container_file_t {{ spire_local_pv_path }} &&
+          ls -dZ {{ spire_local_pv_path }}'
+      register: spire_st_mkdir
+      when: spire_st_pv.rc != 0
+      changed_when: true
+
+    - name: Render the StorageClass and PV
+      ansible.builtin.template:
+        src: storage-local.yaml.j2
+        dest: "{{ spire_manifest_dir }}/02-storage.yaml"
+        mode: '0644'
+
+    - name: Apply them
+      ansible.builtin.command:
+        cmd: oc apply -f {{ spire_manifest_dir }}/02-storage.yaml
+      register: spire_st_apply
+      changed_when: spire_st_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+    - name: Show the PV
+      ansible.builtin.command:
+        cmd: oc get pv spire-server-data-{{ spire_c.name }}
+      register: spire_st_show
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ (spire_st_mkdir.stdout_lines | default([])) + spire_st_show.stdout_lines }}"

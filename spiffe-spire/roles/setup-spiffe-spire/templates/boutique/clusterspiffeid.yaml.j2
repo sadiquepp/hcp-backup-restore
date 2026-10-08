@@ -1,0 +1,21 @@
+{# Every pod in the namespace gets an identity - no podSelector - named for
+   its service account: spiffe://{{ spire_c.trust_domain }}/ns/{{ spire_boutique_namespace }}/sa/<service>.
+   Only the two pods with ghostunnel USE theirs; the rest show that
+   registration and use are separate things. #}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ spire_boutique_namespace }}
+spec:
+  className: {{ spire_class_name }}
+  spiffeIDTemplate: {% raw %}"spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"{% endraw %}
+
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ spire_boutique_namespace }}
+{% if spire_boutique_federates_with | default([]) %}
+  federatesWith:
+{% for td in spire_boutique_federates_with %}
+    - {{ td }}
+{% endfor %}
+{% endif %}

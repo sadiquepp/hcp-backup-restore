@@ -1,0 +1,295 @@
+---
+# Online Boutique on OpenShift Service Mesh 3, with SPIRE as the mesh's
+# certificate authority: every sidecar's certificate is an X.509-SVID from
+# the SPIRE agent, fetched over the SPIFFE CSI driver's socket. mTLS is STRICT
+# and paymentservice admits checkoutservice only.
+#
+# In order: the Service Mesh operator, IstioCNI and Istio (51-mesh-istio.yaml),
+# the ClusterSPIFFEID (52-mesh-clusterspiffeid.yaml), then the application
+# overlay, built with `oc kustomize` into 53-boutique-mesh.yaml.
+#
+# A namespace of its own, so it neither needs nor disturbs the ghostunnel
+# version in {{ spire_boutique_namespace }}.
+
+- name: Fail unless the SPIRE server is up
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_retries: 1
+    spire_sr_delay: 0
+
+- name: Fail unless SPIRE is up
+  ansible.builtin.command:
+    cmd: oc wait spireagent/cluster spiffecsidriver/cluster --for=condition=Ready --timeout=10s
+  register: spire_ms_ready
+  changed_when: false
+  failed_when: false
+
+- name: Say so
+  ansible.builtin.assert:
+    that: spire_ms_ready.rc == 0
+    fail_msg: >-
+      The SPIRE agent or CSI driver on {{ spire_c.name }} are not Ready
+      ({{ spire_ms_ready.stderr | default('') | trim }}). Run --tags spire first.
+
+## ---------------------------------------------------------------------------
+## The Service Mesh operator
+## ---------------------------------------------------------------------------
+
+- name: Look Service Mesh 3 up in {{ spire_catalog_source }}
+  ansible.builtin.command:
+    cmd: >-
+      oc get packagemanifests -n {{ spire_catalog_namespace }}
+      -l catalog={{ spire_catalog_source }}
+      -o 'jsonpath={range .items[?(@.metadata.name=="{{ spire_mesh_operator_package }}")]}{.status.defaultChannel}{" "}{.status.channels[*].name}{end}'
+  register: spire_ms_pkg
+  changed_when: false
+
+- name: Fail if it is not there
+  ansible.builtin.assert:
+    that: spire_ms_pkg.stdout | trim | length > 0
+    fail_msg: >-
+      No package {{ spire_mesh_operator_package }} in catalog {{ spire_catalog_source }}.
+      OpenShift Service Mesh 3 is in redhat-operators from OpenShift 4.14; check
+      the catalog pod in {{ spire_catalog_namespace }} is healthy.
+
+# Somebody may already run Service Mesh 3 on this cluster. One copy of the
+# operator per cluster: use theirs, and leave it for them at cleanup.
+- name: Find any Subscription to the operator, anywhere
+  ansible.builtin.command:
+    cmd: >-
+      oc get subscriptions.operators.coreos.com -A
+      -o 'jsonpath={range .items[?(@.spec.name=="{{ spire_mesh_operator_package }}")]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.spec.channel}{"\n"}{end}'
+  register: spire_ms_subs
+  changed_when: false
+
+- name: Settle on the channel, and whose Subscription it is
+  ansible.builtin.set_fact:
+    spire_mesh_pkg: "{{ spire_mesh_operator_package }}"
+    spire_mesh_existing_sub: "{{ (spire_ms_subs.stdout_lines | map('split') | list | first) | default([]) }}"
+    spire_mesh_chan: >-
+      {{ spire_mesh_operator_channel if spire_mesh_operator_channel
+         else ((spire_ms_subs.stdout_lines | map('split') | list | first | default([]))[2]
+               | default(spire_ms_pkg.stdout.split()[0])) }}
+
+- name: Fail if the chosen channel does not exist
+  ansible.builtin.assert:
+    that: spire_mesh_chan in spire_ms_pkg.stdout.split()[1:]
+    fail_msg: >-
+      Channel '{{ spire_mesh_chan }}' is not offered by {{ spire_mesh_pkg }}.
+      It has: {{ spire_ms_pkg.stdout.split()[1:] | join(', ') }}
+
+# Ours when there is none, or when the one there is the one we would make.
+- name: Render the Subscription
+  ansible.builtin.template:
+    src: mesh-operator.yaml.j2
+    dest: "{{ spire_manifest_dir }}/50-mesh-operator.yaml"
+    mode: '0644'
+  when: >-
+    spire_mesh_existing_sub | length == 0 or
+    spire_mesh_existing_sub[:2] == [spire_mesh_operator_namespace, spire_mesh_pkg]
+
+- name: Apply it
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/50-mesh-operator.yaml
+  register: spire_ms_op_apply
+  changed_when: spire_ms_op_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+  when: >-
+    spire_mesh_existing_sub | length == 0 or
+    spire_mesh_existing_sub[:2] == [spire_mesh_operator_namespace, spire_mesh_pkg]
+
+- name: Wait for the Subscription to name an installed CSV
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_mesh_existing_sub[0] | default(spire_mesh_operator_namespace) }}
+      get subscriptions.operators.coreos.com {{ spire_mesh_existing_sub[1] | default(spire_mesh_pkg) }}
+      -o jsonpath={.status.installedCSV}
+  register: spire_ms_csv
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: spire_ms_csv.stdout | length > 0
+  changed_when: false
+
+- name: Wait for the CSV to succeed
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_mesh_existing_sub[0] | default(spire_mesh_operator_namespace) }}
+      get csv {{ spire_ms_csv.stdout }} -o jsonpath={.status.phase}
+  register: spire_ms_phase
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: spire_ms_phase.stdout == 'Succeeded'
+  changed_when: false
+
+- name: Wait for the operator's CRDs
+  ansible.builtin.command:
+    cmd: oc wait --for=condition=Established --timeout=300s crd/{{ item }}
+  loop:
+    - istios.sailoperator.io
+    - istiocnis.sailoperator.io
+    - peerauthentications.security.istio.io
+    - authorizationpolicies.security.istio.io
+    - gateways.networking.istio.io
+    - virtualservices.networking.istio.io
+  changed_when: false
+
+## ---------------------------------------------------------------------------
+## The control plane
+## ---------------------------------------------------------------------------
+
+# An Istio named 'default' that this lab did not make is somebody else's
+# mesh, with its own CA settings: applying ours over it would take it over.
+- name: Look for a mesh this lab did not create
+  ansible.builtin.command:
+    cmd: >-
+      oc get istios.sailoperator.io,istiocnis.sailoperator.io
+      -o 'jsonpath={range .items[*]}{.kind}/{.metadata.name}={.metadata.labels}{"\n"}{end}'
+  register: spire_ms_meshes
+  changed_when: false
+
+- name: Fail if there is one
+  ansible.builtin.assert:
+    that: spire_ms_meshes.stdout_lines | reject('search', spire_mesh_owner_label | regex_escape) | list | length == 0
+    fail_msg: >-
+      {{ spire_c.name }} already runs a mesh this lab did not create:
+      {{ spire_ms_meshes.stdout_lines | reject('search', spire_mesh_owner_label | regex_escape)
+         | map('regex_replace', '=.*$', '') | join(', ') }}.
+      Making SPIRE its CA changes every workload's certificate, so this lab
+      will not do it to someone else's mesh. Use a cluster without one.
+
+- name: Render IstioCNI and Istio
+  ansible.builtin.template:
+    src: mesh-istio.yaml.j2
+    dest: "{{ spire_manifest_dir }}/51-mesh-istio.yaml"
+    mode: '0644'
+
+- name: Apply them
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/51-mesh-istio.yaml
+  register: spire_ms_istio_apply
+  changed_when: spire_ms_istio_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+# The operator only sets the conditions once it has looked at the CR - wait
+# on them with retries rather than one `oc wait` that fails on "no
+# condition" in the first seconds.
+- name: Wait for IstioCNI and Istio to be Ready
+  ansible.builtin.command:
+    cmd: >-
+      oc get {{ item }} -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}'
+  loop:
+    - istiocnis.sailoperator.io/default
+    - istios.sailoperator.io/default
+  register: spire_ms_cp
+  retries: "{{ spire_wait_retries }}"
+  delay: "{{ spire_wait_delay }}"
+  until: spire_ms_cp.stdout == 'True'
+  changed_when: false
+
+- name: Read the Istio version that is running
+  ansible.builtin.command:
+    cmd: oc get istios.sailoperator.io default -o 'jsonpath={.spec.version}'
+  register: spire_ms_version
+  changed_when: false
+
+## ---------------------------------------------------------------------------
+## The application
+## ---------------------------------------------------------------------------
+
+- name: Look for a federation with the peer trust domain
+  ansible.builtin.command:
+    cmd: oc get clusterfederatedtrustdomain {{ spire_peer.trust_domain }} -o name
+  register: spire_ms_cftd
+  changed_when: false
+  failed_when: false
+
+# Harmless and cheap: the peer's bundle then reaches every sidecar under
+# ROOTCA as well, which is what a cross-cluster mesh would build on.
+- name: Decide what the mesh identities federate with
+  ansible.builtin.set_fact:
+    spire_mesh_federates_with: "{{ [spire_peer.trust_domain] if spire_ms_cftd.rc == 0 else [] }}"
+
+- name: Fetch the application source
+  ansible.builtin.import_tasks: boutique-source.yml
+
+# Before the pods: a sidecar with no registration entry gets no certificate,
+# and its pod waits, not ready, until the entry appears.
+- name: Render the registration
+  ansible.builtin.template:
+    src: mesh/clusterspiffeid.yaml.j2
+    dest: "{{ spire_manifest_dir }}/52-mesh-clusterspiffeid.yaml"
+    mode: '0644'
+
+- name: Apply it
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/52-mesh-clusterspiffeid.yaml
+  register: spire_ms_csid_apply
+  changed_when: spire_ms_csid_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+- name: Create the overlay directory
+  ansible.builtin.file:
+    path: "{{ spire_mesh_render_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Render the mesh overlay
+  ansible.builtin.template:
+    src: "mesh/{{ item }}.j2"
+    dest: "{{ spire_mesh_render_dir }}/{{ item }}"
+    mode: '0644'
+  loop:
+    - kustomization.yaml
+    - policy.yaml
+    - gateway.yaml
+
+- name: Build it into one manifest
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      oc kustomize {{ spire_mesh_render_dir }} > {{ spire_manifest_dir }}/53-boutique-mesh.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Apply it
+  ansible.builtin.command:
+    cmd: oc apply -f {{ spire_manifest_dir }}/53-boutique-mesh.yaml
+  register: spire_ms_apply
+  changed_when: spire_ms_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+
+# Pods created before injection was on (a re-run after a failed first try)
+# have no sidecar; a restart brings them into the mesh. Only those.
+- name: Find Deployments whose pods have no sidecar
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_mesh_namespace }} get pods
+      -o 'jsonpath={range .items[*]}{.metadata.labels.app}{"|"}{.spec.initContainers[*].name}{" "}{.spec.containers[*].name}{"\n"}{end}'
+  register: spire_ms_pods
+  changed_when: false
+
+- name: Restart them
+  ansible.builtin.command:
+    cmd: oc -n {{ spire_mesh_namespace }} rollout restart deployment/{{ item }}
+  loop: >-
+    {{ spire_ms_pods.stdout_lines | reject('search', 'istio-proxy')
+       | map('split', '|') | map('first') | select | unique | list }}
+  changed_when: true
+
+- name: Wait for every Deployment to roll out
+  ansible.builtin.command:
+    cmd: >-
+      oc -n {{ spire_mesh_namespace }} rollout status deployment/{{ item }} --timeout=900s
+  loop:
+    - paymentservice
+    - checkoutservice
+    - frontend
+    - "{{ spire_mesh_gateway_name }}"
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "Online Boutique on Service Mesh {{ spire_ms_version.stdout | default('') }} on {{ spire_c.name }}, namespace {{ spire_mesh_namespace }}"
+      - "every sidecar's certificate from SPIRE ({{ spire_c.trust_domain }}); mTLS STRICT"
+      - "paymentservice admits: {{ spire_mesh_payment_allowed | join(', ') }}"
+      - "operator: {{ spire_ms_csv.stdout }}{{ '' if (spire_mesh_existing_sub | length == 0 or spire_mesh_existing_sub[:2] == [spire_mesh_operator_namespace, spire_mesh_pkg])
+          else ' (already installed by ' ~ spire_mesh_existing_sub[:2] | join('/') ~ ', used as it is)' }}"
+      - "manifests: {{ spire_manifest_dir }}/5[0-3]-*.yaml (overlay in {{ spire_mesh_render_dir }})"

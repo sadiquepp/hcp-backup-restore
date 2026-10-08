@@ -1,0 +1,85 @@
+---
+# First federation play: check both SPIRE servers are ready to federate, and
+# read each one's trust bundle in SPIFFE format. Both clusters from one play,
+# so every oc names its --kubeconfig. The bundles are left as facts on
+# localhost (spire_bundles) for the per-cluster plays that follow.
+
+- name: Look for both kubeconfigs
+  ansible.builtin.stat:
+    path: "{{ spire_clusters[item].kubeconfig }}"
+  loop: "{{ spire_pair }}"
+  register: spire_fb_kc
+
+- name: Fail unless both clusters are there
+  ansible.builtin.assert:
+    that: spire_fb_kc.results | map(attribute='stat.exists') | select | list | length == 2
+    fail_msg: >-
+      Federation needs both clusters. Missing kubeconfig(s):
+      {{ spire_fb_kc.results | rejectattr('stat.exists') | map(attribute='item')
+         | map('extract', spire_clusters) | map(attribute='kubeconfig') | join(', ') }}
+
+# Healthy, not Ready: see server-ready.yml.
+- name: Wait for both SPIRE servers to be healthy
+  ansible.builtin.include_tasks: server-ready.yml
+  vars:
+    spire_sr_kubeconfig: "{{ spire_clusters[spire_fb_c].kubeconfig }}"
+    spire_sr_retries: 6
+  loop: "{{ spire_pair }}"
+  loop_control:
+    loop_var: spire_fb_c
+
+- name: Read each server's bundle endpoint profile and Route host
+  ansible.builtin.shell:
+    cmd: >-
+      oc --kubeconfig {{ spire_clusters[item].kubeconfig }} get spireserver cluster
+      -o jsonpath={.spec.federation.bundleEndpoint.profile};
+      echo -n ' ';
+      oc --kubeconfig {{ spire_clusters[item].kubeconfig }} -n {{ spire_operator_namespace }}
+      get route {{ spire_federation_route_name }} -o jsonpath={.spec.host} 2>/dev/null || true
+  loop: "{{ spire_pair }}"
+  register: spire_fb_endpoint
+  changed_when: false
+
+- name: Fail unless both publish a bundle endpoint
+  ansible.builtin.assert:
+    that: >-
+      item.stdout.split() | length == 2 and
+      item.stdout.split()[0] == 'https_spiffe' and
+      item.stdout.split()[1] == spire_federation_route_name ~ '.' ~ spire_clusters[item.item].apps_domain
+    fail_msg: >-
+      {{ item.item }}: bundle endpoint profile / Route host is '{{ item.stdout }}', wanted
+      'https_spiffe {{ spire_federation_route_name }}.{{ spire_clusters[item.item].apps_domain }}'.
+      Run --tags spire -e spire_cluster={{ item.item }} with spire_federation_enabled true
+      (the default) - it adds spec.federation to the SpireServer and the Route.
+    success_msg: "{{ item.item }}: https://{{ item.stdout.split() | last }}"
+  loop: "{{ spire_fb_endpoint.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# SPIFFE bundle format: a JWKS document holding the trust domain's X.509
+# CAs (use: x509-svid) and JWT signing keys (use: jwt-svid). This is the
+# out-of-band step federation cannot do without - see cftd.yaml.j2.
+- name: Read each server's own trust bundle
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ spire_clusters[item].kubeconfig }} -n {{ spire_operator_namespace }}
+      exec spire-server-0 -c spire-server -- {{ spire_server_cli }} bundle show -format spiffe
+  loop: "{{ spire_pair }}"
+  register: spire_fb_bundle
+  changed_when: false
+
+- name: Keep them for the next plays
+  ansible.builtin.set_fact:
+    spire_bundles: "{{ dict(spire_fb_bundle.results | map(attribute='item') | zip(spire_fb_bundle.results | map(attribute='stdout'))) }}"
+
+- name: Fail unless each is a bundle with at least one X.509 CA
+  ansible.builtin.assert:
+    that: >-
+      (spire_bundles[item] | from_json).get('keys', [])
+      | selectattr('use', 'equalto', 'x509-svid') | list | length > 0
+    fail_msg: "{{ item }}: `spire-server bundle show -format spiffe` did not return a bundle with an X.509 CA"
+    success_msg: >-
+      {{ item }}: {{ (spire_bundles[item] | from_json).get('keys', []) | selectattr('use', 'equalto', 'x509-svid') | list | length }}
+      X.509 CA(s), {{ (spire_bundles[item] | from_json).get('keys', []) | selectattr('use', 'equalto', 'jwt-svid') | list | length }}
+      JWT key(s)
+  loop: "{{ spire_pair }}"

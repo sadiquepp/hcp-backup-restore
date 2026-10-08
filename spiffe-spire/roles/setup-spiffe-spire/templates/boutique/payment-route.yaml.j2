@@ -1,0 +1,14 @@
+{# The paymentservice, reachable from the OTHER cluster: passthrough, so the
+   mTLS session runs end to end from the peer's checkoutservice to this
+   ghostunnel. The router only reads the SNI. Unused until a checkout
+   elsewhere is pointed at it (spire_boutique_remote_payments). #}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: paymentservice
+  namespace: {{ spire_boutique_namespace }}
+spec:
+  host: {{ spire_boutique_payment_route_host }}
+  to: {kind: Service, name: paymentservice, weight: 100}
+  port: {targetPort: {{ spire_boutique_mtls_port }}}
+  tls: {termination: passthrough, insecureEdgeTerminationPolicy: None}
