@@ -162,6 +162,29 @@
   notify:
     -  Restart_Named
 
+# The three-node compact clusters (compact-cluster/setup_compact_cluster.yaml
+# and compact-cluster/setup_compact_cluster_disconnected.yaml), one zone per compact_clusters
+# entry. Same guard discipline as the SNO above: this condition is repeated in
+# named.rfc1912.zones.j2, because a stanza without its file stops named from
+# starting.
+- name: Deploy the compact clusters' forward zonefiles
+  template:
+    src: compact_domain.j2
+    dest: "/var/named/{{ compact_cluster.name }}.{{ base_domain }}.db"
+    owner: root
+    group: named
+    mode: u=rw,g=r,o=r
+  loop: "{{ compact_clusters | default([]) }}"
+  loop_control:
+    loop_var: compact_cluster
+    label: "{{ compact_cluster.name }}.{{ base_domain }}"
+  when:
+    - (compact_cluster.name | default('')) | length > 0
+    - (compact_cluster.api_vip_key | default('')) in ip_list
+    - (compact_cluster.ingress_vip_key | default('')) in ip_list
+  notify:
+    -  Restart_Named
+
 # Every hosted cluster gets a zone, connected and disconnected alike, in one
 # unconditional pass - the helper serves all of them at once and never needs
 # rebuilding to switch between the two. The zones are derived from the cluster
@@ -180,15 +203,25 @@
 
 # Which hub each cluster's api/api-int points at - see setup_dns_hub_* in
 # defaults/main.yml for why it is resolved per cluster and not per run.
+#
+# A connected cluster with no address for target_hub falls back to 'hub', and
+# one with no 'hub' address either - hcp-compact1, whose control plane runs on
+# the compact cluster - to the one management cluster it does have an address
+# for. Falling back to 'hub' unconditionally rendered a zone with no api record
+# for such a cluster.
 - name: Plan the connected hosted cluster zones
   ansible.builtin.set_fact:
     hosted_cluster_zone_plan: >-
       {{ hosted_cluster_zone_plan | default([]) + [{
            'name': item,
+           'domain': ((hosted_cluster_domains | default({}))[item] | default(base_domain)),
            'hub': setup_dns_hub_connected
-                  if (hosted_cluster_metallb_pools[item].ip | default({}))[setup_dns_hub_connected] is defined
-                  else 'hub' }] }}
+                  if setup_dns_ip_map[setup_dns_hub_connected] is defined
+                  else ('hub' if setup_dns_ip_map['hub'] is defined
+                        else (setup_dns_ip_map | list | first)) }] }}
   loop: "{{ dns_connected_clusters }}"
+  vars:
+    setup_dns_ip_map: "{{ hosted_cluster_metallb_pools[item].ip | default({}) }}"
   when: item in (hosted_cluster_metallb_pools | default({}))
 
 - name: Plan the disconnected hosted cluster zones
@@ -196,6 +229,7 @@
     hosted_cluster_zone_plan: >-
       {{ hosted_cluster_zone_plan | default([]) + [{
            'name': item,
+           'domain': ((hosted_cluster_domains | default({}))[item] | default(base_domain)),
            'hub': 'hub2' if (target_hub | default('hub')) == 'hub2'
                   else setup_dns_hub_disconnected }] }}
   loop: "{{ dns_disconnected_clusters }}"
@@ -216,13 +250,13 @@
 - name: Deploy the hosted cluster forward zonefiles
   template:
     src: hosted_cluster_zone.j2
-    dest: "/var/named/{{ item.name }}.{{ base_domain }}.db"
+    dest: "/var/named/{{ item.name }}.{{ item.domain }}.db"
     owner: root
     group: named
     mode: u=rw,g=r,o=r
   loop: "{{ hosted_cluster_zone_plan | default([]) }}"
   loop_control:
-    label: "{{ item.name }}.{{ base_domain }} -> {{ item.hub }}"
+    label: "{{ item.name }}.{{ item.domain }} -> {{ item.hub }}"
   vars:
     zone: "{{ item }}"
   notify:
@@ -231,7 +265,7 @@
 - name: Show which address each hosted cluster zone publishes
   ansible.builtin.debug:
     msg: >-
-      api.{{ item.name }}.{{ base_domain }} ->
+      api.{{ item.name }}.{{ item.domain }} ->
       {{ (hosted_cluster_metallb_network_prefixes | default({}))[item.hub] | default(lab_network_prefix) }}.{{ hosted_cluster_metallb_pools[item.name].ip[item.hub] }}
       (hub {{ item.hub }}, MetalLB pool {{ hosted_cluster_metallb_pools[item.name].pool }})
   loop: "{{ hosted_cluster_zone_plan | default([]) }}"

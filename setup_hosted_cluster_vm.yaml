@@ -17,6 +17,15 @@
 ## mirror registry. disconnected_install wins over target_hub, same as in
 ## setup_bminfra.yaml.
 ##
+## The compact cluster's hosted cluster (hcp-compact1):
+##   ansible-playbook -i inventory/hosts setup_hosted_cluster_vm.yaml --ask-vault-pass \
+##     -e target_hub=compact
+## builds compact_hosted_cluster_workers (two VMs, ip_list.hcpc1worker*)
+## against the compact cluster's InfraEnv (setup_bminfra.yaml -e
+## target_hub=compact), and adds their DHCP reservations to the running
+## libvirt network first - redefining the network would cut the compact
+## cluster off it.
+##
 ## Both paths run the same tasks - only the worker set, the VM folder and the
 ## sizing differ (see the "Select the worker set" task below and the
 ## disconnected block in vars.yaml) - plus one step the disconnected path needs
@@ -30,10 +39,18 @@
   vars_files:
     - vars.yaml
   vars:
+    ## Anything not named here is hub1, as before.
+    hub_install_folders:
+      hub: "{{ hub_install_folder }}"
+      hub2: "{{ hub2_install_folder }}"
+      compact: "{{ compact_install_folder }}"
     hub_install_folder_selected: >-
       {{ hub_disconnected_install_folder
          if (disconnected_install | default(false) | bool)
-         else ((target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder)) }}
+         else (hub_install_folders[target_hub | default('hub')] | default(hub_install_folder)) }}
+    hcp_on_compact: >-
+      {{ not (disconnected_install | default(false) | bool)
+         and (target_hub | default('hub')) == 'compact' }}
     hub_kubeconfig: "{{ hub_install_folder_selected }}/auth/kubeconfig"
   environment:
     KUBECONFIG: "{{ hub_kubeconfig }}"
@@ -51,19 +68,23 @@
         hcp_workers: >-
           {{ hosted_cluster_disconnected_workers
              if (disconnected_install | default(false) | bool)
-             else hosted_cluster_workers }}
+             else (compact_hosted_cluster_workers if hcp_on_compact | bool
+                   else hosted_cluster_workers) }}
         hcp_vm_folder: >-
           {{ hosted_cluster_disconnected_vm_folder
              if (disconnected_install | default(false) | bool)
-             else hosted_cluster_vm_folder }}
+             else (compact_hosted_cluster_vm_folder if hcp_on_compact | bool
+                   else hosted_cluster_vm_folder) }}
         hcp_vm_memory: >-
           {{ hosted_cluster_disconnected_memory
              if (disconnected_install | default(false) | bool)
-             else hosted_cluster_memory }}
+             else (compact_hosted_cluster_memory if hcp_on_compact | bool
+                   else hosted_cluster_memory) }}
         hcp_vm_cpu: >-
           {{ hosted_cluster_disconnected_cpu
              if (disconnected_install | default(false) | bool)
-             else hosted_cluster_cpu }}
+             else (compact_hosted_cluster_cpu if hcp_on_compact | bool
+                   else hosted_cluster_cpu) }}
 
     - name: Report which hosted cluster's VMs are being built
       ansible.builtin.debug:
@@ -104,6 +125,43 @@
     - name: Download discovery ISO from hub InfraEnv
       ansible.builtin.include_tasks: roles/setup-bminfra/tasks/download-discovery-iso.yml
 
+    # The hub's hosted cluster workers get their DHCP reservations from the
+    # libvirt network definition setup_bm_host.yaml renders, which it applies
+    # by destroying and redefining the network - fine before anything runs on
+    # it, not with the compact cluster up. So a compact run adds its workers'
+    # reservations to the RUNNING network instead (--live --config), the way
+    # roles/setup-compact-cluster adds its nodes'. Same FQDN the template
+    # renders, so a later rebuild changes nothing.
+    - name: Read the default network's current definition
+      ansible.builtin.command: virsh net-dumpxml default
+      register: hcp_net_xml
+      changed_when: false
+      when: hcp_on_compact | bool
+
+    - name: Reserve each worker's address on the running network
+      ansible.builtin.command:
+        cmd: >-
+          virsh net-update default add ip-dhcp-host
+          "<host mac='{{ hcp_worker_mac }}' name='{{ item.ip_key }}.{{ hcp_worker_zone }}'
+                 ip='{{ lab_network_prefix }}.{{ ip_list[item.ip_key] }}'/>"
+          --live --config
+      loop: "{{ hcp_workers }}"
+      loop_control:
+        label: "{{ item.name }} {{ hcp_worker_mac }}"
+      vars:
+        hcp_worker_mac: "52:54:00:e2:54:{{ '%02d' | format(ip_list[item.ip_key] | int) }}"
+        hcp_worker_cluster: >-
+          {{ (hosted_cluster_node_keys | dict2items
+              | selectattr('value.workers', 'defined')
+              | selectattr('value.workers', 'contains', item.ip_key)
+              | map(attribute='key') | first) | default('') }}
+        hcp_worker_zone: >-
+          {{ hcp_worker_cluster }}.{{ (hosted_cluster_domains | default({}))[hcp_worker_cluster] | default(base_domain) }}
+      when:
+        - hcp_on_compact | bool
+        - hcp_worker_mac not in (hcp_net_xml.stdout | lower)
+      changed_when: true
+
     - name: Create Directory for Hosted Cluster VMs
       file:
         path: "{{ hcp_vm_folder }}"
@@ -120,18 +178,39 @@
       loop_control:
         label: "{{ item.name }}"
 
+    # --import with an explicit hd,cdrom boot order, not --cdrom, for the
+    # reason given in roles/setup-sno/tasks/vm.yml and used by
+    # roles/setup-compact-cluster too.
+    #
+    # --cdrom is virt-install's "install from this media" mode. It sets the
+    # domain up as an install session around the ISO, which assumes the guest
+    # reboots once when the installer is finished. The assisted-installer
+    # agent does not work that way - it writes RHCOS to the disk and reboots
+    # the machine to run it - and the session gets in the way of that reboot:
+    # depending on the virt-install version the worker either powers off
+    # partway through provisioning (the NodePool then waits until someone
+    # starts the VM by hand) or boots back into the agent off the ISO, which
+    # is the symptom roles/setup-sno/tasks/vm.yml describes.
+    #
+    # --import defines the domain without an install phase, and hd,cdrom gives
+    # it the boot order these nodes actually want: the disk is empty on the
+    # first boot so the VM falls through to the discovery ISO, and once RHCOS
+    # is on the disk every later boot - including the agent's own reboot -
+    # comes up from it. The ISO stays attached and is simply never reached.
     - name: Deploy Workers for Hosted Cluster
       shell: |
         virt-install \
+        --import \
         --ram {{ hcp_vm_memory }} \
         --vcpus {{ hcp_vm_cpu }} \
         --os-variant rhel9.5 \
-        --cdrom {{ discovery_image_url }} \
         --disk path={{ hcp_vm_folder }}/{{ item.name }}.qcow2,device=disk,bus=virtio,format=qcow2,cache=none \
+        --disk path={{ discovery_image_url }},device=cdrom,bus=sata,readonly=on \
+        --boot hd,cdrom \
         --memballoon model=virtio,freePageReporting=on \
         --noautoconsole \
         --vnc \
-        --network network:default,mac=52:54:00:e2:54:{{ ip_list[item.ip_key] }} \
+        --network network:default,mac=52:54:00:e2:54:{{ '%02d' | format(ip_list[item.ip_key] | int) }} \
         --name {{ item.name }} \
         --cpu host-passthrough
       loop: "{{ hcp_workers }}"

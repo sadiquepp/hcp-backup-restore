@@ -36,11 +36,19 @@
 # so a hosted cluster added to either cluster list gets its VIP bound here
 # without a second edit; the '-d' clusters were missing precisely because this
 # list was hand-maintained. Only VIPs whose ip_list key exists are bound.
+#
+# selectattr first, because a hosted cluster need not have an 'apps_lb' at all:
+# one whose *.apps comes from MetalLB inside the cluster rather than from this
+# haproxy (hcp-compact1, see roles/setup-hcp-ingress-metallb) carries an
+# 'apps_vip' and no key here. Mapping the attribute over every entry made that
+# a hard failure of the whole lb role - 'dict object' has no attribute
+# 'apps_lb' - rather than the cluster simply not being bound here.
 - name: Work out the VIPs haproxy has to bind
   ansible.builtin.set_fact:
     lb_vip_octets: >-
       {{ [ip_list.hublb, ip_list.hub2lb, ip_list.hubdlb, ip_list.hub2dlb]
          + ((hosted_cluster_node_keys | default({})).values() | list
+            | selectattr('apps_lb', 'defined') | list
             | map(attribute='apps_lb') | list
             | select('in', ip_list) | list
             | map('extract', ip_list) | list) }}

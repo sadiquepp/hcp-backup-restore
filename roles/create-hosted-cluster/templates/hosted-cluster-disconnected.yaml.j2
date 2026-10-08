@@ -128,7 +128,7 @@ spec:
       agentNamespace: '{{ oadp_bminfra_namespace }}'
   infraID: '{{ hcp.name }}'
   dns:
-    baseDomain: '{{ base_domain }}'
+    baseDomain: '{{ hosted_cluster_domain }}'
   services:
   - service: APIServer
     servicePublishingStrategy:

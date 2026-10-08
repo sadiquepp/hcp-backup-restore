@@ -1,0 +1,41 @@
+---
+# LVM Storage (the LVMS operator and one LVMCluster) on a freshly built
+# cluster, so it has a default StorageClass - lvms-vg1 - from the moment the
+# build finishes.
+#
+# Run from the cluster builds themselves when use_lvm_storage is true:
+# setup_hub_cluster.yaml and setup_hub_cluster2.yaml (tag lvm, so it survives
+# --skip-tags acm) and setup_sno.yaml (tag snostorage). It used to be part of
+# setup-hub-acm, which meant a hub built with --skip-tags acm had no storage
+# at all.
+#
+# The LVMCluster names no deviceSelector, so it takes every empty disk on
+# every node: the 500G storage_worker<N>.qcow2 each hub worker is built with,
+# or the disk setup-sno attaches to the SNO for this.
+
+## The same switch vars.yaml carries; repeated so the role has a value when
+## run without it. false = the Ceph/ODF path, and this role does nothing.
+use_lvm_storage: true
+
+## Connected: redhat-operators. Disconnected: the CatalogSource oc-mirror
+## generated, named as setup-hub-acm names it - and an acm_catalog_source set
+## in vars.yaml is followed, so the two can never resolve against different
+## catalogs.
+disconnected_install: false
+lvm_mirror_catalog_source: "cs-{{ (mirror_catalog_index | default('')) | regex_replace('^.*/', '') | regex_replace('[:.]', '-') }}"
+lvm_catalog_source: >-
+  {{ acm_catalog_source if acm_catalog_source is defined
+     else (lvm_mirror_catalog_source if disconnected_install | bool else 'redhat-operators') }}
+lvm_catalog_source_namespace: openshift-marketplace
+
+lvm_namespace: openshift-storage
+lvm_subscription_name: lvms
+lvm_cluster_name: my-lvmcluster
+## The StorageClass LVMS creates for the device class 'vg1' in
+## files/04-lvm-cluster.yaml, marked default because that class is.
+lvm_storage_class: lvms-vg1
+
+## Operator install and vg-manager scanning the disks: a few minutes on a
+## fresh cluster.
+lvm_wait_retries: 60
+lvm_wait_delay: 10

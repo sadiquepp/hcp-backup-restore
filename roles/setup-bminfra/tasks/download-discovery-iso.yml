@@ -9,7 +9,12 @@
 # sets discovery_iso_force_download when it changed the InfraEnv and the ISO was
 # therefore rebuilt; nothing else needs to force a ~1G download.
 
+# A PXE-booted node never touches the ISO - it gets the same agent as kernel,
+# initrd and rootfs, which the three tasks below stage on the helper. So a
+# caller that only PXE-boots (setup_hosted_cluster2_vm.yaml) sets
+# discovery_download_iso false and skips a ~1G download it would not use.
 - name: Wait for InfraEnv discovery ISO URL
+  when: discovery_download_iso | default(true) | bool
   ansible.builtin.shell: >
     oc get infraenv "{{ oadp_bminfra_namespace }}" -n "{{ oadp_bminfra_namespace }}"
     -o jsonpath='{.status.isoDownloadURL}'
@@ -46,6 +51,7 @@
     mode: '0755'
 
 - name: Download discovery ISO from InfraEnv
+  when: discovery_download_iso | default(true) | bool
   ansible.builtin.get_url:
     url: "{{ infraenv_iso_url.stdout }}"
     dest: "{{ download_dir }}/{{ discovery_iso_filename }}"
@@ -70,11 +76,18 @@
   loop_control:
     label: "{{ item.filename }}"
 
+# Left undefined when the ISO was not downloaded, so a caller that boots from
+# it fails on the undefined variable rather than on a path that is not there.
 - name: Set discovery_image_url to local ISO path
+  when: discovery_download_iso | default(true) | bool
   ansible.builtin.set_fact:
     discovery_image_url: "{{ download_dir }}/{{ discovery_iso_filename }}"
 
+# The helper's PXE paths are one set of files, owned by the hub's hosted
+# cluster workers. discovery_copy_pxe_to_helper (vars.yaml) is false for the
+# compact cluster's InfraEnv, whose workers boot the ISO instead.
 - name: Ensure PXE directories exist on helper
+  when: discovery_copy_pxe_to_helper | default(true) | bool
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
@@ -86,6 +99,7 @@
   become: true
 
 - name: Copy PXE boot artifacts to helper
+  when: discovery_copy_pxe_to_helper | default(true) | bool
   ansible.builtin.copy:
     src: "{{ download_dir }}/{{ item.src }}"
     dest: "{{ item.dest }}"
@@ -104,8 +118,12 @@
 
 - name: Report discovery image and PXE boot artifact paths
   ansible.builtin.debug:
-    msg:
-      - "Discovery ISO ready at {{ discovery_image_url }}"
-      - "PXE kernel on helper: /var/lib/tftpboot/images/vmlinuz"
-      - "PXE initrd on helper: /var/lib/tftpboot/images/initrd.img"
-      - "PXE rootfs on helper: /var/www/html/bootp/rootfs.img"
+    msg: >-
+      {{ (['Discovery ISO ready at ' ~ discovery_image_url]
+          if (discovery_download_iso | default(true) | bool)
+          else ['Discovery ISO not downloaded (discovery_download_iso is false) - PXE artifacts only'])
+         + (['PXE kernel on helper: /var/lib/tftpboot/images/vmlinuz',
+             'PXE initrd on helper: /var/lib/tftpboot/images/initrd.img',
+             'PXE rootfs on helper: /var/www/html/bootp/rootfs.img']
+            if (discovery_copy_pxe_to_helper | default(true) | bool)
+            else ['PXE artifacts left off the helper (discovery_copy_pxe_to_helper is false)']) }}

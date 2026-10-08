@@ -8,11 +8,28 @@
 ## tags to remove everything, or narrow it:
 ##
 ##   --tags sno      the single-node OpenShift cluster only
+##   --tags compact  the three-node compact cluster only, with the worker VMs
+##                   of the hosted cluster it manages (hcp-compact1)
+##   --tags compacthcp  just those hosted cluster worker VMs and their cached
+##                   discovery ISO - the compact cluster stays
+##   --tags compactd the disconnected compact cluster only (VMs, folders and
+##                   its egress-blocking iptables rules)
 ##   --tags udnlab   the UDN/BGP/EVPN lab - clab VM, client VMs, fabric net
 ##
 ## The untagged tasks (hub, hub2, hosted clusters, helper, registry, minio,
 ## ceph) have no tag of their own, so they run on an untagged invocation and
-## are skipped by either tag above.
+## are skipped by any tag above.
+##
+## THE MIRROR REGISTRY IS ONLY SHUT DOWN, never deleted. Its VM, its 500G disk
+## and everything oc-mirror put on it survive, so the disconnected flows can be
+## picked up again with `virsh start registry` instead of another mirror run
+## over tens of gigabytes. The CA this host trusts and its podman login are
+## left alone too, since they still match that registry.
+##
+##   ansible-playbook -i inventory/hosts cleanup-mirror-registry.yaml
+##
+## is the one that really removes it - the VM, the disks and, unless told
+## otherwise, the local trust that would otherwise outlive it.
 ##
 ## WHAT THIS DOES NOT TOUCH. The DHCP reservations these VMs hold on the
 ## libvirt 'default' network are left in place. Every MAC in this lab is
@@ -140,12 +157,66 @@
       virsh undefine helper >/dev/null 2>&1 || true
       rm -f /var/lib/libvirt/images/helper_disk.qcow2
 
-  - name: Destroy Mirror Registry VM
-    shell: |
-      virsh destroy  registry >/dev/null 2>&1 || true
-      virsh undefine registry >/dev/null 2>&1 || true
-      rm -f /var/lib/libvirt/images/registry_disk.qcow2
-      rm -f /var/lib/libvirt/images/registry_extra_disk.qcow2
+  ## The mirror registry is the one VM here that is kept. Everything else in
+  ## this lab is rebuilt from a playbook in minutes; the registry's content is
+  ## an oc-mirror run of tens of gigabytes, and nothing about it is tied to the
+  ## clusters that were just removed. So it is stopped - freeing its 16G of
+  ## RAM, which is the actual reason to care while it is not in use - and left
+  ## defined, with its disks and its mirrored content intact.
+  ##
+  ## `virsh start registry` brings it back, and the disconnected playbooks work
+  ## again with no mirror run: this host's CA trust and podman login are
+  ## untouched here, and the registry comes up with the same name, address and
+  ## certificate. To really remove it, run cleanup-mirror-registry.yaml.
+  ##
+  ## Graceful first (quay stops cleanly, so a restart has no recovery to do),
+  ## with a forced power-off only if it does not stop in three minutes. A
+  ## domain that is absent or already off is left as it is.
+  - name: Check the mirror registry VM's state
+    shell: "virsh domstate {{ mirror_registry_name | default('registry') }} 2>/dev/null || true"
+    register: mirror_registry_state
+    changed_when: false
+
+  ## 'running', but also 'paused' or 'pmsuspended' - anything holding its
+  ## memory. Absent is '' and gives nothing to do.
+  - name: Note whether it is up
+    ansible.builtin.set_fact:
+      mirror_registry_up: "{{ mirror_registry_state.stdout | trim not in ['', 'shut off'] }}"
+
+  - name: Ask the mirror registry VM to shut down
+    shell: "virsh shutdown {{ mirror_registry_name | default('registry') }}"
+    when: mirror_registry_up | bool
+
+  - name: Wait for it to stop (up to 3 minutes)
+    shell: "virsh domstate {{ mirror_registry_name | default('registry') }} 2>/dev/null || true"
+    register: mirror_registry_stopping
+    until: "'shut off' in mirror_registry_stopping.stdout"
+    retries: 18
+    delay: 10
+    failed_when: false
+    changed_when: false
+    when: mirror_registry_up | bool
+
+  ## Only if the guest ignored ACPI. The registry holds no state that a hard
+  ## power-off endangers - quay's data is on the disk and its database is
+  ## crash-safe - so this is a last resort, not a risk.
+  - name: Force it off if the graceful shutdown did not finish
+    shell: "virsh destroy {{ mirror_registry_name | default('registry') }} >/dev/null 2>&1 || true"
+    when:
+      - mirror_registry_up | bool
+      - "'shut off' not in (mirror_registry_stopping.stdout | default(''))"
+
+  - name: Report what happened to the mirror registry
+    ansible.builtin.debug:
+      msg: >-
+        {{ mirror_registry_name | default('registry') }}:
+        {{ 'was ' ~ (mirror_registry_state.stdout | trim) ~ ', now shut off - VM and mirrored content kept.'
+           if (mirror_registry_up | bool)
+           else ((mirror_registry_state.stdout | trim | length > 0)
+                 | ternary('already shut off - VM and mirrored content kept.',
+                           'not defined, nothing to do.')) }}
+        Start it again with: virsh start {{ mirror_registry_name | default('registry') }}
+        - or remove it for good with cleanup-mirror-registry.yaml.
 
   - name: Destroy Minio VM
     shell: |
@@ -194,6 +265,70 @@
         virsh undefine {{ sno_name }} >/dev/null 2>&1 || true
       rm -rf {{ sno_vm_folder | default(download_dir ~ '/' ~ sno_name) }}
       rm -rf {{ sno_install_folder }}
+
+  ## -------------------------------------------------------------------------
+  ## The three-node compact cluster (compact-cluster/setup_compact_cluster.yaml)
+  ## -------------------------------------------------------------------------
+  ## Same reasoning as the SNO above for taking the install folder with it.
+  ## No --remove-all-storage: the three domains share the agent ISO as their
+  ## cdrom, and the folders are removed outright below anyway.
+  - name: Destroy the compact cluster VMs
+    tags: [compact]
+    shell: |
+      {% for node in compact_nodes | default([]) %}
+      virsh destroy  {{ node.ip_key }} >/dev/null 2>&1 || true
+      virsh undefine {{ node.ip_key }} >/dev/null 2>&1 || true
+      {% endfor %}
+      rm -rf {{ compact_vm_folder | default(download_dir ~ '/compact') }}
+      rm -rf {{ compact_install_folder | default(download_dir ~ '/compact_install') }}
+
+  ## The worker VMs of the hosted cluster the compact cluster manages
+  ## (setup_hosted_cluster_vm.yaml -e target_hub=compact). Its control plane is
+  ## pods on the compact cluster, so it goes with it; --tags compacthcp removes
+  ## only the workers, e.g. to rebuild them. To retire the hosted cluster
+  ## while keeping the compact cluster, delete its HostedCluster/NodePool on
+  ## the compact cluster first (compact-cluster/compact-cluster-hcp.md), or
+  ## the NodePool keeps waiting for Agents that no longer exist.
+  - name: Destroy the compact cluster's hosted cluster worker VMs
+    tags: [compact, compacthcp]
+    shell: |
+      {% for w in compact_hosted_cluster_workers | default([]) %}
+      virsh destroy  {{ w.name }} >/dev/null 2>&1 || true
+      virsh undefine {{ w.name }} >/dev/null 2>&1 || true
+      {% endfor %}
+      rm -rf {{ compact_hosted_cluster_vm_folder | default(download_dir ~ '/hcp_compact1') }}
+      rm -f {{ download_dir }}/compact-bminfra-discovery-*
+
+  ## -------------------------------------------------------------------------
+  ## The disconnected compact cluster (compact-cluster/setup_compact_cluster_disconnected.yaml)
+  ## -------------------------------------------------------------------------
+  ## Its iptables rules go too. They carry the comment
+  ## "compactd disconnected: ..." (block-node-nat.yml), so only this cluster's
+  ## rules are deleted; hubd's, and the LAB_NO_NAT / LAB_NO_EGRESS chains and
+  ## their jumps, stay for whoever else uses them. The mirror registry and the
+  ## chronyd `allow` on this host are shared infrastructure and are left alone.
+  - name: Destroy the disconnected compact cluster VMs
+    tags: [compactd]
+    shell: |
+      {% for node in compactd_nodes | default([]) %}
+      virsh destroy  {{ node.ip_key }} >/dev/null 2>&1 || true
+      virsh undefine {{ node.ip_key }} >/dev/null 2>&1 || true
+      {% endfor %}
+      rm -rf {{ compactd_vm_folder | default(download_dir ~ '/compactd') }}
+      rm -rf {{ compactd_install_folder | default(download_dir ~ '/compactd_install') }}
+      rm -rf /tmp/{{ compactd_name | default('compactd') }}-cluster-resources /tmp/{{ compactd_name | default('compactd') }}-cluster-resources.tar.gz
+
+  - name: Remove the disconnected compact cluster's egress-blocking rules
+    tags: [compactd]
+    shell: |
+      for t in "nat LAB_NO_NAT" "filter LAB_NO_EGRESS"; do
+        set -- $t
+        iptables -t $1 -S $2 2>/dev/null \
+          | grep -- '--comment "{{ compactd_name | default('compactd') }} disconnected:' \
+          | sed 's/^-A /-D /' \
+          | while read -r rule; do eval iptables -t $1 $rule; done
+      done
+      true
 
   ## -------------------------------------------------------------------------
   ## The UDN/BGP/EVPN lab (setup_udn_bgp_lab.yaml)

@@ -1,0 +1,112 @@
+---
+# Build a connected three-node compact OpenShift cluster from an agent ISO,
+# with every node's address on an active-backup (mode 1) bond over two NICs.
+#
+#   cd compact-cluster
+#   ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
+#
+# From inside compact-cluster/, like udn-bgp-evpn/: ansible.cfg is read from
+# the working directory, and the one here adds ../roles to roles_path.
+#
+# Runs on the hypervisor. --ask-vault-pass is not optional: this is a connected
+# install and the nodes pull their release payload from quay.io with the pull
+# secret out of vault.yaml.
+#
+# DNS IS NOT DONE HERE, for the same reason as setup_sno.yaml: the zone
+# compact.<base_domain> is rendered by setup-dns, which runs on the HELPER and
+# is owned by setup_bm_host.yaml. Run this first, from the repository root:
+#
+#   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns \
+#     --ask-vault-pass
+#
+# That renders the zone on the helper and the api/*.apps names in this host's
+# /etc/hosts. Pre-flight fails with the same command if api.compact.<domain>
+# does not resolve to the API VIP yet.
+#
+# Useful subsets:
+#   --tags compactimage   rebuild the agent ISO without touching the VMs
+#   --tags compactvm      rebuild the VMs from the ISO already built
+#   --tags compactwait    just block until an install already running finishes
+#   --tags compactstorage just add LVM Storage (lvms-vg1) to a running cluster,
+#                         attaching the empty disk it needs to any node built
+#                         without one
+#
+# Hosted control planes on the compact cluster (compact-cluster-hcp.md). Both
+# tags are also tagged 'never', so a plain run - or --tags compact - does not
+# turn the compact cluster into a management cluster; ask for them by name:
+#   --tags acm            ACM (with MCE), MetalLB and OADP, exactly what
+#                         setup_hub_cluster.yaml --tags acm puts on the hub
+#                         (roles/setup-hub-acm), with metallb_hub=compact so
+#                         MetalLB gets the API pool of each hosted cluster
+#                         addressed 'compact' in hosted_cluster_metallb_pools
+#   --tags hcpingress     once a hosted cluster's workers are up: MetalLB INSIDE
+#                         it, giving its HostNetwork routers the *.apps address
+#                         (roles/setup-hcp-ingress-metallb)
+#
+# Rebuilding over an existing cluster needs -e compact_force_reinstall=true;
+# the rebuild wipes the only copy of its kubeconfig.
+#
+# Every step this automates is written out by hand in compact-cluster.md.
+- name: Set up a three-node compact OpenShift cluster
+  hosts: localhost
+  become: true
+  vars_files:
+    - ../vars.yaml
+    - ../vault.yaml
+  tasks:
+    - name: Install the compact cluster
+      ansible.builtin.import_role:
+        name: setup-compact-cluster
+
+    # After the install: the operator needs a running cluster. Its own task
+    # file, so --tags compactstorage runs it alone against a cluster built
+    # earlier.
+    - name: Add LVM Storage (default StorageClass lvms-vg1)
+      ansible.builtin.include_role:
+        name: setup-compact-cluster
+        tasks_from: storage
+        apply:
+          tags: [compact, compactstorage]
+      when:
+        - compact_lvm_storage | default(use_lvm_storage | default(true)) | bool
+        - compact_wait_for_install | default(true) | bool
+      tags: [compact, compactstorage]
+
+    # ACM/MCE/MetalLB/OADP - the hub's day-2 role, unchanged, pointed at this
+    # cluster. metallb_hub=compact selects the hosted clusters whose
+    # hosted_cluster_metallb_pools entry has a 'compact' address (hcp-compact1),
+    # and only those: no hub's pool is ever rendered here, and hub runs never
+    # render this one. LVM Storage in it is the same operator and LVMCluster
+    # tasks/storage.yml already applied, so that part is a no-op re-apply.
+    # The AgentServiceConfig is rendered, not applied, exactly as on the hub.
+    - name: Make the compact cluster a management cluster (ACM, MCE, MetalLB)
+      ansible.builtin.import_role:
+        name: setup-hub-acm
+      vars:
+        metallb_hub: compact
+      environment:
+        KUBECONFIG: "{{ compact_install_folder }}/auth/kubeconfig"
+        PATH: "{{ compact_install_folder }}:{{ lookup('env', 'PATH') }}"
+      tags: [acm, never]
+
+    # Ingress for each hosted cluster this cluster manages: MetalLB inside the
+    # hosted cluster -> Service -> its HostNetwork routers. No helper haproxy.
+    - name: MetalLB ingress inside each hosted cluster the compact cluster manages
+      ansible.builtin.include_role:
+        name: setup-hcp-ingress-metallb
+        apply:
+          tags: [hcpingress]
+          environment:
+            PATH: "{{ compact_install_folder }}:{{ lookup('env', 'PATH') }}"
+      vars:
+        hcp_ingress_mgmt_kubeconfig: "{{ compact_install_folder }}/auth/kubeconfig"
+      loop: >-
+        {{ hosted_cluster_metallb_pools | dict2items
+           | selectattr('value.ip.compact', 'defined')
+           | map(attribute='key')
+           | select('in', (hosted_clusters | select('mapping') | map(attribute='name') | list)
+                          + (hosted_clusters | reject('mapping') | list))
+           | list }}
+      loop_control:
+        loop_var: hcp_ingress_cluster
+      tags: [hcpingress, never]

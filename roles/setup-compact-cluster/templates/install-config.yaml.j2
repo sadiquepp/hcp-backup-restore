@@ -1,0 +1,79 @@
+{#
+  install-config.yaml for the connected three-node compact cluster.
+
+  Three control-plane replicas and zero compute is what makes this compact:
+  with no workers the installer marks the masters schedulable, so ingress and
+  every workload land on the same three nodes.
+
+  platform: baremetal, not none. With none, api and *.apps would need an
+  external load balancer in front of three nodes (the hub's haproxy pattern).
+  The baremetal platform instead runs keepalived, haproxy and CoreDNS on the
+  nodes themselves and floats the two VIPs below between them. The agent
+  installer needs only apiVIPs and ingressVIPs here - there are no BMCs, the
+  agent ISO is what installs the hosts, and agent-config.yaml describes them.
+
+  provisioningNetwork: Disabled because there is no separate provisioning
+  network in this lab, and nothing here is PXE-booted by Ironic.
+
+  Both VIPs and every node address must be inside machineNetwork, or the
+  installer rejects the VIPs before it builds anything.
+#}
+apiVersion: v1
+baseDomain: {{ base_domain }}
+compute:
+- name: worker
+  replicas: 0
+controlPlane:
+  name: master
+  replicas: {{ compact_hosts | length }}
+metadata:
+  name: {{ compact_name }}
+networking:
+  clusterNetwork:
+  - cidr: {{ compact_cluster_network_cidr }}
+    hostPrefix: {{ compact_cluster_network_host_prefix }}
+  machineNetwork:
+  - cidr: {{ lab_network_prefix }}.0/{{ compact_prefix_length }}
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - {{ compact_service_network_cidr }}
+platform:
+  baremetal:
+    apiVIPs:
+    - {{ compact_api_vip }}
+    ingressVIPs:
+    - {{ compact_ingress_vip }}
+    provisioningNetwork: Disabled
+{% if compact_disconnected | bool %}
+{#
+  Disconnected. imageDigestSources is the ONLY place the mirror is configured
+  for the install: the installer uses it for its own pulls while building the
+  ISO (it hands it to oc as --icsp-file), writes it into the ISO's
+  registries.conf for the agents, and generates the cluster's own
+  ImageDigestMirrorSet from it. oc-mirror's IDMS is deliberately not added as
+  an extra manifest as well - see roles/setup-hub-cluster-disconnected.
+
+  The pull secret holds only the mirror's credentials; to_json twice so no
+  character in it can break the YAML. The CA lets every node, and the agent
+  ISO, pull from the mirror over TLS.
+#}
+imageDigestSources:
+{% for m in compact_image_digest_mirrors %}
+- mirrors:
+{% for mirror in m.mirrors %}
+  - {{ mirror }}
+{% endfor %}
+  source: {{ m.source }}
+{% endfor %}
+pullSecret: {{ compact_mirror_pull_secret | to_json | to_json }}
+sshKey: '{{ compact_ssh_key }}'
+{# Also put the CA in the cluster-wide trusted bundle, for pods that talk to
+   the registry themselves; the default (Proxyonly) does that only with a
+   proxy configured. #}
+additionalTrustBundlePolicy: Always
+additionalTrustBundle: |
+  {{ compact_mirror_ca_cert | trim | indent(2) }}
+{% else %}
+pullSecret: '{{ pull_secret }}'
+sshKey: '{{ compact_ssh_key }}'
+{% endif %}

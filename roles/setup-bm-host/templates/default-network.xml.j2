@@ -20,7 +20,7 @@
                         + (hosted_clusters | default([]) | reject('mapping') | list)
                         + (hosted_clusters_disconnected | default([]) | select('mapping') | map(attribute='name') | list)
                         + (hosted_clusters_disconnected | default([]) | reject('mapping') | list) %}
-    <forwarder domain='{{ hcp_zone_name }}.{{ base_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+    <forwarder domain='{{ hcp_zone_name }}.{{ (hosted_cluster_domains | default({}))[hcp_zone_name] | default(base_domain) }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
 {% endfor %}
     <forwarder domain='{{ hub2_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
     <forwarder domain='{{ hub_disconnected_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
@@ -35,6 +35,15 @@
 {% if (sno_name | default('')) and (ip_list[sno_name] is defined) %}
     <forwarder domain='{{ sno_name }}.{{ base_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
 {% endif %}
+{# The three-node compact clusters, on the same condition setup-dns serves their
+   zones on. Their nodes resolve api-int and *.apps from their own on-node
+   CoreDNS, so the installs do not depend on this - every OTHER VM on the
+   network does, to reach a cluster by name. #}
+{% for c in compact_clusters | default([]) %}
+{% if (c.name | default('')) and ((c.api_vip_key | default('')) in ip_list) and ((c.ingress_vip_key | default('')) in ip_list) %}
+    <forwarder domain='{{ c.name }}.{{ base_domain }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
+{% endif %}
+{% endfor %}
     <forwarder domain='{{ lab_network_reverse_zone }}' addr='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
   </dns>
   <ip address='{{ lab_network_prefix }}.1' netmask='{{ lab_network_netmask }}'>
@@ -49,6 +58,20 @@
 {% for key in hcp_keys.workers | default([]) %}
 {% set _ = hosted_cluster_worker_zone.update({key: hcp_name}) %}
 {% endfor %}
+{% endfor %}
+{# ip_list key -> FQDN for every compact cluster, so their nodes and VIPs are
+   named inside <cluster>.<base_domain> rather than falling through to the hub
+   zone. Must match the PTRs named-reverse.hub.j2 renders for the same keys. #}
+{% set compact_dhcp_names = {} %}
+{% for c in compact_clusters | default([]) %}
+{% if c.name | default('') %}
+{% set compact_zone = c.name ~ '.' ~ base_domain %}
+{% for node in c.nodes | default([]) %}
+{% set _ = compact_dhcp_names.update({node.ip_key: node.hostname ~ '.' ~ compact_zone}) %}
+{% endfor %}
+{% set _ = compact_dhcp_names.update({c.api_vip_key: 'api.' ~ compact_zone}) %}
+{% set _ = compact_dhcp_names.update({c.ingress_vip_key: 'ingress.apps.' ~ compact_zone}) %}
+{% endif %}
 {% endfor %}
 {% macro dhcp_fqdn(key) -%}
 {%- if key == 'helper_server' -%}
@@ -70,7 +93,7 @@ bootstrap.{{ hub_disconnected_domain }}
 {%- elif key in hosted_cluster_worker_zone -%}
 {#- Hosted cluster worker VMs: the cluster whose hosted_cluster_node_keys list
     the key belongs to, so a new cluster or a '-d' one needs no branch here. -#}
-{{ key }}.{{ hosted_cluster_worker_zone[key] }}.{{ base_domain }}
+{{ key }}.{{ hosted_cluster_worker_zone[key] }}.{{ (hosted_cluster_domains | default({}))[hosted_cluster_worker_zone[key]] | default(base_domain) }}
 {%- elif key == 'hublb' -%}
 api.{{ hub_domain }}
 {%- elif key == 'hub2lb' -%}
@@ -86,12 +109,18 @@ api.{{ hub2_disconnected_domain }}
     invariant the comment at the top of this dhcp block states. 'sno.sno' reads
     oddly and is right: hostname 'sno' inside zone sno.<base_domain>. -#}
 {{ sno_name }}.{{ sno_name }}.{{ base_domain }}
+{%- elif key in compact_dhcp_names -%}
+{{ compact_dhcp_names[key] }}
 {%- else -%}
 {{ key }}.{{ hub_domain }}
 {%- endif -%}
 {%- endmacro %}
      {% for key, value in ip_list.items() %}
-     <host mac='52:54:00:e2:54:{{ value }}' name='{{ dhcp_fqdn(key) }}' ip='{{ lab_network_prefix }}.{{ value }}'/>
+{# '%02d': the octet is used as the MAC's last byte verbatim, so a single-digit
+   octet (the compactd cluster's .3-.7) is padded to 03 - otherwise the MAC
+   here would be 52:54:00:e2:54:3, which nothing but libvirt accepts. Every
+   two-digit octet renders exactly as before. #}
+     <host mac='52:54:00:e2:54:{{ '%02d' | format(value | int) }}' name='{{ dhcp_fqdn(key) }}' ip='{{ lab_network_prefix }}.{{ value }}'/>
      {% endfor %}
      <bootp file='pxelinux.0' server='{{ lab_network_prefix }}.{{ ip_list.helper_server }}'/>
    </dhcp>

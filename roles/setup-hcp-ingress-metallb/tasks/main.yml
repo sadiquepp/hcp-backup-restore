@@ -1,0 +1,160 @@
+---
+# MetalLB inside a hosted cluster, fronting its HostNetwork routers - see
+# defaults/main.yml. Every `oc` names its kubeconfig: the management cluster's
+# for the HostedCluster objects, the hosted cluster's for everything else.
+
+- name: Fail fast without a cluster, a management kubeconfig or an apps VIP
+  ansible.builtin.assert:
+    that:
+      - hcp_ingress_cluster | length > 0
+      - hcp_ingress_mgmt_kubeconfig | length > 0
+      - (hosted_cluster_node_keys | default({}))[hcp_ingress_cluster].apps_vip is defined
+    fail_msg: >-
+      Needs hcp_ingress_cluster (the HostedCluster name), hcp_ingress_mgmt_kubeconfig
+      (the cluster running its control plane), and an apps_vip for it in
+      hosted_cluster_node_keys (vars.yaml) - the last octet of the *.apps
+      address, the same one roles/setup-dns publishes.
+
+# --- The hosted cluster's own kubeconfig ------------------------------------
+
+- name: Wait for the HostedCluster to publish its admin kubeconfig
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_mgmt_kubeconfig }}
+      get hostedcluster {{ hcp_ingress_cluster }} -n {{ hcp_ingress_cluster }}
+      -o jsonpath={.status.kubeconfig.name}
+  register: hcp_ingress_secret
+  until: hcp_ingress_secret.rc == 0 and hcp_ingress_secret.stdout | length > 0
+  retries: "{{ hcp_ingress_retries }}"
+  delay: "{{ hcp_ingress_delay }}"
+  changed_when: false
+
+- name: Make the kubeconfig directory
+  ansible.builtin.file:
+    path: "{{ hcp_ingress_kubeconfig_dir }}"
+    state: directory
+    mode: '0700'
+
+- name: Extract the hosted cluster's admin kubeconfig
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_mgmt_kubeconfig }}
+      extract secret/{{ hcp_ingress_secret.stdout }} -n {{ hcp_ingress_cluster }}
+      --keys=kubeconfig --to={{ hcp_ingress_kubeconfig_dir }} --confirm
+  changed_when: false
+
+# MetalLB's speakers run on the workers, so they have to be there. The NodePool
+# says how many to expect.
+- name: Read how many workers the NodePool asks for
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_mgmt_kubeconfig }}
+      get nodepool -n {{ hcp_ingress_cluster }}
+      -o jsonpath={.items[*].spec.replicas}
+  register: hcp_ingress_replicas
+  changed_when: false
+
+- name: Wait for every worker to be Ready
+  ansible.builtin.shell:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_kubeconfig }} get nodes --no-headers
+      | awk '$2 == "Ready"' | wc -l
+  register: hcp_ingress_ready
+  until: >-
+    hcp_ingress_ready.rc == 0
+    and (hcp_ingress_ready.stdout | int) >= (hcp_ingress_replicas.stdout.split() | map('int') | sum)
+  retries: "{{ hcp_ingress_node_retries }}"
+  delay: "{{ hcp_ingress_node_delay }}"
+  changed_when: false
+
+# --- MetalLB ----------------------------------------------------------------
+
+- name: Install the MetalLB operator
+  ansible.builtin.command:
+    cmd: oc --kubeconfig {{ hcp_ingress_kubeconfig }} apply -f -
+    stdin: "{{ lookup('ansible.builtin.template', 'metallb-operator.yaml.j2') }}"
+  register: hcp_ingress_operator
+  changed_when: "hcp_ingress_operator.stdout_lines | reject('search', ' unchanged$') | list | length > 0"
+
+- name: Wait for the Subscription to name an installed CSV
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_kubeconfig }} -n metallb-system
+      get subscriptions.operators.coreos.com metallb-operator-sub
+      -o jsonpath={.status.installedCSV}
+  register: hcp_ingress_csv
+  until: hcp_ingress_csv.rc == 0 and hcp_ingress_csv.stdout | length > 0
+  retries: "{{ hcp_ingress_retries }}"
+  delay: "{{ hcp_ingress_delay }}"
+  changed_when: false
+
+- name: Wait for the CSV to succeed
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_kubeconfig }} -n metallb-system
+      get csv {{ hcp_ingress_csv.stdout }} -o jsonpath={.status.phase}
+  register: hcp_ingress_csv_phase
+  until: hcp_ingress_csv_phase.stdout == 'Succeeded'
+  retries: "{{ hcp_ingress_retries }}"
+  delay: "{{ hcp_ingress_delay }}"
+  changed_when: false
+
+- name: Start MetalLB
+  ansible.builtin.command:
+    cmd: oc --kubeconfig {{ hcp_ingress_kubeconfig }} apply -f -
+    stdin: |
+      apiVersion: metallb.io/v1beta1
+      kind: MetalLB
+      metadata:
+        name: metallb
+        namespace: metallb-system
+  register: hcp_ingress_metallb
+  changed_when: "' unchanged' not in hcp_ingress_metallb.stdout"
+
+# The pool and advertisement are validated by MetalLB's webhook, which only
+# answers once its controller is up - an apply before that is refused, so it
+# is retried rather than waited for by pod name.
+- name: Create the apps VIP pool, its L2Advertisement and the ingress Service
+  ansible.builtin.command:
+    cmd: oc --kubeconfig {{ hcp_ingress_kubeconfig }} apply -f -
+    stdin: "{{ lookup('ansible.builtin.template', 'ingress-vip.yaml.j2') }}"
+  register: hcp_ingress_vip_apply
+  until: hcp_ingress_vip_apply.rc == 0
+  retries: "{{ hcp_ingress_retries }}"
+  delay: "{{ hcp_ingress_delay }}"
+  changed_when: "hcp_ingress_vip_apply.stdout_lines | reject('search', ' unchanged$') | list | length > 0"
+
+- name: Wait for the ingress Service to hold the apps VIP
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_kubeconfig }} -n openshift-ingress
+      get svc {{ hcp_ingress_service }}
+      -o jsonpath={.status.loadBalancer.ingress[0].ip}
+  register: hcp_ingress_svc_ip
+  until: hcp_ingress_svc_ip.stdout == hcp_ingress_vip
+  retries: "{{ hcp_ingress_retries }}"
+  delay: "{{ hcp_ingress_delay }}"
+  changed_when: false
+
+# --- Check it from outside --------------------------------------------------
+
+# The console route answers through the whole path: DNS (*.apps -> the VIP),
+# MetalLB's ARP for it, the Service, a router pod on a worker, the route.
+# Not fatal: the console operator can still be settling on a new cluster.
+- name: Reach the console through the apps VIP
+  ansible.builtin.uri:
+    url: "https://console-openshift-console.apps.{{ hcp_ingress_cluster }}.{{ hcp_ingress_domain }}"
+    validate_certs: false
+    follow_redirects: none
+    status_code: [200, 302, 303, 503]
+  register: hcp_ingress_probe
+  failed_when: false
+  vars:
+    hcp_ingress_domain: "{{ (hosted_cluster_domains | default({}))[hcp_ingress_cluster] | default(base_domain) }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "{{ hcp_ingress_cluster }}: *.apps -> {{ hcp_ingress_vip }} (MetalLB pool {{ hcp_ingress_pool }}, Service openshift-ingress/{{ hcp_ingress_service }})"
+      - "Console probe: {{ hcp_ingress_probe.status | default('no answer') }} {{ hcp_ingress_probe.msg | default('') }}"
+      - "Hosted cluster kubeconfig: {{ hcp_ingress_kubeconfig }}"

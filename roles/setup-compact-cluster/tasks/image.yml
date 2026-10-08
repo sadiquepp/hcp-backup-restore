@@ -1,0 +1,195 @@
+---
+# Fetch the installer, render the two manifests, and build the agent ISO.
+#
+# Identical to roles/setup-sno/tasks/image.yml apart from one step: the
+# generated state of a previous build is cleared before rendering. An agent
+# install directory that still holds .openshift_install_state.json and auth/
+# from an earlier cluster builds an ISO that reuses that cluster's generated
+# assets, and the failure that produces does not point back here.
+
+- name: Create the install and VM directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ compact_install_folder }}"
+    - "{{ compact_vm_folder }}"
+
+# Before anything is downloaded: everything except THIS version's tarballs
+# and the binaries unpacked from them, so a rebuild at the same version does
+# not re-download ~1GiB. The tarball names carry the version (below), so a
+# version bump removes the old tarballs here and fetches new ones - get_url
+# skips a dest that exists, so with a version-less name it would quietly reuse
+# the old installer. The binaries are re-extracted from the right tarball
+# every run. Pre-flight has already refused to get here over a live cluster
+# unless compact_force_reinstall was set.
+- name: Clear the previous build's generated state
+  ansible.builtin.shell:
+    cmd: >-
+      find {{ compact_install_folder }} -mindepth 1 -maxdepth 1
+      ! -name 'openshift-*-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz'
+      ! -name openshift-install ! -name oc ! -name kubectl
+      ! -name README.md -print -exec rm -rf {} +
+  register: compact_cleared
+  changed_when: compact_cleared.stdout | length > 0
+
+# Connected only. A disconnected install takes openshift-install out of the
+# mirrored release instead (mirror.yml, below), because the binary installs
+# the release it came from.
+- name: Get the OpenShift installer for {{ ocp_major_version }}.{{ ocp_minor_version }}
+  when: not (compact_disconnected | bool)
+  ansible.builtin.get_url:
+    url: >-
+      https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-install-linux.tar.gz
+    dest: "{{ compact_install_folder }}/openshift-install-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz"
+    mode: '0644'
+
+- name: Extract openshift-install
+  when: not (compact_disconnected | bool)
+  ansible.builtin.unarchive:
+    src: "{{ compact_install_folder }}/openshift-install-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz"
+    dest: "{{ compact_install_folder }}"
+    remote_src: true
+
+# Our own oc, beside the installer and on PATH only for the build - see
+# roles/setup-sno/tasks/image.yml for the race that sharing /usr/bin/oc with a
+# hub play running in parallel caused.
+- name: Get the OpenShift client for {{ ocp_major_version }}.{{ ocp_minor_version }}
+  ansible.builtin.get_url:
+    url: >-
+      https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_major_version }}.{{ ocp_minor_version }}/openshift-client-linux.tar.gz
+    dest: "{{ compact_install_folder }}/openshift-client-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz"
+    mode: '0644'
+
+- name: Extract oc
+  ansible.builtin.unarchive:
+    src: "{{ compact_install_folder }}/openshift-client-linux-{{ ocp_major_version }}.{{ ocp_minor_version }}.tar.gz"
+    dest: "{{ compact_install_folder }}"
+    remote_src: true
+
+# Disconnected: stage oc-mirror's output, extract openshift-install from the
+# mirror with --idms-file (using the oc just downloaded), and collect the
+# imageDigestSources, CA and pull secret install-config.yaml needs.
+- name: Get the installer and the mirror configuration from the mirror registry
+  ansible.builtin.include_tasks:
+    file: mirror.yml
+    apply:
+      tags: [compact, compactimage]
+  when: compact_disconnected | bool
+
+- name: Report the client version
+  ansible.builtin.command:
+    cmd: "{{ compact_install_folder }}/oc version --client"
+  register: compact_oc_version
+  changed_when: false
+
+- name: Report the installer version
+  ansible.builtin.command:
+    cmd: "{{ compact_install_folder }}/openshift-install version"
+  register: compact_installer_version
+  changed_when: false
+
+- name: Show the installer and client versions
+  ansible.builtin.debug:
+    msg: "{{ compact_installer_version.stdout_lines + compact_oc_version.stdout_lines }}"
+
+# `agent create image` CONSUMES both manifests, so keep a readable copy.
+- name: Keep a readable copy of what is being installed
+  ansible.builtin.file:
+    path: "{{ compact_install_folder }}/rendered"
+    state: directory
+    mode: '0755'
+
+- name: Render install-config.yaml and agent-config.yaml
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ compact_install_folder }}/rendered/{{ item }}"
+    mode: '0600'
+  loop:
+    - install-config.yaml
+    - agent-config.yaml
+
+# Disconnected: oc-mirror's install-time resources (the release signature
+# ConfigMap) and the OperatorHub default-sources suppression go in as extra
+# manifests - the agent installer applies everything in <dir>/openshift/.
+# IDMS/ITMS/CatalogSource are NOT here; see mirror.yml and the day-2 step.
+- name: Create the extra-manifests directory
+  ansible.builtin.file:
+    path: "{{ compact_install_folder }}/openshift"
+    state: directory
+    mode: '0755'
+  when: compact_disconnected | bool
+
+- name: Find oc-mirror's install-time resources
+  ansible.builtin.find:
+    paths: "{{ compact_cluster_resources_dir }}/install"
+    patterns: ['*.yaml', '*.yml', '*.json']
+  register: compact_install_resources
+  when: compact_disconnected | bool
+
+- name: Add them as extra manifests
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ compact_install_folder }}/openshift/"
+    remote_src: true
+    mode: '0644'
+  loop: "{{ compact_install_resources.files | default([]) | map(attribute='path') | list }}"
+  when: compact_disconnected | bool
+
+# The default catalogs point at registry.redhat.io, which the nodes cannot
+# reach; left on, their pods retry pulling forever.
+- name: Add the OperatorHub default-catalog suppression manifest
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../setup-hub-cluster-disconnected/files/operatorhub-disable-default-sources.yaml"
+    dest: "{{ compact_install_folder }}/openshift/operatorhub-disable-default-sources.yaml"
+    mode: '0644'
+  when: compact_disconnected | bool
+
+- name: Place the manifests where the installer will consume them
+  ansible.builtin.copy:
+    src: "{{ compact_install_folder }}/rendered/{{ item }}"
+    dest: "{{ compact_install_folder }}/{{ item }}"
+    mode: '0600'
+    remote_src: true
+  loop:
+    - install-config.yaml
+    - agent-config.yaml
+
+# This is where a malformed bond fails: openshift-install hands each host's
+# networkConfig to nmstatectl on this host before it writes the ISO.
+- name: Build the agent ISO
+  ansible.builtin.command:
+    cmd: "{{ compact_install_folder }}/openshift-install --dir {{ compact_install_folder }} agent create image"
+  register: compact_iso_build
+  changed_when: true
+  environment:
+    PATH: "{{ compact_install_folder }}:{{ ansible_env.PATH }}"
+
+- name: Report the ISO build
+  ansible.builtin.debug:
+    msg: "{{ compact_iso_build.stdout_lines | default([], true) + compact_iso_build.stderr_lines | default([], true) }}"
+
+- name: Confirm the ISO exists
+  ansible.builtin.stat:
+    path: "{{ compact_install_folder }}/agent.x86_64.iso"
+  register: compact_iso
+
+- name: Fail if the ISO was not produced
+  ansible.builtin.assert:
+    that: compact_iso.stat.exists
+    fail_msg: >-
+      openshift-install reported success but there is no
+      {{ compact_install_folder }}/agent.x86_64.iso. The rendered manifests are
+      in {{ compact_install_folder }}/rendered/ - check them, since the
+      installer consumed the originals.
+    success_msg: >-
+      Agent ISO built: {{ compact_install_folder }}/agent.x86_64.iso
+      ({{ (compact_iso.stat.size / 1024 / 1024) | round | int }} MiB).
+
+- name: Let qemu read the ISO
+  ansible.builtin.file:
+    path: "{{ compact_install_folder }}/agent.x86_64.iso"
+    mode: '0644'

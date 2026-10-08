@@ -49,7 +49,7 @@ $TTL    600
                 + (hosted_clusters_disconnected | default([]) | reject('mapping') | list) %}
 {% for key in ((hosted_cluster_node_keys | default({}))[name] | default({})).workers | default([]) %}
 {% if key in ip_list %}
-{{ ip_list[key] }} 		IN PTR 		{{ key }}.{{ name }}.{{ base_domain }}.
+{{ ip_list[key] }} 		IN PTR 		{{ key }}.{{ name }}.{{ (hosted_cluster_domains | default({}))[name] | default(base_domain) }}.
 {% endif %}
 {% endfor %}
 {% endfor %}
@@ -68,3 +68,19 @@ $TTL    600
 {% if (sno_name | default('')) and (ip_list[sno_name] is defined) %}
 {{ ip_list[sno_name] }} 		IN PTR 		{{ sno_name }}.{{ sno_name }}.{{ base_domain }}.
 {% endif %}
+{# The three-node compact clusters. Each node's PTR is <hostname>.<zone>, the A
+   record compact_domain.j2 renders. The API VIP points back at api.<zone>;
+   the ingress VIP at ingress.apps.<zone>, which the *.apps wildcard answers -
+   so both have a forward record to match, and both agree with the names
+   default-network.xml.j2 gives their DHCP reservations. #}
+{% for c in compact_clusters | default([]) %}
+{% if (c.name | default('')) and ((c.api_vip_key | default('')) in ip_list) and ((c.ingress_vip_key | default('')) in ip_list) %}
+{% for node in c.nodes | default([]) %}
+{% if node.ip_key in ip_list %}
+{{ ip_list[node.ip_key] }} 		IN PTR 		{{ node.hostname }}.{{ c.name }}.{{ base_domain }}.
+{% endif %}
+{% endfor %}
+{{ ip_list[c.api_vip_key] }} 		IN PTR 		api.{{ c.name }}.{{ base_domain }}.
+{{ ip_list[c.ingress_vip_key] }} 		IN PTR 		ingress.apps.{{ c.name }}.{{ base_domain }}.
+{% endif %}
+{% endfor %}

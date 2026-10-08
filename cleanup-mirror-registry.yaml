@@ -1,0 +1,124 @@
+---
+## Remove the mirror registry for good: the VM, its disks, and the trust this
+## host holds for it.
+##
+##   ansible-playbook -i inventory/hosts cleanup-mirror-registry.yaml
+##
+## This is the counterpart to cleanup.yaml, which deliberately only SHUTS the
+## registry DOWN. Rebuilding it costs an oc-mirror run of tens of gigabytes, so
+## tearing the lab's clusters down leaves it stopped and intact; this playbook
+## is the explicit "I am done with it" step.
+##
+## WHAT GOES:
+##   - the registry VM (destroyed and undefined)
+##   - its root disk and its extra disk, with every mirrored image on them
+##   - this host's trust in it: the CA in /etc/pki/ca-trust/source/anchors and
+##     the podman login entry in mirror_registry_authfile
+##
+## The trust goes by default because a rebuilt registry generates a NEW CA, and
+## a stale one is worse than none: it is what roles/setup-compact-cluster and
+## setup_hub_cluster.yaml check to decide the mirror registry "has been set up",
+## so leaving it behind makes a disconnected run start and then fail on a TLS
+## error instead of stopping with a clear message. Keep it with:
+##
+##   -e mirror_registry_remove_local_trust=false
+##
+## Only the mirror registry's own entry is removed from the authfile
+## (podman logout, not rm): mirror_registry_authfile defaults to
+## /root/.docker/config.json, which also holds your quay.io and
+## registry.redhat.io credentials.
+##
+## WHAT STAYS: everything else. The DHCP reservation and DNS record for the
+## registry's address come from ip_list in vars.yaml, like every other VM's,
+## and a rebuild reuses them - the same reasoning as cleanup.yaml's. Clusters
+## already installed from this registry keep running; they only break when
+## they next need to pull an image.
+##
+## Re-create it with:
+##   ansible-playbook -i inventory/hosts setup_mirror_registry.yaml \
+##     -e disconnected_install=true --ask-vault-pass
+
+- name: Remove the mirror registry
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+  vars:
+    ## Also remove the CA this host trusts and the podman login for the
+    ## registry. See the note above before turning this off.
+    mirror_registry_remove_local_trust: true
+  tasks:
+  - name: Report what is about to be removed
+    ansible.builtin.debug:
+      msg: >-
+        Removing the mirror registry VM '{{ mirror_registry_name }}'
+        ({{ mirror_registry_domain }}:{{ mirror_registry_port }}), its disks
+        and every mirrored image on them.
+        Local CA trust and podman login:
+        {{ (mirror_registry_remove_local_trust | bool) | ternary('also removed', 'kept') }}.
+
+  ## Destroy before undefine, and tolerate both failing - the same sequence and
+  ## for the same reason as cleanup.yaml: undefining a running domain makes it
+  ## transient rather than stopping it, and destroying one that is already off
+  ## fails.
+  - name: Destroy and undefine the mirror registry VM
+    shell: |
+      virsh destroy  {{ mirror_registry_name }} >/dev/null 2>&1 || true
+      virsh undefine {{ mirror_registry_name }} >/dev/null 2>&1 || true
+
+  - name: Delete its disks
+    ansible.builtin.file:
+      path: "/var/lib/libvirt/images/{{ item }}"
+      state: absent
+    loop:
+      - "{{ mirror_registry_disk }}"
+      - "{{ mirror_registry_extra_disk }}"
+
+  ## The registry's own copy of these lives on the disk just deleted; this is
+  ## the hypervisor's side of it, left by roles/setup-mirror-registry-trust.
+  - name: Log podman out of the mirror registry
+    shell: >-
+      podman logout --authfile {{ mirror_registry_authfile }}
+      {{ mirror_registry_domain }}:{{ mirror_registry_port }}
+    register: mirror_registry_logout
+    failed_when: false
+    changed_when: "'Removed login credentials' in mirror_registry_logout.stdout"
+    when: mirror_registry_remove_local_trust | bool
+
+  - name: Remove the mirror registry CA from this host's trust anchors
+    ansible.builtin.file:
+      path: /etc/pki/ca-trust/source/anchors/mirror-registry-rootCA.pem
+      state: absent
+    register: mirror_registry_ca
+    when: mirror_registry_remove_local_trust | bool
+
+  - name: Rebuild the CA trust bundle
+    ansible.builtin.command:
+      cmd: update-ca-trust extract
+    when:
+      - mirror_registry_remove_local_trust | bool
+      - mirror_registry_ca is changed
+
+  ## Staged copies of what oc-mirror published, pulled off the registry VM by
+  ## the disconnected cluster builds. They describe a registry that no longer
+  ## exists, and each build re-fetches them anyway.
+  - name: Remove the staged oc-mirror cluster-resources on this host
+    ansible.builtin.file:
+      path: "{{ item }}"
+      state: absent
+    loop:
+      - "{{ hub_disconnected_cluster_resources_dir | default('/tmp/hubd-cluster-resources') }}"
+      - "{{ hub_disconnected_cluster_resources_archive | default('/tmp/hubd-cluster-resources.tar.gz') }}"
+      - "/tmp/{{ compactd_name | default('compactd') }}-cluster-resources"
+      - "/tmp/{{ compactd_name | default('compactd') }}-cluster-resources.tar.gz"
+
+  - name: Report
+    ansible.builtin.debug:
+      msg: >-
+        {{ mirror_registry_name }} is gone, with its disks and everything
+        mirrored onto them.
+        {{ 'The CA and podman login for it were removed from this host too.'
+           if (mirror_registry_remove_local_trust | bool)
+           else 'The CA and podman login for it were kept, and now point at a registry that no longer exists.' }}
+        Rebuild it with: ansible-playbook -i inventory/hosts
+        setup_mirror_registry.yaml -e disconnected_install=true --ask-vault-pass

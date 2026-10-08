@@ -59,6 +59,7 @@ In a hurry? [steps.md](steps.md) is the same end-to-end run as commands only.
   - [Attach it to OpenShift](#attach-it-to-openshift)
   - [Verifying](#verifying-1)
   - [Notes and constraints](#notes-and-constraints-1)
+- [Three-node compact cluster](#three-node-compact-cluster)
 - [UDN over BGP, VRF-Lite and EVPN (containerlab fabric)](#udn-over-bgp-vrf-lite-and-evpn-containerlab-fabric)
   - [Can this be simulated on this lab? Yes - here is the honest shape of it](#can-this-be-simulated-on-this-lab-yes---here-is-the-honest-shape-of-it)
   - [The one idea to drop first: you do not move a UDN's default gateway](#the-one-idea-to-drop-first-you-do-not-move-a-udns-default-gateway)
@@ -1964,6 +1965,25 @@ not a Ceph or credentials problem.
   re-runs the exporter against the same Ceph cluster, so both hubs end up
   consuming the same pool. That is fine for a lab; it is not isolation.
 
+## Three-node compact cluster
+
+**Lives in [`compact-cluster/`](compact-cluster/).** A three-node compact
+OpenShift cluster from one agent ISO, every node's address on a bond over two
+NICs: in the lab (connected, or disconnected from the mirror registry) and on
+physical servers with LACP. The connected one can also be a management
+cluster for hosted control planes, side by side with the hub
+([compact-cluster/compact-cluster-hcp.md](compact-cluster/compact-cluster-hcp.md)).
+Start with [compact-cluster/README.md](compact-cluster/README.md).
+
+Additive like the UDN lab below: it shares `vars.yaml`, `vault.yaml`,
+`inventory/hosts` and `roles/`, but nothing in the hub, hosted-cluster or OADP
+flows reads it. Run its playbooks from inside the directory:
+
+```bash
+cd compact-cluster
+ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass
+```
+
 ## UDN over BGP, VRF-Lite and EVPN (containerlab fabric)
 
 **Moved to [`udn-bgp-evpn/`](udn-bgp-evpn/).** The whole lab - the two roles,
@@ -2027,7 +2047,8 @@ delegates.
 | `cleanup-hub.yaml`            | Destroy hub1 VMs and delete disks             |
 | `cleanup-hub-disconnected.yaml` | Destroy the disconnected hub's VMs and disks (hubd only) |
 | `cleanup-hub2-disconnected.yaml` | Destroy the disconnected DR hub's VMs and disks (hub2d only) |
-| `cleanup.yaml`                | Destroy all VMs (hub + helper)                |
+| `cleanup.yaml`                | Destroy all VMs (hub + helper). The mirror registry is only shut down, so its mirrored content survives |
+| `cleanup-mirror-registry.yaml` | Really remove the mirror registry: VM, disks, and this host's CA trust and podman login for it |
 | `setup_hosted_cluster_vm.yaml` | Create a hosted cluster's worker VMs; builds the disconnected set when `disconnected_install: true` |
 | `create_hosted_cluster.yaml`  | Render the HostedCluster/NodePool bundle; renders the disconnected clusters when `disconnected_install: true` |
 | `setup_ceph.yaml`             | Build the standalone Ceph 9 cluster (ceph1-3 + cephadmin) |
@@ -2095,6 +2116,21 @@ Remove everything (all VMs including helper):
 ```bash
 ansible-playbook -i inventory/hosts cleanup.yaml
 ```
+
+The **mirror registry is the exception**: that run only shuts it down. Its VM,
+its 500G disk and everything `oc-mirror` put there are kept, so a later
+disconnected run starts with `virsh start registry` instead of mirroring tens
+of gigabytes again. This host's CA trust and podman login for it are left in
+place too, and still match. To remove it for good:
+
+```bash
+ansible-playbook -i inventory/hosts cleanup-mirror-registry.yaml
+```
+
+That destroys and undefines the VM, deletes both disks, and removes the CA and
+the podman login - a rebuilt registry gets a new CA, and a stale one makes a
+disconnected run fail on TLS instead of stopping with a clear message. Keep
+them with `-e mirror_registry_remove_local_trust=false`.
 
 Remove the Ceph cluster (VMs + OSD disks; leaves the hubs alone). ODF on the
 hub is not touched - delete the `StorageCluster` there first if you are tearing

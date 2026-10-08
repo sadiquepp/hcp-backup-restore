@@ -7,6 +7,12 @@
 ##   ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass                    # targets hub1 (default)
 ##   ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass -e target_hub=hub2 # targets hub2
 ##   ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass -e disconnected_install=true # targets the disconnected hub
+##   ansible-playbook -i inventory/hosts setup_bminfra.yaml --ask-vault-pass -e target_hub=compact       # the connected compact cluster
+##
+## target_hub=compact puts the InfraEnv on the compact cluster (ACM/MCE from
+## compact-cluster/setup_compact_cluster.yaml --tags acm), caches its discovery
+## ISO under compact-* names and leaves the helper's PXE files alone - see
+## discovery_file_prefix in vars.yaml.
 ##
 ## disconnected_install (vars.yaml, default false) wins over target_hub: with
 ## it set the playbook uses hub_disconnected_install_folder/auth/kubeconfig
@@ -29,10 +35,15 @@
     - vars.yaml
     - vault.yaml
   vars:
+    ## Anything not named here is hub1, as before.
+    hub_install_folders:
+      hub: "{{ hub_install_folder }}"
+      hub2: "{{ hub2_install_folder }}"
+      compact: "{{ compact_install_folder }}"
     hub_install_folder_selected: >-
       {{ hub_disconnected_install_folder
          if (disconnected_install | default(false) | bool)
-         else ((target_hub == 'hub2') | ternary(hub2_install_folder, hub_install_folder)) }}
+         else (hub_install_folders[target_hub | default('hub')] | default(hub_install_folder)) }}
     hub_kubeconfig: "{{ hub_install_folder_selected }}/auth/kubeconfig"
   tasks:
   - name: Fail fast if pull_secret/ssh_key are missing from vault.yaml

@@ -1,0 +1,53 @@
+---
+# *.apps for a hosted cluster from MetalLB running INSIDE that hosted cluster,
+# instead of from the helper's haproxy:
+#
+#   client -> <apps VIP> (MetalLB L2, on a worker)
+#          -> Service openshift-ingress/metallb-ingress (type LoadBalancer)
+#          -> the default IngressController's router pods (HostNetwork, :80/:443)
+#          -> route -> Service -> application pods
+#
+# This is the documented ingress layout for a hosted cluster on the Agent
+# platform: its router pods listen on the workers' own ports 80/443, and a
+# LoadBalancer Service selecting them is what puts one stable address in front
+# of however many workers there are.
+#
+# Run against a hosted cluster that is up (its nodes Ready). Used by
+# compact-cluster/setup_compact_cluster.yaml --tags hcpingress for hcp-compact1;
+# nothing in it is specific to the compact cluster.
+
+## The HostedCluster (also its namespace on the management cluster).
+hcp_ingress_cluster: ""
+
+## Kubeconfig of the MANAGEMENT cluster - the one running the hosted control
+## plane, where the hosted cluster's admin kubeconfig Secret lives.
+hcp_ingress_mgmt_kubeconfig: ""
+
+## The *.apps address: the last octet in hosted_cluster_node_keys[<cluster>].apps_vip
+## (vars.yaml), which is also what roles/setup-dns publishes as *.apps.
+hcp_ingress_vip: >-
+  {{ lab_network_prefix }}.{{ (hosted_cluster_node_keys | default({}))[hcp_ingress_cluster].apps_vip
+                              | default('') }}
+
+## Where the hosted cluster's admin kubeconfig is written on this host.
+hcp_ingress_kubeconfig_dir: "{{ download_dir }}/{{ hcp_ingress_cluster }}"
+hcp_ingress_kubeconfig: "{{ hcp_ingress_kubeconfig_dir }}/kubeconfig"
+
+## MetalLB inside the hosted cluster, from the hosted cluster's own
+## redhat-operators catalog (connected).
+hcp_ingress_catalog_source: redhat-operators
+hcp_ingress_catalog_source_namespace: openshift-marketplace
+hcp_ingress_metallb_channel: stable
+
+## The single-address pool and its L2Advertisement. autoAssign false: the pool
+## exists for the ingress Service alone, which asks for it by name - any other
+## LoadBalancer Service in the hosted cluster needs a pool of its own.
+hcp_ingress_pool: "{{ hcp_ingress_cluster }}-ingress"
+hcp_ingress_service: metallb-ingress
+
+## Waits. A NodePool's Agents install and join in 20-40 minutes; the operator
+## install and the address assignment take a few.
+hcp_ingress_node_retries: 120
+hcp_ingress_node_delay: 30
+hcp_ingress_retries: 60
+hcp_ingress_delay: 10

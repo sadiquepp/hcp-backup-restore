@@ -74,7 +74,13 @@ hosted_cluster_metallb_hub_disconnected: hubd
 # of truth. Override per cluster with 'api_hostname' when a cluster's zone is
 # not named after it - in particular a disconnected cluster whose api/api-int
 # live in a hubd zone under a different label.
-hosted_cluster_api_hostname: "api.{{ hcp.name }}.{{ base_domain }}"
+hosted_cluster_api_hostname: "api.{{ hcp.name }}.{{ hosted_cluster_domain }}"
+
+# The DNS domain the cluster sits under: dns.baseDomain on the HostedCluster,
+# so its names are <x>.<name>.<this>. base_domain unless vars.yaml's
+# hosted_cluster_domains says otherwise (hcp-compact1 sits under the compact
+# cluster's zone). roles/setup-dns renders the zone from the same map.
+hosted_cluster_domain: "{{ (hosted_cluster_domains | default({}))[hcp.name] | default(base_domain) }}"
 
 hosted_cluster_availability_policy: HighlyAvailable
 hosted_cluster_olm_catalog_placement: management

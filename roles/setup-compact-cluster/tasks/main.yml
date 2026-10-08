@@ -1,0 +1,52 @@
+---
+# Three-node compact OpenShift from an agent ISO, with every node's address on
+# an active-backup bond over two NICs. Connected by default; disconnected
+# (from the mirror registry, egress cut) when compact_disconnected is true -
+# compact-cluster/setup_compact_cluster_disconnected.yaml sets that.
+#
+# The same four stages as roles/setup-sno, each runnable on its own by tag:
+#
+#   compactpreflight   everything knowable before anything is built
+#   compactimage       get the installer (downloaded, or extracted from the
+#                      mirror), render the manifests, build the ISO
+#   compactvm          egress block + NTP (disconnected), then the three
+#                      libvirt domains, each with two NICs, booting the ISO
+#   compactwait        block until the cluster is up
+#
+# One ISO boots all three nodes. It carries every host's networkConfig, and
+# each agent picks its own by matching the MACs it finds against the
+# interfaces lists in agent-config.yaml.
+#
+# `apply: tags` on every include, not just `tags`: a tag on a dynamic include
+# selects the include itself but NOT the tasks it brings in, so `--tags
+# compactimage` used to run the include and skip every task inside it - a
+# silent no-op. `apply` puts the tags on the included tasks too.
+
+- name: Pre-flight
+  ansible.builtin.include_tasks:
+    file: preflight.yml
+    apply:
+      tags: [compact, compactpreflight, compactimage, compactvm, compactwait]
+  tags: [compact, compactpreflight, compactimage, compactvm, compactwait]
+
+- name: Build the agent ISO
+  ansible.builtin.include_tasks:
+    file: image.yml
+    apply:
+      tags: [compact, compactimage]
+  tags: [compact, compactimage]
+
+- name: Build the compact cluster VMs
+  ansible.builtin.include_tasks:
+    file: vm.yml
+    apply:
+      tags: [compact, compactvm]
+  tags: [compact, compactvm]
+
+- name: Wait for the cluster
+  ansible.builtin.include_tasks:
+    file: wait.yml
+    apply:
+      tags: [compact, compactwait]
+  when: compact_wait_for_install | bool
+  tags: [compact, compactwait]

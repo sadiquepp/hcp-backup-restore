@@ -1,0 +1,143 @@
+---
+# The three VMs: for each, a disk, a DHCP reservation, and a domain with TWO
+# NICs on the default network - the bond's two ports - booting the agent ISO.
+
+# Disconnected: cut the nodes off from the internet BEFORE anything boots, so
+# the install cannot quietly fall back to quay.io and succeed for the wrong
+# reason. The same LAB_NO_NAT / LAB_NO_EGRESS chains as hubd; the task file
+# asserts at the end that every node IP really is blocked.
+- name: Cut the compact nodes off from the real internet
+  ansible.builtin.include_tasks:
+    file: "{{ role_path }}/../setup-hub-cluster-disconnected/tasks/block-node-nat.yml"
+    apply:
+      tags: [compact, compactvm]
+  vars:
+    disconnected_nat_enabled: "{{ compact_block_node_nat }}"
+    disconnected_nat_ip_keys: "{{ compact_nodes | map(attribute='ip_key') | list }}"
+    disconnected_nat_label: "{{ compact_name }}"
+  when: compact_disconnected | bool
+
+- name: Serve time to the lab network from this hypervisor
+  ansible.builtin.include_tasks:
+    file: ntp-server.yml
+    apply:
+      tags: [compact, compactvm]
+  when: compact_serve_ntp | bool
+
+# No --remove-all-storage, unlike setup-sno. All three domains share the agent
+# ISO as their cdrom, which virt-install has just put in a storage pool beside
+# it, so libvirt may count it as the domain's storage - and the first undefine
+# would then delete the ISO the rebuild is about to boot. The disk is removed
+# by path below instead, which is unambiguous.
+- name: Remove stale domains if rebuilding
+  ansible.builtin.shell:
+    cmd: |
+      virsh destroy {{ item }} >/dev/null 2>&1 || true
+      virsh undefine {{ item }} >/dev/null 2>&1 || true
+  loop: "{{ compact_existing_vms }}"
+  changed_when: true
+
+# Always a fresh disk. A disk left over from an earlier install still holds a
+# bootable RHCOS, and with boot order hd,cdrom the node would boot THAT rather
+# than the agent ISO - so it would never register, and nothing would say why.
+#
+# The storage disk is replaced too: LVMS only takes a disk with nothing on it,
+# and the old one carries the previous cluster's volume group.
+- name: Remove any previous disks
+  ansible.builtin.file:
+    path: "{{ compact_vm_folder }}/{{ item.0.domain }}_{{ item.1 }}.qcow2"
+    state: absent
+  loop: "{{ compact_hosts | product(['disk', 'storage']) | list }}"
+  loop_control:
+    label: "{{ item.0.domain }}_{{ item.1 }}"
+
+- name: Create each node's disk
+  ansible.builtin.command:
+    cmd: >-
+      qemu-img create -f qcow2
+      {{ compact_vm_folder }}/{{ item.domain }}_disk.qcow2 {{ compact_disk_gb }}G
+  loop: "{{ compact_hosts }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  changed_when: true
+
+# Empty, for LVM Storage (tasks/storage.yml). Attached SECOND, so it is vdb and
+# the rootDeviceHints pin on /dev/vda keeps RHCOS off it.
+- name: Create each node's storage disk
+  ansible.builtin.command:
+    cmd: >-
+      qemu-img create -f qcow2 -o preallocation=metadata
+      {{ compact_vm_folder }}/{{ item.domain }}_storage.qcow2 {{ compact_storage_disk_gb }}G
+  loop: "{{ compact_hosts }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  when: compact_lvm_storage | bool
+  changed_when: true
+
+- name: Read the default network's current definition
+  ansible.builtin.command:
+    cmd: "virsh net-dumpxml default"
+  register: compact_net_xml
+  changed_when: false
+
+# Only the PRIMARY MAC is reserved. The node addresses itself statically on
+# the bond, so this is not what gives it its address - it is what stops libvirt
+# handing that address to something else. The bond carries the primary MAC
+# whichever port is active, so one reservation covers it; a second <host>
+# entry for the same IP would be rejected by libvirt anyway.
+- name: Reserve each node's address on the default network
+  ansible.builtin.command:
+    cmd: >-
+      virsh net-update default add ip-dhcp-host
+      "<host mac='{{ item.primary_mac }}'
+             name='{{ item.hostname }}.{{ compact_cluster_domain }}'
+             ip='{{ item.ip }}'/>"
+      --live --config
+  loop: "{{ compact_hosts }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  when: item.primary_mac not in (compact_net_xml.stdout | lower)
+  changed_when: true
+
+# Two --network options, in this order, is what makes the bond possible: the
+# first becomes enp1s0 with the primary MAC, the second enp2s0 with the
+# secondary. Both are on the same libvirt network - the bond protects against
+# a port going away, not against the bridge going away, and in a lab the port
+# is the thing you can actually pull (virsh domif-setlink, see compact-cluster/compact-cluster.md).
+#
+# --import with an explicit hd,cdrom boot order, not --cdrom, for the reason
+# given in roles/setup-sno/tasks/vm.yml: the node must prefer the disk once
+# RHCOS is on it, or it reboots back into the agent.
+- name: Define and start each node
+  ansible.builtin.shell:
+    cmd: |
+      virt-install \
+      --import \
+      --name "{{ item.domain }}" \
+      --memory "{{ compact_memory }}" \
+      --vcpus "{{ compact_vcpus }}" \
+      --cpu host-passthrough \
+      --os-variant={{ compact_os_variant }} \
+      --disk "{{ compact_vm_folder }}/{{ item.domain }}_disk.qcow2",format=qcow2,cache=none,bus=virtio \
+      {% if compact_lvm_storage | bool %}
+      --disk "{{ compact_vm_folder }}/{{ item.domain }}_storage.qcow2",format=qcow2,cache=none,bus=virtio \
+      {% endif %}
+      --disk "{{ compact_install_folder }}/agent.x86_64.iso",device=cdrom,bus=sata,readonly=on \
+      --boot hd,cdrom \
+      --network network:default,mac={{ item.primary_mac }},model=virtio \
+      --network network:default,mac={{ item.secondary_mac }},model=virtio \
+      --memballoon model=virtio,freePageReporting=on \
+      --noautoconsole
+  loop: "{{ compact_hosts }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  changed_when: true
+
+- name: Report how to watch the install
+  ansible.builtin.debug:
+    msg:
+      - "{{ compact_hosts | map(attribute='domain') | join(', ') }} are booting the agent ISO."
+      - "Rendezvous host: {{ compact_hosts[0].hostname }} at {{ compact_rendezvous_ip }}"
+      - "Console:   virsh console {{ compact_hosts[0].domain }}"
+      - "Agent UI:  http://{{ compact_rendezvous_ip }}:8080  (once the agent is up)"
+      - "Progress:  {{ compact_install_folder }}/openshift-install --dir {{ compact_install_folder }} agent wait-for install-complete"

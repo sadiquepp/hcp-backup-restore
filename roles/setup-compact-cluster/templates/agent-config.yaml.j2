@@ -1,0 +1,103 @@
+{#
+  agent-config.yaml for the connected three-node compact cluster.
+
+  rendezvousIP is the first node's address. That node runs the assisted
+  service, the other two register with it, and it installs itself last.
+
+  Per host, the 'interfaces' list is what the agent uses to recognise the
+  machine it booted on: it matches these MACs against the real NICs, picks the
+  host entry whose MACs it found, and maps the names in networkConfig onto the
+  real interfaces. Both bond ports are listed, so either NIC identifies the
+  host.
+
+  networkConfig is nmstate. The address is on bond0, NOT on either NIC:
+
+    bond0  active-backup (mode 1), miimon, primary = the first NIC
+      +- enp1s0   primary MAC     (port)
+      +- enp2s0   secondary MAC   (port)
+
+  bond0 carries the PRIMARY NIC's MAC explicitly. Without it the bond takes
+  the MAC of whichever port is enslaved first, which is not guaranteed to be
+  the same on every boot - and the libvirt DHCP reservation, ARP caches and
+  anything else that has learned this address know it by the primary MAC.
+
+  The ports are declared too, with no IP of their own. Listing them is what
+  ties each name to its MAC in nmstate, and an un-addressed port is the only
+  shape a bond member can have.
+
+  The default route points at bond0, so it survives either port failing.
+#}
+apiVersion: v1alpha1
+kind: AgentConfig
+metadata:
+  name: {{ compact_name }}
+rendezvousIP: {{ compact_rendezvous_ip }}
+{% if compact_ntp_sources | length > 0 %}
+{# The lab's own time source (the hypervisor) - a disconnected node cannot
+   reach the default internet pool, and the agent will not install a host
+   that is not time-synced. #}
+additionalNTPSources:
+{% for ntp in compact_ntp_sources %}
+  - {{ ntp }}
+{% endfor %}
+{% endif %}
+hosts:
+{% for h in compact_hosts %}
+  - hostname: {{ h.hostname }}
+    role: master
+    interfaces:
+      - name: {{ compact_bond_primary_nic }}
+        macAddress: {{ h.primary_mac }}
+      - name: {{ compact_bond_secondary_nic }}
+        macAddress: {{ h.secondary_mac }}
+    rootDeviceHints:
+      deviceName: {{ compact_installation_disk }}
+    networkConfig:
+      interfaces:
+        - name: {{ compact_bond_name }}
+          type: bond
+          state: up
+          mac-address: {{ h.primary_mac }}
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: {{ h.ip }}
+                prefix-length: {{ compact_prefix_length }}
+          ipv6:
+            enabled: false
+          link-aggregation:
+            mode: {{ compact_bond_mode }}
+            options:
+              miimon: "{{ compact_bond_miimon }}"
+              primary: {{ compact_bond_primary_nic }}
+            port:
+              - {{ compact_bond_primary_nic }}
+              - {{ compact_bond_secondary_nic }}
+        - name: {{ compact_bond_primary_nic }}
+          type: ethernet
+          state: up
+          mac-address: {{ h.primary_mac }}
+          ipv4:
+            enabled: false
+          ipv6:
+            enabled: false
+        - name: {{ compact_bond_secondary_nic }}
+          type: ethernet
+          state: up
+          mac-address: {{ h.secondary_mac }}
+          ipv4:
+            enabled: false
+          ipv6:
+            enabled: false
+      dns-resolver:
+        config:
+          server:
+            - {{ compact_dns_server }}
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: {{ compact_gateway }}
+            next-hop-interface: {{ compact_bond_name }}
+            table-id: 254
+{% endfor %}

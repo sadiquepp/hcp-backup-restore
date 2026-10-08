@@ -111,6 +111,51 @@
   loop_control:
     label: "{{ (item is mapping) | ternary(item.name | default('<unnamed>'), item) }}"
 
+# A connected cluster runs on whichever management clusters it has a MetalLB
+# address for. The hubs and the compact cluster share hosted_clusters, so a
+# run renders only the clusters that can run on THIS run's management cluster
+# (hosted_cluster_metallb_hub, i.e. target_hub): a hub run leaves hcp-compact1
+# alone, a -e target_hub=compact run renders hcp-compact1 and nothing else.
+# A cluster with no pool entry at all is kept, so the "no MetalLB pool" check
+# further down still names it. -e hcp_cluster_name skips this: naming a
+# cluster is asking for it, and the address check below then says whether it
+# fits this hub.
+- name: Keep the connected clusters that can run on this run's management cluster
+  ansible.builtin.set_fact:
+    hosted_cluster_specs_on_hub: >-
+      {{ hosted_cluster_specs_on_hub | default([])
+         + ([item] if (item.metallb_hub | default(hosted_cluster_metallb_hub)) == hosted_cluster_metallb_hub
+                      and (item.name not in (hosted_cluster_metallb_pools | default({}))
+                           or hosted_cluster_metallb_hub in (hosted_cluster_metallb_pools[item.name].ip | default({})))
+            else []) }}
+  loop: "{{ hosted_cluster_specs | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - not (hosted_cluster_run_disconnected | bool)
+    - hcp_cluster_name is not defined
+
+- name: Say which clusters belong to another management cluster
+  ansible.builtin.debug:
+    msg: >-
+      Rendering for '{{ hosted_cluster_metallb_hub }}':
+      {{ hosted_cluster_specs_on_hub | default([]) | map(attribute='name') | join(', ') | default('none', true) }}.
+      Skipped (no '{{ hosted_cluster_metallb_hub }}' address in
+      hosted_cluster_metallb_pools):
+      {{ hosted_cluster_specs | map(attribute='name')
+         | difference(hosted_cluster_specs_on_hub | default([]) | map(attribute='name'))
+         | join(', ') | default('none', true) }}.
+  when:
+    - not (hosted_cluster_run_disconnected | bool)
+    - hcp_cluster_name is not defined
+
+- name: Use that selection
+  ansible.builtin.set_fact:
+    hosted_cluster_specs: "{{ hosted_cluster_specs_on_hub | default([]) }}"
+  when:
+    - not (hosted_cluster_run_disconnected | bool)
+    - hcp_cluster_name is not defined
+
 # -e hcp_cluster_name=<name> narrows the run to a single cluster. If that
 # name is in hosted_clusters its per-cluster overrides are kept; if it
 # isn't, it's rendered from the hosted_cluster_* defaults alone (which is
@@ -211,7 +256,7 @@
   ansible.builtin.debug:
     msg: >-
       {{ item.name }} (hub {{ item.hub }}):
-      hostname {{ item.api_hostname | default('api.' ~ item.name ~ '.' ~ base_domain) }}
+      hostname {{ item.api_hostname | default('api.' ~ item.name ~ '.' ~ ((hosted_cluster_domains | default({}))[item.name] | default(base_domain))) }}
       must resolve to
       {{ (hosted_cluster_metallb_network_prefixes | default({}))[item.hub] | default(lab_network_prefix) }}.{{ hosted_cluster_metallb_pools[item.name].ip[item.hub] }}
       (MetalLB pool {{ hosted_cluster_metallb_pools[item.name].pool }}).
@@ -219,7 +264,7 @@
       ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns
       --ask-vault-pass -e target_hub={{ item.hub }}
       then check it with:
-      dig +short {{ item.api_hostname | default('api.' ~ item.name ~ '.' ~ base_domain) }}
+      dig +short {{ item.api_hostname | default('api.' ~ item.name ~ '.' ~ ((hosted_cluster_domains | default({}))[item.name] | default(base_domain))) }}
       @{{ lab_network_prefix }}.{{ ip_list.helper_server }}
   loop: "{{ hosted_cluster_vip_plan }}"
   loop_control:

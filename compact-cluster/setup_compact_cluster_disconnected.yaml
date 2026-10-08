@@ -1,0 +1,123 @@
+---
+# Build a DISCONNECTED three-node compact OpenShift cluster from an agent ISO,
+# with every node's address on an active-backup bond over two NICs.
+#
+#   cd compact-cluster
+#   ansible-playbook -i ../inventory/hosts setup_compact_cluster_disconnected.yaml \
+#     -e disconnected_install=true --ask-vault-pass
+#
+# From inside compact-cluster/, like udn-bgp-evpn/: ansible.cfg is read from
+# the working directory, and the one here adds ../roles to roles_path.
+#
+# Three things happen, in order:
+#
+#   1. ../setup_mirror_registry.yaml - the mirror registry VM, the mirror itself
+#      (oc-mirror of the release and operators), and trust of its CA and
+#      credentials on this hypervisor. -e disconnected_install=true is what
+#      that playbook insists on; it changes nothing else in this run.
+#   2. roles/setup-compact-cluster with compact_disconnected=true, for the
+#      compactd cluster from vars.yaml (compactd_* - its own addresses,
+#      .3-.7, so it can run beside the connected compact cluster):
+#        - openshift-install extracted from the MIRRORED release with
+#          `oc adm release extract --idms-file`
+#        - install-config.yaml with imageDigestSources, the mirror CA and a
+#          mirror-only pull secret
+#        - iptables rules (LAB_NO_NAT / LAB_NO_EGRESS, shared with hubd) that
+#          cut the nodes' egress past the lab subnet before they boot
+#        - chronyd on this hypervisor serving time to the lab, because the
+#          agent will not install a host without NTP and the internet pool is
+#          out of reach
+#   3. Day 2: oc-mirror's ImageDigestMirrorSet/ImageTagMirrorSet/CatalogSource,
+#      applied once the cluster is up (one rolling reboot of the masters).
+#   4. LVM Storage (default StorageClass lvms-vg1), from the mirrored catalog
+#      day 2 just applied - so it has to come after it.
+#
+# DNS is rendered by setup_bm_host.yaml, as for every cluster here - run this
+# first, from the repository root (compactd.<base_domain> is in
+# compact_clusters in vars.yaml):
+#
+#   ansible-playbook -i inventory/hosts setup_bm_host.yaml --tags dns --ask-vault-pass
+#
+# Useful subsets (each skips step 1, since its tasks carry none of these tags):
+#   --tags compact          the cluster only - mirror registry already built
+#   --tags compactimage     re-extract the installer and rebuild the ISO
+#   --tags compactvm        re-assert the egress block / NTP and rebuild the VMs
+#   --tags compactwait      just wait for an install already running
+#   --tags compactday2      just apply the day-2 mirror resources
+#   --tags compactstorage   just add LVM Storage (after day 2 has run once)
+#
+# Rebuilding over an existing compactd needs -e compact_force_reinstall=true.
+# Every manual step this automates is in compact-cluster-disconnected.md.
+
+- name: Check how this playbook was invoked
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../vars.yaml
+  tasks:
+    - name: Fail early unless the mirror-registry playbook will accept this run
+      ansible.builtin.assert:
+        that: disconnected_install | bool
+        fail_msg: >-
+          Pass -e disconnected_install=true. setup_mirror_registry.yaml, which
+          this playbook runs first, refuses to run without it. It only affects
+          this run - vars.yaml keeps disconnected_install: false for the rest of
+          the lab. To skip the mirror registry because it is already built, run
+          with --tags compact instead.
+
+- name: Build the mirror registry first
+  ansible.builtin.import_playbook: ../setup_mirror_registry.yaml
+
+- name: Set up the disconnected three-node compact cluster
+  hosts: localhost
+  become: true
+  vars_files:
+    - ../vars.yaml
+    - ../vault.yaml
+  tasks:
+    # Task-level vars on the import outrank vars.yaml (vars_files), so the
+    # role builds compactd rather than the connected compact cluster.
+    - name: Install the disconnected compact cluster
+      ansible.builtin.import_role:
+        name: setup-compact-cluster
+      vars:
+        compact_disconnected: true
+        compact_name: "{{ compactd_name }}"
+        compact_nodes: "{{ compactd_nodes }}"
+        compact_api_vip_key: "{{ compactd_api_vip_key }}"
+        compact_ingress_vip_key: "{{ compactd_ingress_vip_key }}"
+        compact_install_folder: "{{ compactd_install_folder }}"
+        compact_vm_folder: "{{ compactd_vm_folder }}"
+        compact_block_node_nat: "{{ compactd_block_node_nat }}"
+
+    # Its own task file rather than hubd's, so --tags compactday2 runs every
+    # step and the cluster's own oc is used by full path.
+    - name: Apply the mirror registry's day-2 resources (IDMS/ITMS/CatalogSource)
+      ansible.builtin.include_role:
+        name: setup-compact-cluster
+        tasks_from: day2
+        apply:
+          tags: [compact, compactday2]
+      vars:
+        compact_disconnected: true
+        compact_name: "{{ compactd_name }}"
+        compact_install_folder: "{{ compactd_install_folder }}"
+      when: compact_wait_for_install | default(true) | bool
+      tags: [compact, compactday2]
+
+    - name: Add LVM Storage from the mirrored catalog (default StorageClass lvms-vg1)
+      ansible.builtin.include_role:
+        name: setup-compact-cluster
+        tasks_from: storage
+        apply:
+          tags: [compact, compactstorage]
+      vars:
+        compact_disconnected: true
+        compact_name: "{{ compactd_name }}"
+        compact_nodes: "{{ compactd_nodes }}"
+        compact_install_folder: "{{ compactd_install_folder }}"
+        compact_vm_folder: "{{ compactd_vm_folder }}"
+      when:
+        - compact_lvm_storage | default(use_lvm_storage | default(true)) | bool
+        - compact_wait_for_install | default(true) | bool
+      tags: [compact, compactstorage]
