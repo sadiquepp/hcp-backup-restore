@@ -1,0 +1,96 @@
+---
+# Tasks file for setup-bastion-vm
+#
+# Creates the bastion VM on the baremetal host (localhost). Same shape as
+# roles/setup-mirror-registry-vm: reuse the already-customized RHEL 9 base image
+# that roles/setup-bm-host prepares for helper (lab ssh key injected, cloud-init
+# removed), expand it into a fresh sparse disk, and import it.
+#
+# One deliberate difference from helper/registry: NO address reservation. There
+# is no ip_list entry and no `virsh net-update ... ip-dhcp-host` here, so the VM
+# takes whatever libvirt's DHCP hands it. Nothing in the lab needs to reach the
+# bastion at a predictable address -- it is where builds run from, not something
+# a cluster talks to -- and the role discovers the address after boot and hands
+# it to the playbook.
+
+- ansible.builtin.import_tasks: preflight.yml
+
+- name: Check the bastion disk existence
+  ansible.builtin.stat:
+    path: "{{ bastion_disk_dir }}/{{ bastion_disk }}"
+  register: bastion_disk_status
+  tags:
+    - virt
+
+- name: Create the bastion VM disk (sparse, no preallocation)
+  ansible.builtin.command:
+    cmd: "qemu-img create -f qcow2 {{ bastion_disk_dir }}/{{ bastion_disk }} {{ bastion_disk_size }}"
+  when: not bastion_disk_status.stat.exists
+  tags:
+    - virt
+
+# Printed before the resize, not after: if bastion_resize_partition does not
+# match the base image's real layout, virt-resize fails naming a device and this
+# output is what tells you which device it should have been.
+- name: Report actual partition layout of the base image
+  ansible.builtin.command:
+    cmd: "virt-filesystems --long --parts --blkdevs -h -a {{ base_image_dir }}/{{ rhel9_kvm_image }}"
+  register: bastion_base_filesystems
+  changed_when: false
+  when: not bastion_disk_status.stat.exists
+  tags:
+    - virt
+
+- name: Show base image partition layout
+  ansible.builtin.debug:
+    msg: "{{ bastion_base_filesystems.stdout_lines }}"
+  when: not bastion_disk_status.stat.exists
+  tags:
+    - virt
+
+- name: Expand the base RHEL 9 image into the new disk (virt-resize)
+  ansible.builtin.command:
+    cmd: >
+      virt-resize --expand {{ bastion_resize_partition }}
+      {{ base_image_dir }}/{{ rhel9_kvm_image }}
+      {{ bastion_disk_dir }}/{{ bastion_disk }}
+  when: not bastion_disk_status.stat.exists
+  tags:
+    - virt
+
+- name: Check if the bastion VM already exists
+  ansible.builtin.shell: "virsh dominfo {{ bastion_name }} 2>/dev/null | awk '/State/ {print $2}'"
+  register: bastion_vm_state
+  changed_when: false
+  tags:
+    - virt
+
+- name: Define and start the bastion VM
+  ansible.builtin.shell: |
+    virt-install \
+    --import \
+    --name "{{ bastion_name }}" \
+    --memory "{{ bastion_memory }}" \
+    --vcpus "{{ bastion_vcpus }}" \
+    --disk "{{ bastion_disk_dir }}/{{ bastion_disk }}",format=qcow2,cache=none,bus=virtio \
+    --os-variant={{ bastion_os_variant }} \
+    --memballoon model=virtio,freePageReporting=on \
+    --noautoconsole \
+    --network network:{{ bastion_network }}
+  when: bastion_vm_state.stdout == ''
+  tags:
+    - virt
+
+- name: Start the bastion VM if it exists but is shut off
+  ansible.builtin.command:
+    cmd: "virsh start {{ bastion_name }}"
+  when: bastion_vm_state.stdout == 'shut'
+  tags:
+    - virt
+
+# Discovery lives in its own file so it can be tagged `always`: add_host builds
+# the `bastion` group for this run only, so a run narrowed to the in-guest tags
+# still has to do it or the second play matches no hosts. See discover.yml.
+- ansible.builtin.import_tasks: discover.yml
+  tags:
+    - always

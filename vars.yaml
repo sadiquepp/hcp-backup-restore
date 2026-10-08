@@ -1466,6 +1466,31 @@ hosted_cluster_domains:
 ## disconnected_install gates whether any of this is used at all - default
 ## false so connected installs are completely unaffected. It is set in the
 ## START HERE block at the top.
+## ===========================================================================
+## Bastion VM (setup_bastion.yaml)
+##
+## A big-disk guest for building and scanning container images, because the
+## baremetal host does not have the room and filling its / takes the lab down.
+## 256G, 8 vCPU, 16G -- sized for the hardened-vs-UBI image comparison in
+## sadiquepp/openshift, which builds two full stacks of twelve images and saves
+## each one to a tar to scan it.
+##
+## No ip_list entry on purpose: the bastion takes a DHCP address and the role
+## reports it. Nothing needs to reach it at a fixed address. Find it again with
+## `virsh domifaddr bastion`.
+##
+## bastion_disk_dir is where the qcow2 goes. If /var/lib/libvirt/images is on a
+## small /, point it at a filesystem with room -- the role refuses to create the
+## disk otherwise rather than filling the filesystem it is on.
+## ===========================================================================
+bastion_name: bastion
+bastion_disk: bastion_disk.qcow2
+bastion_disk_dir: /var/lib/libvirt/images
+bastion_disk_size: 256G
+bastion_resize_partition: /dev/sda4
+bastion_memory: 16384
+bastion_vcpus: 8
+
 mirror_registry_name: registry
 mirror_registry_disk: registry_disk.qcow2
 mirror_registry_extra_disk: registry_extra_disk.qcow2

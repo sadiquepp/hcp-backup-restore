@@ -1,0 +1,88 @@
+## Creates the bastion VM and sets it up for building and scanning container
+## images. Structured the same way as setup_mirror_registry.yaml: VM creation
+## happens on the baremetal host (localhost), then the in-guest setup is
+## delegated into the new VM.
+##
+## Why this VM exists: the baremetal host has very little room under /, and
+## building container images needs a lot of it. The hardened-vs-UBI image
+## comparison in sadiquepp/openshift pulls a dozen base images, produces two
+## full stacks of twelve service images, and saves each one to a tar in order to
+## scan it. None of that fits on a host whose / is nearly full, and filling /
+## on the baremetal host takes the whole lab down with it. So: a 256G guest,
+## and the builds happen there.
+##
+## Unlike helper and mirror-registry this VM has NO address reservation and no
+## ip_list entry -- it takes whatever libvirt's DHCP gives it, and the role
+## reports the address. Nothing in the lab needs to reach the bastion at a
+## predictable address; it is where you run builds from, not something a
+## cluster talks to.
+##
+## Reuses the base image that setup_bm_host.yaml prepares (lab ssh key injected,
+## cloud-init removed), so run that first. Registry trust and login additionally
+## need setup_mirror_registry.yaml to have run -- turn them off with
+## -e bastion_trust_mirror_registry=false -e bastion_registry_login=false if you
+## only want the VM and the tooling.
+##
+## Nothing in the connected or disconnected install flow imports this playbook,
+## so running it changes nothing about either.
+##
+## Usage:
+##   ansible-playbook -i inventory/hosts setup_bastion.yaml --ask-vault-pass
+##
+## Useful tags: preflight, virt, packages, repos, scanners, clients,
+## registry-trust, env.
+##
+## Any of the in-guest tags can be used on their own -- address discovery and
+## the ssh wait are tagged `always`, so the `bastion` group is built on every
+## run whatever else is selected. Without that, a run like
+##   --tags repos,scanners
+## skips the whole first play, never populates the group, and ends in
+##   [WARNING]: Could not match supplied host pattern, ignoring: bastion
+##   PLAY [Configure the bastion] ... skipping: no hosts matched
+## which looks like a DHCP problem and is not one.
+
+- name: Create the bastion VM
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+  - name: Fail fast if org_id/activation_key are missing from vault.yaml
+    ansible.builtin.assert:
+      that:
+        - org_id is defined
+        - activation_key is defined
+      fail_msg: >-
+        Add org_id / activation_key to vault.yaml (ansible-vault edit
+        vault.yaml) - needed to register the bastion with subscription-manager
+        before any dnf task can run in it.
+
+  - ansible.builtin.import_role:
+      name: setup-bastion-vm
+    tags:
+      - bastion-vm
+
+- name: Configure the bastion
+  hosts: bastion
+  # gather_facts: false deliberately. Fact gathering runs BEFORE the first task,
+  # so with it on this play fails connecting to a guest whose sshd is still
+  # coming up -- the VM has an address by now (that is what setup-bastion-vm
+  # waited for) but not necessarily a listening sshd. setup-rhsm's first task is
+  # wait_for_connection, which is what should hit that wait. Nothing below needs
+  # gathered facts.
+  gather_facts: false
+  become: true
+  vars_files:
+    - vars.yaml
+    - vault.yaml
+  tasks:
+  - ansible.builtin.import_role:
+      name: setup-rhsm
+    tags:
+      - rhsm
+
+  - ansible.builtin.import_role:
+      name: setup-bastion
+    tags:
+      - bastion
