@@ -13,6 +13,8 @@ same application on [OpenShift Service Mesh](#online-boutique-on-service-mesh-sp
 with SPIRE issuing every sidecar's certificate in place of istiod.
 
 - **Build it:** [Quick start](#quick-start), or `./build-lab.sh --help`
+- **On your own clusters:** any two OpenShift clusters, no base lab -
+  [Bring your own clusters](#bring-your-own-clusters)
 - **Learn it:** [workshop.md](workshop.md) - day 0 automated, then every
   SPIRE object typed by hand
 - **Variables:** [vars.yaml](vars.yaml) - every one prefixed `spire_`
@@ -32,6 +34,7 @@ with SPIRE issuing every sidecar's certificate in place of istiod.
 
 - [What it builds](#what-it-builds)
 - [Quick start](#quick-start)
+- [Bring your own clusters](#bring-your-own-clusters)
 - [Layout](#layout)
 - [Design decisions](#design-decisions)
   - [Red Hat's operator, found in the catalog, not assumed](#red-hats-operator-found-in-the-catalog-not-assumed)
@@ -107,6 +110,7 @@ cd /root/ocp-onpremise/spiffe-spire
 | `clusters` | `../setup_hub_cluster.yaml --skip-tags acm` and `../setup_sno.yaml` in parallel - each skipped if its kubeconfig exists | 75 min |
 | `lvm` | per cluster: LVM Storage from the base playbooks (`../setup_hub_cluster.yaml --tags lvm`, `../setup_sno.yaml --tags snostorage`) - a no-op on clusters the `clusters` step just built | 1-10 min |
 | `preflight` | per cluster: operator in the catalog? which channel? StorageClass? Changes nothing | 1 min |
+| `probe` | per cluster: one short-lived pod in its own namespace - every node name resolves (the agent dials its kubelet by name), both clusters' `*.apps` resolve and their routers answer, the demo images pull. Deletes the namespace after | 1-2 min |
 | `operator` | per cluster: Subscription, CSV, CRDs, API check | 5 min |
 | `storage` | per cluster: nothing when `lvms-vg1` is there; a local PV as a fallback when there is no default StorageClass | 1 min |
 | `spire` | per cluster: the four CRs and the federation Route, wait Ready, every agent attested | 5 min |
@@ -145,13 +149,51 @@ applied with `oc apply -f`, so what was applied can be read afterwards.
 
 ---
 
+## Bring your own clusters
+
+Everything above, on any two OpenShift clusters you are cluster-admin on -
+no base lab, no helper VM, no vault, not root:
+
+```bash
+git clone https://github.com/sadiquepp/ocp-onpremise.git ~/ocp-onpremise
+cd ~/ocp-onpremise/spiffe-spire
+./build-lab.sh --byo east=$HOME/east.kubeconfig --byo west=$HOME/west.kubeconfig            # the full build
+./build-lab.sh --byo east=$HOME/east.kubeconfig --byo west=$HOME/west.kubeconfig --workshop # or day 0 of the workshop
+```
+
+`--byo <name>=<kubeconfig>`, twice, asks each cluster its ingress domain and
+writes `~/spiffe-byo/vars.yaml`:
+
+- `spire_clusters` with the two clusters under the names given - the names
+  `--cluster` and the workshop's `lab` then take;
+- each trust domain from its `*.apps` domain (`apps.east.example.com` →
+  `east.example.com`), or `--td east=<domain>`; they must differ;
+- `spire_pair`, the order the both-cluster plays pair them in (the first one's
+  payments cross in `boutique-federate`);
+- every output path under `$HOME`, and `ansible_become: false` - every change
+  is made through `oc`.
+
+Every playbook gets it as `-e @~/spiffe-byo/vars.yaml`, and the base-lab
+steps (`bmhost`, `clusters`, `lvm`) drop out. Everything else is the same
+code as for the hub and the SNO. Later runs: `--byo-vars
+~/spiffe-byo/vars.yaml`, implied in a shell that sourced the workshop's env
+file. No `../vault.yaml` is needed: nothing in this lab reads a secret, so
+without one the plays load nothing in its place and `build-lab.sh` asks for
+no vault password.
+
+What the clusters need is in [workshop.md, Y1](workshop.md#y1-what-your-clusters-need);
+the `probe` step checks the network side of it from inside each cluster
+and lists everything missing in one go.
+
+---
+
 ## Layout
 
 ```
 spiffe-spire/
   ansible.cfg              mirrored from the root: ansible reads it from the working directory
   vars.yaml                every spire_* variable; loaded after ../vars.yaml, before ../vault.yaml
-  build-lab.sh             the steps above
+  build-lab.sh             the steps above; --byo for your own clusters
   setup_spiffe_spire.yaml  one play per cluster (phases by tag) + four federation/xverify plays
   workshop.md              the hands-on version
   roles/setup-spiffe-spire/
@@ -160,7 +202,7 @@ spiffe-spire/
     templates/boutique/    the Online Boutique overlay: ghostunnel patches, NetworkPolicy, Route, ClusterSPIFFEID
     templates/mesh/        the Service Mesh overlay: gateway, PeerAuthentication, AuthorizationPolicy, ClusterSPIFFEID
     templates/mesh-*.j2    the Service Mesh operator Subscription; IstioCNI and Istio with the SPIRE templates
-    files/                 echo_server.py, spiffe_client.py - the demo app, stdlib Python
+    files/                 echo_server.py, spiffe_client.py - the demo app, stdlib Python; probe.py - the probe step's checks
 ```
 
 Load order in every play, as for every use case being split out of the root
@@ -170,10 +212,11 @@ Load order in every play, as for every use case being split out of the root
 vars_files:
   - ../vars.yaml          # base (and, for now, everyone else's)
   - vars.yaml             # this use case - may refer to base variables freely
-  - ../vault.yaml
+  - ["../vault.yaml", "vars.yaml"]   # the vault if there is one; nothing here reads a secret
 ```
 
-plus `-e @../vars-metal.yaml` when it exists (build-lab.sh passes it).
+plus `-e @../vars-metal.yaml` when it exists (build-lab.sh passes it), or
+`-e @~/spiffe-byo/vars.yaml` for your own clusters.
 
 ---
 
@@ -533,6 +576,7 @@ oc -n spiffe-demo exec deploy/client -c app -- python3 /app/spiffe_client.py \
 
 | Symptom | First look |
 | --- | --- |
+| `probe` fails | it lists each problem: a node name that does not resolve (troubleshooting.md case 2), a `*.apps` name that does not resolve or no router answering on 443 from a pod, an image that will not pull. `-e spire_probe_strict=false` reports without stopping |
 | preflight: no package matching | `oc -n openshift-marketplace get catalogsource,pods` - is `redhat-operators` healthy |
 | `SpireServer` never Ready, PVC `Pending` | `oc -n zero-trust-workload-identity-manager get pvc,pv` and `oc get sc` - no `lvms-vg1`? `./build-lab.sh --only lvm`; `oc -n openshift-storage get lvmcluster -o yaml` says why LVM Storage is not Ready |
 | agents fewer than workers | `oc -n zero-trust-workload-identity-manager logs ds/spire-agent`; node attestation errors name the cause |

@@ -6,11 +6,18 @@ becomes a SPIFFE trust domain with its own SPIRE server; pods receive short-
 lived X.509 certificates that say *which workload they are*, and use them to
 authenticate to each other over mutual TLS. A pod nobody registered gets
 nothing and is turned away. Then you federate the two trust domains, and a
-workload on the hub proves who it is to a workload on the SNO.
+workload on one cluster proves who it is to a workload on the other.
 
-**What is automated and what you type.** The plumbing - the host, the helper
-VM, both cluster installs, the operator install and a volume for the SPIRE
-server - is one command. Everything that *is* SPIFFE or SPIRE - the trust
+**Two ways in.** This repository builds a lab for it - a hub and a
+single-node cluster on one metal host, [Part A](#part-a---day-0-build-the-lab).
+Or bring **any two OpenShift clusters** you are cluster-admin on,
+[Part A, alternatively](#part-a-alternatively---bring-your-own-clusters):
+the same labs, on your clusters, under your names. From Part B on, the
+two are the same text.
+
+**What is automated and what you type.** The plumbing - for the lab, the
+host, the helper VM and both cluster installs; either way the operator
+install and a volume for the SPIRE server - is one command. Everything that *is* SPIFFE or SPIRE - the trust
 domain, the server, the agents, the CSI driver, the registration, the
 workloads, the federation - you create yourself from the blocks below. Each
 block writes a manifest to a file and then applies that file, so you can read
@@ -26,6 +33,10 @@ exactly what your shell produced before it reaches the cluster.
   - [A2. One command](#a2-one-command)
   - [A3. While it runs: the six ideas](#a3-while-it-runs-the-six-ideas)
   - [A4. When it finishes](#a4-when-it-finishes)
+- [Part A, alternatively - bring your own clusters](#part-a-alternatively---bring-your-own-clusters)
+  - [Y1. What your clusters need](#y1-what-your-clusters-need)
+  - [Y2. One command](#y2-one-command)
+  - [Y3. When it finishes](#y3-when-it-finishes)
 - [Part B - Hands-on](#part-b---hands-on)
   - [Lab 1. A trust domain per cluster](#lab-1-a-trust-domain-per-cluster)
   - [Lab 2. The SPIRE server](#lab-2-the-spire-server)
@@ -84,6 +95,11 @@ exactly what your shell produced before it reaches the cluster.
 The workload IDs are `ns/<namespace>/sa/<service account>`, which is a
 choice you make in Lab 5, not a rule.
 
+With your own clusters the picture is the same, with your two clusters in
+place of the hub and the SNO, your trust domains in place of
+`hub.mylab.com` and `sno.mylab.com`, and no helper VM - your `*.apps` DNS
+does its job.
+
 ---
 
 ## Part A - Day 0: build the lab
@@ -117,6 +133,7 @@ tmux new -s lab          # the cluster installs take over an hour
 | `clusters` | the hub and the SNO, **in parallel**, logging to `build-logs/`, each with LVM Storage as part of its build. Each skipped if already installed | 75 min |
 | `lvm` | per cluster: LVM Storage from the base playbooks - a no-op on a cluster `clusters` just built; on an older one it adds `lvms-vg1`, the default StorageClass | 1-10 min |
 | `preflight` | per cluster: is Red Hat's SPIRE operator in `redhat-operators`, which channel, is there a StorageClass | 1 min |
+| `probe` | per cluster: one short-lived pod checks that node names resolve, both clusters' `*.apps` answer from a pod, and the demo images pull | 1-2 min |
 | `operator` | per cluster: the Zero Trust Workload Identity Manager - Namespace, OperatorGroup, Subscription - and a wait for it | 5 min |
 | `storage` | per cluster: nothing when `lvms-vg1` is there; a local PersistentVolume for the SPIRE server only on a cluster with no default StorageClass | 1 min |
 | `prep` | `/root/spiffe-workshop.env`, and one file per cluster that `lab` loads | - |
@@ -188,13 +205,17 @@ nmcli con up "$CON"
 **Every new shell:**
 
 ```bash
-source /root/spiffe-workshop.env
-lab hub          # oc -> the hub, and $TD, $PEER_TD, $APPS, $SPIRE_SC, $M to match
+source ~/spiffe-workshop.env
+lab $FIRST       # oc -> the hub, and $TD, $PEER_TD, $APPS, $SPIRE_SC, $M to match
 ```
+
+`$FIRST` and `$SECOND` are the two clusters' names - `hub` and `sno` here;
+`lab hub` works just as well.
 
 | Helper / variable | Is | Same as |
 | --- | --- | --- |
-| `lab hub` / `lab sno` | switch `oc` and the variables below to that cluster | `export KUBECONFIG=... TD=hub.mylab.com ...` from `/root/spiffe-workshop.d/hub.env` |
+| `lab $FIRST` / `lab $SECOND` | switch `oc` and the variables below to that cluster (`lab` alone names them) | `export KUBECONFIG=... TD=hub.mylab.com ...` from `~/spiffe-workshop.d/hub.env` |
+| `$FIRST`, `$SECOND` | the two clusters' names | `hub`, `sno` |
 | `$TD`, `$PEER_TD` | this cluster's trust domain, and the other's | `hub.mylab.com`, `sno.mylab.com` |
 | `$APPS`, `$PEER_APPS` | the two clusters' `*.apps` domains | `apps.hub.mylab.com`, ... |
 | `$SPIRE_SC` | the StorageClass the SPIRE server's volume uses | `lvms-vg1`, from the base build's LVM Storage |
@@ -243,19 +264,100 @@ oc get pv                                     # spire-server-data-hub  Available
 
 ---
 
+## Part A, alternatively - bring your own clusters
+
+Any two OpenShift clusters instead of the hub and the SNO. Nothing here
+builds or changes a cluster beyond what the workshop itself creates: no
+base lab, no VM, no DNS record. About twenty minutes, nearly all of it the
+operator install.
+
+### Y1. What your clusters need
+
+The `probe` step below checks the network items from inside each cluster
+and stops with the list of what is missing; the rest the `preflight` step
+checks or the first lab shows at once.
+
+| | Why | If not |
+| --- | --- | --- |
+| **Two OpenShift clusters, cluster-admin on both** | Routes, SCCs and the operator are OpenShift's | - |
+| **Red Hat's operator catalog** (`redhat-operators`, or a mirror of it) | the Zero Trust Workload Identity Manager comes from it | `preflight` says so; for a mirror, `-e spire_catalog_source=<name>` |
+| **A StorageClass**, ideally the default | the SPIRE server's datastore and CA keys live on a PVC | the `storage` step makes a local PV on one node |
+| **Each cluster's pods resolve the other's `*.apps`, and reach its router on 443** | the federation endpoint and the cross-cluster calls are Routes | `probe` fails: fix DNS or routing between the clusters |
+| **Node names resolve in cluster DNS** | the SPIRE agent dials its kubelet by the node's name; if it cannot, no pod on that node gets an SVID | `probe` fails; troubleshooting.md case 2 |
+| **Pods can pull** `ghcr.io/spiffe/spiffe-helper` and `registry.access.redhat.com/ubi9/python-311` | the demo workloads | `probe` fails; mirror them and set `-e spire_demo_helper_image=... -e spire_demo_python_image=...` |
+| **Two different trust domains** | federation joins two authorities | taken from each `*.apps` domain (`apps.east.example.com` → `east.example.com`); `--td` to choose |
+
+And one workstation that reaches both APIs, with `oc`, `ansible-playbook`
+(ansible-core 2.14 or later), `git`, `curl` and `python3`, both kubeconfigs,
+and a clone of this repository. Not root, no vault, no `vars-metal.yaml`:
+those belong to the lab's base build. Parts C and D also pull from GitHub
+and their images' registries.
+
+### Y2. One command
+
+Name your clusters - any short lower-case names; `lab` will know them by
+these:
+
+```bash
+git clone https://github.com/sadiquepp/ocp-onpremise.git ~/ocp-onpremise
+cd ~/ocp-onpremise/spiffe-spire
+./build-lab.sh --workshop --byo east=$HOME/east.kubeconfig --byo west=$HOME/west.kubeconfig
+```
+
+First it asks each cluster its `*.apps` domain and writes
+`~/spiffe-byo/vars.yaml` - the two clusters, their trust domains, and every
+output path under your home - then runs:
+
+| Step | What it does | About |
+| --- | --- | --- |
+| `preflight` | per cluster: is the operator in the catalog, which channel, is there a StorageClass. Changes nothing | 1 min |
+| `probe` | per cluster: one pod, in a namespace of its own that is deleted afterwards, checks node names, both `*.apps` and both images, and lists what is wrong | 1-2 min |
+| `operator` | per cluster: the Zero Trust Workload Identity Manager - Namespace, OperatorGroup, Subscription - and a wait for it | 5-15 min |
+| `storage` | per cluster: nothing when there is a default StorageClass; otherwise a local PersistentVolume for the SPIRE server | 1 min |
+| `prep` | `~/spiffe-workshop.env`, and one file per cluster that `lab` loads | - |
+
+`--td east=east.example.org` chooses a trust domain instead. A trust domain
+is an identifier, not a hostname: it need not resolve, only be unique to
+each cluster and stay the same for good (Lab 1).
+
+### Y3. When it finishes
+
+```bash
+source ~/spiffe-workshop.env      # in every new shell
+lab                               # lab east | lab west
+lab $FIRST
+```
+
+Then Part B, from Lab 1. Wherever this workshop says the hub, read your
+first cluster; the SNO, your second. Every block is written with `$FIRST`
+and `$SECOND`, so the paste is the same.
+
+`build-lab.sh` in a shell that sourced the env file finds your clusters by
+itself (`SPIFFE_BYO_VARS`): `--only check`, `--only cleanup` and the rest
+work as written. From any other shell, add `--byo-vars ~/spiffe-byo/vars.yaml`.
+
+---
+
 ## Part B - Hands-on
 
 **Every `oc` command goes to whichever cluster you last named with `lab`.**
-Each lab starts with a **Where:** line. Labs 1-6 are done on the hub and then
-repeated on the SNO - the blocks use only variables, so the same paste works
-on both - and Lab 7 needs both. Each lab ends with a **Check**.
+Each lab starts with a **Where:** line. Labs 1-6 are done on one cluster and
+then repeated on the other - the blocks use only variables, so the same paste
+works on both - and Lab 7 needs both. Each lab ends with a **Check**.
+
+**Whose clusters.** `$FIRST` and `$SECOND` are the two clusters' names, as
+`lab` knows them: `hub` and `sno` in this repository's lab, whatever you
+named them if you brought your own (`lab` alone prints them). The blocks
+never assume more than that. The sample output, though, is from this
+repository's lab: where it says `hub.mylab.com` and `sno.mylab.com`, yours
+says your two trust domains - `echo $TD $PEER_TD`.
 
 ### Lab 1. A trust domain per cluster
 
-> **Where:** the hub, then the SNO.
+> **Where:** each cluster - `$FIRST`, then `$SECOND`.
 
 ```bash
-lab hub
+lab $FIRST
 ```
 
 ```bash
@@ -278,7 +380,8 @@ oc apply -f "$M/lab01-trust-domain.yaml"
   '{"spec":{"trustDomain":"other.example"}}'` and read the refusal.
 - **`clusterName`** is in every agent's SPIFFE ID; it is what would let two
   clusters share one trust domain without their agents colliding. Here each
-  cluster has its own trust domain, so it is simply `hub` or `sno`.
+  cluster has its own trust domain, so it is simply the name `lab` uses -
+  `hub` or `sno` in this repository's lab.
 
 **Check**
 
@@ -290,14 +393,14 @@ oc get zerotrustworkloadidentitymanager cluster \
 `Ready=False` with a reason about operands not yet created is right: this CR
 is the frame, and the operands inside it come next.
 
-**Now the SNO:** `lab sno`, then paste the block and the check again.
+**Now the second cluster:** `lab $SECOND`, then paste the block and the check again.
 
 ### Lab 2. The SPIRE server
 
-> **Where:** the hub, then the SNO.
+> **Where:** each cluster - `$FIRST`, then `$SECOND`.
 
 ```bash
-lab hub
+lab $FIRST
 ```
 
 ```bash
@@ -366,14 +469,14 @@ The pod has two containers: `spire-server`, and `spire-controller-manager`,
 which turns the Kubernetes objects of Lab 5 and Lab 7 into entries and
 federation relationships through the server's local API socket.
 
-**Now the SNO:** `lab sno`, then paste the block and the check again.
+**Now the second cluster:** `lab $SECOND`, then paste the block and the check again.
 
 ### Lab 3. Agents and the CSI driver
 
-> **Where:** the hub, then the SNO.
+> **Where:** each cluster - `$FIRST`, then `$SECOND`.
 
 ```bash
-lab hub
+lab $FIRST
 ```
 
 ```bash
@@ -411,8 +514,9 @@ oc apply -f "$M/lab03-agents.yaml"
 oc wait spireagent/cluster spiffecsidriver/cluster --for=condition=Ready --timeout=10m
 ```
 
-- **The agent** is a DaemonSet. No tolerations, so on the hub it runs on the
-  three workers - which is where workloads run - and not the masters.
+- **The agent** is a DaemonSet. No tolerations, so it runs on the nodes
+  workloads run on - the workers - and not on tainted control-plane nodes:
+  three on this repository's hub, the one node on its SNO.
 - **The CSI driver** exists so that a workload can reach the agent's socket
   *without* a `hostPath` volume, which would need a privileged SCC. The pod
   asks for an inline CSI volume; the driver bind-mounts the socket directory
@@ -423,7 +527,7 @@ oc wait spireagent/cluster spiffecsidriver/cluster --for=condition=Ready --timeo
 
 ```bash
 oc -n $ZT_NS get ds
-spire agent list                  # Found 3 attested agents (1 on the SNO)
+spire agent list                  # Found <n> attested agents: one per worker node
 oc get nodes -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
 oc get csidriver csi.spiffe.io -o jsonpath='{.metadata.labels}{"\n"}'
 ```
@@ -433,17 +537,17 @@ Each agent's SPIFFE ID is
 the node list. That is node attestation, finished: the server now knows, for
 each agent, which node it speaks for.
 
-**Now the SNO:** `lab sno`, then paste the block and the check again.
+**Now the second cluster:** `lab $SECOND`, then paste the block and the check again.
 
 ### Lab 4. Workloads with no identity
 
-> **Where:** the hub, then the SNO.
+> **Where:** each cluster - `$FIRST`, then `$SECOND`.
 
 Three workloads, before any registration exists. They can all reach the
 Workload API - and it has nothing for any of them yet.
 
 ```bash
-lab hub
+lab $FIRST
 ```
 
 The namespace, one service account per workload (the SPIFFE ID will name
@@ -653,15 +757,15 @@ API through the CSI volume, the agent attested it (it knows exactly which
 pod asked), and found no registration entry for it. Identity is not handed to
 whatever can reach the socket.
 
-**Now the SNO:** `lab sno`, then paste the blocks again, including the
+**Now the second cluster:** `lab $SECOND`, then paste the blocks again, including the
 `demo_pod` function and its two calls.
 
 ### Lab 5. Register them
 
-> **Where:** the hub, then the SNO.
+> **Where:** each cluster - `$FIRST`, then `$SECOND`.
 
 ```bash
-lab hub
+lab $FIRST
 ```
 
 First, the mistake everyone makes once. A `ClusterSPIFFEID` without its
@@ -722,16 +826,23 @@ Match the entry's `Parent ID` to `spire agent list`, and its `k8s:pod-uid`
 selector to `oc -n $DEMO_NS get pod -l app=client -o jsonpath='{.items[0].metadata.uid}'`.
 The intruder's helper keeps retrying, and keeps being told `no identity issued`.
 
-**Now the SNO:** `lab sno`, then paste the corrected ClusterSPIFFEID (the
+If the **client** is still told `no identity issued` a minute after its
+entry exists, look at the agent's log on its node: `lookup <node> ... no such
+host` means the agent cannot reach the kubelet by the node's name, so it
+cannot tell which pod is asking. The node name has to resolve in cluster DNS
+- the `probe` step checks it, and troubleshooting.md case 2 is the long
+version.
+
+**Now the second cluster:** `lab $SECOND`, then paste the corrected ClusterSPIFFEID (the
 `sed` line included) and the check.
 
 ### Lab 6. Mutual TLS, and who gets refused
 
-> **Where:** the hub. Repeat on the SNO if you like; Lab 7 only needs the
+> **Where:** `$FIRST`. Repeat on `$SECOND` if you like; Lab 7 only needs the
 > workloads, which both clusters have.
 
 ```bash
-lab hub
+lab $FIRST
 call client https://echo-server:8443/ spiffe://$TD/ns/$DEMO_NS/sa/echo-server
 ```
 
@@ -792,7 +903,7 @@ call client https://echo-server:8443/ spiffe://$TD/ns/$DEMO_NS/sa/someone-else
 ```
 
 **Hostnames do not matter.** The same call through the Route - via the
-helper's DNS and the router, as anything outside the cluster would - works
+`*.apps` DNS and the router, as anything outside the cluster would - works
 unchanged, because nothing checks the name:
 
 ```bash
@@ -809,23 +920,23 @@ call client https://echo-server:8443/ spiffe://$TD/ns/$DEMO_NS/sa/echo-server; e
 
 > **Where:** both, in the order given. Every block says which.
 
-**Before: the hub cannot trust the SNO.**
+**Before: `$FIRST` cannot trust `$SECOND`.**
 
 ```bash
-lab hub
+lab $FIRST
 call client https://echo-$DEMO_NS.$PEER_APPS/ spiffe://$PEER_TD/ns/$DEMO_NS/sa/echo-server
 # SERVER NOT TRUSTED: ... Its CA is not in /svid/svid_bundle.pem   (exit 3)
 ```
 
-The network path is fine - the call reached the SNO's router and its echo
-server. The hub's client refused the SNO's certificate, because nothing in
-its bundle signs for `sno.mylab.com`.
+The network path is fine - the call reached `$SECOND`'s router and its echo
+server. `$FIRST`'s client refused `$SECOND`'s certificate, because nothing in
+its bundle signs for `$PEER_TD`.
 
 **7a. Publish a bundle endpoint, on each cluster.** A patch to the
 SpireServer, and a passthrough Route to it under `*.apps`:
 
 ```bash
-lab hub
+lab $FIRST
 ```
 
 ```bash
@@ -835,7 +946,7 @@ spec:
     bundleEndpoint:
       profile: https_spiffe      # authenticate the endpoint by SPIFFE ID
       refreshHint: 300           # peers re-fetch every 5 minutes
-    managedRoute: "false"        # the operator's own would be federation.$TD - not in DNS
+    managedRoute: "false"        # the operator's own would be federation.$TD - outside *.apps, so in no DNS
 EOF
 oc patch spireserver cluster --type=merge --patch-file="$M/lab07-server-federation.yaml"
 
@@ -862,9 +973,12 @@ counts any False condition as a failure. Every *other* condition in that
 list should be True; those two False lines are expected. (The lab's own
 checks read the conditions the same way.)
 
-The last line is the bundle, as JSON, fetched from the lab host through the
-helper and the router: the bundle is public, only the endpoint's *identity*
-matters.
+The last line is the bundle, as JSON, fetched from your workstation
+through the router (in this repository's lab, resolved by the helper VM's
+DNS; elsewhere, by whatever resolves your `*.apps`): the bundle is public,
+only the endpoint's *identity* matters. If your workstation cannot resolve
+`$APPS`, that `curl` fails and nothing else does - what matters is the
+other cluster reaching it, which `federation refresh` proves in 7c.
 
 - **`https_spiffe`**: the endpoint serves TLS with the SPIRE server's own
   SVID, `spiffe://$TD/spire/server`. A peer checks that SPIFFE ID and that the
@@ -874,16 +988,17 @@ matters.
 - **Passthrough**, because a router that terminated TLS would present its own
   certificate and fail exactly that check.
 
-Then the same on the SNO: `lab sno`, and paste the block again.
+Then the same on the second cluster: `lab $SECOND`, and paste the block again.
 
-**7b. Exchange the bootstrap bundles.** To authenticate the hub's endpoint
-the first time, the SNO needs the hub's CA - which it would otherwise only
-learn *from* that endpoint. So it is copied once, out of band:
+**7b. Exchange the bootstrap bundles.** To authenticate `$FIRST`'s endpoint
+the first time, `$SECOND` needs `$FIRST`'s CA - which it would otherwise only
+learn *from* that endpoint. So it is copied once, out of band (and the other
+way round):
 
 ```bash
-lab hub; spire bundle show -format spiffe > $WS_MANIFESTS/hub.bundle.json
-lab sno; spire bundle show -format spiffe > $WS_MANIFESTS/sno.bundle.json
-head -c 300 $WS_MANIFESTS/hub.bundle.json; echo
+lab $FIRST; spire bundle show -format spiffe > $WS_MANIFESTS/$FIRST.bundle.json
+lab $SECOND; spire bundle show -format spiffe > $WS_MANIFESTS/$SECOND.bundle.json
+head -c 300 $WS_MANIFESTS/$FIRST.bundle.json; echo
 ```
 
 The SPIFFE bundle format is a JWKS: the X.509 CAs (`"use": "x509-svid"`) and
@@ -891,7 +1006,7 @@ the JWT signing keys (`"use": "jwt-svid"`), plus a sequence number and a
 refresh hint.
 
 **7c. Declare the federation, on each cluster.** Paste this once after
-`lab hub` and once after `lab sno` - `$PEER` and `$PEER_TD` follow `lab`:
+`lab $FIRST` and once after `lab $SECOND` - `$PEER` and `$PEER_TD` follow `lab`:
 
 ```bash
 cat > "$M/lab07-federate-$PEER_TD.yaml" <<EOF
@@ -913,8 +1028,8 @@ oc apply -f "$M/lab07-federate-$PEER_TD.yaml"
 ```
 
 ```bash
-lab hub        # then paste the block above
-lab sno        # then paste it again
+lab $FIRST        # then paste the block above
+lab $SECOND        # then paste it again
 ```
 
 - **`trustDomainBundle`** is used once, when the relationship is created.
@@ -932,9 +1047,10 @@ spire federation refresh -id $PEER_TD                    # Bundle refreshed
 ```
 
 `federation refresh` makes the server fetch the peer's bundle *now*, over the
-Route. It succeeding proves the helper's DNS, the peer's router, the
-passthrough and the `https_spiffe` authentication together. If it fails, the
-message names which.
+Route. It succeeding proves the `*.apps` DNS (the helper VM's, in this
+repository's lab), the peer's router, the passthrough and the
+`https_spiffe` authentication together. If it fails, the message names
+which.
 
 **7d. Give the workloads the peer's CA, on each cluster.** A server holding
 a foreign bundle is not enough: a workload is only handed it if its
@@ -967,15 +1083,15 @@ EOF
 oc apply -f "$M/lab07-allowed.yaml"
 ```
 
-Do 7d and 7e after `lab hub`, then again after `lab sno`.
+Do 7d and 7e after `lab $FIRST`, then again after `lab $SECOND`.
 
 **Check: across the boundary, both ways**
 
 ```bash
-lab hub
+lab $FIRST
 call client https://echo-$DEMO_NS.$PEER_APPS/ spiffe://$PEER_TD/ns/$DEMO_NS/sa/echo-server
 # HTTP 200: hello spiffe://hub.mylab.com/ns/spiffe-demo/sa/client, this is spiffe://sno.mylab.com/ns/spiffe-demo/sa/echo-server
-lab sno
+lab $SECOND
 call client https://echo-$DEMO_NS.$PEER_APPS/ spiffe://$PEER_TD/ns/$DEMO_NS/sa/echo-server
 # HTTP 200: hello spiffe://sno.mylab.com/ns/spiffe-demo/sa/client, this is spiffe://hub.mylab.com/ns/spiffe-demo/sa/echo-server
 ```
@@ -992,7 +1108,7 @@ workload in each proves who it is to a workload in the other.
 client, and it keeps working - for a while:
 
 ```bash
-lab hub
+lab $FIRST
 POD=$(oc -n $DEMO_NS get pod -l app=client -o name)
 oc -n $DEMO_NS label $POD $LABEL-                 # the pod no longer matches
 spire entry show -spiffeID spiffe://$TD/ns/$DEMO_NS/sa/client   # Found 0 entries, within seconds
@@ -1052,12 +1168,15 @@ ships it; everything SPIFFE is a kustomize overlay you write on top.
 About 1.4 GiB of memory per cluster, most of it the application and its load
 generator, which places orders continuously so the hop always has traffic.
 
+As in Part B, the blocks use `$FIRST` and `$SECOND`; where the text says the
+hub and the SNO, with your own clusters read your first and second.
+
 ### C1. The application, as shipped
 
-> **Where:** the hub, then the SNO.
+> **Where:** each cluster - `$FIRST`, then `$SECOND`.
 
 ```bash
-lab hub
+lab $FIRST
 [ -d "$BQ_CLONE/.git" ] || git clone "$BQ_REPO" "$BQ_CLONE"
 git -C "$BQ_CLONE" checkout -q "$BQ_REF"
 oc kustomize "$BQ_SRC/overlays/default" > "$M/c1-boutique.yaml"
@@ -1078,15 +1197,15 @@ inpod intruder python3 -c "import socket; socket.create_connection(('paymentserv
 Nothing in the application would stop it asking for a charge. Identity is not
 in the picture at all.
 
-**Now the SNO:** `lab sno`, and paste both blocks again. C5 needs a
+**Now the second cluster:** `lab $SECOND`, and paste both blocks again. C5 needs a
 paymentservice there.
 
 ### C2. Register every service
 
-> **Where:** the hub, then the SNO.
+> **Where:** each cluster - `$FIRST`, then `$SECOND`.
 
 ```bash
-lab hub
+lab $FIRST
 cat > "$M/c2-clusterspiffeid.yaml" <<EOF
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID
@@ -1120,11 +1239,11 @@ Twelve identities - and nothing changed. The services were not asked to fetch
 an SVID, so none did, and none checks anyone else's. Registration makes an
 identity *available*; using it is the workload's job.
 
-**Now the SNO:** `lab sno`, and paste again.
+**Now the second cluster:** `lab $SECOND`, and paste again.
 
 ### C3. Put the payment hop under mTLS
 
-> **Where:** the hub, then the SNO.
+> **Where:** each cluster - `$FIRST`, then `$SECOND`.
 
 **What changes, in one picture.** Before - the application as shipped, C1
 and C2:
@@ -1172,7 +1291,7 @@ it just forwards to ghostunnel's 8443 now.
 Four small files, in an overlay directory next to your other manifests:
 
 ```bash
-lab hub
+lab $FIRST
 mkdir -p "$M/boutique"
 ```
 
@@ -1334,15 +1453,15 @@ oc -n $BQ_NS rollout status deploy/paymentservice --timeout=10m
 oc -n $BQ_NS rollout status deploy/checkoutservice --timeout=10m
 ```
 
-**Now the SNO:** `lab sno`, and paste every block of C3 again - `$TD`,
+**Now the second cluster:** `lab $SECOND`, and paste every block of C3 again - `$TD`,
 `$PEER_TD` and `$APPS` follow `lab`.
 
 ### C4. Who gets through now
 
-> **Where:** the hub (the SNO behaves the same).
+> **Where:** `$FIRST` (`$SECOND` behaves the same).
 
 ```bash
-lab hub
+lab $FIRST
 bq_status
 # {"ok":true,"status":"ok","backend_ok":true,"backend_status":"ok",...}
 oc -n $BQ_NS logs deploy/checkoutservice -c server --since=5m | grep -c 'payment went through'   # orders, paid
@@ -1396,7 +1515,7 @@ network.
 
 ### C5. Pay in the other trust domain
 
-> **Where:** the hub, after C1-C3 on both clusters.
+> **Where:** `$FIRST`, after C1-C3 on both clusters.
 
 The SNO's paymentservice already admits `spiffe://hub.mylab.com/.../checkoutservice`
 (C3 listed it), both namespaces' identities federate (C2), and the SNO's
@@ -1404,7 +1523,7 @@ paymentservice has a passthrough Route. Only the hub's checkoutservice has to
 be told where to go - and whom to expect:
 
 ```bash
-lab hub
+lab $FIRST
 sed -e "s|--target=paymentservice:50051|--target=payment-$BQ_NS.$PEER_APPS:443|" \
     -e "s|--verify-uri=spiffe://$TD/|--verify-uri=spiffe://$PEER_TD/|" \
     "$M/boutique/checkout-client.yaml" > "$M/boutique/checkout-client.yaml.new"
@@ -1420,7 +1539,7 @@ bq_status
 Watch the payments arrive on the other cluster:
 
 ```bash
-lab sno
+lab $SECOND
 oc -n $BQ_NS logs deploy/paymentservice -c ghostunnel --since=10m | grep 'opening pipe'
 # opening pipe: tcp:10.128.0.2:39666 [O=SPIRE,C=US] <-> tcp:[::1]:50052 [no tls]
 oc -n $BQ_NS logs deploy/paymentservice -c server -f --since=1m | grep 'Transaction processed'
@@ -1441,10 +1560,10 @@ future expiry (paymentservice only checks that it is a well-formed Visa or
 Mastercard):
 
 ```bash
-lab hub
+lab $FIRST
 oc -n $BQ_NS get route frontend -o jsonpath='https://{.spec.host}{"\n"}'
 # ... place the order in the browser, then:
-lab sno
+lab $SECOND
 oc -n $BQ_NS logs deploy/paymentservice -c server --since=5m | grep 'visa ending 1111'
 # {"severity":"info",...,"message":"Transaction processed: visa ending 1111     Amount: USD118.980000000"}
 ```
@@ -1454,7 +1573,7 @@ A click on the hub's website, charged in the other trust domain.
 On the hub, the paymentservice has gone quiet:
 
 ```bash
-lab hub
+lab $FIRST
 oc -n $BQ_NS logs deploy/paymentservice -c server --since=2m | grep -c 'Transaction processed'   # 0
 ```
 
@@ -1464,12 +1583,12 @@ checkout in `hub.mylab.com` proving who it is to a payment service in
 the two SPIRE servers exchanged bundles in Lab 7.
 
 To put the hub's payments back on the hub, reverse the `sed`, rebuild and
-apply - or `./build-lab.sh --only boutique --cluster hub`.
+apply - or `./build-lab.sh --only boutique --cluster $FIRST`.
 
 **Check**
 
 ```bash
-cd /root/ocp-onpremise/spiffe-spire
+cd $LAB_DIR
 ./build-lab.sh --workshop --only boutique-verify     # both clusters, the same asserts as the full build
 ```
 
@@ -1497,7 +1616,7 @@ room (README "Memory budget").
 
 ### D1. The operator
 
-> **Where:** the hub.
+> **Where:** `$FIRST`.
 
 Service Mesh 3 is an AllNamespaces operator, so it goes in
 `openshift-operators`, under the OperatorGroup that namespace already has.
@@ -1506,7 +1625,7 @@ already, skip this block. The label marks it as yours, so that cleanup
 removes it.
 
 ```bash
-lab hub
+lab $FIRST
 CHANNEL=$(oc get packagemanifests -n openshift-marketplace -l catalog=$CATALOG \
           -o jsonpath="{.items[?(@.metadata.name=='$MESH_PKG')].status.defaultChannel}")
 echo "channel: $CHANNEL"
@@ -1531,7 +1650,7 @@ until oc wait --for=condition=Established crd/istios.sailoperator.io --timeout=1
 
 ### D2. A mesh whose CA is SPIRE
 
-> **Where:** the hub.
+> **Where:** `$FIRST`.
 
 Two custom resources. `IstioCNI` sets up each pod's traffic redirection from
 a DaemonSet, so pods need no privileges. `Istio` is the control plane, and
@@ -1637,7 +1756,7 @@ the same one.
 
 ### D3. The application, in the mesh - and not yet registered
 
-> **Where:** the hub.
+> **Where:** `$FIRST`.
 
 An overlay on the same upstream `overlays/default` as C1. It moves the
 application to `$MESH_NS`, turns injection on for the namespace, and asks
@@ -1689,7 +1808,7 @@ identity means no traffic at all, not just a refused handshake.
 
 ### D4. Register them, and look at what Envoy holds
 
-> **Where:** the hub.
+> **Where:** `$FIRST`.
 
 The same ClusterSPIFFEID as C2, for the new namespace. It is cluster-scoped,
 so it is applied on its own, outside the kustomize overlay (kustomize would
@@ -1736,7 +1855,7 @@ anything.
 
 ### D5. Lock it down
 
-> **Where:** the hub.
+> **Where:** `$FIRST`.
 
 So far mTLS is *permissive*: Envoys use it with each other, but anything
 without a sidecar can still talk plaintext. Three things change that, added to the
@@ -1870,7 +1989,7 @@ oc -n $MESH_NS get route frontend -o jsonpath='https://{.spec.host}{"\n"}'   # t
 
 ### D6. Who gets through now
 
-> **Where:** the hub.
+> **Where:** `$FIRST`.
 
 **checkoutservice → paymentservice.** paymentservice's Envoy counts every
 request it accepts, labelled with the caller's SPIFFE ID, taken from the
@@ -1917,8 +2036,8 @@ in every pod.
 **Check**
 
 ```bash
-cd /root/ocp-onpremise/spiffe-spire
-./build-lab.sh --workshop --only mesh-verify --cluster hub
+cd $LAB_DIR
+./build-lab.sh --workshop --only mesh-verify --cluster $FIRST
 ```
 
 The full build's own asserts, run against what you built: every Envoy holds
@@ -1929,7 +2048,7 @@ To take this part away again, mesh and all, and leave SPIRE, Part B and
 Part C as they were:
 
 ```bash
-./build-lab.sh --only mesh-cleanup --cluster hub
+./build-lab.sh --only mesh-cleanup --cluster $FIRST
 ```
 
 ---
@@ -1941,7 +2060,7 @@ objects - they test outcomes (Ready conditions, entries, SVIDs, handshakes),
 not how the manifests were written:
 
 ```bash
-cd /root/ocp-onpremise/spiffe-spire
+cd $LAB_DIR
 ./build-lab.sh --workshop --only check              # Labs 1-6, both clusters
 ./build-lab.sh --workshop --only xverify            # Lab 7, both directions
 ```
@@ -1962,6 +2081,7 @@ have rather than duplicating it:
 | fewer agents than workers | `oc -n $ZT_NS logs ds/spire-agent` - node attestation errors say why |
 | ClusterSPIFFEID `.status` empty | `className` |
 | a pod never gets `/svid/svid.pem` | `oc -n $DEMO_NS logs deploy/<pod> -c spiffe-helper` - `no identity issued` means no entry matches |
+| ... though `spire entry show` lists its entry | `oc -n $ZT_NS logs ds/spire-agent` on its node: `lookup <node> ... no such host` - the node name does not resolve in cluster DNS (troubleshooting.md case 2; `./build-lab.sh --only probe` checks every node) |
 | the intruder has an SVID | `oc get clusterspiffeid` - a `...-spire-default` fallback exists only if someone created a `SpireOIDCDiscoveryProvider`, which registers every pod |
 | `federation refresh` fails | the message: `no such host` (DNS), connection refused or 503 (the Route), `x509` (the endpoint's SVID / the bootstrap bundle) |
 | cross-cluster `SERVER NOT TRUSTED` | 7d: `federatesWith`, then wait for the bundle file to hold 2 certificates |
@@ -1976,7 +2096,7 @@ have rather than duplicating it:
 ./build-lab.sh --only cleanup
 ```
 
-Removes, from both clusters: Part D's mesh (only what carries the
+Removes, from both clusters - yours too, with nothing outside these: Part D's mesh (only what carries the
 `$MESH_OWNER` label), `spiffe-demo`, every SPIRE CR, the federation
 Route, the operator, the SPIRE server's PV and StorageClass, and the data
 directory on the node - the trust domain's CA keys, so a rebuild is a new
