@@ -21,8 +21,8 @@
       https://echo-{{ spire_demo_namespace }}.{{ spire_clusters[item.dst].apps_domain }}/
       spiffe://{{ spire_clusters[item.dst].trust_domain }}/ns/{{ spire_demo_namespace }}/sa/echo-server
   loop:
-    - {src: hub, dst: sno}
-    - {src: sno, dst: hub}
+    - {src: "{{ spire_pair[0] }}", dst: "{{ spire_pair[1] }}"}
+    - {src: "{{ spire_pair[1] }}", dst: "{{ spire_pair[0] }}"}
   loop_control:
     label: "{{ item.src }} client -> {{ item.dst }} echo-server"
   register: spire_xv

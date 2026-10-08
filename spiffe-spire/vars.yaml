@@ -36,6 +36,11 @@
 ## apps_domain   the cluster's *.apps wildcard. Routes are named under it so
 ##               they resolve through the helper with no DNS change.
 ## peer          the other cluster, for federation.
+##
+## Bring your own clusters: `./build-lab.sh --byo <name>=<kubeconfig> ...`
+## writes a vars file that replaces spire_clusters and spire_pair with two
+## clusters of any names, discovered from their kubeconfigs (workshop.md,
+## "Part A, alternatively - bring your own clusters").
 spire_clusters:
   hub:
     name: hub
@@ -53,6 +58,10 @@ spire_clusters:
     cluster_name: "{{ sno_name }}"
     apps_domain: "apps.{{ sno_name }}.{{ base_domain }}"
     peer: hub
+
+## The two clusters the both-cluster plays (federation, xverify) pair up, in
+## order: the first is the one whose payments go across in boutique-federate.
+spire_pair: [hub, sno]
 
 ## ---------------------------------------------------------------------------
 ## The operator - Red Hat's packaging of SPIFFE/SPIRE
@@ -200,6 +209,10 @@ spire_demo_namespace: spiffe-demo
 spire_demo_identity_label: spiffe.mylab.com/identity
 spire_demo_python_image: registry.access.redhat.com/ubi9/python-311:latest
 spire_demo_helper_image: ghcr.io/spiffe/spiffe-helper:0.11.0
+## The probe step's namespace: one pod, deleted when it has answered.
+spire_probe_namespace: spiffe-probe
+## false: report what the probe found, but do not stop the build on it.
+spire_probe_strict: true
 ## The echo-server's passthrough Route, for the cross-cluster call.
 spire_demo_route_host: "echo-{{ spire_demo_namespace }}.{{ spire_c.apps_domain }}"
 

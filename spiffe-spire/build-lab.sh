@@ -16,6 +16,23 @@
 #   ./build-lab.sh --only mesh         # ... or as well, on a lab already built
 #   ./build-lab.sh -e @my-vars.yaml    # extra vars, passed to every playbook
 #
+# BRING YOUR OWN CLUSTERS. Any two OpenShift clusters instead of the hub and
+# the SNO - no base lab, no libvirt, no helper VM:
+#
+#   ./build-lab.sh --byo east=~/east.kubeconfig --byo west=~/west.kubeconfig --workshop
+#   ./build-lab.sh --byo-vars ~/spiffe-byo/vars.yaml --only check     # later runs
+#                                      # (--byo-vars is implied in a shell that sourced
+#                                      # ~/spiffe-workshop.env: SPIFFE_BYO_VARS)
+#   ./build-lab.sh --byo ... --td east=east.example.org               # choose a trust domain
+#
+# --byo asks each cluster its *.apps domain, takes the trust domain from it
+# (apps.east.example.com -> east.example.com) unless --td says otherwise,
+# and writes ~/spiffe-byo/vars.yaml: the two clusters, under the names you
+# gave, and every output path under $HOME. Every playbook then gets it as
+# -e @vars.yaml. The base-lab steps (bmhost, clusters, lvm) are dropped;
+# everything else - preflight to the asserts - is the same code. `lab
+# <name>` in the workshop takes the names you gave.
+#
 # THE BASE LAB. The first two steps are the repository's own playbooks,
 # unchanged: bmhost (../setup_bm_host.yaml - the helper, DNS, load balancer)
 # and clusters (../setup_hub_cluster.yaml --skip-tags acm and
@@ -73,9 +90,15 @@ CLUSTERS=(hub sno)
 NO_BOUTIQUE=0
 MESH=0
 EXTRA_VARS=()
+BYO_SPECS=()       # name=kubeconfig, from --byo
+BYO_TDS=()         # name=trust domain, from --td
+# The generated vars file; --byo-vars reuses one. A shell that sourced the
+# workshop's env file for your own clusters has it in SPIFFE_BYO_VARS.
+BYO_VARS="${SPIFFE_BYO_VARS:-}"
+PAIR=(hub sno)
 
-ALL_STEPS=(bmhost clusters lvm preflight operator storage spire demo verify federation xverify boutique boutique-federate)
-WORKSHOP_STEPS=(bmhost clusters lvm preflight operator storage prep)
+ALL_STEPS=(bmhost clusters lvm preflight probe operator storage spire demo verify federation xverify boutique boutique-federate)
+WORKSHOP_STEPS=(bmhost clusters lvm preflight probe operator storage prep)
 # Valid for --only, in no sequence.
 EXTRA_STEPS=(prep check boutique-verify mesh mesh-verify mesh-cleanup cleanup)
 
@@ -93,6 +116,11 @@ list_steps() {
              already did it
   preflight  per cluster: is the operator in redhat-operators, which channel,
              is there a StorageClass. Changes nothing
+  probe      per cluster: one short-lived pod in its own namespace checks
+             what the labs need from the network - every node name resolves
+             (the agent dials its kubelet by name), both clusters' *.apps
+             resolve and their routers answer, the demo images pull. Then
+             deletes the namespace
   operator   per cluster: Namespace, OperatorGroup, Subscription; waits for
              the CSV and checks for the 1.x API
   storage    per cluster: nothing when lvms-vg1 (or any default class) is
@@ -129,6 +157,8 @@ list_steps() {
 EOF
     printf '\n  this run (%s): %s\n' "$( (( WORKSHOP )) && echo workshop || echo full)" "${STEPS[*]}"
     printf '  clusters for per-cluster steps: %s\n' "${CLUSTERS[*]}"
+    (( ${#BYO_SPECS[@]} )) || [[ -n $BYO_VARS ]] && printf '  bring your own clusters: %s\n' "${BYO_VARS:-(not written yet)}"
+    return 0
 }
 
 while [[ $# -gt 0 ]]; do
@@ -137,7 +167,10 @@ while [[ $# -gt 0 ]]; do
         --from)                FROM="$2"; shift 2 ;;
         --only)                ONLY="$2"; shift 2 ;;
         --workshop)            WORKSHOP=1; shift ;;
-        --cluster)             CLUSTERS=("$2"); shift 2 ;;
+        --cluster)             CLUSTERS=("$2"); CLUSTER_SET=1; shift 2 ;;
+        --byo)                 BYO_SPECS+=("$2"); shift 2 ;;
+        --td)                  BYO_TDS+=("$2"); shift 2 ;;
+        --byo-vars)            BYO_VARS="$2"; shift 2 ;;
         -e|--extra-vars)       EXTRA_VARS+=(-e "$2"); shift 2 ;;
         -y|--yes)              ASSUME_YES=1; shift ;;
         --no-boutique)         NO_BOUTIQUE=1; shift ;;
@@ -148,6 +181,81 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+# ---------------------------------------------------------------------------
+# Bring your own clusters: write the vars file from --byo, or read the pair
+# back from --byo-vars. Either way the cluster names stop being hub and sno.
+byo_write() {
+    local out="$1" spec name kc apps td names=() kcs=() tds=() apps_l=() i
+    command -v oc >/dev/null || { echo "--byo needs oc in PATH" >&2; exit 1; }
+    (( ${#BYO_SPECS[@]} == 2 )) || { echo "--byo takes exactly two clusters: --byo <name>=<kubeconfig> --byo <name>=<kubeconfig>" >&2; exit 1; }
+    for spec in "${BYO_SPECS[@]}"; do
+        name=${spec%%=*}; kc=${spec#*=}
+        [[ $spec == *=* && $name =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || {
+            echo "--byo $spec: want <name>=<kubeconfig>, the name lower-case letters, digits and '-'" >&2; exit 1; }
+        kc=$(readlink -f "${kc/#\~/$HOME}")
+        [[ -r $kc ]] || { echo "--byo $name: no readable kubeconfig at $kc" >&2; exit 1; }
+        apps=$(oc --kubeconfig "$kc" get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null) || true
+        [[ -n $apps ]] || { echo "--byo $name: could not read the ingress domain with $kc - is it an OpenShift cluster, and are you logged in as cluster-admin?" >&2; exit 1; }
+        td=${apps#apps.}
+        for i in "${BYO_TDS[@]}"; do [[ ${i%%=*} == "$name" ]] && td=${i#*=}; done
+        names+=("$name"); kcs+=("$kc"); apps_l+=("$apps"); tds+=("$td")
+    done
+    [[ ${names[0]} != "${names[1]}" ]] || { echo "--byo: the two clusters need different names" >&2; exit 1; }
+    [[ ${tds[0]} != "${tds[1]}" ]] || { echo "--byo: both clusters would have trust domain ${tds[0]}; give one another with --td ${names[1]}=<domain>" >&2; exit 1; }
+    for i in "${BYO_TDS[@]}"; do
+        [[ " ${names[*]} " == *" ${i%%=*} "* ]] || { echo "--td ${i}: no --byo cluster called ${i%%=*}" >&2; exit 1; }
+    done
+    mkdir -p "$(dirname "$out")"
+    {
+        echo "# Written by build-lab.sh --byo on $(date -u +%FT%TZ). Re-run --byo to change it;"
+        echo "# later runs: ./build-lab.sh --byo-vars $out ..."
+        echo "spire_byo_vars_file: \"$out\""
+        echo "spire_pair: [${names[0]}, ${names[1]}]"
+        echo "spire_clusters:"
+        for i in 0 1; do
+            cat <<EOF
+  ${names[$i]}:
+    name: ${names[$i]}
+    kubeconfig: "${kcs[$i]}"
+    trust_domain: ${tds[$i]}
+    cluster_name: ${names[$i]}
+    apps_domain: ${apps_l[$i]}
+    peer: ${names[$(( 1 - i ))]}
+EOF
+        done
+        cat <<EOF
+# Everything this lab writes, under your home rather than /root.
+spire_manifest_root: "$HOME/spiffe-spire-manifests"
+spire_workshop_env_file: "$HOME/spiffe-workshop.env"
+spire_workshop_cluster_dir: "$HOME/spiffe-workshop.d"
+spire_workshop_manifest_root: "$HOME/spiffe-workshop-manifests"
+spire_boutique_src_dir: "$HOME/spiffe-spire-src/openshift"
+# Nothing here needs root on this machine: every change is made through oc.
+ansible_become: false
+EOF
+    } > "$out"
+    echo "    wrote $out:"
+    for i in 0 1; do printf '      %-8s trust domain %-30s *.%s\n' "${names[$i]}" "${tds[$i]}" "${apps_l[$i]}"; done
+}
+
+if (( ${#BYO_SPECS[@]} )); then
+    BYO_VARS=${BYO_VARS:-$HOME/spiffe-byo/vars.yaml}
+    [[ -n ${SPIFFE_BYO_VARS:-} && $BYO_VARS == "$SPIFFE_BYO_VARS" ]] &&
+        echo "    (rewriting $BYO_VARS - the file your workshop shell points at)"
+    byo_write "$BYO_VARS"
+elif (( ${#BYO_TDS[@]} )); then
+    echo "--td goes with --byo" >&2; exit 1
+fi
+if [[ -n $BYO_VARS ]]; then
+    [[ -r $BYO_VARS ]] || { echo "--byo-vars: cannot read $BYO_VARS (write it with --byo <name>=<kubeconfig> twice)" >&2; exit 1; }
+    BYO_VARS=$(readlink -f "$BYO_VARS")
+    read -r -a PAIR <<< "$(sed -n 's/^spire_pair: *\[\(.*\)\]/\1/p' "$BYO_VARS" | tr -d ' ' | tr ',' ' ')"
+    (( ${#PAIR[@]} == 2 )) || { echo "$BYO_VARS has no spire_pair: [a, b] line" >&2; exit 1; }
+    (( ${CLUSTER_SET:-0} )) || CLUSTERS=("${PAIR[@]}")
+    # No base lab to build: the clusters are yours.
+    ALL_STEPS=("${ALL_STEPS[@]:3}"); WORKSHOP_STEPS=("${WORKSHOP_STEPS[@]:3}")
+fi
 
 if (( WORKSHOP )); then STEPS=("${WORKSHOP_STEPS[@]}"); EXTRA_STEPS+=("${ALL_STEPS[@]}")
 else STEPS=("${ALL_STEPS[@]}"); fi
@@ -165,11 +273,12 @@ if (( MESH && ! NO_BOUTIQUE )); then
     read -r -a STEPS <<< "${STEPS[*]}"
     EXTRA_STEPS+=(boutique boutique-federate)
 fi
-[[ -r "$HOST_VARS" ]] && EXTRA_VARS=(-e "@$HOST_VARS" "${EXTRA_VARS[@]}")
+if [[ -n $BYO_VARS ]]; then EXTRA_VARS=(-e "@$BYO_VARS" "${EXTRA_VARS[@]}")
+elif [[ -r "$HOST_VARS" ]]; then EXTRA_VARS=(-e "@$HOST_VARS" "${EXTRA_VARS[@]}"); fi
 TOTAL=${#STEPS[@]}
 
 for c in "${CLUSTERS[@]}"; do
-    [[ "$c" == hub || "$c" == sno ]] || { echo "--cluster must be hub or sno, not '$c'" >&2; exit 1; }
+    [[ " ${PAIR[*]} " == *" $c "* ]] || { echo "--cluster must be ${PAIR[0]} or ${PAIR[1]}, not '$c'" >&2; exit 1; }
 done
 
 (( WANT_LIST )) && { list_steps; exit 0; }
@@ -184,9 +293,18 @@ if [[ -n "$ONLY" && " ${STEPS[*]} ${EXTRA_STEPS[*]} " != *" $ONLY "* ]]; then
 fi
 [[ -n "$FROM" && -n "$ONLY" ]] && { echo "--from and --only are mutually exclusive" >&2; exit 1; }
 
+# The vault is the base lab's. Nothing in this lab reads a secret, so with
+# no ../vault.yaml (a fresh clone, your own clusters) there is no password
+# to ask for.
+VAULT_ARGS=()
+if [[ -e ../vault.yaml ]]; then
+    VAULT_ARGS=(--vault-password-file "$VAULT_FILE")
+    if (( ! DRY_RUN )) && [[ ! -r "$VAULT_FILE" ]]; then
+        echo "vault password file not readable: $VAULT_FILE (--vault-password-file PATH)" >&2; exit 1
+    fi
+fi
 if (( ! DRY_RUN )); then
     command -v ansible-playbook >/dev/null || { echo "ansible-playbook not in PATH" >&2; exit 1; }
-    [[ -r "$VAULT_FILE" ]] || { echo "vault password file not readable: $VAULT_FILE (--vault-password-file PATH)" >&2; exit 1; }
 fi
 mkdir -p "$LOGDIR"
 
@@ -200,7 +318,7 @@ inv() { [[ -r "$INVENTORY" ]] && printf -- '-i\n%s\n' "$INVENTORY"; return 0; }
 play() {
     local pb="$1"; shift
     local -a i; mapfile -t i < <(inv)
-    local -a cmd=(ansible-playbook "${i[@]}" "$pb" --vault-password-file "$VAULT_FILE" "${EXTRA_VARS[@]}" "$@")
+    local -a cmd=(ansible-playbook "${i[@]}" "$pb" "${VAULT_ARGS[@]}" "${EXTRA_VARS[@]}" "$@")
     if (( DRY_RUN )); then printf '    %s\n' "${cmd[*]}"; return 0; fi
     "${cmd[@]}"
 }
@@ -210,7 +328,7 @@ BG_NAMES=(); BG_PIDS=()
 play_bg() {
     local name="$1" pb="$2"; shift 2
     local -a i; mapfile -t i < <(inv)
-    local -a cmd=(ansible-playbook "${i[@]}" "$pb" --vault-password-file "$VAULT_FILE" "${EXTRA_VARS[@]}" "$@")
+    local -a cmd=(ansible-playbook "${i[@]}" "$pb" "${VAULT_ARGS[@]}" "${EXTRA_VARS[@]}" "$@")
     if (( DRY_RUN )); then printf '    %s   > %s/%s.log &\n' "${cmd[*]}" "$LOGDIR" "$name"; return 0; fi
     printf '    %s -> %s/%s.log\n' "$name" "$LOGDIR" "$name"
     "${cmd[@]}" >"$LOGDIR/$name.log" 2>&1 &
@@ -262,10 +380,13 @@ per_cluster() {
 }
 
 both_clusters() {
-    if [[ " ${CLUSTERS[*]} " != *" hub "* || " ${CLUSTERS[*]} " != *" sno "* ]]; then
+    if [[ " ${CLUSTERS[*]} " != *" ${PAIR[0]} "* || " ${CLUSTERS[*]} " != *" ${PAIR[1]} "* ]]; then
         skip "$1 - it needs both clusters, and --cluster limited this run to ${CLUSTERS[*]}"
         return 1
     fi
+    # Your own clusters' kubeconfigs were checked when --byo wrote the file;
+    # the playbook checks them again.
+    [[ -n $BYO_VARS ]] && return 0
     if (( ! DRY_RUN )) && [[ ! -r "$KUBECONFIG_HUB" || ! -r "$KUBECONFIG_SNO" ]]; then
         echo "    $1 needs both kubeconfigs: $KUBECONFIG_HUB, $KUBECONFIG_SNO" >&2
         return 2
@@ -316,7 +437,7 @@ EOF
             else play_bg sno-storage ../setup_sno.yaml --tags snodns,snostorage; fi
         done
         wait_all ;;
-    preflight|operator|storage|spire|demo|verify|prep)
+    preflight|probe|operator|storage|spire|demo|verify|prep)
         per_cluster "$step" ;;
     check)
         per_cluster verify ;;
@@ -330,9 +451,9 @@ EOF
         per_cluster "$step" ;;
     boutique-federate)
         both_clusters boutique-federate || { [[ $? == 1 ]] && return 0; return 1; }
-        say "$(pos boutique-federate)  hub checkoutservice -> SNO paymentservice"
-        play "$PB" --tags boutique,boutique-verify -e spire_cluster=hub -e spire_boutique_remote_payments=true
-        play "$PB" --tags boutique-verify -e spire_cluster=sno ;;
+        say "$(pos boutique-federate)  ${PAIR[0]} checkoutservice -> ${PAIR[1]} paymentservice"
+        play "$PB" --tags boutique,boutique-verify -e "spire_cluster=${PAIR[0]}" -e spire_boutique_remote_payments=true
+        play "$PB" --tags boutique-verify -e "spire_cluster=${PAIR[1]}" ;;
     cleanup)
         if (( ! DRY_RUN )) && (( ! ASSUME_YES )); then
             cat >&2 <<EOF
@@ -357,7 +478,7 @@ EOF
 }
 
 trap 'echo; echo "FAILED at step: ${CURRENT:-?}" >&2;
-      echo "  resume with: $0$( (( WORKSHOP )) && echo " --workshop") --from ${CURRENT:-?}" >&2' ERR
+      echo "  resume with: $0$( [[ -n $BYO_VARS ]] && echo " --byo-vars $BYO_VARS")$( (( WORKSHOP )) && echo " --workshop") --from ${CURRENT:-?}" >&2' ERR
 
 # An out-of-band step replaces the sequence rather than being filtered from it.
 if [[ -n "$ONLY" && " ${STEPS[*]} " != *" $ONLY "* ]]; then STEPS=("$ONLY"); TOTAL=1; fi
@@ -370,7 +491,7 @@ done
 if [[ -n "$ONLY" ]]; then
     say "done - step '$ONLY' only."
 elif (( WORKSHOP )); then
-    say "day 0 done - source /root/spiffe-workshop.env and start Lab 1 in workshop.md"
+    say "day 0 done - source $( [[ -n $BYO_VARS ]] && echo "$HOME" || echo /root)/spiffe-workshop.env, then lab ${PAIR[0]}, and start Lab 1 in workshop.md"
 else
     say "done - SPIRE on ${CLUSTERS[*]}$( [[ ${#CLUSTERS[@]} == 2 ]] && echo ', federated')"
 fi

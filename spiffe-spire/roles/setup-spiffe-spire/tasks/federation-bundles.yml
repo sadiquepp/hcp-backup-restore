@@ -7,7 +7,7 @@
 - name: Look for both kubeconfigs
   ansible.builtin.stat:
     path: "{{ spire_clusters[item].kubeconfig }}"
-  loop: [hub, sno]
+  loop: "{{ spire_pair }}"
   register: spire_fb_kc
 
 - name: Fail unless both clusters are there
@@ -24,7 +24,7 @@
   vars:
     spire_sr_kubeconfig: "{{ spire_clusters[spire_fb_c].kubeconfig }}"
     spire_sr_retries: 6
-  loop: [hub, sno]
+  loop: "{{ spire_pair }}"
   loop_control:
     loop_var: spire_fb_c
 
@@ -36,7 +36,7 @@
       echo -n ' ';
       oc --kubeconfig {{ spire_clusters[item].kubeconfig }} -n {{ spire_operator_namespace }}
       get route {{ spire_federation_route_name }} -o jsonpath={.spec.host} 2>/dev/null || true
-  loop: [hub, sno]
+  loop: "{{ spire_pair }}"
   register: spire_fb_endpoint
   changed_when: false
 
@@ -64,7 +64,7 @@
     cmd: >-
       oc --kubeconfig {{ spire_clusters[item].kubeconfig }} -n {{ spire_operator_namespace }}
       exec spire-server-0 -c spire-server -- {{ spire_server_cli }} bundle show -format spiffe
-  loop: [hub, sno]
+  loop: "{{ spire_pair }}"
   register: spire_fb_bundle
   changed_when: false
 
@@ -82,4 +82,4 @@
       {{ item }}: {{ (spire_bundles[item] | from_json).get('keys', []) | selectattr('use', 'equalto', 'x509-svid') | list | length }}
       X.509 CA(s), {{ (spire_bundles[item] | from_json).get('keys', []) | selectattr('use', 'equalto', 'jwt-svid') | list | length }}
       JWT key(s)
-  loop: [hub, sno]
+  loop: "{{ spire_pair }}"

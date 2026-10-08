@@ -28,6 +28,9 @@
 ##
 ##   --tags preflight   is the operator in the catalog, what channel, is there
 ##                      a StorageClass. Changes nothing.
+##   --tags probe       one short-lived pod in its own namespace: node names
+##                      resolve, both clusters' *.apps answer from a pod, the
+##                      demo images pull. Then deletes the namespace.
 ##   --tags operator    Namespace, OperatorGroup, Subscription; waits for the
 ##                      CSV and checks the API is the 1.x one this lab is
 ##                      written against.
@@ -83,7 +86,7 @@
   vars_files:
     - ../vars.yaml          # base (and, for now, everyone else's)
     - vars.yaml             # this use case - may refer to base variables freely
-    - ../vault.yaml
+    - ["../vault.yaml", "vars.yaml"]   # optional: nothing here reads a secret
   vars:
     # The selected cluster, and the other one. Guarded with defaults so the
     # assert below, not a templating error, is what reports a missing or
@@ -102,7 +105,7 @@
           Pass -e spire_cluster=<{{ spire_clusters.keys() | join('|') }}>.
           Every per-cluster phase runs against exactly one cluster; the
           federation and xverify phases take none and use both.
-      tags: &spire_phase_tags [preflight, operator, storage, spire, demo, verify, boutique, boutique-verify, mesh, mesh-verify, mesh-cleanup, prep, cleanup]
+      tags: &spire_phase_tags [preflight, probe, operator, storage, spire, demo, verify, boutique, boutique-verify, mesh, mesh-verify, mesh-cleanup, prep, cleanup]
 
     - name: Look for the selected cluster's kubeconfig
       ansible.builtin.stat:
@@ -137,6 +140,12 @@
         name: setup-spiffe-spire
         tasks_from: preflight.yml
       tags: [preflight, never]
+
+    - name: Probe - what the labs need from the network, from a pod
+      ansible.builtin.import_role:
+        name: setup-spiffe-spire
+        tasks_from: probe.yml
+      tags: [probe, never]
 
     - name: The Zero Trust Workload Identity Manager operator
       ansible.builtin.import_role:
@@ -225,10 +234,10 @@
   vars_files:
     - ../vars.yaml
     - vars.yaml
-    - ../vault.yaml
+    - ["../vault.yaml", "vars.yaml"]   # optional: nothing here reads a secret
   vars:
-    # Templates reached from here resolve spire_c; the hub is as good as any.
-    spire_c: "{{ spire_clusters.hub }}"
+    # Templates reached from here resolve spire_c; the first is as good as any.
+    spire_c: "{{ spire_clusters[spire_pair[0]] }}"
   tasks:
     - name: Read both trust bundles
       ansible.builtin.import_role:
@@ -236,56 +245,56 @@
         tasks_from: federation-bundles.yml
       tags: [federation, never]
 
-- name: Federation - the hub trusts the SNO
+- name: Federation - the first cluster trusts the second
   hosts: localhost
   become: true
   gather_facts: false
   vars_files:
     - ../vars.yaml
     - vars.yaml
-    - ../vault.yaml
+    - ["../vault.yaml", "vars.yaml"]   # optional: nothing here reads a secret
   vars:
-    spire_c: "{{ spire_clusters.hub }}"
+    spire_c: "{{ spire_clusters[spire_pair[0]] }}"
     spire_peer: "{{ spire_clusters[spire_c.peer] }}"
   environment:
     KUBECONFIG: "{{ spire_c.kubeconfig }}"
   tasks:
-    - name: Federate the hub with the SNO
+    - name: Federate the first cluster with the second
       ansible.builtin.import_role:
         name: setup-spiffe-spire
         tasks_from: federation.yml
       tags: [federation, never]
 
-- name: Federation - the SNO trusts the hub
+- name: Federation - the second cluster trusts the first
   hosts: localhost
   become: true
   gather_facts: false
   vars_files:
     - ../vars.yaml
     - vars.yaml
-    - ../vault.yaml
+    - ["../vault.yaml", "vars.yaml"]   # optional: nothing here reads a secret
   vars:
-    spire_c: "{{ spire_clusters.sno }}"
+    spire_c: "{{ spire_clusters[spire_pair[1]] }}"
     spire_peer: "{{ spire_clusters[spire_c.peer] }}"
   environment:
     KUBECONFIG: "{{ spire_c.kubeconfig }}"
   tasks:
-    - name: Federate the SNO with the hub
+    - name: Federate the second cluster with the first
       ansible.builtin.import_role:
         name: setup-spiffe-spire
         tasks_from: federation.yml
       tags: [federation, never]
 
-- name: Cross-cluster mTLS - hub to SNO and back
+- name: Cross-cluster mTLS - each way between the pair
   hosts: localhost
   become: true
   gather_facts: false
   vars_files:
     - ../vars.yaml
     - vars.yaml
-    - ../vault.yaml
+    - ["../vault.yaml", "vars.yaml"]   # optional: nothing here reads a secret
   vars:
-    spire_c: "{{ spire_clusters.hub }}"
+    spire_c: "{{ spire_clusters[spire_pair[0]] }}"
   tasks:
     - name: Call across the trust domain boundary, both ways
       ansible.builtin.import_role:

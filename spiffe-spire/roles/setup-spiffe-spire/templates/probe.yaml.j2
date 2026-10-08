@@ -1,0 +1,42 @@
+{# The probe step's pod. Rendered to <manifest dir>/05-probe.yaml after its
+   namespace and the script's ConfigMap; deleted with the namespace once it
+   has answered.
+
+   The init container is spiffe-helper printing its version - it does
+   nothing else, but it proves this cluster can pull the image every demo
+   pod runs. The probe container is the demo's Python image, so a pod that
+   gets this far has pulled both. Restricted in every way the restricted-v2
+   SCC asks for. #}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spiffe-probe
+  namespace: {{ spire_probe_namespace }}
+  labels:
+    app.kubernetes.io/part-of: spiffe-spire-lab
+spec:
+  restartPolicy: Never
+  initContainers:
+    - name: helper-image
+      image: {{ spire_demo_helper_image }}
+      args: ["-version"]
+      securityContext: &restricted
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: probe
+      image: {{ spire_demo_python_image }}
+      command: ["python3", "/probe/probe.py"]
+      env:
+        - name: NODES
+          value: {{ spire_pb_nodes.stdout_lines | to_json | to_json }}
+        - name: APPS
+          value: {{ spire_pb_apps | to_json | to_json }}
+      securityContext: *restricted
+      volumeMounts:
+        - {name: probe, mountPath: /probe, readOnly: true}
+  volumes:
+    - name: probe
+      configMap: {name: spiffe-probe}
