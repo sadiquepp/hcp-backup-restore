@@ -11,6 +11,7 @@ bond over two NICs.
 | [compact-cluster-disconnected.md](compact-cluster-disconnected.md) | Lab, disconnected (`compactd`): installed only from the lab's mirror registry, with the nodes' internet egress blocked. |
 | [compact-cluster-baremetal.md](compact-cluster-baremetal.md) | Physical servers, connected, with LACP (802.3ad) bonds. Manual steps only. |
 | [compact-cluster-baremetal-disconnected.md](compact-cluster-baremetal-disconnected.md) | Physical servers, from your own mirror registry, with LACP bonds. Self-contained manual steps. |
+| [sno-to-compact.md](sno-to-compact.md) | One page: what changes between the single-node cluster (`setup_sno.yaml`) and this one, why the move is a reinstall, and what the API and ingress VIPs are. |
 | [setup_compact_cluster.yaml](setup_compact_cluster.yaml) | Automates the connected lab cluster. |
 | [setup_compact_cluster_disconnected.yaml](setup_compact_cluster_disconnected.yaml) | Automates the disconnected lab cluster: mirror registry, cluster, day 2. |
 
