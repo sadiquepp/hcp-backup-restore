@@ -394,7 +394,7 @@ and Service are unchanged: the Service still selects the default router's
 pods, and its endpoints become pod IPs instead of worker IPs.
 
 ```
-client -> .101 (MetalLB L2) -> Service metallb-ingress -> router pod (pod network, :443) -> route
+client -> MetalLB VIP (L2) -> Service metallb-ingress -> router pod (pod network, :443) -> route
 ```
 
 Use it when the hosted cluster's OVN-Kubernetes runs in **local gateway mode**
