@@ -130,6 +130,13 @@ compact_wait_for_install: true
 compact_bootstrap_timeout_min: 75
 compact_install_timeout_min: 120
 
+## When `agent wait-for install-complete` gives up, how much longer to keep
+## asking the CLUSTER whether ClusterVersion went Available before failing.
+## The installer's wait exits non-zero on transients the cluster recovers
+## from, and a failure there used to drop every later step - LVM Storage most
+## of all. 0 restores the old behaviour of trusting the installer alone.
+compact_settle_extra_min: 30
+
 ## The key injected into every node for `ssh core@<node>`.
 compact_ssh_public_key_file: "~/.ssh/lab_rsa.pub"
 

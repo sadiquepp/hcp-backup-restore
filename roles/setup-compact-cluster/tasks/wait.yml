@@ -17,20 +17,31 @@
   ansible.builtin.debug:
     msg: "{{ (compact_bootstrap.stderr_lines | default([], true) + compact_bootstrap.stdout_lines | default([], true))[-25:] }}"
 
-- name: Fail if bootstrap did not complete
-  ansible.builtin.assert:
-    that: compact_bootstrap.rc == 0
-    fail_msg: >-
-      The compact cluster did not reach a working control plane. Look at the
-      rendezvous host first - it runs the assisted service the other two
-      register with:
+# Deliberately NOT fatal. bootstrap-complete is a progress milestone as the
+# INSTALLER sees it, and it gives up on things the cluster recovers from by
+# itself - a host that registers late, the API unreachable through the pivot.
+# A compact cluster that looked stuck here has gone on to install fine a while
+# later.
+#
+# Failing here ended the run, and that dropped every step after it - LVM
+# Storage most of all, so the cluster came up with no default StorageClass and
+# nothing said why. So record it and let the install wait below decide: it asks
+# the same question of the whole cluster, and it cannot pass if bootstrap
+# really never finished.
+- name: Note that bootstrap did not report complete
+  ansible.builtin.debug:
+    msg: >-
+      bootstrap-complete gave up after {{ compact_bootstrap_timeout_min }}m.
+      Not fatal on its own - carrying on to wait for the install to finish.
+      If that times out too, start with the rendezvous host; it runs the
+      assisted service the other two register with:
         virsh console {{ compact_hosts[0].domain }}
         ssh -i ~/.ssh/lab_rsa core@{{ compact_rendezvous_ip }} 'sudo journalctl -u assisted-service -u agent'
       A node that never got an address means its bond did not come up: check
       the MACs in {{ compact_install_folder }}/rendered/agent-config.yaml
       against `virsh domiflist <node>`. Fewer than three hosts registered
       usually means a node cannot reach {{ compact_rendezvous_ip }}.
-    success_msg: "Control plane is up."
+  when: compact_bootstrap.rc != 0
 
 - name: Wait for the install to complete (up to {{ compact_install_timeout_min }}m)
   ansible.builtin.command:
@@ -46,17 +57,54 @@
   ansible.builtin.debug:
     msg: "{{ (compact_complete.stderr_lines | default([], true) + compact_complete.stdout_lines | default([], true))[-25:] }}"
 
-- name: Fail if the install did not complete
+# Last resort, and the authoritative one: the installer's wait exits non-zero
+# on transients, so when it gives up, ask the cluster. ClusterVersion Available
+# is the same condition tasks/storage.yml waits on.
+- name: Ask the cluster itself whether it became Available (up to {{ compact_settle_extra_min }}m more)
+  ansible.builtin.command:
+    cmd: >-
+      oc get clusterversion version
+      -o 'jsonpath={.status.conditions[?(@.type=="Available")].status}'
+  environment:
+    KUBECONFIG: "{{ compact_install_folder }}/auth/kubeconfig"
+    PATH: "{{ compact_install_folder }}:{{ lookup('env', 'PATH') }}"
+  register: compact_settled
+  retries: "{{ [1, ((compact_settle_extra_min | int) * 3)] | max }}"
+  delay: 20
+  until: compact_settled.stdout | trim == 'True'
+  changed_when: false
+  failed_when: false
+  when: compact_complete.rc != 0
+
+- name: Fail if the cluster never came up
   ansible.builtin.assert:
-    that: compact_complete.rc == 0
+    that: compact_complete.rc == 0 or (compact_settled.stdout | default('') | trim) == 'True'
     fail_msg: >-
-      The control plane came up but the cluster did not finish settling. It is
-      reachable, so look at it directly:
+      {{ compact_name }} did not come up: the install wait timed out and
+      ClusterVersion was still not Available {{ compact_settle_extra_min }}m
+      later. Look at it directly - it may still be reachable:
         export KUBECONFIG={{ compact_install_folder }}/auth/kubeconfig
         oc get nodes ; oc get clusteroperators
       Degraded ingress or console operators usually mean *.apps.{{ compact_cluster_domain }}
       does not resolve to the ingress VIP {{ compact_ingress_vip }}.
-    success_msg: "{{ compact_name }} is installed."
+      {{ ('Bootstrap did not report complete either, so start further back: '
+          if compact_bootstrap.rc != 0 else '') }}
+        virsh console {{ compact_hosts[0].domain }}
+        ssh -i ~/.ssh/lab_rsa core@{{ compact_rendezvous_ip }} 'sudo journalctl -u assisted-service -u agent'
+      A node that never got an address means its bond did not come up: check
+      the MACs in {{ compact_install_folder }}/rendered/agent-config.yaml
+      against `virsh domiflist <node>`. Fewer than three hosts registered
+      usually means a node cannot reach {{ compact_rendezvous_ip }}.
+      Nothing after this step has run - LVM Storage above all, so there is no
+      default StorageClass and any PVC naming none will sit Pending. Once
+      `oc get clusterversion` does report Available, finish the build with:
+        cd compact-cluster && ansible-playbook -i ../inventory/hosts
+        setup_compact_cluster.yaml --ask-vault-pass --tags compactstorage
+    success_msg: >-
+      {{ compact_name }} is installed{{ ''
+         if compact_complete.rc == 0
+         else " - the installer's wait gave up, but ClusterVersion reports
+               Available, so the build carries on" }}.
 
 # Read straight from the kernel, over ssh, rather than from the
 # NodeNetworkState: it needs no operator, and /proc/net/bonding is the one
@@ -87,6 +135,9 @@
       {{ compact_bond_name }} in active-backup mode over
       {{ compact_bond_primary_nic }} and {{ compact_bond_secondary_nic }}:
       {{ (item.stdout_lines | default([])) + (item.stderr_lines | default([])) }}
+      The cluster itself is up, but nothing after this step has run - LVM
+      Storage above all. Add it with `--tags compactstorage` once the bond is
+      fixed, or now if you want the StorageClass regardless.
     success_msg: >-
       {{ item.item.hostname }}: {{ compact_bond_name }} active-backup,
       {{ item.stdout | regex_search('Currently Active Slave: \S+') }}
