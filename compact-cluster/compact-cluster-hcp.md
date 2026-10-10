@@ -399,7 +399,7 @@ client -> .101 (MetalLB L2) -> Service metallb-ingress -> router pod (pod networ
 
 Use it when the hosted cluster's OVN-Kubernetes runs in **local gateway mode**
 (`gatewayConfig.routingViaHost: true`, which Service Mesh ambient mode
-requires). In that mode the worker DNATs `.101` to the Service's ClusterIP
+requires). In that mode the worker DNATs the MetalLB VIP to the Service's ClusterIP
 and routes it into OVN over a host route capped at the cluster MTU:
 
 ```bash
