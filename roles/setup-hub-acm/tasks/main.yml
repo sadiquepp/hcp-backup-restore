@@ -43,7 +43,10 @@
     oc apply -f "{{ role_path }}/files/lvm-storage/01-namespace.yaml"
     oc apply -f "{{ role_path }}/files/lvm-storage/02-operatorGroup.yaml"
     oc apply -f "{{ role_path }}/files/lvm-storage/.rendered-03-subscription.yaml"
-  when: use_lvm_storage == true
+  # `| bool`, not `== true`: -e use_lvm_storage=true arrives as the STRING
+  # 'true', and 'true' == true is false in Jinja, so the command-line form
+  # silently skipped LVM Storage. vars.yaml's real YAML bool worked either way.
+  when: use_lvm_storage | default(true) | bool
 
 
 - name: Deploy MetalLB Operator  
@@ -81,7 +84,10 @@
 - name: Setup LVMCluster Resource
   shell: |
     oc apply -f "{{ role_path }}/files/lvm-storage/04-lvm-cluster.yaml"
-  when: use_lvm_storage == true
+  # `| bool`, not `== true`: -e use_lvm_storage=true arrives as the STRING
+  # 'true', and 'true' == true is false in Jinja, so the command-line form
+  # silently skipped LVM Storage. vars.yaml's real YAML bool worked either way.
+  when: use_lvm_storage | default(true) | bool
 
 # Pool names are hub-independent but their addresses are not: hub2 is the DR
 # hub on its own segment and hubd the disconnected one, so each hosted cluster
