@@ -4,7 +4,8 @@
 #
 #   client -> <apps VIP> (MetalLB L2, on a worker)
 #          -> Service openshift-ingress/metallb-ingress (type LoadBalancer)
-#          -> the default IngressController's router pods (HostNetwork, :80/:443)
+#          -> the default IngressController's router pods (HostNetwork, :80/:443;
+#             or on the pod network - hcp_ingress_router_mode below)
 #          -> route -> Service -> application pods
 #
 # This is the documented ingress layout for a hosted cluster on the Agent
@@ -44,6 +45,83 @@ hcp_ingress_metallb_channel: stable
 ## LoadBalancer Service in the hosted cluster needs a pool of its own.
 hcp_ingress_pool: "{{ hcp_ingress_cluster }}-ingress"
 hcp_ingress_service: metallb-ingress
+
+## Where the default IngressController's router pods run - the Service above
+## selects them either way:
+##
+##   hostnetwork  As HyperShift creates it on the Agent platform: haproxy on
+##                the workers' own :80/:443. The role leaves the
+##                IngressController alone.
+##   nodeport     endpointPublishingStrategy NodePortService: the router pods
+##                move to the pod network and haproxy listens on :80/:443 in
+##                its own pod. The MetalLB Service still fronts them, now with
+##                pod endpoints; the operator's NodePort Service exists too
+##                but nothing needs it.
+##
+## Why nodeport: with OVN-Kubernetes in local gateway mode
+## (gatewayConfig.routingViaHost: true, e.g. for Service Mesh ambient), the
+## node DNATs the VIP to the ClusterIP and routes it into OVN over a route
+## capped at the cluster MTU (1400). A HostNetwork haproxy advertises
+## MSS 1460 from its 1500-MTU host route, so a client's full-size segments
+## (1420-1500 bytes) are dropped on that route, and the client recovers only
+## if the node's ICMP "fragmentation needed" reaches it. A router on the pod
+## network advertises MSS 1360 from its 1400-MTU eth0, so clients never send
+## a segment that does not fit. Shared gateway mode (the default) does not
+## take that route and works with either.
+##
+## Switching to nodeport recreates the default IngressController: the
+## IngressController's publishing type cannot be changed in place. *.apps is
+## down until the new router pods are Ready - about a minute. Re-running is a
+## no-op once the type is NodePortService. The role does not switch back; to
+## return to hostnetwork, recreate the IngressController the same way.
+hcp_ingress_router_mode: hostnetwork
+
+## OVN-Kubernetes gateway mode of the hosted cluster, set on its
+## network.operator.openshift.io/cluster before the ingress steps:
+##
+##   false  shared gateway (the OpenShift default): OVN handles Service and
+##          pod egress traffic inside OVS on br-ex.
+##   true   local gateway (gatewayConfig.routingViaHost: true): that traffic
+##          goes through the host kernel - its routing table, rules and
+##          nftables. Service Mesh ambient mode and UDN VRF-Lite/EVPN need
+##          it; with HostNetwork routers it also brings the MTU problem
+##          hcp_ingress_router_mode: nodeport avoids (see above).
+##
+## HyperShift leaves gatewayConfig alone on the Agent platform (it only forces
+## routingViaHost on PowerVS), so the setting sticks. The change rolls the
+## ovnkube-node pods; nodes are not rebooted. The role sets it either way, so
+## false also switches a cluster back to shared gateway.
+hcp_ingress_routing_via_host: false
+
+## gatewayConfig.ipForwarding, set only with hcp_ingress_routing_via_host:
+## true - Global lets the host forward between its interfaces, which local
+## gateway mode with traffic on a secondary NIC (MetalLB, BGP) needs. Left as
+## it is when switching back to shared gateway. '' leaves it alone.
+hcp_ingress_ip_forwarding: Global
+
+## Spec fields copied from the current default IngressController onto the
+## recreated one, so day-2 settings (a custom default certificate, placement,
+## sharding selectors, TLS profile, ...) survive the switch. domain is always
+## kept; endpointPublishingStrategy is what changes.
+hcp_ingress_preserve_fields:
+  - replicas
+  - defaultCertificate
+  - nodePlacement
+  - namespaceSelector
+  - routeSelector
+  - routeAdmission
+  - tlsSecurityProfile
+  - clientTLS
+  - tuningOptions
+  - httpHeaders
+  - httpCompression
+  - httpErrorCodePages
+  - httpEmptyRequestsPolicy
+  - logging
+  - unsupportedConfigOverrides
+
+## How long to wait for the old router pods to go before recreating.
+hcp_ingress_ic_delete_timeout: 10m
 
 ## Waits. A NodePool's Agents install and join in 20-40 minutes; the operator
 ## install and the address assignment take a few.
