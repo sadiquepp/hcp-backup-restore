@@ -121,3 +121,25 @@
         - compact_lvm_storage | default(use_lvm_storage | default(true)) | bool
         - compact_wait_for_install | default(true) | bool
       tags: [compact, compactstorage]
+
+    # A skipped storage step used to be silent, which from the outside looks
+    # exactly like "use_lvm_storage was true and LVM Storage still is not
+    # there". Name the switch that turned it off, and how to add it afterwards.
+    - name: Say why LVM Storage was skipped
+      ansible.builtin.debug:
+        msg: >-
+          LVM Storage was NOT installed, because
+          {{ 'compact_lvm_storage (which follows use_lvm_storage) is false'
+             if not (compact_lvm_storage | default(use_lvm_storage | default(true)) | bool)
+             else 'compact_wait_for_install is false, so this run never waited for
+                   the cluster - and the operator needs a running one' }}.
+          This cluster therefore has no default StorageClass, so anything that
+          makes a PVC with no storageClassName - the AgentServiceConfig for
+          hosted control planes, for one - will sit Pending. Add it once the
+          cluster is Available:
+          cd compact-cluster && ansible-playbook -i ../inventory/hosts
+          setup_compact_cluster_disconnected.yaml --ask-vault-pass --tags compactstorage
+      when: >-
+        not (compact_lvm_storage | default(use_lvm_storage | default(true)) | bool
+             and compact_wait_for_install | default(true) | bool)
+      tags: [compact, compactstorage]
