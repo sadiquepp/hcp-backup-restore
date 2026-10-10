@@ -442,6 +442,51 @@ oc --kubeconfig $HCP_KUBECONFIG -n openshift-ingress get endpointslices \
 On a worker, `tcpdump -nni any 'tcp port 443 and tcp[tcpflags] & tcp-syn != 0'`
 during a `curl` to the console shows the router's SYN-ACK carrying `mss 1360`.
 
+#### Toggle: local gateway mode (`hcp_ingress_routing_via_host=true`)
+
+The hosted cluster comes up in OVN-Kubernetes' default **shared gateway**
+mode. To run it in **local gateway** mode instead:
+
+```bash
+ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass \
+  --tags hcpingress -e hcp_ingress_routing_via_host=true
+```
+
+Before the ingress steps, the role merge-patches the hosted cluster's network
+operator config:
+
+```yaml
+spec:
+  defaultNetwork:
+    ovnKubernetesConfig:
+      gatewayConfig:
+        routingViaHost: true
+        ipForwarding: Global     # hcp_ingress_ip_forwarding; '' leaves it alone
+```
+
+and waits for `ovnkube-node` to roll out on every worker (no reboots).
+HyperShift does not reconcile `gatewayConfig` on the Agent platform, so the
+setting stays. `-e hcp_ingress_routing_via_host=false` (the default) switches
+it back to `routingViaHost: false`, leaving `ipForwarding` as it is. Reruns
+patch only when the current value differs.
+
+The two settings combine into the four layouts:
+
+| `hcp_ingress_routing_via_host` | `hcp_ingress_router_mode` | Full-size client packets to `*.apps` |
+|---|---|---|
+| `false` | `hostnetwork` | pass (the default) |
+| `false` | `nodeport` | pass |
+| `true` | `hostnetwork` | dropped at the 1400-MTU route; recover only via ICMP "fragmentation needed" |
+| `true` | `nodeport` | pass - the router advertises MSS 1360 |
+
+`true` + `hostnetwork` reproduces the black hole: from a client whose ICMP
+path to the worker is blocked, the console's TLS handshake hangs.
+
+```bash
+oc --kubeconfig $HCP_KUBECONFIG get network.operator.openshift.io cluster \
+  -o jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig}{"\n"}'
+```
+
 ### Step 9 - Verify
 
 ```bash

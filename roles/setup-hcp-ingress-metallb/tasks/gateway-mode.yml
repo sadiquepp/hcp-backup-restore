@@ -1,0 +1,67 @@
+---
+# Set the hosted cluster's OVN-Kubernetes gateway mode from
+# hcp_ingress_routing_via_host - see defaults/main.yml.
+#
+# The cluster network operator runs in the hosted control plane and watches
+# network.operator.openshift.io/cluster in the hosted cluster, as on any
+# OpenShift cluster; HyperShift does not touch gatewayConfig on Agent.
+
+- name: Read the current gateway mode
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_kubeconfig }}
+      get network.operator.openshift.io cluster
+      -o jsonpath={.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig}
+  register: hcp_ingress_gw_raw
+  changed_when: false
+
+- name: Work out what has to change
+  ansible.builtin.set_fact:
+    hcp_ingress_gw_now: "{{ hcp_ingress_gw_raw.stdout | default('{}', true) | from_json }}"
+    hcp_ingress_gw_want: >-
+      {{ {'routingViaHost': hcp_ingress_routing_via_host | bool}
+         | combine({'ipForwarding': hcp_ingress_ip_forwarding}
+                   if (hcp_ingress_routing_via_host | bool) and hcp_ingress_ip_forwarding | length > 0
+                   else {}) }}
+
+# Only the keys being set are compared: anything else under gatewayConfig
+# (ipv4/ipv6 masquerade subnets, ipForwarding when going back to shared) is
+# left as it is by the merge patch.
+- name: Set the gateway mode
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_kubeconfig }}
+      patch network.operator.openshift.io cluster --type merge
+      -p '{{ {"spec": {"defaultNetwork": {"ovnKubernetesConfig": {"gatewayConfig": hcp_ingress_gw_want}}}} | to_json }}'
+  when: hcp_ingress_gw_now | combine(hcp_ingress_gw_want) != hcp_ingress_gw_now
+  register: hcp_ingress_gw_patch
+  changed_when: true
+
+# The operator rolls ovnkube-node one node at a time. Give it a moment to
+# start, so the rollout status below waits for the new generation and not the
+# old one.
+- name: Wait for OVN-Kubernetes to pick up the new gateway mode
+  when: hcp_ingress_gw_patch is changed
+  block:
+    - name: Let the network operator start the rollout
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Wait for ovnkube-node to roll out on every worker
+      ansible.builtin.command:
+        cmd: >-
+          oc --kubeconfig {{ hcp_ingress_kubeconfig }}
+          -n openshift-ovn-kubernetes rollout status daemonset/ovnkube-node --timeout=60s
+      register: hcp_ingress_ovnk_rollout
+      until: hcp_ingress_ovnk_rollout.rc == 0
+      retries: "{{ hcp_ingress_retries }}"
+      delay: "{{ hcp_ingress_delay }}"
+      changed_when: false
+
+- name: Report the gateway mode
+  ansible.builtin.debug:
+    msg: >-
+      {{ hcp_ingress_cluster }}: OVN-Kubernetes
+      {{ 'local gateway (routingViaHost: true, ipForwarding: ' ~ (hcp_ingress_ip_forwarding or 'unchanged') ~ ')'
+         if hcp_ingress_routing_via_host | bool else 'shared gateway (routingViaHost: false)' }}
+      - {{ 'changed' if hcp_ingress_gw_patch is changed else 'already set' }}

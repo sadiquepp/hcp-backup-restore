@@ -76,6 +76,29 @@ hcp_ingress_service: metallb-ingress
 ## return to hostnetwork, recreate the IngressController the same way.
 hcp_ingress_router_mode: hostnetwork
 
+## OVN-Kubernetes gateway mode of the hosted cluster, set on its
+## network.operator.openshift.io/cluster before the ingress steps:
+##
+##   false  shared gateway (the OpenShift default): OVN handles Service and
+##          pod egress traffic inside OVS on br-ex.
+##   true   local gateway (gatewayConfig.routingViaHost: true): that traffic
+##          goes through the host kernel - its routing table, rules and
+##          nftables. Service Mesh ambient mode and UDN VRF-Lite/EVPN need
+##          it; with HostNetwork routers it also brings the MTU problem
+##          hcp_ingress_router_mode: nodeport avoids (see above).
+##
+## HyperShift leaves gatewayConfig alone on the Agent platform (it only forces
+## routingViaHost on PowerVS), so the setting sticks. The change rolls the
+## ovnkube-node pods; nodes are not rebooted. The role sets it either way, so
+## false also switches a cluster back to shared gateway.
+hcp_ingress_routing_via_host: false
+
+## gatewayConfig.ipForwarding, set only with hcp_ingress_routing_via_host:
+## true - Global lets the host forward between its interfaces, which local
+## gateway mode with traffic on a secondary NIC (MetalLB, BGP) needs. Left as
+## it is when switching back to shared gateway. '' leaves it alone.
+hcp_ingress_ip_forwarding: Global
+
 ## Spec fields copied from the current default IngressController onto the
 ## recreated one, so day-2 settings (a custom default certificate, placement,
 ## sharding selectors, TLS profile, ...) survive the switch. domain is always
