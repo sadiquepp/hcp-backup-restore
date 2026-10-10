@@ -1,0 +1,154 @@
+---
+# hcp_ingress_router_mode: nodeport - move the default IngressController's
+# router pods from the host network to the pod network (NodePortService), so
+# haproxy advertises an MSS that fits the cluster MTU. See defaults/main.yml.
+#
+# The publishing type is not changed in place by the ingress operator, so the
+# IngressController is deleted and recreated with the same domain and the
+# fields in hcp_ingress_preserve_fields.
+#
+# Two things can recreate 'default' while it is gone: HyperShift's
+# hosted-cluster-config-operator, which creates it whenever it is missing
+# (and leaves an existing one alone), and the ingress operator. HyperShift's
+# copy takes its type from HostedCluster
+# spec.operatorConfiguration.ingressOperator.endpointPublishingStrategy when
+# that is set, so it is set first wherever the management cluster's
+# HostedCluster API has the field. Whoever wins, the type is checked at the
+# end and a HostNetwork result fails the run - running it again retries.
+
+- name: Read the default IngressController
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_kubeconfig }}
+      -n openshift-ingress-operator get ingresscontroller default -o json
+  register: hcp_ingress_ic_raw
+  changed_when: false
+
+- name: Work out its current publishing type
+  ansible.builtin.set_fact:
+    hcp_ingress_ic: "{{ hcp_ingress_ic_raw.stdout | from_json }}"
+    hcp_ingress_ic_type: >-
+      {{ (hcp_ingress_ic_raw.stdout | from_json).status.endpointPublishingStrategy.type
+         | default((hcp_ingress_ic_raw.stdout | from_json).spec.endpointPublishingStrategy.type
+         | default('')) }}
+
+- name: Recreate the default IngressController as NodePortService
+  when: hcp_ingress_ic_type != 'NodePortService'
+  block:
+
+    # --- Tell HyperShift, so its own recreation is NodePortService too ---------
+
+    - name: Check whether the HostedCluster API can carry the strategy
+      ansible.builtin.command:
+        cmd: >-
+          oc --kubeconfig {{ hcp_ingress_mgmt_kubeconfig }}
+          explain hostedcluster.spec.operatorConfiguration.ingressOperator.endpointPublishingStrategy
+          --api-version=hypershift.openshift.io/v1beta1
+      register: hcp_ingress_hc_field
+      failed_when: false
+      changed_when: false
+
+    - name: Set the default router's strategy on the HostedCluster
+      ansible.builtin.command:
+        cmd: >-
+          oc --kubeconfig {{ hcp_ingress_mgmt_kubeconfig }}
+          -n {{ hcp_ingress_cluster }} patch hostedcluster {{ hcp_ingress_cluster }}
+          --type merge -p '{{ hcp_ingress_hc_patch | to_json }}'
+      vars:
+        hcp_ingress_hc_patch:
+          spec:
+            operatorConfiguration:
+              ingressOperator:
+                endpointPublishingStrategy:
+                  type: NodePortService
+      when: hcp_ingress_hc_field.rc == 0
+      register: hcp_ingress_hc_patched
+      changed_when: "'no change' not in hcp_ingress_hc_patched.stdout"
+
+    # --- Recreate ---------------------------------------------------------------
+
+    # What goes back: the domain, the preserved day-2 fields as they are now,
+    # and the new strategy. Nothing from status or metadata.
+    - name: Build the replacement IngressController
+      ansible.builtin.set_fact:
+        hcp_ingress_ic_new:
+          apiVersion: operator.openshift.io/v1
+          kind: IngressController
+          metadata:
+            name: default
+            namespace: openshift-ingress-operator
+          spec: >-
+            {{ hcp_ingress_ic.spec | dict2items
+               | selectattr('key', 'in', hcp_ingress_preserve_fields)
+               | items2dict
+               | combine({'domain': hcp_ingress_ic.spec.domain
+                                    | default(hcp_ingress_ic.status.domain),
+                          'endpointPublishingStrategy': {'type': 'NodePortService'}}) }}
+
+    - name: Show what is about to be recreated
+      ansible.builtin.debug:
+        msg:
+          - "Recreating openshift-ingress-operator/ingresscontroller default: {{ hcp_ingress_ic_type }} -> NodePortService"
+          - "HostedCluster strategy: {{ 'set' if hcp_ingress_hc_field.rc == 0 else 'not supported by this HyperShift API - relying on the recreate below' }}"
+          - "*.apps for {{ hcp_ingress_cluster }} is down until the new router pods are Ready."
+
+    - name: Delete the default IngressController and wait for its routers to go
+      ansible.builtin.command:
+        cmd: >-
+          oc --kubeconfig {{ hcp_ingress_kubeconfig }}
+          -n openshift-ingress-operator delete ingresscontroller default
+          --wait=true --timeout={{ hcp_ingress_ic_delete_timeout }}
+      changed_when: true
+
+    # apply, not create: if HyperShift has already put 'default' back (as
+    # NodePortService, from the HostedCluster above), this is a merge of the
+    # preserved fields onto it rather than an AlreadyExists failure.
+    - name: Create the default IngressController as NodePortService
+      ansible.builtin.command:
+        cmd: oc --kubeconfig {{ hcp_ingress_kubeconfig }} apply -f -
+        stdin: "{{ hcp_ingress_ic_new | to_json }}"
+      register: hcp_ingress_ic_apply
+      until: hcp_ingress_ic_apply.rc == 0
+      retries: "{{ hcp_ingress_retries }}"
+      delay: "{{ hcp_ingress_delay }}"
+      changed_when: true
+
+# --- Check what came back -------------------------------------------------------
+
+# Wait for the operator to admit it and settle on a type - any type, so a
+# HostNetwork result fails at once below instead of timing out here.
+- name: Wait for the default IngressController to report its publishing type
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_kubeconfig }}
+      -n openshift-ingress-operator get ingresscontroller default
+      -o jsonpath={.status.endpointPublishingStrategy.type}
+  register: hcp_ingress_ic_status
+  until: hcp_ingress_ic_status.rc == 0 and hcp_ingress_ic_status.stdout | length > 0
+  retries: "{{ hcp_ingress_retries }}"
+  delay: "{{ hcp_ingress_delay }}"
+  changed_when: false
+
+- name: Fail if the router came back on the host network
+  ansible.builtin.assert:
+    that:
+      - hcp_ingress_ic_status.stdout == 'NodePortService'
+    fail_msg: >-
+      The default IngressController came back as {{ hcp_ingress_ic_status.stdout }},
+      not NodePortService - something recreated it with its platform default
+      before this role's copy landed. Run the role again: it repeats the
+      recreate. If it keeps happening, check that HostedCluster
+      {{ hcp_ingress_cluster }} has
+      spec.operatorConfiguration.ingressOperator.endpointPublishingStrategy.type
+      NodePortService (needs a HyperShift API that has the field).
+
+- name: Wait for the router pods on the pod network to be ready
+  ansible.builtin.command:
+    cmd: >-
+      oc --kubeconfig {{ hcp_ingress_kubeconfig }}
+      -n openshift-ingress rollout status deployment/router-default --timeout=30s
+  register: hcp_ingress_router_rollout
+  until: hcp_ingress_router_rollout.rc == 0
+  retries: "{{ hcp_ingress_retries }}"
+  delay: "{{ hcp_ingress_delay }}"
+  changed_when: false

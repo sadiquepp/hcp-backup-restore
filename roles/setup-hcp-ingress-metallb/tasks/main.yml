@@ -9,11 +9,13 @@
       - hcp_ingress_cluster | length > 0
       - hcp_ingress_mgmt_kubeconfig | length > 0
       - (hosted_cluster_node_keys | default({}))[hcp_ingress_cluster].apps_vip is defined
+      - hcp_ingress_router_mode in ['hostnetwork', 'nodeport']
     fail_msg: >-
       Needs hcp_ingress_cluster (the HostedCluster name), hcp_ingress_mgmt_kubeconfig
       (the cluster running its control plane), and an apps_vip for it in
       hosted_cluster_node_keys (vars.yaml) - the last octet of the *.apps
-      address, the same one roles/setup-dns publishes.
+      address, the same one roles/setup-dns publishes. hcp_ingress_router_mode
+      is hostnetwork or nodeport (got {{ hcp_ingress_router_mode }}).
 
 # --- The hosted cluster's own kubeconfig ------------------------------------
 
@@ -66,6 +68,14 @@
   retries: "{{ hcp_ingress_node_retries }}"
   delay: "{{ hcp_ingress_node_delay }}"
   changed_when: false
+
+# --- Where the routers run --------------------------------------------------
+
+# hostnetwork leaves the default IngressController as HyperShift made it;
+# nodeport moves its router pods to the pod network - see defaults/main.yml.
+- name: Put the default router on the pod network
+  ansible.builtin.include_tasks: router-nodeport.yml
+  when: hcp_ingress_router_mode == 'nodeport'
 
 # --- MetalLB ----------------------------------------------------------------
 
@@ -156,5 +166,6 @@
   ansible.builtin.debug:
     msg:
       - "{{ hcp_ingress_cluster }}: *.apps -> {{ hcp_ingress_vip }} (MetalLB pool {{ hcp_ingress_pool }}, Service openshift-ingress/{{ hcp_ingress_service }})"
+      - "Default router: {{ 'pod network (NodePortService)' if hcp_ingress_router_mode == 'nodeport' else 'host network (as HyperShift created it)' }}"
       - "Console probe: {{ hcp_ingress_probe.status | default('no answer') }} {{ hcp_ingress_probe.msg | default('') }}"
       - "Hosted cluster kubeconfig: {{ hcp_ingress_kubeconfig }}"

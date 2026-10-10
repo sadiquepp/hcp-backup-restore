@@ -380,6 +380,68 @@ The router pods use HostNetwork, so `targetPort` 80/443 is the workers' own
 ports, where the router's haproxy listens. MetalLB answers ARP for `.101` from
 one worker and moves it to the other if that worker goes away.
 
+#### Variant: routers on the pod network (`hcp_ingress_router_mode=nodeport`)
+
+```bash
+ansible-playbook -i ../inventory/hosts setup_compact_cluster.yaml --ask-vault-pass \
+  --tags hcpingress -e hcp_ingress_router_mode=nodeport
+```
+
+Before the MetalLB steps, the role recreates the default IngressController
+with `endpointPublishingStrategy: NodePortService`, so its router pods run on
+the pod network instead of the workers' host network. The pool, advertisement
+and Service are unchanged: the Service still selects the default router's
+pods, and its endpoints become pod IPs instead of worker IPs.
+
+```
+client -> .101 (MetalLB L2) -> Service metallb-ingress -> router pod (pod network, :443) -> route
+```
+
+Use it when the hosted cluster's OVN-Kubernetes runs in **local gateway mode**
+(`gatewayConfig.routingViaHost: true`, which Service Mesh ambient mode
+requires). In that mode the worker DNATs `.101` to the Service's ClusterIP
+and routes it into OVN over a host route capped at the cluster MTU:
+
+```bash
+ip route show | grep 169.254.0.4    # <service CIDR> via 169.254.0.4 dev br-ex ... mtu 1400
+```
+
+A HostNetwork haproxy advertises MSS 1460 (from its 1500-MTU host route), so
+clients send full-size packets that do not fit that route. They are dropped,
+and the client only recovers if the worker's ICMP "fragmentation needed"
+reaches it - the TCP handshake works, then TLS hangs. A router on the pod
+network advertises MSS 1360 (from its 1400-MTU `eth0`), so nothing oversized
+is ever sent. In shared gateway mode (the default) the VIP never takes that
+route and either layout works.
+
+What the switch does:
+
+1. sets `spec.operatorConfiguration.ingressOperator.endpointPublishingStrategy`
+   to `NodePortService` on the HostedCluster, when the management cluster's
+   HyperShift API has the field - so HyperShift's own recreation of the
+   IngressController uses it too;
+2. deletes the default IngressController and recreates it with the same
+   domain, the day-2 fields in `hcp_ingress_preserve_fields` (default
+   certificate, placement, selectors, TLS profile, ...) and the new strategy;
+3. fails if it came back as anything but `NodePortService` (rerun to retry),
+   then waits for `router-default` to roll out.
+
+`*.apps` is down for about a minute while the routers are replaced. A rerun
+is a no-op once the type is `NodePortService`; the role never switches back.
+
+Verify:
+
+```bash
+oc --kubeconfig $HCP_KUBECONFIG -n openshift-ingress-operator get ingresscontroller default \
+  -o jsonpath='{.status.endpointPublishingStrategy.type}{"\n"}'     # NodePortService
+oc --kubeconfig $HCP_KUBECONFIG -n openshift-ingress get pods -o wide # pod IPs, not worker IPs
+oc --kubeconfig $HCP_KUBECONFIG -n openshift-ingress get endpointslices \
+  -l kubernetes.io/service-name=metallb-ingress                      # the same pod IPs
+```
+
+On a worker, `tcpdump -nni any 'tcp port 443 and tcp[tcpflags] & tcp-syn != 0'`
+during a `curl` to the console shows the router's SYN-ACK carrying `mss 1360`.
+
 ### Step 9 - Verify
 
 ```bash
